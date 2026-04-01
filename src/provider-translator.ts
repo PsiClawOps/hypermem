@@ -59,15 +59,51 @@ export function detectProvider(providerString: string | null | undefined): Provi
 
 /**
  * Convert neutral messages to Anthropic Messages API format.
+ *
+ * Prompt caching (DYNAMIC_BOUNDARY):
+ * Anthropic supports prompt caching via cache_control on content blocks.
+ * The last system message BEFORE the dynamicBoundary marker gets
+ * cache_control: {type: "ephemeral"} to mark the static/dynamic boundary.
+ *
+ * Static (cacheable): system prompt + identity — stable across sessions
+ * Dynamic (not cacheable): context block (facts/recall), conversation history
+ *
+ * This allows Anthropic to cache the static prefix and skip re-tokenizing it.
  */
 function toAnthropic(messages: NeutralMessage[]): ProviderMessage[] {
   const result: ProviderMessage[] = [];
 
-  for (const msg of messages) {
+  // Find the last static system message index (before any dynamicBoundary message)
+  // so we can mark it with cache_control.
+  let lastStaticSystemIdx = -1;
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role === 'system' && !(msg.metadata as Record<string, unknown> | undefined)?.dynamicBoundary) {
+      lastStaticSystemIdx = i;
+    } else if ((msg.metadata as Record<string, unknown> | undefined)?.dynamicBoundary) {
+      // Stop scanning — everything after the boundary marker is dynamic
+      break;
+    }
+  }
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+
     if (msg.role === 'system') {
       // Anthropic system messages are handled separately (system parameter)
-      // Include them as-is; the gateway will extract them
-      result.push({ role: 'system', content: msg.textContent || '' });
+      // Include them as-is; the gateway will extract them.
+      // Mark the last static system message as the cache boundary.
+      const isLastStatic = i === lastStaticSystemIdx;
+      const providerMsg: ProviderMessage = {
+        role: 'system',
+        content: msg.textContent || '',
+      };
+      if (isLastStatic) {
+        // Add cache_control as a hint to the gateway/Anthropic API.
+        // The gateway is responsible for lifting this into the correct API position.
+        providerMsg.cache_control = { type: 'ephemeral' };
+      }
+      result.push(providerMsg);
       continue;
     }
 

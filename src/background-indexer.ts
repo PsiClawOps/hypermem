@@ -24,6 +24,7 @@ import { FactStore } from './fact-store.js';
 import { EpisodeStore } from './episode-store.js';
 import { TopicStore } from './topic-store.js';
 import { KnowledgeStore } from './knowledge-store.js';
+import { isSafeForSharedVisibility } from './secret-scanner.js';
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -49,60 +50,69 @@ export interface WatermarkState {
  * Patterns that indicate a message contains extractable facts.
  * Returns extracted facts as strings.
  */
-function extractFactCandidates(content: string): string[] {
-  const facts: string[] = [];
+/** Extracted fact candidate with pattern-based confidence. */
+interface FactCandidate {
+  content: string;
+  /** TUNE-003: confidence varies by extraction pattern type */
+  confidence: number;
+}
+
+function extractFactCandidates(content: string): FactCandidate[] {
+  const facts: FactCandidate[] = [];
   if (!content || content.length < 20) return facts;
 
-  // Decision patterns: "decided to", "agreed on", "choosing", "going with"
+  // Decision patterns: "decided to", "agreed on", "choosing", "going with" — high confidence (0.75)
   const decisionPatterns = [
     /(?:we |I |they )?(?:decided|agreed|chose|selected|committed) (?:to |on |that )(.{20,200})/gi,
     /(?:going|went) with (.{10,150})/gi,
     /decision:\s*(.{10,200})/gi,
   ];
 
-  // Learned/discovered patterns
+  // Learned/discovered patterns — medium-high confidence (0.65)
   const learnedPatterns = [
     /(?:learned|discovered|found out|realized|noticed) (?:that |)(.{20,200})/gi,
     /turns out (?:that |)(.{20,200})/gi,
     /(?:TIL|FYI|note to self)[:\s]+(.{10,200})/gi,
   ];
 
-  // Config/setting patterns
+  // Config/setting patterns — medium confidence (0.60); matches more promiscuously
   const configPatterns = [
     /(?:set|changed|updated|configured) (\S+ to .{5,150})/gi,
     /(?:model|config|setting)[:\s]+(\S+\s*(?:→|->|=|is)\s*.{5,100})/gi,
   ];
 
-  // Preference patterns
+  // Preference patterns — medium confidence (0.60)
   const preferencePatterns = [
     /(?:prefer|always use|never use|don't use|avoid) (.{10,150})/gi,
     /(?:ragesaq|operator) (?:wants|prefers|likes|hates|dislikes) (.{10,150})/gi,
   ];
 
-  // Operational patterns
+  // Operational patterns: deployments, incidents, fixes — high confidence (0.70)
   const operationalPatterns = [
     /(?:deployed|shipped|released|rolled back|reverted) (.{10,200})/gi,
     /(?:outage|incident|failure|broke|broken|crashed)(?:: | — | - )(.{10,200})/gi,
     /(?:fixed|resolved|patched|hotfixed) (.{10,200})/gi,
   ];
 
-  const allPatterns = [
-    ...decisionPatterns,
-    ...learnedPatterns,
-    ...configPatterns,
-    ...preferencePatterns,
-    ...operationalPatterns,
+  const patternGroups: Array<{ patterns: RegExp[]; confidence: number }> = [
+    { patterns: decisionPatterns,    confidence: 0.75 },
+    { patterns: learnedPatterns,     confidence: 0.65 },
+    { patterns: configPatterns,      confidence: 0.60 },
+    { patterns: preferencePatterns,  confidence: 0.60 },
+    { patterns: operationalPatterns, confidence: 0.70 },
   ];
 
-  for (const pattern of allPatterns) {
-    let match: RegExpExecArray | null;
-    // Reset lastIndex for global patterns
-    pattern.lastIndex = 0;
-    while ((match = pattern.exec(content)) !== null) {
-      const candidate = match[1].trim();
-      // Filter out noise
-      if (candidate.length > 10 && !candidate.startsWith('```') && !candidate.startsWith('http')) {
-        facts.push(candidate);
+  for (const { patterns, confidence } of patternGroups) {
+    for (const pattern of patterns) {
+      let match: RegExpExecArray | null;
+      // Reset lastIndex for global patterns
+      pattern.lastIndex = 0;
+      while ((match = pattern.exec(content)) !== null) {
+        const candidate = match[1].trim();
+        // Filter out noise
+        if (candidate.length > 10 && !candidate.startsWith('```') && !candidate.startsWith('http')) {
+          facts.push({ content: candidate, confidence });
+        }
       }
     }
   }
@@ -152,7 +162,7 @@ function classifyEpisode(msg: StoredMessage): { type: EpisodeType; significance:
   // Config changes (medium significance)
   if (/(?:changed|updated|migrated|switched|model.*(?:→|->|to))/i.test(content) && content.length > 40) {
     const summary = content.slice(0, 200);
-    return { type: 'config_change', significance: 0.4, summary };
+    return { type: 'config_change', significance: 0.5, summary }; // TUNE-004: raised from 0.4 to meet default threshold
   }
 
   // Milestone/completion (medium significance)
@@ -405,13 +415,13 @@ export class BackgroundIndexer {
       // Skip heartbeats and very short messages
       if (msg.isHeartbeat || content.length < 30) continue;
 
-      // 1. Extract facts
+      // 1. Extract facts (TUNE-003: confidence varies by extraction pattern type)
       const factCandidates = extractFactCandidates(content);
-      for (const factContent of factCandidates) {
+      for (const { content: factContent, confidence: factConfidence } of factCandidates) {
         try {
           factStore.addFact(agentId, factContent, {
             scope: 'agent',
-            confidence: 0.6,
+            confidence: factConfidence,
             sourceType: 'indexer',
             sourceSessionKey: this.getSessionKeyForMessage(messageDb, msg.conversationId),
             sourceRef: `msg:${msg.id}`,
@@ -425,10 +435,13 @@ export class BackgroundIndexer {
       // 2. Classify episodes
       const episode = classifyEpisode(msg);
       if (episode && episode.significance >= this.config.episodeSignificanceThreshold) {
+        // Secret gate: shared visibility requires clean content.
+        // Downgrade to 'private' rather than drop, so we don't lose the episode.
+        const episodeVisibility = isSafeForSharedVisibility(episode.summary) ? 'org' : 'private';
         try {
           episodeStore.record(agentId, episode.type, episode.summary, {
             significance: episode.significance,
-            visibility: 'org',
+            visibility: episodeVisibility,
             sessionKey: this.getSessionKeyForMessage(messageDb, msg.conversationId),
           });
           episodesRecorded++;

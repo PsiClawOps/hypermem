@@ -228,6 +228,12 @@ export interface ComposeResult {
   /** True when any non-fatal warnings were emitted (soft failures, truncated slots, etc.). */
   hasWarnings: boolean;
   warnings: string[];
+  /**
+   * The assembled context block (facts, recall, episodes) as a plain string.
+   * Used by the plugin to pass as systemPromptAddition to the OpenClaw runtime.
+   * Omitted when no context was assembled.
+   */
+  contextBlock?: string;
 }
 
 /**

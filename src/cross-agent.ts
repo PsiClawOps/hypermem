@@ -24,6 +24,7 @@ import type {
   AgentIdentity,
 } from './types.js';
 import { DatabaseManager } from './db.js';
+import { FleetStore } from './fleet-store.js';
 
 // ─── Org Membership Registry ─────────────────────────────────────
 
@@ -126,6 +127,72 @@ export function visibilityFilter(
     canReadOrg,
     canReadCouncil,
   };
+}
+
+// ─── Live Registry Loader ────────────────────────────────────────
+
+/**
+ * Build an OrgRegistry by reading from the fleet_agents and fleet_orgs tables.
+ *
+ * Falls back to defaultOrgRegistry() when:
+ *   - The library DB is unavailable
+ *   - The fleet tables are empty (not yet seeded)
+ *   - An unexpected schema error occurs
+ *
+ * This replaces the hardcoded registry with a live source, so new agents and
+ * org restructures propagate automatically without a code change.
+ *
+ * Merge strategy: DB entries OVERRIDE hardcoded defaults. Agents present only
+ * in the hardcoded registry (not yet seeded to the DB) are preserved as fallback.
+ */
+export function buildOrgRegistryFromDb(libraryDb: DatabaseSync): OrgRegistry {
+  const fallback = defaultOrgRegistry();
+
+  try {
+    const fleetStore = new FleetStore(libraryDb);
+    const dbAgents = fleetStore.listAgents();
+
+    if (dbAgents.length === 0) {
+      // Fleet not yet seeded — use hardcoded registry
+      return fallback;
+    }
+
+    const agents: Record<string, AgentIdentity> = { ...fallback.agents };
+
+    for (const agent of dbAgents) {
+      const tier = agent.tier as AgentIdentity['tier'];
+      agents[agent.id] = {
+        agentId: agent.id,
+        tier,
+        org: agent.orgId ?? undefined,
+        councilLead: agent.reportsTo ?? undefined,
+      };
+    }
+
+    // Build orgs from DB: group agents by orgId
+    const orgs: Record<string, string[]> = {};
+
+    // Seed with hardcoded orgs for agents not in DB
+    for (const [orgId, members] of Object.entries(fallback.orgs)) {
+      orgs[orgId] = [...members];
+    }
+
+    // Apply DB agents — update org membership
+    for (const agent of dbAgents) {
+      if (!agent.orgId) continue;
+      if (!orgs[agent.orgId]) {
+        orgs[agent.orgId] = [];
+      }
+      if (!orgs[agent.orgId].includes(agent.id)) {
+        orgs[agent.orgId].push(agent.id);
+      }
+    }
+
+    return { orgs, agents };
+  } catch {
+    // DB error is non-fatal — fall back to hardcoded registry
+    return fallback;
+  }
 }
 
 // ─── Cross-Agent Query Engine ────────────────────────────────────

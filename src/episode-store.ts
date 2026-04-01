@@ -8,6 +8,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { Episode, EpisodeType } from './types.js';
+import { isSafeForSharedVisibility, requiresScan } from './secret-scanner.js';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -48,6 +49,13 @@ export class EpisodeStore {
     const now = nowIso();
     const significance = opts?.significance || 0.5;
 
+    // Secret gate: if requested visibility is shared, verify content is clean.
+    // Downgrade to 'private' rather than throw — better to lose the share than leak a secret.
+    let resolvedVisibility = opts?.visibility || 'org';
+    if (requiresScan(resolvedVisibility) && !isSafeForSharedVisibility(summary)) {
+      resolvedVisibility = 'private';
+    }
+
     const result = this.db.prepare(`
       INSERT INTO episodes (agent_id, event_type, summary, significance,
         visibility, participants, session_key, created_at, decay_score)
@@ -57,7 +65,7 @@ export class EpisodeStore {
       eventType,
       summary,
       significance,
-      opts?.visibility || 'org',
+      resolvedVisibility,
       opts?.participants ? JSON.stringify(opts.participants) : null,
       opts?.sessionKey || null,
       now
@@ -71,7 +79,7 @@ export class EpisodeStore {
       eventType,
       summary,
       significance,
-      visibility: opts?.visibility || 'org',
+      visibility: resolvedVisibility,
       participants: opts?.participants || null,
       sessionKey: opts?.sessionKey || null,
       createdAt: now,

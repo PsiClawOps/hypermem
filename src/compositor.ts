@@ -542,12 +542,19 @@ export class Compositor {
     }
 
     // ── Inject assembled context block ──────────────────────
-    if (contextParts.length > 0) {
+    const assembledContextBlock = contextParts.length > 0 ? contextParts.join('\n\n') : undefined;
+
+    if (assembledContextBlock) {
       const contextMsg: NeutralMessage = {
         role: 'system',
-        textContent: contextParts.join('\n\n'),
+        textContent: assembledContextBlock,
         toolCalls: null,
         toolResults: null,
+        // DYNAMIC_BOUNDARY: this slot is session-specific (facts, recall, episodes).
+        // It must NOT be included in any prompt caching boundary that spans static content.
+        // The provider translator will insert a cache_control ephemeral marker BEFORE
+        // this message so providers can cache everything up to identity/system as static context.
+        metadata: { dynamicBoundary: true },
       };
       // Insert after system/identity, before history
       // Insert context after all system/identity messages, before conversation history.
@@ -570,6 +577,7 @@ export class Compositor {
       truncated: remaining < 0,
       hasWarnings: warnings.length > 0,
       warnings,
+      contextBlock: assembledContextBlock,
     };
   }
 
@@ -680,6 +688,7 @@ export class Compositor {
       AND superseded_by IS NULL
       AND (expires_at IS NULL OR expires_at > datetime('now'))
       AND decay_score < 0.8
+      AND confidence >= 0.5
       ORDER BY confidence DESC, decay_score ASC
       LIMIT ?
     `).all(agentId, this.config.maxFacts) as Array<{
@@ -819,6 +828,8 @@ export class Compositor {
       let tokens = 0;
 
       for (const result of results) {
+        // TUNE-001: drop very-low-relevance results (RRF scores below 0.008 are noise)
+        if (result.score < 0.008) continue;
         const label = this.formatHybridResult(result);
         const lineTokens = estimateTokens(label);
         if (tokens + lineTokens > maxTokens) break;
