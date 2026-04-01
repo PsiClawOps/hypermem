@@ -442,11 +442,24 @@ export class Compositor {
             // FTS5 treats space-separated terms as AND by default — we want OR so
             // that any relevant term is sufficient to retrieve a matching chunk.
             // Prefix operator (*) ensures stems match full words in the index.
-            const ftsTerms = relevantWords.length > 0
-              ? [...new Set(relevantWords.map(w => `${w}*`))].slice(0, 3).join(' OR ')
+            // Sort by keyword match specificity (longer matched keyword = more specific term),
+            // then cap at 6 terms to keep FTS queries reasonable.
+            // No positional slice — all relevant words participate, not just the first 3.
+            const sortedWords = [...new Set(relevantWords)].sort((a, b) => {
+              const aLen = Math.max(...matchedKeywords.filter(kw =>
+                a.toLowerCase().includes(kw.toLowerCase()) || kw.toLowerCase().includes(a.toLowerCase().slice(0, 5))
+              ).map(kw => kw.length), 0);
+              const bLen = Math.max(...matchedKeywords.filter(kw =>
+                b.toLowerCase().includes(kw.toLowerCase()) || kw.toLowerCase().includes(b.toLowerCase().slice(0, 5))
+              ).map(kw => kw.length), 0);
+              return bLen - aLen; // Most specific match first
+            });
+
+            const ftsTerms = sortedWords.length > 0
+              ? sortedWords.slice(0, 6).map(w => `${w}*`).join(' OR ')
               : matchedKeywords
                   .sort((a, b) => b.length - a.length)
-                  .slice(0, 2)
+                  .slice(0, 3)
                   .map(kw => `${kw}*`)
                   .join(' OR ');
 
