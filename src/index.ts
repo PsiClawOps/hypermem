@@ -55,6 +55,15 @@ export { migrateLibrary, LIBRARY_SCHEMA_VERSION } from './library-schema.js';
 export { VectorStore, generateEmbeddings } from './vector-store.js';
 export type { EmbeddingConfig, VectorSearchResult, VectorIndexStats } from './vector-store.js';
 
+export { DocChunkStore } from './doc-chunk-store.js';
+export type { DocChunkRow, ChunkQuery, IndexResult as DocIndexResult } from './doc-chunk-store.js';
+
+export { WorkspaceSeeder, seedWorkspace } from './seed.js';
+export type { SeedOptions, SeedResult } from './seed.js';
+
+export { chunkMarkdown, chunkFile, inferCollection, hashContent, ACA_COLLECTIONS } from './doc-chunker.js';
+export type { DocChunk, ChunkOptions, CollectionDef } from './doc-chunker.js';
+
 export {
   crossAgentQuery,
   canAccess,
@@ -112,6 +121,9 @@ import { RedisLayer } from './redis.js';
 import { Compositor } from './compositor.js';
 import { VectorStore, type VectorSearchResult, type VectorIndexStats } from './vector-store.js';
 import { userMessageToNeutral, fromProviderFormat } from './provider-translator.js';
+import { DocChunkStore, type DocChunkRow, type ChunkQuery, type IndexResult } from './doc-chunk-store.js';
+import { WorkspaceSeeder, type SeedOptions, type SeedResult } from './seed.js';
+import { chunkMarkdown, chunkFile, inferCollection, type DocChunk, type ChunkOptions } from './doc-chunker.js';
 import type {
   HyperMemConfig,
   ComposeRequest,
@@ -1177,6 +1189,65 @@ export class HyperMem {
     }
 
     return results;
+  }
+
+  // ─── Document Chunks (L4: Library) ──────────────────────────
+
+  /**
+   * Index chunks from a parsed set of DocChunk objects.
+   * Atomic: replaces all chunks for the source in one transaction.
+   */
+  indexDocChunks(chunks: DocChunk[]): IndexResult {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DocChunkStore(db);
+    return store.indexChunks(chunks);
+  }
+
+  /**
+   * Query doc chunks by collection with optional keyword/scope/agent filters.
+   */
+  queryDocChunks(query: ChunkQuery): DocChunkRow[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DocChunkStore(db);
+    return store.queryChunks(query);
+  }
+
+  /**
+   * Seed all ACA files from a workspace directory into the doc chunk index.
+   * Idempotent: skips files whose source hash hasn't changed.
+   * Force re-index with opts.force = true.
+   */
+  async seedWorkspace(workspaceDir: string, opts: SeedOptions = {}): Promise<SeedResult> {
+    const db = this.dbManager.getLibraryDb();
+    const seeder = new WorkspaceSeeder(db);
+    return seeder.seedWorkspace(workspaceDir, opts);
+  }
+
+  /**
+   * Seed a single file into the doc chunk index.
+   */
+  seedFile(filePath: string, collection: string, opts: SeedOptions = {}) {
+    const db = this.dbManager.getLibraryDb();
+    const seeder = new WorkspaceSeeder(db);
+    return seeder.seedFile(filePath, collection, opts);
+  }
+
+  /**
+   * Get stats about the current doc chunk index.
+   */
+  getDocIndexStats() {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DocChunkStore(db);
+    return store.getStats();
+  }
+
+  /**
+   * List indexed sources (what files have been seeded and their hashes).
+   */
+  listDocSources(opts?: { agentId?: string; collection?: string }) {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DocChunkStore(db);
+    return store.listSources(opts);
   }
 
   // ─── Fleet Cache Hydration ──────────────────────────────────
