@@ -1,0 +1,370 @@
+/**
+ * HyperMem Message Store
+ *
+ * CRUD operations for conversations and messages in SQLite.
+ * All messages are stored in provider-neutral format.
+ * This is the write-through layer: Redis → here.
+ */
+
+import type { DatabaseSync } from 'node:sqlite';
+import type {
+  NeutralMessage,
+  StoredMessage,
+  Conversation,
+  ChannelType,
+  ConversationStatus,
+} from './types.js';
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+/**
+ * Parse a stored message row from SQLite into a StoredMessage object.
+ */
+function parseMessageRow(row: Record<string, unknown>): StoredMessage {
+  return {
+    id: row.id as number,
+    conversationId: row.conversation_id as number,
+    agentId: row.agent_id as string,
+    role: row.role as StoredMessage['role'],
+    textContent: (row.text_content as string) || null,
+    toolCalls: row.tool_calls ? JSON.parse(row.tool_calls as string) : null,
+    toolResults: row.tool_results ? JSON.parse(row.tool_results as string) : null,
+    metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,
+    messageIndex: row.message_index as number,
+    tokenCount: (row.token_count as number) || null,
+    isHeartbeat: (row.is_heartbeat as number) === 1,
+    createdAt: row.created_at as string,
+  };
+}
+
+function parseConversationRow(row: Record<string, unknown>): Conversation {
+  return {
+    id: row.id as number,
+    sessionKey: row.session_key as string,
+    sessionId: (row.session_id as string) || null,
+    agentId: row.agent_id as string,
+    channelType: row.channel_type as ChannelType,
+    channelId: (row.channel_id as string) || null,
+    provider: (row.provider as string) || null,
+    model: (row.model as string) || null,
+    status: row.status as ConversationStatus,
+    messageCount: row.message_count as number,
+    tokenCountIn: row.token_count_in as number,
+    tokenCountOut: row.token_count_out as number,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    endedAt: (row.ended_at as string) || null,
+  };
+}
+
+export class MessageStore {
+  constructor(private readonly db: DatabaseSync) {}
+
+  // ─── Conversation Operations ─────────────────────────────────
+
+  /**
+   * Get or create a conversation for a session.
+   */
+  getOrCreateConversation(
+    agentId: string,
+    sessionKey: string,
+    opts?: {
+      channelType?: ChannelType;
+      channelId?: string;
+      provider?: string;
+      model?: string;
+    }
+  ): Conversation {
+    const existing = this.db
+      .prepare('SELECT * FROM conversations WHERE session_key = ?')
+      .get(sessionKey) as Record<string, unknown> | undefined;
+
+    if (existing) {
+      return parseConversationRow(existing);
+    }
+
+    const now = nowIso();
+    const channelType = opts?.channelType || this.inferChannelType(sessionKey);
+
+    const result = this.db.prepare(`
+      INSERT INTO conversations (session_key, agent_id, channel_type, channel_id, provider, model, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      sessionKey,
+      agentId,
+      channelType,
+      opts?.channelId || null,
+      opts?.provider || null,
+      opts?.model || null,
+      now,
+      now
+    );
+
+    // node:sqlite returns { changes, lastInsertRowid }
+    const id = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
+
+    return {
+      id,
+      sessionKey,
+      sessionId: null,
+      agentId,
+      channelType,
+      channelId: opts?.channelId || null,
+      provider: opts?.provider || null,
+      model: opts?.model || null,
+      status: 'active',
+      messageCount: 0,
+      tokenCountIn: 0,
+      tokenCountOut: 0,
+      createdAt: now,
+      updatedAt: now,
+      endedAt: null,
+    };
+  }
+
+  /**
+   * Get a conversation by session key.
+   */
+  getConversation(sessionKey: string): Conversation | null {
+    const row = this.db
+      .prepare('SELECT * FROM conversations WHERE session_key = ?')
+      .get(sessionKey) as Record<string, unknown> | undefined;
+
+    return row ? parseConversationRow(row) : null;
+  }
+
+  /**
+   * Get all conversations for an agent, optionally filtered.
+   */
+  getConversations(
+    agentId: string,
+    opts?: {
+      status?: ConversationStatus;
+      channelType?: ChannelType;
+      limit?: number;
+    }
+  ): Conversation[] {
+    let sql = 'SELECT * FROM conversations WHERE agent_id = ?';
+    const params: (string | number | null)[] = [agentId];
+
+    if (opts?.status) {
+      sql += ' AND status = ?';
+      params.push(opts.status);
+    }
+    if (opts?.channelType) {
+      sql += ' AND channel_type = ?';
+      params.push(opts.channelType);
+    }
+
+    sql += ' ORDER BY updated_at DESC';
+
+    if (opts?.limit) {
+      sql += ' LIMIT ?';
+      params.push(opts.limit);
+    }
+
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    return rows.map(parseConversationRow);
+  }
+
+  /**
+   * Update conversation metadata.
+   */
+  updateConversation(conversationId: number, updates: {
+    provider?: string;
+    model?: string;
+    status?: ConversationStatus;
+    endedAt?: string;
+  }): void {
+    const sets: string[] = ['updated_at = ?'];
+    const params: (string | number | null)[] = [nowIso()];
+
+    if (updates.provider !== undefined) {
+      sets.push('provider = ?');
+      params.push(updates.provider);
+    }
+    if (updates.model !== undefined) {
+      sets.push('model = ?');
+      params.push(updates.model);
+    }
+    if (updates.status !== undefined) {
+      sets.push('status = ?');
+      params.push(updates.status);
+    }
+    if (updates.endedAt !== undefined) {
+      sets.push('ended_at = ?');
+      params.push(updates.endedAt);
+    }
+
+    params.push(conversationId);
+    this.db.prepare(`UPDATE conversations SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+  }
+
+  // ─── Message Operations ──────────────────────────────────────
+
+  /**
+   * Record a message to the database.
+   * Returns the stored message with its assigned ID.
+   */
+  recordMessage(
+    conversationId: number,
+    agentId: string,
+    message: NeutralMessage,
+    opts?: {
+      tokenCount?: number;
+      isHeartbeat?: boolean;
+    }
+  ): StoredMessage {
+    const now = nowIso();
+
+    // Get next message index
+    const lastRow = this.db
+      .prepare('SELECT MAX(message_index) AS max_idx FROM messages WHERE conversation_id = ?')
+      .get(conversationId) as { max_idx: number | null } | undefined;
+
+    const messageIndex = (lastRow?.max_idx ?? -1) + 1;
+
+    const result = this.db.prepare(`
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, metadata, token_count, message_index, is_heartbeat, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      conversationId,
+      agentId,
+      message.role,
+      message.textContent,
+      message.toolCalls ? JSON.stringify(message.toolCalls) : null,
+      message.toolResults ? JSON.stringify(message.toolResults) : null,
+      message.metadata ? JSON.stringify(message.metadata) : null,
+      opts?.tokenCount || null,
+      messageIndex,
+      opts?.isHeartbeat ? 1 : 0,
+      now
+    );
+
+    const id = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
+
+    // Update conversation counters
+    const tokenDelta = opts?.tokenCount || 0;
+    const isOutput = message.role === 'assistant';
+
+    this.db.prepare(`
+      UPDATE conversations
+      SET message_count = message_count + 1,
+          token_count_in = token_count_in + ?,
+          token_count_out = token_count_out + ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      isOutput ? 0 : tokenDelta,
+      isOutput ? tokenDelta : 0,
+      now,
+      conversationId
+    );
+
+    return {
+      id,
+      conversationId,
+      agentId,
+      role: message.role,
+      textContent: message.textContent,
+      toolCalls: message.toolCalls,
+      toolResults: message.toolResults,
+      metadata: message.metadata,
+      messageIndex,
+      tokenCount: opts?.tokenCount || null,
+      isHeartbeat: opts?.isHeartbeat || false,
+      createdAt: now,
+    };
+  }
+
+  /**
+   * Get recent messages for a conversation.
+   */
+  getRecentMessages(conversationId: number, limit: number = 50): StoredMessage[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM messages
+      WHERE conversation_id = ?
+      ORDER BY message_index DESC
+      LIMIT ?
+    `).all(conversationId, limit) as Record<string, unknown>[];
+
+    // Reverse to get chronological order
+    return rows.reverse().map(parseMessageRow);
+  }
+
+  /**
+   * Get messages across all conversations for an agent (cross-session query).
+   */
+  getAgentMessages(
+    agentId: string,
+    opts?: {
+      since?: string;        // ISO timestamp
+      limit?: number;
+      excludeHeartbeats?: boolean;
+    }
+  ): StoredMessage[] {
+    let sql = 'SELECT * FROM messages WHERE agent_id = ?';
+    const params: (string | number | null)[] = [agentId];
+
+    if (opts?.since) {
+      sql += ' AND created_at > ?';
+      params.push(opts.since);
+    }
+    if (opts?.excludeHeartbeats) {
+      sql += ' AND is_heartbeat = 0';
+    }
+
+    sql += ' ORDER BY created_at DESC';
+
+    if (opts?.limit) {
+      sql += ' LIMIT ?';
+      params.push(opts.limit);
+    }
+
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    return rows.map(parseMessageRow);
+  }
+
+  /**
+   * Full-text search across all messages for an agent.
+   */
+  searchMessages(agentId: string, query: string, limit: number = 20): StoredMessage[] {
+    const rows = this.db.prepare(`
+      SELECT m.* FROM messages m
+      JOIN messages_fts fts ON m.id = fts.rowid
+      WHERE messages_fts MATCH ?
+      AND m.agent_id = ?
+      ORDER BY fts.rank
+      LIMIT ?
+    `).all(query, agentId, limit) as Record<string, unknown>[];
+
+    return rows.map(parseMessageRow);
+  }
+
+  /**
+   * Get message count for a conversation.
+   */
+  getMessageCount(conversationId: number): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?')
+      .get(conversationId) as { count: number };
+    return row.count;
+  }
+
+  // ─── Helpers ─────────────────────────────────────────────────
+
+  /**
+   * Infer channel type from session key format.
+   */
+  private inferChannelType(sessionKey: string): ChannelType {
+    if (sessionKey.includes(':webchat:')) return 'webchat';
+    if (sessionKey.includes(':discord:')) return 'discord';
+    if (sessionKey.includes(':telegram:')) return 'telegram';
+    if (sessionKey.includes(':signal:')) return 'signal';
+    if (sessionKey.includes(':subagent:') || sessionKey.includes(':spawn:')) return 'subagent';
+    if (sessionKey.includes(':heartbeat')) return 'heartbeat';
+    return 'other';
+  }
+}
