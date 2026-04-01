@@ -54,6 +54,8 @@ export { migrateLibrary, LIBRARY_SCHEMA_VERSION } from './library-schema.js';
 
 export { VectorStore, generateEmbeddings } from './vector-store.js';
 export type { EmbeddingConfig, VectorSearchResult, VectorIndexStats } from './vector-store.js';
+export { hybridSearch, buildFtsQuery } from './hybrid-retrieval.js';
+export type { HybridSearchResult, HybridSearchOptions } from './hybrid-retrieval.js';
 
 export { DocChunkStore } from './doc-chunk-store.js';
 export type { DocChunkRow, ChunkQuery, IndexResult as DocIndexResult } from './doc-chunk-store.js';

@@ -26,6 +26,7 @@ import { MessageStore } from './message-store.js';
 import { toProviderFormat } from './provider-translator.js';
 import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
+import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
 
 const DEFAULT_CONFIG: CompositorConfig = {
   defaultTokenBudget: 100000,
@@ -370,15 +371,20 @@ export class Compositor {
       }
     }
 
-    // ── Semantic Recall (L3: Vectors) ────────────────────────
-    if (remaining > 500 && this.vectorStore) {
+    // ── Semantic Recall (L3: Hybrid FTS5+KNN) ───────────────
+    // Fires when either vector store or library DB is available.
+    // FTS5-only (no embeddings) still returns keyword matches.
+    // KNN-only (no FTS terms) still returns semantic matches.
+    // Both present → Reciprocal Rank Fusion.
+    if (remaining > 500 && (this.vectorStore || libDb)) {
       const lastUserMsg = this.getLastUserMessage(messages);
       if (lastUserMsg) {
         try {
           const semanticContent = await this.buildSemanticRecall(
             lastUserMsg,
             request.agentId,
-            Math.floor(remaining * 0.15) // Cap at 15% of remaining
+            Math.floor(remaining * 0.15), // Cap at 15% of remaining
+            libDb || undefined
           );
           if (semanticContent) {
             const tokens = estimateTokens(semanticContent);
@@ -779,51 +785,99 @@ export class Compositor {
     return lines.join('\n');
   }
 
-  // ─── L3 Vector Search ────────────────────────────────────────
+  // ─── L3 Hybrid Retrieval (FTS5 + KNN) ───────────────────────
 
   /**
-   * Build semantic recall content by searching vectors for content
-   * related to the user's latest message.
+   * Build semantic recall content using hybrid FTS5+KNN retrieval.
+   *
+   * Uses Reciprocal Rank Fusion to merge keyword and vector results.
+   * Gracefully degrades: FTS5-only when no vector store, KNN-only
+   * when FTS query is empty (all stop words), both when available.
    */
   private async buildSemanticRecall(
     userMessage: string,
     agentId: string,
-    maxTokens: number
+    maxTokens: number,
+    libraryDb?: DatabaseSync
   ): Promise<string | null> {
+    const libDb = libraryDb || this.libraryDb;
+    if (!libDb && !this.vectorStore) return null;
+
+    // Use hybrid search when library DB is available
+    if (libDb) {
+      const results = await hybridSearch(libDb, this.vectorStore, userMessage, {
+        tables: ['facts', 'knowledge', 'episodes'],
+        limit: 10,
+        agentId,
+        maxKnnDistance: 1.2,
+      });
+
+      if (results.length === 0) return null;
+
+      const lines: string[] = [];
+      let tokens = 0;
+
+      for (const result of results) {
+        const label = this.formatHybridResult(result);
+        const lineTokens = estimateTokens(label);
+        if (tokens + lineTokens > maxTokens) break;
+        lines.push(label);
+        tokens += lineTokens;
+      }
+
+      return lines.length > 0 ? lines.join('\n') : null;
+    }
+
+    // Fallback: KNN-only when no library DB (legacy path)
     if (!this.vectorStore) return null;
 
-    // Search across all indexed content types
     const results = await this.vectorStore.search(userMessage, {
       tables: ['facts', 'knowledge', 'episodes'],
       limit: 8,
-      maxDistance: 1.2, // Filter out low-relevance results
+      maxDistance: 1.2,
     });
 
     if (results.length === 0) return null;
 
-    // Build recall content, respecting token budget
     const lines: string[] = [];
     let tokens = 0;
 
     for (const result of results) {
-      const label = this.formatRecallResult(result);
+      const label = this.formatVectorResult(result);
       const lineTokens = estimateTokens(label);
-
       if (tokens + lineTokens > maxTokens) break;
-
       lines.push(label);
       tokens += lineTokens;
     }
 
-    if (lines.length === 0) return null;
-
-    return lines.join('\n');
+    return lines.length > 0 ? lines.join('\n') : null;
   }
 
   /**
-   * Format a vector search result for injection into context.
+   * Format a hybrid search result for injection into context.
+   * Shows retrieval source(s) and relevance score.
    */
-  private formatRecallResult(result: VectorSearchResult): string {
+  private formatHybridResult(result: HybridSearchResult): string {
+    const type = result.sourceTable;
+    const sourceTag = result.sources.length === 2 ? 'fts+knn' : result.sources[0];
+    const scoreStr = (result.score * 100).toFixed(0);
+
+    switch (type) {
+      case 'facts':
+        return `- [fact, ${sourceTag}, score:${scoreStr}] ${result.content}`;
+      case 'knowledge':
+        return `- [knowledge/${result.metadata || 'general'}, ${sourceTag}, score:${scoreStr}] ${result.content}`;
+      case 'episodes':
+        return `- [episode/${result.domain || 'event'}, ${sourceTag}, score:${scoreStr}] ${result.content}`;
+      default:
+        return `- [${type}, ${sourceTag}, score:${scoreStr}] ${result.content}`;
+    }
+  }
+
+  /**
+   * Format a vector-only search result (legacy fallback).
+   */
+  private formatVectorResult(result: VectorSearchResult): string {
     const relevance = Math.max(0, Math.round((1 - result.distance) * 100));
     const type = result.sourceTable;
 

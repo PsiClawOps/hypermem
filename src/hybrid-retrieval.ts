@@ -1,0 +1,452 @@
+/**
+ * HyperMem Hybrid Retrieval — FTS5 + KNN Score Fusion
+ *
+ * Merges keyword (FTS5/BM25) and semantic (KNN/vector) results into a
+ * single ranked list using Reciprocal Rank Fusion (RRF). This avoids
+ * vocabulary mismatch (KNN-only misses exact terms) and semantic gap
+ * (FTS5-only misses paraphrases).
+ *
+ * Architecture:
+ *   - FTS5 results from library.db (facts_fts, knowledge_fts, episodes_fts)
+ *   - KNN results from vectors.db via VectorStore
+ *   - RRF merges both ranked lists with configurable k constant
+ *   - Deduplication by (sourceTable, sourceId)
+ *   - Token-budgeted output for compositor consumption
+ */
+
+import type { DatabaseSync } from 'node:sqlite';
+import type { VectorStore, VectorSearchResult } from './vector-store.js';
+
+// ─── Types ─────────────────────────────────────────────────────
+
+export interface HybridSearchResult {
+  sourceTable: string;      // 'facts' | 'knowledge' | 'episodes'
+  sourceId: number;
+  content: string;
+  domain?: string;
+  agentId?: string;
+  metadata?: string;
+  /** Combined RRF score (higher = more relevant) */
+  score: number;
+  /** Which retrieval paths contributed */
+  sources: ('fts' | 'knn')[];
+}
+
+export interface HybridSearchOptions {
+  /** Content types to search. Default: ['facts', 'knowledge', 'episodes'] */
+  tables?: string[];
+  /** Max results to return. Default: 10 */
+  limit?: number;
+  /** Max KNN distance (filters low-quality vectors). Default: 1.2 */
+  maxKnnDistance?: number;
+  /** RRF k constant. Higher = less weight to top ranks. Default: 60 */
+  rrfK?: number;
+  /** Agent ID filter for FTS queries */
+  agentId?: string;
+  /** Weight for FTS results in fusion. Default: 1.0 */
+  ftsWeight?: number;
+  /** Weight for KNN results in fusion. Default: 1.0 */
+  knnWeight?: number;
+  /** Minimum number of FTS terms to attempt a query (skip if fewer). Default: 1 */
+  minFtsTerms?: number;
+}
+
+// ─── FTS5 Query Building ───────────────────────────────────────
+
+/** Stop words to exclude from FTS5 queries */
+const STOP_WORDS = new Set([
+  'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+  'should', 'may', 'might', 'shall', 'can', 'need', 'dare', 'ought',
+  'used', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from',
+  'as', 'into', 'through', 'during', 'before', 'after', 'above', 'below',
+  'between', 'out', 'off', 'over', 'under', 'again', 'further', 'then',
+  'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each',
+  'every', 'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no',
+  'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
+  'just', 'don', 'now', 'and', 'but', 'or', 'if', 'it', 'its', 'this',
+  'that', 'these', 'those', 'i', 'me', 'my', 'we', 'our', 'you', 'your',
+  'he', 'him', 'his', 'she', 'her', 'they', 'them', 'their', 'what',
+  'which', 'who', 'whom', 'about', 'up',
+]);
+
+/**
+ * Build an FTS5 query from a natural language string.
+ * Extracts meaningful words, removes stop words, uses OR conjunction.
+ */
+export function buildFtsQuery(input: string): string {
+  const words = input
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, ' ')       // strip punctuation except hyphens
+    .split(/\s+/)
+    .filter(w => w.length >= 3 && !STOP_WORDS.has(w));
+
+  if (words.length === 0) return '';
+
+  // Deduplicate, sort by length descending (more specific terms first),
+  // cap at 8 terms to keep queries reasonable
+  const unique = [...new Set(words)]
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 8);
+
+  // Use prefix matching (*) and OR so any term can match
+  return unique.map(w => `"${w}"*`).join(' OR ');
+}
+
+// ─── FTS5 Search Functions ─────────────────────────────────────
+
+interface FtsResult {
+  id: number;
+  rank: number;       // FTS5 BM25 rank (negative — more negative = better match)
+  content: string;
+  domain?: string;
+  agentId?: string;
+  metadata?: string;
+}
+
+/**
+ * Search facts via FTS5.
+ */
+function searchFactsFts(
+  db: DatabaseSync,
+  query: string,
+  agentId?: string,
+  limit: number = 20
+): FtsResult[] {
+  let sql = `
+    SELECT f.id, fts.rank, f.content, f.domain, f.agent_id
+    FROM facts f
+    JOIN facts_fts fts ON f.id = fts.rowid
+    WHERE facts_fts MATCH ?
+    AND f.superseded_by IS NULL
+    AND f.decay_score < 0.8
+  `;
+  const params: (string | number)[] = [query];
+
+  if (agentId) {
+    sql += ' AND f.agent_id = ?';
+    params.push(agentId);
+  }
+
+  sql += ' ORDER BY fts.rank LIMIT ?';
+  params.push(limit);
+
+  const rows = db.prepare(sql).all(...params) as Array<{
+    id: number; rank: number; content: string; domain: string; agent_id: string;
+  }>;
+
+  return rows.map(r => ({
+    id: r.id,
+    rank: r.rank,
+    content: r.content,
+    domain: r.domain,
+    agentId: r.agent_id,
+  }));
+}
+
+/**
+ * Search knowledge via FTS5.
+ */
+function searchKnowledgeFts(
+  db: DatabaseSync,
+  query: string,
+  agentId?: string,
+  limit: number = 20
+): FtsResult[] {
+  let sql = `
+    SELECT k.id, fts.rank, k.content, k.domain, k.agent_id, k.key
+    FROM knowledge k
+    JOIN knowledge_fts fts ON k.id = fts.rowid
+    WHERE knowledge_fts MATCH ?
+    AND k.superseded_by IS NULL
+  `;
+  const params: (string | number)[] = [query];
+
+  if (agentId) {
+    sql += ' AND k.agent_id = ?';
+    params.push(agentId);
+  }
+
+  sql += ' ORDER BY fts.rank LIMIT ?';
+  params.push(limit);
+
+  const rows = db.prepare(sql).all(...params) as Array<{
+    id: number; rank: number; content: string; domain: string; agent_id: string; key: string;
+  }>;
+
+  return rows.map(r => ({
+    id: r.id,
+    rank: r.rank,
+    content: r.content,
+    domain: r.domain,
+    agentId: r.agent_id,
+    metadata: r.key,
+  }));
+}
+
+/**
+ * Search episodes via FTS5.
+ */
+function searchEpisodesFts(
+  db: DatabaseSync,
+  query: string,
+  agentId?: string,
+  limit: number = 20
+): FtsResult[] {
+  let sql = `
+    SELECT e.id, fts.rank, e.summary, e.event_type, e.agent_id, e.participants
+    FROM episodes e
+    JOIN episodes_fts fts ON e.id = fts.rowid
+    WHERE episodes_fts MATCH ?
+    AND e.decay_score < 0.8
+  `;
+  const params: (string | number)[] = [query];
+
+  if (agentId) {
+    sql += ' AND e.agent_id = ?';
+    params.push(agentId);
+  }
+
+  sql += ' ORDER BY fts.rank LIMIT ?';
+  params.push(limit);
+
+  const rows = db.prepare(sql).all(...params) as Array<{
+    id: number; rank: number; summary: string; event_type: string; agent_id: string; participants: string | null;
+  }>;
+
+  return rows.map(r => ({
+    id: r.id,
+    rank: r.rank,
+    content: r.summary,
+    domain: r.event_type,
+    agentId: r.agent_id,
+    metadata: r.participants || undefined,
+  }));
+}
+
+// ─── Reciprocal Rank Fusion ────────────────────────────────────
+
+type ResultKey = string; // "table:id"
+
+interface FusionEntry {
+  sourceTable: string;
+  sourceId: number;
+  content: string;
+  domain?: string;
+  agentId?: string;
+  metadata?: string;
+  ftsRank?: number;       // Position in FTS result list (1-based)
+  knnRank?: number;       // Position in KNN result list (1-based)
+  knnDistance?: number;
+  score: number;
+  sources: ('fts' | 'knn')[];
+}
+
+function resultKey(table: string, id: number): ResultKey {
+  return `${table}:${id}`;
+}
+
+/**
+ * Merge FTS5 and KNN results using Reciprocal Rank Fusion.
+ *
+ * RRF score = Σ (weight / (k + rank)) for each result list the item appears in.
+ * k is a constant (default 60) that dampens the effect of high rank positions.
+ */
+function fuseResults(
+  ftsResults: Map<ResultKey, FusionEntry>,
+  knnResults: Map<ResultKey, FusionEntry>,
+  k: number,
+  ftsWeight: number,
+  knnWeight: number
+): FusionEntry[] {
+  const merged = new Map<ResultKey, FusionEntry>();
+
+  // Add FTS results
+  for (const [key, entry] of ftsResults) {
+    const score = ftsWeight / (k + (entry.ftsRank || 1));
+    merged.set(key, { ...entry, score, sources: ['fts'] });
+  }
+
+  // Merge KNN results
+  for (const [key, entry] of knnResults) {
+    const knnScore = knnWeight / (k + (entry.knnRank || 1));
+    const existing = merged.get(key);
+
+    if (existing) {
+      // Item found by both — boost score
+      existing.score += knnScore;
+      existing.knnRank = entry.knnRank;
+      existing.knnDistance = entry.knnDistance;
+      existing.sources = ['fts', 'knn'];
+    } else {
+      merged.set(key, { ...entry, score: knnScore, sources: ['knn'] });
+    }
+  }
+
+  // Sort by fused score descending
+  return [...merged.values()].sort((a, b) => b.score - a.score);
+}
+
+// ─── Public API ────────────────────────────────────────────────
+
+/**
+ * Hybrid search combining FTS5 keyword search and KNN vector search.
+ *
+ * When vectorStore is null, falls back to FTS5-only.
+ * When FTS5 query is empty (all stop words), falls back to KNN-only.
+ */
+export async function hybridSearch(
+  libraryDb: DatabaseSync,
+  vectorStore: VectorStore | null,
+  query: string,
+  opts?: HybridSearchOptions
+): Promise<HybridSearchResult[]> {
+  const tables = opts?.tables || ['facts', 'knowledge', 'episodes'];
+  const limit = opts?.limit || 10;
+  const maxKnnDistance = opts?.maxKnnDistance || 1.2;
+  const rrfK = opts?.rrfK || 60;
+  const ftsWeight = opts?.ftsWeight || 1.0;
+  const knnWeight = opts?.knnWeight || 1.0;
+  const minFtsTerms = opts?.minFtsTerms || 1;
+
+  // ── FTS5 retrieval ──
+  const ftsQuery = buildFtsQuery(query);
+  const ftsMap = new Map<ResultKey, FusionEntry>();
+
+  if (ftsQuery && ftsQuery.split(' OR ').length >= minFtsTerms) {
+    try {
+      const perTableLimit = Math.ceil(limit * 1.5); // Over-fetch for fusion
+
+      if (tables.includes('facts')) {
+        const results = searchFactsFts(libraryDb, ftsQuery, opts?.agentId, perTableLimit);
+        results.forEach((r, i) => {
+          const key = resultKey('facts', r.id);
+          ftsMap.set(key, {
+            sourceTable: 'facts',
+            sourceId: r.id,
+            content: r.content,
+            domain: r.domain,
+            agentId: r.agentId,
+            ftsRank: i + 1,
+            score: 0,
+            sources: ['fts'],
+          });
+        });
+      }
+
+      if (tables.includes('knowledge')) {
+        const results = searchKnowledgeFts(libraryDb, ftsQuery, opts?.agentId, perTableLimit);
+        results.forEach((r, i) => {
+          const key = resultKey('knowledge', r.id);
+          ftsMap.set(key, {
+            sourceTable: 'knowledge',
+            sourceId: r.id,
+            content: r.content,
+            domain: r.domain,
+            agentId: r.agentId,
+            metadata: r.metadata,
+            ftsRank: i + 1,
+            score: 0,
+            sources: ['fts'],
+          });
+        });
+      }
+
+      if (tables.includes('episodes')) {
+        const results = searchEpisodesFts(libraryDb, ftsQuery, opts?.agentId, perTableLimit);
+        results.forEach((r, i) => {
+          const key = resultKey('episodes', r.id);
+          ftsMap.set(key, {
+            sourceTable: 'episodes',
+            sourceId: r.id,
+            content: r.content,
+            domain: r.domain,
+            agentId: r.agentId,
+            metadata: r.metadata,
+            ftsRank: i + 1,
+            score: 0,
+            sources: ['fts'],
+          });
+        });
+      }
+    } catch {
+      // FTS5 failure is non-fatal — fall through to KNN-only
+    }
+  }
+
+  // ── KNN retrieval ──
+  const knnMap = new Map<ResultKey, FusionEntry>();
+
+  if (vectorStore) {
+    try {
+      const knnResults = await vectorStore.search(query, {
+        tables,
+        limit: Math.ceil(limit * 1.5),
+        maxDistance: maxKnnDistance,
+      });
+
+      knnResults.forEach((r, i) => {
+        const key = resultKey(r.sourceTable, r.sourceId);
+        knnMap.set(key, {
+          sourceTable: r.sourceTable,
+          sourceId: r.sourceId,
+          content: r.content,
+          domain: r.domain,
+          agentId: r.agentId,
+          metadata: r.metadata,
+          knnRank: i + 1,
+          knnDistance: r.distance,
+          score: 0,
+          sources: ['knn'],
+        });
+      });
+    } catch {
+      // KNN failure is non-fatal — use FTS-only
+    }
+  }
+
+  // ── Fusion ──
+  if (ftsMap.size === 0 && knnMap.size === 0) {
+    return [];
+  }
+
+  // If only one source has results, skip fusion overhead but assign scores
+  if (ftsMap.size === 0) {
+    // KNN-only: score by inverse distance
+    return [...knnMap.values()]
+      .sort((a, b) => (a.knnDistance || 99) - (b.knnDistance || 99))
+      .slice(0, limit)
+      .map((entry, i) => toHybridResult({
+        ...entry,
+        score: knnWeight / (rrfK + i + 1),
+      }));
+  }
+
+  if (knnMap.size === 0) {
+    // FTS-only: score by rank position
+    return [...ftsMap.values()]
+      .sort((a, b) => (a.ftsRank || 99) - (b.ftsRank || 99))
+      .slice(0, limit)
+      .map((entry, i) => toHybridResult({
+        ...entry,
+        score: ftsWeight / (rrfK + i + 1),
+      }));
+  }
+
+  // Both sources present — RRF fusion
+  const fused = fuseResults(ftsMap, knnMap, rrfK, ftsWeight, knnWeight);
+  return fused.slice(0, limit).map(toHybridResult);
+}
+
+function toHybridResult(entry: FusionEntry): HybridSearchResult {
+  return {
+    sourceTable: entry.sourceTable,
+    sourceId: entry.sourceId,
+    content: entry.content,
+    domain: entry.domain,
+    agentId: entry.agentId,
+    metadata: entry.metadata,
+    score: entry.score,
+    sources: entry.sources,
+  };
+}
