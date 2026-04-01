@@ -373,6 +373,28 @@ Every council response includes:
   assert(statsAfterSeed.some(s => s.collection === 'governance/policy'), 'Policy collection indexed');
   assert(statsAfterSeed.some(s => s.collection === 'identity/job'), 'Job collection indexed');
 
+  // Tier filter: council-scoped chunks should not appear for director queries
+  const councilChunks = chunkMarkdown('# Charter\n\n## Council Structure\n\nThis section is for council seats only — their specific roles and responsibilities.\n', {
+    collection: 'governance/charter',
+    sourcePath: '/workspace/forge/CHARTER.md',
+    scope: 'per-tier',
+    tier: 'council',
+  });
+  const directorChunks = chunkMarkdown('# Charter\n\n## Director Structure\n\nThis section is for directors only — their specific delegation and reporting lines.\n', {
+    collection: 'governance/charter',
+    sourcePath: '/workspace/pylon/CHARTER.md',
+    scope: 'per-tier',
+    tier: 'director',
+  });
+  hm.indexDocChunks(councilChunks);
+  hm.indexDocChunks(directorChunks);
+
+  // Query with tier filter — should only return matching tier
+  const councilOnly = hm.queryDocChunks({ collection: 'governance/charter', tier: 'council' });
+  const directorOnly = hm.queryDocChunks({ collection: 'governance/charter', tier: 'director' });
+  assert(councilOnly.every(c => !c.tier || c.tier === 'council'), 'Council tier filter excludes director chunks');
+  assert(directorOnly.every(c => !c.tier || c.tier === 'director'), 'Director tier filter excludes council chunks');
+
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
   await hm.redis.flushPrefix();

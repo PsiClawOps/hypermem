@@ -416,10 +416,24 @@ export class Compositor {
           );
 
           try {
+            // Build a relevance-based keyword from the matched trigger keywords.
+            // FTS5 returns chunks ordered by relevance (rank) not section order,
+            // ensuring we retrieve the sections actually relevant to the query
+            // rather than the first N alphabetically.
+            const matchedKeywords = trigger.keywords.filter(kw =>
+              lastMsg.toLowerCase().includes(kw.toLowerCase())
+            );
+            // Use the longest matched keyword as the primary query term —
+            // longer matches are more specific and produce better FTS results.
+            const ftsKeyword = matchedKeywords
+              .sort((a, b) => b.length - a.length)[0] || lastMsg.split(/\s+/).slice(0, 3).join(' ');
+
             const chunks = docChunkStore.queryChunks({
               collection: trigger.collection,
               agentId: request.agentId,
+              tier: request.tier,
               limit: trigger.maxChunks || 3,
+              keyword: ftsKeyword,
             });
 
             if (chunks.length === 0) continue;

@@ -333,6 +333,11 @@ export class VectorStore {
     const limit = opts?.limit || 10;
     const tables = opts?.tables || ['facts', 'knowledge', 'episodes'];
 
+    // Validate all table names before any SQL construction
+    for (const table of tables) {
+      this.validateSourceTable(table);
+    }
+
     // Generate query embedding
     const [queryEmbedding] = await generateEmbeddings([query], this.config);
     const queryBytes = vecToBytes(queryEmbedding);

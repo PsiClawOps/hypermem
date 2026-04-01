@@ -81,11 +81,13 @@ function parseEventRow(row: Record<string, unknown>): WorkEvent {
 
 /**
  * Generate a work item ID.
+ * Uses a 6-hex random suffix (~16.7M daily space) to avoid collisions
+ * even under high-frequency bulk creation.
  */
 function generateId(): string {
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const seq = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
-  return `WQ-${date}-${seq}`;
+  const suffix = Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
+  return `WQ-${date}-${suffix}`;
 }
 
 export class WorkStore {

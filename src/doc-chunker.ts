@@ -145,9 +145,11 @@ function buildSectionPath(stack: string[]): string {
 
 /**
  * Generate a deterministic chunk ID from its identifying properties.
+ * Includes sourcePath to prevent collisions when different files have
+ * identical content and section structure (e.g., POLICY.md in two workspaces).
  */
-function chunkId(collection: string, sectionPath: string, sourceHash: string): string {
-  const key = `${collection}::${sectionPath}::${sourceHash}`;
+function chunkId(collection: string, sectionPath: string, sourceHash: string, sourcePath: string): string {
+  const key = `${collection}::${sourcePath}::${sectionPath}::${sourceHash}`;
   return createHash('sha256').update(key).digest('hex').slice(0, 16);
 }
 
@@ -195,7 +197,7 @@ export function chunkMarkdown(content: string, opts: ChunkOptions): DocChunk[] {
 
     if (chunkContent.length >= minLen) {
       chunks.push({
-        id: chunkId(opts.collection, sectionPath, sourceHash),
+        id: chunkId(opts.collection, sectionPath, sourceHash, opts.sourcePath),
         collection: opts.collection,
         sectionPath,
         depth: 2,
@@ -228,7 +230,7 @@ export function chunkMarkdown(content: string, opts: ChunkOptions): DocChunk[] {
         const sectionPath = buildSectionPath([h1Heading]);
         const chunkContent = [`# ${h1Heading}`, '', section.content].join('\n').trim();
         chunks.push({
-          id: chunkId(opts.collection, sectionPath + '::intro', sourceHash),
+          id: chunkId(opts.collection, sectionPath + '::intro', sourceHash, opts.sourcePath),
           collection: opts.collection,
           sectionPath: sectionPath + ' (intro)',
           depth: 1,
@@ -265,7 +267,7 @@ export function chunkMarkdown(content: string, opts: ChunkOptions): DocChunk[] {
 
         if (chunkContent.length >= minLen) {
           chunks.push({
-            id: chunkId(opts.collection, sectionPath, sourceHash),
+            id: chunkId(opts.collection, sectionPath, sourceHash, opts.sourcePath),
             collection: opts.collection,
             sectionPath,
             depth: 3,
@@ -292,7 +294,7 @@ export function chunkMarkdown(content: string, opts: ChunkOptions): DocChunk[] {
   // Emit preamble if substantial
   if (preamble.length >= minLen) {
     chunks.unshift({
-      id: chunkId(opts.collection, '(preamble)', sourceHash),
+      id: chunkId(opts.collection, '(preamble)', sourceHash, opts.sourcePath),
       collection: opts.collection,
       sectionPath: '(preamble)',
       depth: 0,

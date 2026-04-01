@@ -228,6 +228,38 @@ console.log('\n─── Chunk IDs Are Deterministic ───');
   }
 }
 
+console.log('\n─── Chunk IDs Are Unique Across Source Paths ───');
+
+{
+  // Same content, same collection, different source paths → different IDs
+  const chunksA = chunkMarkdown(POLICY_LIKE, {
+    collection: 'governance/policy',
+    sourcePath: '/workspace/agentA/POLICY.md',
+    scope: 'shared-fleet',
+  });
+
+  const chunksB = chunkMarkdown(POLICY_LIKE, {
+    collection: 'governance/policy',
+    sourcePath: '/workspace/agentB/POLICY.md',
+    scope: 'shared-fleet',
+  });
+
+  assert(chunksA.length === chunksB.length, 'Same content produces same chunk count from different paths');
+  for (let i = 0; i < chunksA.length; i++) {
+    assert(chunksA[i].id !== chunksB[i].id, `Chunk ${i} IDs differ across source paths`);
+  }
+
+  // Same path produces same IDs (deterministic)
+  const chunksA2 = chunkMarkdown(POLICY_LIKE, {
+    collection: 'governance/policy',
+    sourcePath: '/workspace/agentA/POLICY.md',
+    scope: 'shared-fleet',
+  });
+  for (let i = 0; i < chunksA.length; i++) {
+    assertEq(chunksA[i].id, chunksA2[i].id, `Chunk ${i} ID is stable for same path`);
+  }
+}
+
 // ─── Suite 2: DocChunkStore ──────────────────────────────────────
 
 console.log('\n─── DocChunkStore: Basic Indexing ───');
@@ -326,6 +358,87 @@ console.log('\n─── DocChunkStore: FTS5 Keyword Search ───');
   const results = store.keywordSearch('escalation', { collection: 'governance/policy' });
   assert(results.length > 0, 'FTS5 finds "escalation" keyword');
   assert(results[0].content.toLowerCase().includes('escalat'), 'Returned chunk contains "escalat"');
+}
+
+console.log('\n─── DocChunkStore: Cross-Source Isolation ───');
+
+{
+  // Two files with identical content — must not collide in doc_chunks
+  const db = makeDb();
+  const store = new DocChunkStore(db);
+
+  const chunksA = chunkMarkdown(POLICY_LIKE, {
+    collection: 'governance/policy',
+    sourcePath: '/workspace/agentA/POLICY.md',
+    scope: 'shared-fleet',
+  });
+  const chunksB = chunkMarkdown(POLICY_LIKE, {
+    collection: 'governance/policy',
+    sourcePath: '/workspace/agentB/POLICY.md',
+    scope: 'shared-fleet',
+  });
+
+  const r1 = store.indexChunks(chunksA);
+  const r2 = store.indexChunks(chunksB);
+
+  assert(r1.inserted > 0, 'First source indexed');
+  assert(r2.inserted > 0, 'Second source indexed (no collision)');
+
+  // Both sources tracked
+  const sources = store.listSources({ collection: 'governance/policy' });
+  assert(sources.length === 2, `Both sources tracked (got ${sources.length})`);
+  assert(sources.some(s => s.sourcePath.includes('agentA')), 'Source A tracked');
+  assert(sources.some(s => s.sourcePath.includes('agentB')), 'Source B tracked');
+
+  // Total chunks = both sets (no overwrite)
+  const allChunks = store.queryChunks({ collection: 'governance/policy', limit: 100 });
+  assert(allChunks.length === chunksA.length + chunksB.length,
+    `Total chunks = A + B (${allChunks.length} === ${chunksA.length + chunksB.length})`);
+}
+
+console.log('\n─── DocChunkStore: FTS Relevance Over Sort Order ───');
+
+{
+  // Pylon's repro: alphabetically-first sections should NOT beat the actually-relevant one
+  const db = makeDb();
+  const store = new DocChunkStore(db);
+
+  const content = `# Policy
+
+## Aardvark Section
+
+This section covers aardvark-related operational procedures for the fleet.
+
+## Billing Rules
+
+This section describes billing rules and payment processing procedures.
+
+## Escalation Procedures
+
+This section describes escalation triggers and mandatory human review requirements.
+All agents must escalate when facing policy conflicts or irreversible actions.
+
+## Zebra Section
+
+This section covers zebra-related operational procedures for the fleet.
+`;
+
+  const chunks = chunkMarkdown(content, {
+    collection: 'governance/policy',
+    sourcePath: '/workspace/POLICY.md',
+    scope: 'shared-fleet',
+  });
+  store.indexChunks(chunks);
+
+  // Without keyword: returns by depth/section_path order (alphabetical)
+  const byOrder = store.queryChunks({ collection: 'governance/policy', limit: 2 });
+  assert(byOrder.length > 0, 'Order-based query returns results');
+
+  // With FTS keyword: should return Escalation first
+  const byKeyword = store.keywordSearch('escalation', { collection: 'governance/policy', limit: 2 });
+  assert(byKeyword.length > 0, 'FTS keyword search returns results');
+  assert(byKeyword[0].sectionPath.toLowerCase().includes('escalat'),
+    `FTS returns Escalation section first (got: ${byKeyword[0].sectionPath})`);
 }
 
 console.log('\n─── DocChunkStore: Stats ───');

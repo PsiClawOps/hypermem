@@ -199,6 +199,8 @@ export interface ComposeRequest {
   tokenBudget: number;
   provider: string;
   model: string;
+  /** Agent tier (council/director/specialist) — used for tier-scoped doc chunk retrieval */
+  tier?: string;
   includeHistory?: boolean;
   /** Whether to include demand-loaded doc chunks based on conversation triggers */
   includeDocChunks?: boolean;
