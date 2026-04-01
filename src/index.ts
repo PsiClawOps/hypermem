@@ -32,7 +32,7 @@ export type { DesiredStateEntry, ConfigEvent, DriftStatus } from './desired-stat
 
 export { RedisLayer } from './redis.js';
 
-export { Compositor } from './compositor.js';
+export { Compositor, type CompositorDeps } from './compositor.js';
 
 export {
   toProviderFormat,
@@ -171,7 +171,11 @@ export class HyperMem {
     this.config = config;
     this.dbManager = new DatabaseManager({ dataDir: config.dataDir });
     this.redis = new RedisLayer(config.redis);
-    this.compositor = new Compositor(this.redis, config.compositor);
+    this.compositor = new Compositor({
+      redis: this.redis,
+      vectorStore: null,  // Set after create() when vector DB is available
+      libraryDb: null,    // Set after create() when library DB is available
+    }, config.compositor);
   }
 
   /**
