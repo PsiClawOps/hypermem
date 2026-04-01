@@ -9,7 +9,8 @@
  */
 
 import { HyperMem } from '../dist/index.js';
-import { Compositor } from '../dist/compositor.js';
+import { Compositor, DEFAULT_TRIGGERS } from '../dist/compositor.js';
+import { chunkMarkdown } from '../dist/doc-chunker.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -260,6 +261,117 @@ async function run() {
   const slotTotal = Object.values(accountedResult.slots).reduce((a, b) => a + b, 0);
   assert(Math.abs(slotTotal - accountedResult.tokenCount) < 50,
     `Slot sum (${slotTotal}) ≈ total (${accountedResult.tokenCount})`);
+
+  // ── Trigger Registry ──
+  console.log('\n── Trigger Registry ──');
+
+  // Verify DEFAULT_TRIGGERS covers expected collections
+  const collections = DEFAULT_TRIGGERS.map(t => t.collection);
+  assert(collections.includes('governance/policy'), 'Trigger: governance/policy defined');
+  assert(collections.includes('governance/comms'), 'Trigger: governance/comms defined');
+  assert(collections.includes('identity/job'), 'Trigger: identity/job defined');
+  assert(collections.includes('memory/decisions'), 'Trigger: memory/decisions defined');
+
+  // Verify keyword matching logic
+  const policyTrigger = DEFAULT_TRIGGERS.find(t => t.collection === 'governance/policy');
+  assert(policyTrigger !== undefined, 'Policy trigger exists');
+  assert(policyTrigger.keywords.some(k => 'escalation decision'.includes(k)), 'Policy trigger matches "escalation"');
+
+  // ── Doc Chunk Retrieval in Composition ──
+  console.log('\n── Doc Chunk Retrieval (L4 Trigger-Based) ──');
+
+  // Seed some policy chunks into the library DB
+  const policyContent = `# POLICY.md
+
+Fleet governance policy.
+
+## §2 Escalation
+
+Four mandatory escalation triggers require human review. No autonomous resolution allowed.
+
+### Trigger 1: Policy Conflict
+
+If instructions conflict with safety or compliance policies, pause and ask.
+This is a hard requirement that cannot be bypassed.
+
+## §3 Decision States
+
+Green, Yellow, Red decision framework for operational status.
+GREEN = proceed normally, YELLOW = proceed with caution, RED = stop and escalate immediately.
+All council decisions must include a decision state in their response.
+`;
+
+  const policyChunks = chunkMarkdown(policyContent, {
+    collection: 'governance/policy',
+    sourcePath: '/workspace/POLICY.md',
+    scope: 'shared-fleet',
+  });
+  hm.indexDocChunks(policyChunks);
+
+  // Also seed job/deliberation chunks
+  const jobContent = `# JOB.md
+
+Performance criteria for the infrastructure seat.
+
+## Response Contract
+
+Every council response includes:
+1. Position — operationally fit, conditionally fit, or not fit
+2. Top risk — single most critical operational or architectural risk
+3. Confidence — high/medium/low
+4. Action — specific infrastructure work, test, or validation needed
+`;
+
+  const jobChunks = chunkMarkdown(jobContent, {
+    collection: 'identity/job',
+    sourcePath: '/workspace/JOB.md',
+    scope: 'per-agent',
+    agentId: 'forge',
+  });
+  hm.indexDocChunks(jobChunks);
+
+  // Seed a session with an escalation-related message to trigger policy chunks
+  const chunkSessionKey = 'agent:forge:webchat:chunk-test';
+  await hm.recordUserMessage(agentId, chunkSessionKey, 'What are the escalation triggers I should follow?');
+
+  const escalationResult = await hm.compose({
+    agentId,
+    sessionKey: chunkSessionKey,
+    tokenBudget: 8000,
+    provider: 'anthropic',
+    includeDocChunks: true,
+  });
+
+  const escalationText = escalationResult.messages.map(m =>
+    typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+  ).join('\n');
+
+  assert(escalationText.includes('escalat') || escalationText.includes('Escalat'),
+    'Escalation chunks retrieved and injected into prompt');
+
+  // Seed a deliberation-related message to trigger identity/job chunks
+  const deliberationSessionKey = 'agent:forge:webchat:deliberation-test';
+  await hm.recordUserMessage(agentId, deliberationSessionKey, 'We need a council round vote on this proposal and response contract.');
+
+  const deliberationResult = await hm.compose({
+    agentId,
+    sessionKey: deliberationSessionKey,
+    tokenBudget: 8000,
+    provider: 'anthropic',
+    includeDocChunks: true,
+  });
+
+  const deliberationText = deliberationResult.messages.map(m =>
+    typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+  ).join('\n');
+
+  assert(deliberationText.includes('deliberat') || deliberationText.includes('Response Contract') || deliberationText.includes('council'),
+    'Deliberation/job chunks retrieved and injected into prompt');
+
+  const statsAfterSeed = hm.getDocIndexStats();
+  assert(statsAfterSeed.length >= 2, `Doc index has ${statsAfterSeed.length} collections after seeding`);
+  assert(statsAfterSeed.some(s => s.collection === 'governance/policy'), 'Policy collection indexed');
+  assert(statsAfterSeed.some(s => s.collection === 'identity/job'), 'Job collection indexed');
 
   // ── Cleanup ──
   console.log('\n── Cleanup ──');

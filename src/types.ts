@@ -200,6 +200,8 @@ export interface ComposeRequest {
   provider: string;
   model: string;
   includeHistory?: boolean;
+  /** Whether to include demand-loaded doc chunks based on conversation triggers */
+  includeDocChunks?: boolean;
   historyDepth?: number;
   includeFacts?: boolean;
   includeContext?: boolean;
