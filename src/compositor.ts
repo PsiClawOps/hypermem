@@ -416,17 +416,41 @@ export class Compositor {
           );
 
           try {
-            // Build a relevance-based keyword from the matched trigger keywords.
-            // FTS5 returns chunks ordered by relevance (rank) not section order,
-            // ensuring we retrieve the sections actually relevant to the query
-            // rather than the first N alphabetically.
+            // Build a relevance-based FTS5 query from the user message.
+            //
+            // Problem: trigger keywords are stems ('escalat', 'irreversib') for
+            // substring matching against user messages, but FTS5 tokenizes on word
+            // boundaries. 'escalat' does not match 'escalation' in FTS5 without a
+            // prefix operator.
+            //
+            // Solution: extract actual words from the user message that contain a
+            // matched trigger keyword, then use FTS5 prefix queries (word*) for
+            // each extracted word. This bridges stem-matching and FTS5 indexing.
+            const msgLower = lastMsg.toLowerCase();
             const matchedKeywords = trigger.keywords.filter(kw =>
-              lastMsg.toLowerCase().includes(kw.toLowerCase())
+              msgLower.includes(kw.toLowerCase())
             );
-            // Use the longest matched keyword as the primary query term —
-            // longer matches are more specific and produce better FTS results.
-            const ftsKeyword = matchedKeywords
-              .sort((a, b) => b.length - a.length)[0] || lastMsg.split(/\s+/).slice(0, 3).join(' ');
+
+            // Extract whole words from the message that overlap with matched keywords
+            const msgWords = lastMsg.match(/\b\w{4,}\b/g) || [];
+            const relevantWords = msgWords.filter(word =>
+              matchedKeywords.some(kw => word.toLowerCase().includes(kw.toLowerCase()) ||
+                                        kw.toLowerCase().includes(word.toLowerCase().slice(0, 5)))
+            );
+
+            // Build FTS5 OR query: "word1* OR word2* OR word3*"
+            // FTS5 treats space-separated terms as AND by default — we want OR so
+            // that any relevant term is sufficient to retrieve a matching chunk.
+            // Prefix operator (*) ensures stems match full words in the index.
+            const ftsTerms = relevantWords.length > 0
+              ? [...new Set(relevantWords.map(w => `${w}*`))].slice(0, 3).join(' OR ')
+              : matchedKeywords
+                  .sort((a, b) => b.length - a.length)
+                  .slice(0, 2)
+                  .map(kw => `${kw}*`)
+                  .join(' OR ');
+
+            const ftsKeyword = ftsTerms || lastMsg.split(/\s+/).slice(0, 3).join(' ');
 
             const chunks = docChunkStore.queryChunks({
               collection: trigger.collection,

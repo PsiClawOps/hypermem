@@ -330,7 +330,14 @@ Every council response includes:
   });
   hm.indexDocChunks(jobChunks);
 
-  // Seed a session with an escalation-related message to trigger policy chunks
+  // The seeded policy doc contains unique text that can ONLY appear via chunk injection,
+  // not from echoing the user message. We assert on that unique text.
+  // Unique sentinel in policyContent: "mandatory human review requirements"
+  // Unique sentinel in jobContent: "operationally fit, conditionally fit, or not fit"
+  //
+  // This ensures the test fails if FTS retrieval doesn't actually find the right chunks
+  // (Pylon's repro: user message contained "escalation" but no chunk was injected).
+
   const chunkSessionKey = 'agent:forge:webchat:chunk-test';
   await hm.recordUserMessage(agentId, chunkSessionKey, 'What are the escalation triggers I should follow?');
 
@@ -346,8 +353,13 @@ Every council response includes:
     typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
   ).join('\n');
 
-  assert(escalationText.includes('escalat') || escalationText.includes('Escalat'),
-    'Escalation chunks retrieved and injected into prompt');
+  // Assert on chunk-unique content — text that can only appear via chunk injection, not from the user message.
+  // The seeded policy chunk contains "No autonomous resolution allowed" — unique sentinel text
+  // that does not appear in the user question "What are the escalation triggers I should follow?"
+  assert(escalationText.includes('No autonomous resolution') || escalationText.includes('autonomous resolution'),
+    'Chunk-unique policy text injected (not just user message echo)');
+  assert(escalationResult.slots.library > 0,
+    'Library slot consumed (confirms chunk was actually injected, not just present in history)');
 
   // Seed a deliberation-related message to trigger identity/job chunks
   const deliberationSessionKey = 'agent:forge:webchat:deliberation-test';
@@ -365,8 +377,9 @@ Every council response includes:
     typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
   ).join('\n');
 
-  assert(deliberationText.includes('deliberat') || deliberationText.includes('Response Contract') || deliberationText.includes('council'),
-    'Deliberation/job chunks retrieved and injected into prompt');
+  // Assert on chunk-unique content from the seeded JOB.md
+  assert(deliberationText.includes('operationally fit') || deliberationText.includes('conditionally fit'),
+    'Chunk-unique job text injected (response contract from seeded JOB.md)');
 
   const statsAfterSeed = hm.getDocIndexStats();
   assert(statsAfterSeed.length >= 2, `Doc index has ${statsAfterSeed.length} collections after seeding`);
