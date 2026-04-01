@@ -264,6 +264,20 @@ export interface HyperMemConfig {
   redis: RedisConfig;
   compositor: CompositorConfig;
   indexer: IndexerConfig;
+  embedding: EmbeddingProviderConfig;
+}
+
+export interface EmbeddingProviderConfig {
+  /** Ollama base URL. Default: http://localhost:11434 */
+  ollamaUrl: string;
+  /** Embedding model name. Default: nomic-embed-text */
+  model: string;
+  /** Embedding dimensions. Default: 768 */
+  dimensions: number;
+  /** Request timeout ms. Default: 10000 */
+  timeout: number;
+  /** Max texts per batch request. Default: 32 */
+  batchSize: number;
 }
 
 export interface RedisConfig {

@@ -8,7 +8,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LATEST_SCHEMA_VERSION = 2;
+export const LATEST_SCHEMA_VERSION = 3;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -303,8 +303,14 @@ export function migrate(db: DatabaseSync): void {
       .run(2, nowIso());
   }
 
+  if (currentVersion < 3) {
+    applyV3VectorSearch(db);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(3, nowIso());
+  }
+
   // Future migrations go here:
-  // if (currentVersion < 3) { ... }
+  // if (currentVersion < 4) { ... }
 }
 
 /**
@@ -325,6 +331,53 @@ function applyV2Visibility(db: DatabaseSync): void {
   addCol('facts', 'private');
   addCol('knowledge', 'private');
   addCol('episodes', 'org');
+}
+
+/**
+ * V3: Vector search tables (sqlite-vec).
+ * Creates vec0 virtual tables for semantic KNN search over facts, knowledge, episodes.
+ * Requires sqlite-vec extension to be loaded on the connection.
+ */
+function applyV3VectorSearch(db: DatabaseSync): void {
+  // Try to load sqlite-vec — if not available, create placeholder tables note
+  try {
+    // vec0 virtual tables for KNN search (768 = nomic-embed-text dimensions)
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts
+      USING vec0(embedding float[768])
+    `);
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS vec_knowledge
+      USING vec0(embedding float[768])
+    `);
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS vec_episodes
+      USING vec0(embedding float[768])
+    `);
+  } catch {
+    // sqlite-vec extension not loaded — skip vec table creation
+    // VectorStore.ensureTables() will retry when the extension is available
+    console.warn('[hypermem] sqlite-vec not available during migration — vector tables deferred');
+  }
+
+  // Mapping table (plain SQLite, always works)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS vec_index_map (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_table TEXT NOT NULL,
+      source_id INTEGER NOT NULL,
+      vec_table TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      indexed_at TEXT NOT NULL,
+      UNIQUE(source_table, source_id)
+    )
+  `);
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_vec_map_source ON vec_index_map(source_table, source_id)'
+  );
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_vec_map_vec ON vec_index_map(vec_table, id)'
+  );
 }
 
 export { LATEST_SCHEMA_VERSION as SCHEMA_VERSION };

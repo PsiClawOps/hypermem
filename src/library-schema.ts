@@ -7,7 +7,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LIBRARY_SCHEMA_VERSION = 1;
+export const LIBRARY_SCHEMA_VERSION = 2;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -109,4 +109,55 @@ export function migrateLibrary(db: DatabaseSync): void {
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(1, nowIso());
   }
+
+  if (currentVersion < 2) {
+    applyV2SessionRegistry(db);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(2, nowIso());
+  }
+}
+
+/**
+ * V2: Session registry + session events for fleet-wide session tracking.
+ * Also adds vec0 table for semantic search over session summaries.
+ */
+function applyV2SessionRegistry(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS session_registry (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      channel TEXT,
+      channel_type TEXT,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      status TEXT DEFAULT 'active',
+      summary TEXT,
+      decisions_made INTEGER DEFAULT 0,
+      facts_extracted INTEGER DEFAULT 0,
+      messages_count INTEGER DEFAULT 0
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_session_agent ON session_registry(agent_id, status, started_at DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_session_status ON session_registry(status, started_at DESC)');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS session_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL REFERENCES session_registry(id),
+      event_type TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      payload TEXT
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_session_events ON session_events(session_id, timestamp DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_session_events_type ON session_events(event_type, timestamp DESC)');
+
+  // FTS on session summaries
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS session_fts USING fts5(
+      summary,
+      content='session_registry',
+      content_rowid='rowid'
+    )
+  `);
 }

@@ -13,7 +13,8 @@
     "migrate:status": "node dist/cli/migrate.js --status"
   },
   "dependencies": {
-    "ioredis": "^5.4.1"
+    "ioredis": "^5.4.1",
+    "sqlite-vec": "^0.1.9"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

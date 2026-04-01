@@ -39,6 +39,9 @@ export {
 export { migrate, SCHEMA_VERSION } from './schema.js';
 export { migrateLibrary, LIBRARY_SCHEMA_VERSION } from './library-schema.js';
 
+export { VectorStore, generateEmbeddings } from './vector-store.js';
+export type { EmbeddingConfig, VectorSearchResult, VectorIndexStats } from './vector-store.js';
+
 export type {
   // Message types
   NeutralMessage,
@@ -82,6 +85,7 @@ import { TopicStore } from './topic-store.js';
 import { EpisodeStore } from './episode-store.js';
 import { RedisLayer } from './redis.js';
 import { Compositor } from './compositor.js';
+import { VectorStore, type VectorSearchResult, type VectorIndexStats, type EmbeddingConfig } from './vector-store.js';
 import { userMessageToNeutral, fromProviderFormat, toProviderFormat } from './provider-translator.js';
 import {
   crossAgentQuery,
@@ -127,6 +131,13 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     episodeSignificanceThreshold: 0.5,
     periodicInterval: 300000,
   },
+  embedding: {
+    ollamaUrl: 'http://localhost:11434',
+    model: 'nomic-embed-text',
+    dimensions: 768,
+    timeout: 10000,
+    batchSize: 32,
+  },
 };
 
 /**
@@ -161,6 +172,7 @@ export class HyperMem {
       redis: { ...DEFAULT_CONFIG.redis, ...config?.redis },
       compositor: { ...DEFAULT_CONFIG.compositor, ...config?.compositor },
       indexer: { ...DEFAULT_CONFIG.indexer, ...config?.indexer },
+      embedding: { ...DEFAULT_CONFIG.embedding, ...(config as Record<string, unknown>)?.embedding as Partial<HyperMemConfig['embedding']> },
     };
 
     const hm = new HyperMem(merged);
@@ -487,6 +499,175 @@ export class HyperMem {
 
     // Sort by relevance (confidence for facts/knowledge, significance for episodes)
     return results.slice(0, opts?.limit || 20);
+  }
+
+  // ─── Vector / Semantic Search ────────────────────────────────
+
+  /**
+   * Semantic search across an agent's indexed memory.
+   * Uses sqlite-vec for KNN vector search with Ollama embeddings.
+   * Falls back gracefully if sqlite-vec is not available.
+   */
+  async semanticSearch(
+    agentId: string,
+    query: string,
+    opts?: {
+      tables?: string[];
+      limit?: number;
+      maxDistance?: number;
+    }
+  ): Promise<VectorSearchResult[]> {
+    if (!this.dbManager.vecAvailable) {
+      console.warn('[hypermem] Semantic search unavailable — sqlite-vec not loaded');
+      return [];
+    }
+    const db = this.dbManager.getAgentDb(agentId);
+    const vs = new VectorStore(db, this.config.embedding);
+    return vs.search(query, opts);
+  }
+
+  /**
+   * Index all un-indexed content for an agent.
+   * Called by the background indexer or manually.
+   */
+  async indexAgent(agentId: string): Promise<{ indexed: number; skipped: number }> {
+    if (!this.dbManager.vecAvailable) {
+      return { indexed: 0, skipped: 0 };
+    }
+    const db = this.dbManager.getAgentDb(agentId);
+    const vs = new VectorStore(db, this.config.embedding);
+    vs.ensureTables();
+    return vs.indexAll(agentId);
+  }
+
+  /**
+   * Get vector index statistics for an agent.
+   */
+  getVectorStats(agentId: string): VectorIndexStats | null {
+    if (!this.dbManager.vecAvailable) return null;
+    const db = this.dbManager.getAgentDb(agentId);
+    const vs = new VectorStore(db, this.config.embedding);
+    return vs.getStats();
+  }
+
+  /**
+   * Prune orphaned vector entries (source row deleted but vector remains).
+   */
+  pruneVectorOrphans(agentId: string): number {
+    if (!this.dbManager.vecAvailable) return 0;
+    const db = this.dbManager.getAgentDb(agentId);
+    const vs = new VectorStore(db, this.config.embedding);
+    return vs.pruneOrphans();
+  }
+
+  // ─── Session Registry (Library) ────────────────────────────
+
+  /**
+   * Register a session start in the fleet-wide session registry.
+   */
+  registerSession(sessionKey: string, agentId: string, opts?: {
+    channel?: string;
+    channelType?: string;
+  }): void {
+    const db = this.dbManager.getLibraryDb();
+    const now = new Date().toISOString();
+
+    // Upsert — session might restart
+    const existing = db
+      .prepare('SELECT id FROM session_registry WHERE id = ?')
+      .get(sessionKey) as { id: string } | undefined;
+
+    if (existing) {
+      db.prepare('UPDATE session_registry SET status = ?, started_at = ? WHERE id = ?')
+        .run('active', now, sessionKey);
+    } else {
+      db.prepare(
+        `INSERT INTO session_registry (id, agent_id, channel, channel_type, started_at, status)
+         VALUES (?, ?, ?, ?, ?, 'active')`
+      ).run(sessionKey, agentId, opts?.channel || null, opts?.channelType || null, now);
+    }
+
+    // Record start event
+    db.prepare(
+      'INSERT INTO session_events (session_id, event_type, timestamp, payload) VALUES (?, ?, ?, ?)'
+    ).run(sessionKey, 'start', now, JSON.stringify({ channel: opts?.channel, channelType: opts?.channelType }));
+  }
+
+  /**
+   * Record a session event (compaction, decision, handoff, etc).
+   */
+  recordSessionEvent(sessionKey: string, eventType: string, payload?: Record<string, unknown>): void {
+    const db = this.dbManager.getLibraryDb();
+    db.prepare(
+      'INSERT INTO session_events (session_id, event_type, timestamp, payload) VALUES (?, ?, ?, ?)'
+    ).run(sessionKey, eventType, new Date().toISOString(), payload ? JSON.stringify(payload) : null);
+
+    // Update counts based on event type
+    if (eventType === 'decision') {
+      db.prepare('UPDATE session_registry SET decisions_made = decisions_made + 1 WHERE id = ?').run(sessionKey);
+    } else if (eventType === 'fact_extracted') {
+      db.prepare('UPDATE session_registry SET facts_extracted = facts_extracted + 1 WHERE id = ?').run(sessionKey);
+    }
+  }
+
+  /**
+   * Close a session in the registry.
+   */
+  closeSession(sessionKey: string, summary?: string): void {
+    const db = this.dbManager.getLibraryDb();
+    const now = new Date().toISOString();
+
+    db.prepare(
+      'UPDATE session_registry SET status = ?, ended_at = ?, summary = ? WHERE id = ?'
+    ).run('completed', now, summary || null, sessionKey);
+
+    db.prepare(
+      'INSERT INTO session_events (session_id, event_type, timestamp) VALUES (?, ?, ?)'
+    ).run(sessionKey, 'completion', now);
+  }
+
+  /**
+   * Query the session registry.
+   */
+  querySessions(opts?: {
+    agentId?: string;
+    status?: string;
+    since?: string;
+    limit?: number;
+  }): unknown[] {
+    const db = this.dbManager.getLibraryDb();
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+
+    if (opts?.agentId) {
+      conditions.push('agent_id = ?');
+      params.push(opts.agentId);
+    }
+    if (opts?.status) {
+      conditions.push('status = ?');
+      params.push(opts.status);
+    }
+    if (opts?.since) {
+      conditions.push('started_at >= ?');
+      params.push(opts.since);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = opts?.limit || 50;
+
+    return db
+      .prepare(`SELECT * FROM session_registry ${where} ORDER BY started_at DESC LIMIT ?`)
+      .all(...params, limit);
+  }
+
+  /**
+   * Get events for a specific session.
+   */
+  getSessionEvents(sessionKey: string, limit: number = 50): unknown[] {
+    const db = this.dbManager.getLibraryDb();
+    return db
+      .prepare('SELECT * FROM session_events WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?')
+      .all(sessionKey, limit);
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────
