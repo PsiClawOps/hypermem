@@ -28,6 +28,8 @@ export type { SystemState, SystemEvent } from './system-store.js';
 export { WorkStore } from './work-store.js';
 export type { WorkItem, WorkEvent, WorkStatus } from './work-store.js';
 export { DesiredStateStore } from './desired-state-store.js';
+export { KnowledgeGraph } from './knowledge-graph.js';
+export type { EntityType, KnowledgeLink, GraphNode, TraversalResult } from './knowledge-graph.js';
 export type { DesiredStateEntry, ConfigEvent, DriftStatus } from './desired-state-store.js';
 
 export { RedisLayer } from './redis.js';
@@ -101,6 +103,7 @@ import { PreferenceStore, type Preference } from './preference-store.js';
 import { FleetStore, type FleetAgent, type FleetOrg, type AgentCapability } from './fleet-store.js';
 import { SystemStore, type SystemState, type SystemEvent } from './system-store.js';
 import { WorkStore, type WorkItem, type WorkStatus } from './work-store.js';
+import { KnowledgeGraph, type EntityType, type KnowledgeLink, type GraphNode, type TraversalResult } from './knowledge-graph.js';
 import { DesiredStateStore, type DesiredStateEntry, type DriftStatus } from './desired-state-store.js';
 import { RedisLayer } from './redis.js';
 import { Compositor } from './compositor.js';
@@ -804,6 +807,98 @@ export class HyperMem {
     const db = this.dbManager.getLibraryDb();
     const store = new DesiredStateStore(db);
     return store.getDriftSummary();
+  }
+
+  // ─── Knowledge Graph (L4: Library) ──────────────────────────
+
+  /**
+   * Add a directed link between two entities.
+   */
+  addKnowledgeLink(
+    fromType: EntityType, fromId: number,
+    toType: EntityType, toId: number,
+    linkType: string
+  ): KnowledgeLink {
+    const db = this.dbManager.getLibraryDb();
+    const graph = new KnowledgeGraph(db);
+    return graph.addLink(fromType, fromId, toType, toId, linkType);
+  }
+
+  /**
+   * Remove a specific link.
+   */
+  removeKnowledgeLink(
+    fromType: EntityType, fromId: number,
+    toType: EntityType, toId: number,
+    linkType: string
+  ): boolean {
+    const db = this.dbManager.getLibraryDb();
+    const graph = new KnowledgeGraph(db);
+    return graph.removeLink(fromType, fromId, toType, toId, linkType);
+  }
+
+  /**
+   * Get all links for an entity (both directions).
+   */
+  getEntityLinks(type: EntityType, id: number): KnowledgeLink[] {
+    const db = this.dbManager.getLibraryDb();
+    const graph = new KnowledgeGraph(db);
+    return graph.getLinks(type, id);
+  }
+
+  /**
+   * Traverse the knowledge graph from a starting entity.
+   * BFS with bounded depth and result count.
+   */
+  traverseGraph(
+    startType: EntityType, startId: number,
+    opts?: {
+      maxDepth?: number;
+      maxResults?: number;
+      linkTypes?: string[];
+      direction?: 'outbound' | 'inbound' | 'both';
+      targetTypes?: EntityType[];
+    }
+  ): TraversalResult {
+    const db = this.dbManager.getLibraryDb();
+    const graph = new KnowledgeGraph(db);
+    return graph.traverse(startType, startId, opts);
+  }
+
+  /**
+   * Find the shortest path between two entities.
+   */
+  findGraphPath(
+    fromType: EntityType, fromId: number,
+    toType: EntityType, toId: number,
+    maxDepth?: number
+  ): GraphNode[] | null {
+    const db = this.dbManager.getLibraryDb();
+    const graph = new KnowledgeGraph(db);
+    return graph.findPath(fromType, fromId, toType, toId, maxDepth);
+  }
+
+  /**
+   * Get the most connected entities.
+   */
+  getMostConnectedEntities(opts?: { type?: EntityType; limit?: number }): Array<{
+    type: EntityType; id: number; degree: number;
+  }> {
+    const db = this.dbManager.getLibraryDb();
+    const graph = new KnowledgeGraph(db);
+    return graph.getMostConnected(opts);
+  }
+
+  /**
+   * Get knowledge graph statistics.
+   */
+  getGraphStats(): { totalLinks: number; byType: Array<{ linkType: string; count: number }> } {
+    const db = this.dbManager.getLibraryDb();
+    const graph = new KnowledgeGraph(db);
+    return {
+      totalLinks: graph.getTotalLinks(),
+      byType: graph.getLinkStats(),
+    };
   }
 
   // ─── Vector / Semantic Search (L3: Vectors DB) ──────────────
