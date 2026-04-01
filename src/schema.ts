@@ -8,7 +8,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LATEST_SCHEMA_VERSION = 1;
+export const LATEST_SCHEMA_VERSION = 2;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -113,6 +113,7 @@ function applyV1Schema(db: DatabaseSync): void {
       domain TEXT,
       content TEXT NOT NULL,
       confidence REAL DEFAULT 1.0,
+      visibility TEXT NOT NULL DEFAULT 'private',
       source_conversation_id INTEGER REFERENCES conversations(id),
       source_message_id INTEGER REFERENCES messages(id),
       contradicts_fact_id INTEGER,
@@ -162,6 +163,7 @@ function applyV1Schema(db: DatabaseSync): void {
       key TEXT NOT NULL,
       content TEXT NOT NULL,
       confidence REAL DEFAULT 1.0,
+      visibility TEXT NOT NULL DEFAULT 'private',
       source_type TEXT NOT NULL,
       source_ref TEXT,
       created_at TEXT NOT NULL,
@@ -192,6 +194,7 @@ function applyV1Schema(db: DatabaseSync): void {
       event_type TEXT NOT NULL,
       summary TEXT NOT NULL,
       significance REAL NOT NULL,
+      visibility TEXT NOT NULL DEFAULT 'org',
       participants TEXT,
       conversation_id INTEGER REFERENCES conversations(id),
       message_range_start INTEGER,
@@ -294,8 +297,34 @@ export function migrate(db: DatabaseSync): void {
       .run(1, nowIso());
   }
 
+  if (currentVersion < 2) {
+    applyV2Visibility(db);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(2, nowIso());
+  }
+
   // Future migrations go here:
-  // if (currentVersion < 2) { applyV2Migration(db); ... }
+  // if (currentVersion < 3) { ... }
+}
+
+/**
+ * V2: Add visibility column to facts, knowledge, episodes.
+ * Supports cross-agent memory access with scoped permissions.
+ */
+function applyV2Visibility(db: DatabaseSync): void {
+  // Add visibility columns (safe: ALTER TABLE ADD is idempotent-ish in practice,
+  // but we guard with try/catch since SQLite doesn't have IF NOT EXISTS for columns)
+  const addCol = (table: string, defaultVal: string) => {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN visibility TEXT NOT NULL DEFAULT '${defaultVal}'`);
+    } catch {
+      // Column already exists (from fresh v2 schema) — safe to ignore
+    }
+  };
+
+  addCol('facts', 'private');
+  addCol('knowledge', 'private');
+  addCol('episodes', 'org');
 }
 
 export { LATEST_SCHEMA_VERSION as SCHEMA_VERSION };

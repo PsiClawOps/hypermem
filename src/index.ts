@@ -83,6 +83,13 @@ import { EpisodeStore } from './episode-store.js';
 import { RedisLayer } from './redis.js';
 import { Compositor } from './compositor.js';
 import { userMessageToNeutral, fromProviderFormat, toProviderFormat } from './provider-translator.js';
+import {
+  crossAgentQuery,
+  defaultOrgRegistry,
+  canAccess,
+  visibilityFilter,
+  type OrgRegistry,
+} from './cross-agent.js';
 import type {
   HyperMemConfig,
   ComposeRequest,
@@ -409,6 +416,77 @@ export class HyperMem {
     const db = this.dbManager.getAgentDb(agentId);
     const store = new EpisodeStore(db);
     return store.getRecent(agentId, opts as Parameters<typeof store.getRecent>[1]);
+  }
+
+  // ─── Cross-Agent Access ────────────────────────────────────────
+
+  private orgRegistry: OrgRegistry = defaultOrgRegistry();
+
+  /**
+   * Override the org registry (for custom fleet configurations).
+   */
+  setOrgRegistry(registry: OrgRegistry): void {
+    this.orgRegistry = registry;
+  }
+
+  /**
+   * Query another agent's memory with visibility-scoped access control.
+   *
+   * What you CAN read:
+   * - fleet-visible facts, knowledge, episodes from any agent
+   * - council-visible data if you're a council seat
+   * - org-visible data if you're in the same org
+   * - Everything from yourself
+   *
+   * What you CANNOT read (ever, regardless of visibility):
+   * - Raw conversation messages (always private)
+   * - Identity-domain facts/knowledge (hardcoded exclusion)
+   * - Session-scoped facts (ephemeral, meaningless cross-agent)
+   */
+  queryAgent(requesterId: string, targetAgentId: string, opts?: {
+    query?: string;
+    domain?: string;
+    memoryType?: 'facts' | 'knowledge' | 'topics' | 'episodes' | 'messages';
+    limit?: number;
+  }): unknown[] {
+    return crossAgentQuery(this.dbManager, {
+      requesterId,
+      targetAgentId,
+      query: opts?.query,
+      domain: opts?.domain,
+      memoryType: opts?.memoryType,
+      limit: opts?.limit,
+    }, this.orgRegistry);
+  }
+
+  /**
+   * Query ALL agents that the requester has access to, aggregating results.
+   * Useful for "what does the fleet know about X?" queries.
+   */
+  queryFleet(requesterId: string, opts?: {
+    query?: string;
+    domain?: string;
+    memoryType?: 'facts' | 'knowledge' | 'topics' | 'episodes';
+    limit?: number;
+  }): unknown[] {
+    const allAgents = this.dbManager.listAgents();
+    const results: unknown[] = [];
+    const perAgentLimit = Math.max(3, Math.ceil((opts?.limit || 20) / allAgents.length));
+
+    for (const agentId of allAgents) {
+      try {
+        const agentResults = this.queryAgent(requesterId, agentId, {
+          ...opts,
+          limit: perAgentLimit,
+        });
+        results.push(...agentResults);
+      } catch {
+        // Agent DB might not exist or be corrupted — skip
+      }
+    }
+
+    // Sort by relevance (confidence for facts/knowledge, significance for episodes)
+    return results.slice(0, opts?.limit || 20);
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────

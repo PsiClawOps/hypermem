@@ -82,6 +82,46 @@ export interface Conversation {
 
 export type FactScope = 'agent' | 'session' | 'user';
 
+// ─── Visibility / Cross-Agent Access ────────────────────────────
+
+/**
+ * Memory visibility levels:
+ * - private:  Only the owning agent can read. Identity, SOUL, personal reflections.
+ * - org:      Agents in the same org (e.g., Forge's directors: Pylon, Vigil, Plane).
+ * - council:  All council seats can read.
+ * - fleet:    Any agent in the fleet can read.
+ */
+export type MemoryVisibility = 'private' | 'org' | 'council' | 'fleet';
+
+/**
+ * Cross-agent query request. The requesting agent declares who they are;
+ * the access layer filters results by visibility.
+ */
+export interface CrossAgentQuery {
+  /** The agent making the request */
+  requesterId: string;
+  /** The agent whose memory is being queried */
+  targetAgentId: string;
+  /** What to search for */
+  query?: string;
+  /** Filter by domain */
+  domain?: string;
+  /** Filter by memory type */
+  memoryType?: 'facts' | 'knowledge' | 'topics' | 'episodes' | 'messages';
+  /** Max results */
+  limit?: number;
+}
+
+/**
+ * Defines an agent's org and tier for visibility resolution.
+ */
+export interface AgentIdentity {
+  agentId: string;
+  tier: 'council' | 'director' | 'specialist' | 'worker';
+  org?: string;         // e.g., 'forge-org', 'compass-org', 'sentinel-org'
+  councilLead?: string; // director's council lead, e.g., 'forge' for Pylon
+}
+
 export interface Fact {
   id: number;
   agentId: string;
