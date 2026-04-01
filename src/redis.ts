@@ -317,6 +317,78 @@ export class RedisLayer {
     return keys.length;
   }
 
+  // ─── Fleet Cache (Library L4 Hot Layer) ───────────────────────
+
+  /**
+   * Cache a fleet-level value. Used for library data that's read frequently.
+   * TTL defaults to 10 minutes — short enough to pick up changes, long enough
+   * to avoid hammering SQLite on every heartbeat.
+   */
+  async setFleetCache(key: string, value: string, ttl: number = 600): Promise<void> {
+    if (!this.isConnected) return;
+    const redisKey = `${this.config.keyPrefix}fleet:${key}`;
+    await this.client!.set(redisKey, value, 'EX', ttl);
+  }
+
+  /**
+   * Get a fleet-level cached value.
+   */
+  async getFleetCache(key: string): Promise<string | null> {
+    if (!this.isConnected) return null;
+    const redisKey = `${this.config.keyPrefix}fleet:${key}`;
+    return this.client!.get(redisKey);
+  }
+
+  /**
+   * Delete a fleet-level cached value.
+   */
+  async delFleetCache(key: string): Promise<void> {
+    if (!this.isConnected) return;
+    const redisKey = `${this.config.keyPrefix}fleet:${key}`;
+    await this.client!.del(redisKey);
+  }
+
+  /**
+   * Cache a fleet agent's full profile (fleet registry + capabilities + desired state).
+   * Structured so a single key read gives the dashboard everything it needs.
+   */
+  async cacheFleetAgent(agentId: string, data: Record<string, unknown>): Promise<void> {
+    await this.setFleetCache(`agent:${agentId}`, JSON.stringify(data));
+  }
+
+  /**
+   * Get a cached fleet agent profile.
+   */
+  async getCachedFleetAgent(agentId: string): Promise<Record<string, unknown> | null> {
+    const val = await this.getFleetCache(`agent:${agentId}`);
+    return val ? JSON.parse(val) : null;
+  }
+
+  /**
+   * Cache the fleet summary (agent count, drift count, etc.).
+   * Short TTL — recalculated frequently.
+   */
+  async cacheFleetSummary(summary: Record<string, unknown>): Promise<void> {
+    await this.setFleetCache('summary', JSON.stringify(summary), 120); // 2 min
+  }
+
+  /**
+   * Get the cached fleet summary.
+   */
+  async getCachedFleetSummary(): Promise<Record<string, unknown> | null> {
+    const val = await this.getFleetCache('summary');
+    return val ? JSON.parse(val) : null;
+  }
+
+  /**
+   * Invalidate all fleet cache entries for a specific agent.
+   * Call after mutations to fleet registry / desired state.
+   */
+  async invalidateFleetAgent(agentId: string): Promise<void> {
+    await this.delFleetCache(`agent:${agentId}`);
+    await this.delFleetCache('summary'); // Summary includes this agent
+  }
+
   // ─── Lifecycle ───────────────────────────────────────────────
 
   async disconnect(): Promise<void> {

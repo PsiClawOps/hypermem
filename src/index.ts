@@ -490,7 +490,7 @@ export class HyperMem {
   // ─── Fleet Registry (L4: Library) ───────────────────────────
 
   /**
-   * Register or update a fleet agent.
+   * Register or update a fleet agent. Invalidates cache.
    */
   upsertFleetAgent(id: string, data: {
     displayName?: string;
@@ -504,11 +504,31 @@ export class HyperMem {
   }): FleetAgent {
     const db = this.dbManager.getLibraryDb();
     const store = new FleetStore(db);
-    return store.upsertAgent(id, data);
+    const result = store.upsertAgent(id, data);
+    // Invalidate cache — fire and forget
+    this.redis.invalidateFleetAgent(id).catch(() => {});
+    return result;
   }
 
   /**
-   * Get a fleet agent.
+   * Get a fleet agent. Cache-aside: check Redis first, fall back to SQLite.
+   */
+  async getFleetAgentCached(id: string): Promise<FleetAgent | null> {
+    // Try cache first
+    const cached = await this.redis.getCachedFleetAgent(id);
+    if (cached) return cached as unknown as FleetAgent;
+
+    // Fall back to SQLite
+    const agent = this.getFleetAgent(id);
+    if (agent) {
+      // Warm cache — fire and forget
+      this.redis.cacheFleetAgent(id, agent as unknown as Record<string, unknown>).catch(() => {});
+    }
+    return agent;
+  }
+
+  /**
+   * Get a fleet agent (synchronous, SQLite only).
    */
   getFleetAgent(id: string): FleetAgent | null {
     const db = this.dbManager.getLibraryDb();
@@ -704,25 +724,32 @@ export class HyperMem {
   }): DesiredStateEntry {
     const db = this.dbManager.getLibraryDb();
     const store = new DesiredStateStore(db);
-    return store.setDesired(agentId, configKey, desiredValue, opts);
+    const result = store.setDesired(agentId, configKey, desiredValue, opts);
+    // Invalidate cache — desired state change affects fleet view
+    this.redis.invalidateFleetAgent(agentId).catch(() => {});
+    return result;
   }
 
   /**
-   * Report actual runtime value for drift detection.
+   * Report actual runtime value for drift detection. Invalidates cache.
    */
   reportActualState(agentId: string, configKey: string, actualValue: unknown): DriftStatus {
     const db = this.dbManager.getLibraryDb();
     const store = new DesiredStateStore(db);
-    return store.reportActual(agentId, configKey, actualValue);
+    const result = store.reportActual(agentId, configKey, actualValue);
+    this.redis.invalidateFleetAgent(agentId).catch(() => {});
+    return result;
   }
 
   /**
-   * Bulk report actual state (e.g., on session startup / heartbeat).
+   * Bulk report actual state (e.g., on session startup / heartbeat). Invalidates cache.
    */
   reportActualStateBulk(agentId: string, actuals: Record<string, unknown>): Record<string, DriftStatus> {
     const db = this.dbManager.getLibraryDb();
     const store = new DesiredStateStore(db);
-    return store.reportActualBulk(agentId, actuals);
+    const result = store.reportActualBulk(agentId, actuals);
+    this.redis.invalidateFleetAgent(agentId).catch(() => {});
+    return result;
   }
 
   /**
@@ -989,6 +1016,75 @@ export class HyperMem {
     }
 
     return results;
+  }
+
+  // ─── Fleet Cache Hydration ──────────────────────────────────
+
+  /**
+   * Hydrate the Redis fleet cache from library.db.
+   * Call on gateway startup to warm the cache for dashboard queries.
+   * 
+   * Populates:
+   *  - Per-agent profiles (fleet registry + capabilities + desired state)
+   *  - Fleet summary (counts, drift status)
+   */
+  async hydrateFleetCache(): Promise<{ agents: number; summary: boolean }> {
+    if (!this.redis.isConnected) return { agents: 0, summary: false };
+
+    const db = this.dbManager.getLibraryDb();
+    const fleetStore = new FleetStore(db);
+    const desiredStore = new DesiredStateStore(db);
+
+    const agents = fleetStore.listAgents();
+    let hydrated = 0;
+
+    for (const agent of agents) {
+      try {
+        // Build a composite profile for each agent
+        const capabilities = fleetStore.getAgentCapabilities(agent.id);
+        const desiredState = desiredStore.getAgentState(agent.id);
+        const desiredConfig = desiredStore.getAgentConfig(agent.id);
+
+        const composite = {
+          ...agent,
+          capabilities: capabilities.map(c => ({ capType: c.capType, name: c.name, version: c.version })),
+          desiredState: desiredState.map(d => ({
+            configKey: d.configKey,
+            desiredValue: d.desiredValue,
+            actualValue: d.actualValue,
+            driftStatus: d.driftStatus,
+          })),
+          desiredConfig,
+        };
+
+        await this.redis.cacheFleetAgent(agent.id, composite as unknown as Record<string, unknown>);
+        hydrated++;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`[hypermem] Failed to cache agent ${agent.id}: ${message}`);
+      }
+    }
+
+    // Cache fleet summary
+    try {
+      const driftSummary = desiredStore.getDriftSummary();
+      const summary = {
+        totalAgents: agents.length,
+        activeAgents: agents.filter(a => a.status === 'active').length,
+        tiers: {
+          council: agents.filter(a => a.tier === 'council').length,
+          director: agents.filter(a => a.tier === 'director').length,
+          specialist: agents.filter(a => a.tier === 'specialist').length,
+        },
+        drift: driftSummary,
+        hydratedAt: new Date().toISOString(),
+      };
+      await this.redis.cacheFleetSummary(summary);
+    } catch {
+      return { agents: hydrated, summary: false };
+    }
+
+    return { agents: hydrated, summary: true };
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────
