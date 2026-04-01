@@ -30,6 +30,9 @@ export type { WorkItem, WorkEvent, WorkStatus } from './work-store.js';
 export { DesiredStateStore } from './desired-state-store.js';
 export { KnowledgeGraph } from './knowledge-graph.js';
 export type { EntityType, KnowledgeLink, GraphNode, TraversalResult } from './knowledge-graph.js';
+
+export { RateLimiter, createRateLimitedEmbedder } from './rate-limiter.js';
+export type { RateLimiterConfig, Priority } from './rate-limiter.js';
 export type { DesiredStateEntry, ConfigEvent, DriftStatus } from './desired-state-store.js';
 
 export { RedisLayer } from './redis.js';
