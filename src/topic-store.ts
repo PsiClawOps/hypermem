@@ -3,6 +3,7 @@
  *
  * Cross-session topic tracking. Topics are conversation threads that
  * can span multiple sessions and channels.
+ * Lives in the central library DB.
  */
 
 import type { DatabaseSync } from 'node:sqlite';
@@ -19,8 +20,8 @@ function parseTopicRow(row: Record<string, unknown>): Topic {
     name: row.name as string,
     description: (row.description as string) || null,
     status: row.status as TopicStatus,
-    lastConversationId: (row.last_conversation_id as number) || null,
-    lastMessageId: (row.last_message_id as number) || null,
+    visibility: (row.visibility as string) || 'org',
+    lastSessionKey: (row.last_session_key as string) || null,
     messageCount: row.message_count as number,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
@@ -33,15 +34,15 @@ export class TopicStore {
   /**
    * Create a new topic.
    */
-  create(agentId: string, name: string, description?: string): Topic {
+  create(agentId: string, name: string, description?: string, visibility?: string): Topic {
     const now = nowIso();
 
     const result = this.db.prepare(`
-      INSERT INTO topics (agent_id, name, description, status, message_count, created_at, updated_at)
-      VALUES (?, ?, ?, 'active', 0, ?, ?)
-    `).run(agentId, name, description || null, now, now);
+      INSERT INTO topics (agent_id, name, description, status, visibility, message_count, created_at, updated_at)
+      VALUES (?, ?, ?, 'active', ?, 0, ?, ?)
+    `).run(agentId, name, description || null, visibility || 'org', now, now);
 
-    const id = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
+    const id = Number((result as unknown as { lastInsertRowid: bigint }).lastInsertRowid);
 
     return {
       id,
@@ -49,8 +50,8 @@ export class TopicStore {
       name,
       description: description || null,
       status: 'active',
-      lastConversationId: null,
-      lastMessageId: null,
+      visibility: visibility || 'org',
+      lastSessionKey: null,
       messageCount: 0,
       createdAt: now,
       updatedAt: now,
@@ -58,30 +59,18 @@ export class TopicStore {
   }
 
   /**
-   * Link a message to a topic.
+   * Touch a topic — update activity tracking.
    */
-  linkMessage(
-    topicId: number,
-    messageId: number,
-    conversationId: number,
-    relevance: number = 1.0
-  ): void {
+  touch(topicId: number, sessionKey: string, messagesDelta: number = 1): void {
     const now = nowIso();
-
-    this.db.prepare(`
-      INSERT OR IGNORE INTO topic_messages (topic_id, message_id, conversation_id, relevance)
-      VALUES (?, ?, ?, ?)
-    `).run(topicId, messageId, conversationId, relevance);
-
     this.db.prepare(`
       UPDATE topics
-      SET last_conversation_id = ?,
-          last_message_id = ?,
-          message_count = message_count + 1,
+      SET last_session_key = ?,
+          message_count = message_count + ?,
           status = 'active',
           updated_at = ?
       WHERE id = ?
-    `).run(conversationId, messageId, now, topicId);
+    `).run(sessionKey, messagesDelta, now, topicId);
   }
 
   /**
@@ -125,7 +114,7 @@ export class TopicStore {
   }
 
   /**
-   * Find topics matching a query (by name or description).
+   * Find topics matching a query.
    */
   search(agentId: string, query: string, limit: number = 10): Topic[] {
     const rows = this.db.prepare(`
@@ -156,7 +145,7 @@ export class TopicStore {
   }
 
   /**
-   * Close dormant topics (no activity for closedAfterDays).
+   * Close dormant topics.
    */
   closeDormant(agentId: string, closedAfterDays: number = 7): number {
     const cutoff = new Date(Date.now() - closedAfterDays * 24 * 60 * 60 * 1000).toISOString();
@@ -168,19 +157,5 @@ export class TopicStore {
     `).run(nowIso(), agentId, cutoff);
 
     return (result as unknown as { changes: number }).changes;
-  }
-
-  /**
-   * Get topics that are active in a specific conversation.
-   */
-  getConversationTopics(conversationId: number): Topic[] {
-    const rows = this.db.prepare(`
-      SELECT DISTINCT t.* FROM topics t
-      JOIN topic_messages tm ON t.id = tm.topic_id
-      WHERE tm.conversation_id = ?
-      ORDER BY t.updated_at DESC
-    `).all(conversationId) as Record<string, unknown>[];
-
-    return rows.map(parseTopicRow);
   }
 }

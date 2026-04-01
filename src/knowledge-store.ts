@@ -2,6 +2,7 @@
  * HyperMem Knowledge Store
  *
  * Long-term structured knowledge — replaces MEMORY.md.
+ * Lives in the central library DB.
  * Knowledge entries are keyed (domain + key), versioned via superseded_by,
  * and linked to each other via knowledge_links.
  */
@@ -215,8 +216,8 @@ export class KnowledgeStore {
    */
   addLink(fromId: number, toId: number, linkType: LinkType): void {
     this.db.prepare(`
-      INSERT OR IGNORE INTO knowledge_links (from_id, to_id, link_type, created_at)
-      VALUES (?, ?, ?, ?)
+      INSERT OR IGNORE INTO knowledge_links (from_type, from_id, to_type, to_id, link_type, created_at)
+      VALUES ('knowledge', ?, 'knowledge', ?, ?, ?)
     `).run(fromId, toId, linkType, nowIso());
   }
 

@@ -2,6 +2,7 @@
  * HyperMem Episode Store
  *
  * Significant events in an agent's lifetime.
+ * Lives in the central library DB.
  * Replaces daily log files with structured, queryable episodes.
  */
 
@@ -19,10 +20,9 @@ function parseEpisodeRow(row: Record<string, unknown>): Episode {
     eventType: row.event_type as EpisodeType,
     summary: row.summary as string,
     significance: row.significance as number,
+    visibility: (row.visibility as string) || 'org',
     participants: row.participants ? JSON.parse(row.participants as string) : null,
-    conversationId: (row.conversation_id as number) || null,
-    messageRangeStart: (row.message_range_start as number) || null,
-    messageRangeEnd: (row.message_range_end as number) || null,
+    sessionKey: (row.session_key as string) || null,
     createdAt: row.created_at as string,
     decayScore: row.decay_score as number,
   };
@@ -40,32 +40,30 @@ export class EpisodeStore {
     summary: string,
     opts?: {
       significance?: number;
+      visibility?: string;
       participants?: string[];
-      conversationId?: number;
-      messageRangeStart?: number;
-      messageRangeEnd?: number;
+      sessionKey?: string;
     }
   ): Episode {
     const now = nowIso();
     const significance = opts?.significance || 0.5;
 
     const result = this.db.prepare(`
-      INSERT INTO episodes (agent_id, event_type, summary, significance, participants,
-        conversation_id, message_range_start, message_range_end, created_at, decay_score)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0)
+      INSERT INTO episodes (agent_id, event_type, summary, significance,
+        visibility, participants, session_key, created_at, decay_score)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0)
     `).run(
       agentId,
       eventType,
       summary,
       significance,
+      opts?.visibility || 'org',
       opts?.participants ? JSON.stringify(opts.participants) : null,
-      opts?.conversationId || null,
-      opts?.messageRangeStart || null,
-      opts?.messageRangeEnd || null,
+      opts?.sessionKey || null,
       now
     );
 
-    const id = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
+    const id = Number((result as unknown as { lastInsertRowid: bigint }).lastInsertRowid);
 
     return {
       id,
@@ -73,10 +71,9 @@ export class EpisodeStore {
       eventType,
       summary,
       significance,
+      visibility: opts?.visibility || 'org',
       participants: opts?.participants || null,
-      conversationId: opts?.conversationId || null,
-      messageRangeStart: opts?.messageRangeStart || null,
-      messageRangeEnd: opts?.messageRangeEnd || null,
+      sessionKey: opts?.sessionKey || null,
       createdAt: now,
       decayScore: 0,
     };
@@ -136,21 +133,6 @@ export class EpisodeStore {
   }
 
   /**
-   * Get episodes involving specific participants.
-   */
-  getByParticipant(agentId: string, participant: string, limit: number = 20): Episode[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM episodes
-      WHERE agent_id = ?
-      AND participants LIKE ?
-      ORDER BY created_at DESC
-      LIMIT ?
-    `).all(agentId, `%"${participant}"%`, limit) as Record<string, unknown>[];
-
-    return rows.map(parseEpisodeRow);
-  }
-
-  /**
    * Decay all episodes.
    */
   decay(agentId: string, decayRate: number = 0.005): number {
@@ -175,7 +157,7 @@ export class EpisodeStore {
   }
 
   /**
-   * Get episode summary for a time range (for daily log generation).
+   * Get episode summary for a time range.
    */
   getDailySummary(agentId: string, date: string): Episode[] {
     const startOfDay = `${date}T00:00:00.000Z`;

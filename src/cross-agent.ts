@@ -2,23 +2,19 @@
  * Cross-Agent Memory Access
  *
  * Enables agents to read each other's memory with visibility-scoped access.
+ * All structured knowledge lives in the central library DB, so cross-agent
+ * queries are now single-DB operations — no per-agent DB hopping.
  *
  * Visibility levels:
  * - private:  Owner only. Identity, SOUL, personal reflections, raw conversations.
- * - org:      Same org (council lead + their directors). Operational context sharing.
- * - council:  All council seats. Strategic context, deliberation history.
- * - fleet:    Any agent. Shared knowledge, public facts, fleet-wide patterns.
+ * - org:      Same org (council lead + their directors).
+ * - council:  All council seats.
+ * - fleet:    Any agent.
  *
  * What's ALWAYS private (hardcoded, not configurable):
- * - Raw message history (conversations table) — an agent's conversations are theirs
- * - Identity/SOUL-derived knowledge — anything with domain='identity'
- * - Facts with scope='session' — ephemeral session context, not meaningful cross-agent
- *
- * What's shared by default:
- * - Episodes (default: org) — significant events are operationally relevant
- * - Knowledge (default: private, but agents can promote to org/council/fleet)
- * - Facts with scope='agent' (default: private, promotable)
- * - Topics (readable at org level — what is this agent working on?)
+ * - Raw message history — an agent's conversations are theirs
+ * - Identity/SOUL-derived knowledge — domain='identity'
+ * - Facts with scope='session' — ephemeral session context
  */
 
 import type { DatabaseSync } from 'node:sqlite';
@@ -31,49 +27,32 @@ import { DatabaseManager } from './db.js';
 
 // ─── Org Membership Registry ─────────────────────────────────────
 
-/**
- * Fleet org structure. This is the source of truth for who can see what.
- * Loaded from config or hardcoded for now — could move to Redis/SQLite later.
- */
 export interface OrgRegistry {
-  /** Map of org name → member agent IDs */
   orgs: Record<string, string[]>;
-  /** Map of agent ID → identity */
   agents: Record<string, AgentIdentity>;
 }
 
 /**
- * Default fleet org structure matching the current council/director setup.
+ * Default fleet org structure.
  */
 export function defaultOrgRegistry(): OrgRegistry {
   const agents: Record<string, AgentIdentity> = {
-    // Council seats
     forge:    { agentId: 'forge',    tier: 'council' },
     compass:  { agentId: 'compass',  tier: 'council' },
     clarity:  { agentId: 'clarity',  tier: 'council' },
     sentinel: { agentId: 'sentinel', tier: 'council' },
     anvil:    { agentId: 'anvil',    tier: 'council' },
     vanguard: { agentId: 'vanguard', tier: 'council' },
-
-    // Forge org (infrastructure)
-    pylon:  { agentId: 'pylon',  tier: 'director', org: 'forge-org', councilLead: 'forge' },
-    vigil:  { agentId: 'vigil',  tier: 'director', org: 'forge-org', councilLead: 'forge' },
-    plane:  { agentId: 'plane',  tier: 'director', org: 'forge-org', councilLead: 'forge' },
-
-    // Compass org (product)
-    helm:   { agentId: 'helm',   tier: 'director', org: 'compass-org', councilLead: 'compass' },
-    chisel: { agentId: 'chisel', tier: 'director', org: 'compass-org', councilLead: 'compass' },
-    facet:  { agentId: 'facet',  tier: 'director', org: 'compass-org', councilLead: 'compass' },
-
-    // Sentinel org (security)
-    bastion: { agentId: 'bastion', tier: 'director', org: 'sentinel-org', councilLead: 'sentinel' },
-    gauge:   { agentId: 'gauge',   tier: 'director', org: 'sentinel-org', councilLead: 'sentinel' },
-
-    // Research
+    pylon:    { agentId: 'pylon',  tier: 'director', org: 'forge-org', councilLead: 'forge' },
+    vigil:    { agentId: 'vigil',  tier: 'director', org: 'forge-org', councilLead: 'forge' },
+    plane:    { agentId: 'plane',  tier: 'director', org: 'forge-org', councilLead: 'forge' },
+    helm:     { agentId: 'helm',   tier: 'director', org: 'compass-org', councilLead: 'compass' },
+    chisel:   { agentId: 'chisel', tier: 'director', org: 'compass-org', councilLead: 'compass' },
+    facet:    { agentId: 'facet',  tier: 'director', org: 'compass-org', councilLead: 'compass' },
+    bastion:  { agentId: 'bastion', tier: 'director', org: 'sentinel-org', councilLead: 'sentinel' },
+    gauge:    { agentId: 'gauge',   tier: 'director', org: 'sentinel-org', councilLead: 'sentinel' },
     crucible: { agentId: 'crucible', tier: 'specialist' },
-
-    // Utility
-    relay: { agentId: 'relay', tier: 'specialist' },
+    relay:    { agentId: 'relay', tier: 'specialist' },
   };
 
   const orgs: Record<string, string[]> = {
@@ -87,61 +66,33 @@ export function defaultOrgRegistry(): OrgRegistry {
 
 // ─── Access Control ──────────────────────────────────────────────
 
-/**
- * Check if requester can access memories at a given visibility level
- * from the target agent.
- */
 export function canAccess(
   requester: AgentIdentity,
   target: AgentIdentity,
   visibility: MemoryVisibility,
   registry: OrgRegistry,
 ): boolean {
-  // Owner can always access their own data
   if (requester.agentId === target.agentId) return true;
 
   switch (visibility) {
-    case 'private':
-      return false;
-
-    case 'org':
-      return sameOrg(requester, target, registry);
-
+    case 'private': return false;
+    case 'org': return sameOrg(requester, target, registry);
     case 'council':
-      // Council seats can read council-visible data from anyone
       if (requester.tier === 'council') return true;
-      // Directors can read council-visible data from their own council lead
       if (requester.councilLead === target.agentId) return true;
       return false;
-
-    case 'fleet':
-      return true;
-
-    default:
-      return false;
+    case 'fleet': return true;
+    default: return false;
   }
 }
 
-/**
- * Check if two agents are in the same org.
- */
-function sameOrg(
-  a: AgentIdentity,
-  b: AgentIdentity,
-  registry: OrgRegistry,
-): boolean {
+function sameOrg(a: AgentIdentity, b: AgentIdentity, registry: OrgRegistry): boolean {
   for (const members of Object.values(registry.orgs)) {
-    if (members.includes(a.agentId) && members.includes(b.agentId)) {
-      return true;
-    }
+    if (members.includes(a.agentId) && members.includes(b.agentId)) return true;
   }
   return false;
 }
 
-/**
- * Build a SQL visibility filter for cross-agent queries.
- * Returns the WHERE clause fragment and bind parameters.
- */
 export function visibilityFilter(
   requester: AgentIdentity,
   targetAgentId: string,
@@ -149,11 +100,9 @@ export function visibilityFilter(
 ): { clause: string; canReadPrivate: boolean; canReadOrg: boolean; canReadCouncil: boolean } {
   const target = registry.agents[targetAgentId];
   if (!target) {
-    // Unknown agent — fleet-only access
     return { clause: "visibility = 'fleet'", canReadPrivate: false, canReadOrg: false, canReadCouncil: false };
   }
 
-  // Self-access: no filter needed
   if (requester.agentId === targetAgentId) {
     return { clause: '1=1', canReadPrivate: true, canReadOrg: true, canReadCouncil: true };
   }
@@ -177,6 +126,7 @@ export function visibilityFilter(
 
 /**
  * Query another agent's memory with visibility-scoped access.
+ * All queries go to the central library DB — no per-agent DB needed.
  */
 export function crossAgentQuery(
   dbManager: DatabaseManager,
@@ -184,16 +134,13 @@ export function crossAgentQuery(
   registry: OrgRegistry,
 ): unknown[] {
   const requester = registry.agents[query.requesterId];
-  if (!requester) {
-    throw new Error(`Unknown requester agent: ${query.requesterId}`);
-  }
+  if (!requester) throw new Error(`Unknown requester agent: ${query.requesterId}`);
 
   const target = registry.agents[query.targetAgentId];
-  if (!target) {
-    throw new Error(`Unknown target agent: ${query.targetAgentId}`);
-  }
+  if (!target) throw new Error(`Unknown target agent: ${query.targetAgentId}`);
 
-  const db = dbManager.getAgentDb(query.targetAgentId);
+  // All structured knowledge is now in the library DB
+  const db = dbManager.getLibraryDb();
   const filter = visibilityFilter(requester, query.targetAgentId, registry);
   const limit = query.limit || 20;
 
@@ -207,10 +154,9 @@ export function crossAgentQuery(
     case 'episodes':
       return queryEpisodes(db, query, filter.clause, limit);
     case 'messages':
-      // Messages are always private — cross-agent message access is blocked
+      // Messages are always private
       return [];
     default:
-      // Query all accessible memory types
       return [
         ...queryFacts(db, query, filter.clause, Math.ceil(limit / 4)),
         ...queryKnowledge(db, query, filter.clause, Math.ceil(limit / 4)),
@@ -227,11 +173,12 @@ function queryFacts(
   limit: number,
 ): unknown[] {
   let sql = `SELECT id, domain, content, confidence, visibility, created_at
-    FROM facts WHERE agent_id = ? AND ${visFilter} AND scope != 'session'`;
+    FROM facts WHERE agent_id = ? AND ${visFilter}
+    AND scope != 'session'
+    AND (domain IS NULL OR domain != 'identity')
+    AND superseded_by IS NULL
+    AND decay_score < 0.8`;
   const params: (string | number)[] = [query.targetAgentId];
-
-  // Exclude identity-domain facts (always private regardless of visibility column)
-  sql += " AND (domain IS NULL OR domain != 'identity')";
 
   if (query.domain) {
     sql += ' AND domain = ?';
@@ -254,11 +201,10 @@ function queryKnowledge(
   limit: number,
 ): unknown[] {
   let sql = `SELECT id, domain, key, content, confidence, visibility, updated_at
-    FROM knowledge WHERE agent_id = ? AND ${visFilter} AND superseded_by IS NULL`;
+    FROM knowledge WHERE agent_id = ? AND ${visFilter}
+    AND superseded_by IS NULL
+    AND domain != 'identity'`;
   const params: (string | number)[] = [query.targetAgentId];
-
-  // Exclude identity knowledge
-  sql += " AND domain != 'identity'";
 
   if (query.domain) {
     sql += ' AND domain = ?';
@@ -277,13 +223,11 @@ function queryKnowledge(
 function queryTopics(
   db: DatabaseSync,
   query: CrossAgentQuery,
-  _visFilter: string,
+  visFilter: string,
   limit: number,
 ): unknown[] {
-  // Topics are readable at org level — they tell you what an agent is working on
-  // No visibility column on topics yet, so we use a simple status filter
-  const sql = `SELECT id, name, description, status, message_count, updated_at
-    FROM topics WHERE agent_id = ? AND status = 'active'
+  const sql = `SELECT id, name, description, status, visibility, message_count, updated_at
+    FROM topics WHERE agent_id = ? AND ${visFilter} AND status = 'active'
     ORDER BY updated_at DESC LIMIT ?`;
 
   return db.prepare(sql).all(query.targetAgentId, limit).map((r: any) => ({

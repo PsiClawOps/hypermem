@@ -58,53 +58,54 @@ async function run() {
     // ── Populate Forge's memory ──
     console.log('\n── Populating Forge memory ──');
 
-    const forgeDb = hm.dbManager.getAgentDb('forge');
+    // All structured knowledge goes in the library DB
+    const libDb = hm.dbManager.getLibraryDb();
 
     // Private fact (only Forge should see)
-    forgeDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, created_at, updated_at, decay_score)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 0.0)`)
+    libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
+      VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
       .run('forge', 'agent', 'operations', 'I prefer deploying at 2am when traffic is lowest', 1.0, 'private');
 
     // Org-visible fact (Forge + Pylon/Vigil/Plane should see)
-    forgeDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, created_at, updated_at, decay_score)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 0.0)`)
+    libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
+      VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
       .run('forge', 'agent', 'infrastructure', 'Redis 7.0.15 is running on the host', 1.0, 'org');
 
     // Council-visible fact
-    forgeDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, created_at, updated_at, decay_score)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 0.0)`)
+    libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
+      VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
       .run('forge', 'agent', 'architecture', 'HyperMem replaces ClawText as the memory architecture', 0.95, 'council');
 
     // Fleet-visible fact
-    forgeDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, created_at, updated_at, decay_score)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 0.0)`)
+    libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
+      VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
       .run('forge', 'agent', 'infrastructure', 'Gateway restart required after config changes', 0.9, 'fleet');
 
     // Identity-domain fact (should ALWAYS be blocked, even if marked fleet)
-    forgeDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, created_at, updated_at, decay_score)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 0.0)`)
+    libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
+      VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
       .run('forge', 'agent', 'identity', 'I am Forge, the infrastructure seat', 1.0, 'fleet');
 
     // Session-scoped fact (should be excluded from cross-agent)
-    forgeDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, created_at, updated_at, decay_score)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 0.0)`)
+    libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
+      VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
       .run('forge', 'session', 'operations', 'Currently debugging Redis connection', 1.0, 'fleet');
 
     // Knowledge entries
-    forgeDb.prepare(`INSERT INTO knowledge (agent_id, domain, key, content, confidence, visibility, source_type, created_at, updated_at)
+    libDb.prepare(`INSERT INTO knowledge (agent_id, domain, key, content, confidence, visibility, source_type, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
       .run('forge', 'operations', 'deploy-process', 'Run preflight, push containers, health check, traffic shift', 0.9, 'org', 'conversation');
 
-    forgeDb.prepare(`INSERT INTO knowledge (agent_id, domain, key, content, confidence, visibility, source_type, created_at, updated_at)
+    libDb.prepare(`INSERT INTO knowledge (agent_id, domain, key, content, confidence, visibility, source_type, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
       .run('forge', 'identity', 'soul-anchor', 'Infrastructure seat, pragmatic, calm under pressure', 1.0, 'fleet', 'file');
 
     // Episodes
-    forgeDb.prepare(`INSERT INTO episodes (agent_id, event_type, summary, significance, visibility, participants, created_at, decay_score)
+    libDb.prepare(`INSERT INTO episodes (agent_id, event_type, summary, significance, visibility, participants, created_at, decay_score)
       VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 0.0)`)
       .run('forge', 'deployment', 'Deployed HyperMem Phase 1 to production', 8, 'council', JSON.stringify(['forge', 'ragesaq']));
 
-    forgeDb.prepare(`INSERT INTO episodes (agent_id, event_type, summary, significance, visibility, participants, created_at, decay_score)
+    libDb.prepare(`INSERT INTO episodes (agent_id, event_type, summary, significance, visibility, participants, created_at, decay_score)
       VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 0.0)`)
       .run('forge', 'incident', 'Fixed ClawText graft hook poisoning fleet transcripts', 9, 'fleet', JSON.stringify(['forge', 'pylon']));
 
@@ -169,10 +170,9 @@ async function run() {
 
     // ── Test: Fleet-wide query ──
     console.log('\n── Fleet-wide query ──');
-    // Populate Compass with some fleet-visible data
-    const compassDb = hm.dbManager.getAgentDb('compass');
-    compassDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, created_at, updated_at, decay_score)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 0.0)`)
+    // Populate Compass with some fleet-visible data (in library DB)
+    libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
+      VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
       .run('compass', 'agent', 'product', 'ClawCanvas is the primary user surface', 0.95, 'fleet');
 
     const fleetResults = hm.queryFleet('crucible', { memoryType: 'facts' });

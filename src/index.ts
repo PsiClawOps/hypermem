@@ -3,13 +3,11 @@
  *
  * @module @psiclawops/hypermem
  *
- * Core API:
- *   HyperMem.create(config)     — initialize the engine
- *   hm.record(agentId, ...)     — record a message
- *   hm.compose(request)         — compose context for LLM call
- *   hm.warm(agentId, session)   — warm session from SQLite into Redis
- *   hm.search(agentId, query)   — full-text search across agent's messages
- *   hm.close()                  — clean shutdown
+ * Architecture:
+ *   L1: Redis       — hot session working memory
+ *   L2: messages.db — per-agent conversation log (rotatable)
+ *   L3: vectors.db  — per-agent semantic search index (reconstructable)
+ *   L4: library.db  — fleet-wide structured knowledge (crown jewel)
  */
 
 export { DatabaseManager } from './db.js';
@@ -21,6 +19,14 @@ export { KnowledgeStore } from './knowledge-store.js';
 export type { LinkType } from './knowledge-store.js';
 export { TopicStore } from './topic-store.js';
 export { EpisodeStore } from './episode-store.js';
+export { PreferenceStore } from './preference-store.js';
+export type { Preference } from './preference-store.js';
+export { FleetStore } from './fleet-store.js';
+export type { FleetAgent, FleetOrg } from './fleet-store.js';
+export { SystemStore } from './system-store.js';
+export type { SystemState, SystemEvent } from './system-store.js';
+export { WorkStore } from './work-store.js';
+export type { WorkItem, WorkEvent, WorkStatus } from './work-store.js';
 
 export { RedisLayer } from './redis.js';
 
@@ -42,37 +48,43 @@ export { migrateLibrary, LIBRARY_SCHEMA_VERSION } from './library-schema.js';
 export { VectorStore, generateEmbeddings } from './vector-store.js';
 export type { EmbeddingConfig, VectorSearchResult, VectorIndexStats } from './vector-store.js';
 
+export {
+  crossAgentQuery,
+  canAccess,
+  visibilityFilter,
+  defaultOrgRegistry,
+} from './cross-agent.js';
+export type { OrgRegistry } from './cross-agent.js';
+
 export type {
-  // Message types
   NeutralMessage,
   NeutralToolCall,
   NeutralToolResult,
   StoredMessage,
   MessageRole,
   ProviderMessage,
-  // Entity types
   Conversation,
   Fact,
   Topic,
   Knowledge,
   Episode,
-  // Compositor types
   ComposeRequest,
   ComposeResult,
   SlotTokenCounts,
   SessionSlots,
   SessionMeta,
-  // Config types
   HyperMemConfig,
   RedisConfig,
   CompositorConfig,
   IndexerConfig,
-  // Enums
   ChannelType,
   ConversationStatus,
   FactScope,
   TopicStatus,
   EpisodeType,
+  MemoryVisibility,
+  CrossAgentQuery,
+  AgentIdentity,
 } from './types.js';
 
 export type { ProviderType } from './provider-translator.js';
@@ -83,17 +95,14 @@ import { FactStore } from './fact-store.js';
 import { KnowledgeStore } from './knowledge-store.js';
 import { TopicStore } from './topic-store.js';
 import { EpisodeStore } from './episode-store.js';
+import { PreferenceStore, type Preference } from './preference-store.js';
+import { FleetStore, type FleetAgent, type FleetOrg } from './fleet-store.js';
+import { SystemStore, type SystemState, type SystemEvent } from './system-store.js';
+import { WorkStore, type WorkItem, type WorkStatus } from './work-store.js';
 import { RedisLayer } from './redis.js';
 import { Compositor } from './compositor.js';
-import { VectorStore, type VectorSearchResult, type VectorIndexStats, type EmbeddingConfig } from './vector-store.js';
-import { userMessageToNeutral, fromProviderFormat, toProviderFormat } from './provider-translator.js';
-import {
-  crossAgentQuery,
-  defaultOrgRegistry,
-  canAccess,
-  visibilityFilter,
-  type OrgRegistry,
-} from './cross-agent.js';
+import { VectorStore, type VectorSearchResult, type VectorIndexStats } from './vector-store.js';
+import { userMessageToNeutral, fromProviderFormat } from './provider-translator.js';
 import type {
   HyperMemConfig,
   ComposeRequest,
@@ -103,6 +112,7 @@ import type {
   Conversation,
   ChannelType,
 } from './types.js';
+import { crossAgentQuery, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
 import path from 'node:path';
 
 const DEFAULT_CONFIG: HyperMemConfig = {
@@ -163,7 +173,6 @@ export class HyperMem {
 
   /**
    * Create and initialize a HyperMem instance.
-   * Connects to Redis (non-blocking — degrades gracefully if unavailable).
    */
   static async create(config?: Partial<HyperMemConfig>): Promise<HyperMem> {
     const merged: HyperMemConfig = {
@@ -172,12 +181,14 @@ export class HyperMem {
       redis: { ...DEFAULT_CONFIG.redis, ...config?.redis },
       compositor: { ...DEFAULT_CONFIG.compositor, ...config?.compositor },
       indexer: { ...DEFAULT_CONFIG.indexer, ...config?.indexer },
-      embedding: { ...DEFAULT_CONFIG.embedding, ...(config as Record<string, unknown>)?.embedding as Partial<HyperMemConfig['embedding']> },
+      embedding: {
+        ...DEFAULT_CONFIG.embedding,
+        ...(config as Record<string, unknown>)?.embedding as Partial<HyperMemConfig['embedding']>,
+      },
     };
 
     const hm = new HyperMem(merged);
 
-    // Try to connect to Redis — non-blocking
     const redisOk = await hm.redis.connect();
     if (redisOk) {
       console.log('[hypermem] Redis connected');
@@ -188,7 +199,7 @@ export class HyperMem {
     return hm;
   }
 
-  // ─── Core API ────────────────────────────────────────────────
+  // ─── Core API (L2: Message DB) ──────────────────────────────
 
   /**
    * Record a user message.
@@ -206,7 +217,7 @@ export class HyperMem {
       isHeartbeat?: boolean;
     }
   ): Promise<StoredMessage> {
-    const db = this.dbManager.getAgentDb(agentId);
+    const db = this.dbManager.getMessageDb(agentId);
     this.dbManager.ensureAgent(agentId);
     const store = new MessageStore(db);
 
@@ -223,7 +234,6 @@ export class HyperMem {
       isHeartbeat: opts?.isHeartbeat,
     });
 
-    // Push to Redis history
     await this.redis.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
     await this.redis.touchSession(agentId, sessionKey);
 
@@ -231,17 +241,15 @@ export class HyperMem {
   }
 
   /**
-   * Record an assistant response (from LLM).
+   * Record an assistant response.
    */
   async recordAssistantMessage(
     agentId: string,
     sessionKey: string,
     message: NeutralMessage,
-    opts?: {
-      tokenCount?: number;
-    }
+    opts?: { tokenCount?: number }
   ): Promise<StoredMessage> {
-    const db = this.dbManager.getAgentDb(agentId);
+    const db = this.dbManager.getMessageDb(agentId);
     const store = new MessageStore(db);
 
     const conversation = store.getConversation(sessionKey);
@@ -253,7 +261,6 @@ export class HyperMem {
       tokenCount: opts?.tokenCount,
     });
 
-    // Push to Redis history
     await this.redis.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
     await this.redis.touchSession(agentId, sessionKey);
 
@@ -278,8 +285,9 @@ export class HyperMem {
    * Compose context for an LLM call.
    */
   async compose(request: ComposeRequest): Promise<ComposeResult> {
-    const db = this.dbManager.getAgentDb(request.agentId);
-    return this.compositor.compose(request, db);
+    const db = this.dbManager.getMessageDb(request.agentId);
+    const libraryDb = this.dbManager.getLibraryDb();
+    return this.compositor.compose(request, db, libraryDb);
   }
 
   /**
@@ -290,15 +298,16 @@ export class HyperMem {
     sessionKey: string,
     opts?: { systemPrompt?: string; identity?: string }
   ): Promise<void> {
-    const db = this.dbManager.getAgentDb(agentId);
-    await this.compositor.warmSession(agentId, sessionKey, db, opts);
+    const db = this.dbManager.getMessageDb(agentId);
+    const libraryDb = this.dbManager.getLibraryDb();
+    await this.compositor.warmSession(agentId, sessionKey, db, { ...opts, libraryDb });
   }
 
   /**
    * Full-text search across all messages for an agent.
    */
   search(agentId: string, query: string, limit: number = 20): StoredMessage[] {
-    const db = this.dbManager.getAgentDb(agentId);
+    const db = this.dbManager.getMessageDb(agentId);
     const store = new MessageStore(db);
     return store.searchMessages(agentId, query, limit);
   }
@@ -316,7 +325,7 @@ export class HyperMem {
       model?: string;
     }
   ): Conversation {
-    const db = this.dbManager.getAgentDb(agentId);
+    const db = this.dbManager.getMessageDb(agentId);
     this.dbManager.ensureAgent(agentId);
     const store = new MessageStore(db);
     return store.getOrCreateConversation(agentId, sessionKey, opts);
@@ -329,19 +338,21 @@ export class HyperMem {
     return this.dbManager.listAgents();
   }
 
-  // ─── Extended Memory ─────────────────────────────────────────
+  // ─── Facts (L4: Library) ────────────────────────────────────
 
   /**
-   * Add a fact for an agent.
+   * Add a fact.
    */
   addFact(agentId: string, content: string, opts?: {
     scope?: 'agent' | 'session' | 'user';
     domain?: string;
     confidence?: number;
-    sourceConversationId?: number;
-    sourceMessageId?: number;
+    visibility?: string;
+    sourceType?: string;
+    sourceSessionKey?: string;
+    sourceRef?: string;
   }): unknown {
-    const db = this.dbManager.getAgentDb(agentId);
+    const db = this.dbManager.getLibraryDb();
     const store = new FactStore(db);
     return store.addFact(agentId, content, opts);
   }
@@ -355,13 +366,15 @@ export class HyperMem {
     limit?: number;
     minConfidence?: number;
   }): unknown[] {
-    const db = this.dbManager.getAgentDb(agentId);
+    const db = this.dbManager.getLibraryDb();
     const store = new FactStore(db);
     return store.getActiveFacts(agentId, opts);
   }
 
+  // ─── Knowledge (L4: Library) ────────────────────────────────
+
   /**
-   * Add/update knowledge for an agent.
+   * Add/update knowledge.
    */
   upsertKnowledge(agentId: string, domain: string, key: string, content: string, opts?: {
     confidence?: number;
@@ -369,7 +382,7 @@ export class HyperMem {
     sourceRef?: string;
     expiresAt?: string;
   }): unknown {
-    const db = this.dbManager.getAgentDb(agentId);
+    const db = this.dbManager.getLibraryDb();
     const store = new KnowledgeStore(db);
     return store.upsert(agentId, domain, key, content, opts);
   }
@@ -378,16 +391,18 @@ export class HyperMem {
    * Get active knowledge, optionally filtered by domain.
    */
   getKnowledge(agentId: string, opts?: { domain?: string; limit?: number }): unknown[] {
-    const db = this.dbManager.getAgentDb(agentId);
+    const db = this.dbManager.getLibraryDb();
     const store = new KnowledgeStore(db);
     return store.getActive(agentId, opts);
   }
 
+  // ─── Topics (L4: Library) ───────────────────────────────────
+
   /**
-   * Create a topic for an agent.
+   * Create a topic.
    */
   createTopic(agentId: string, name: string, description?: string): unknown {
-    const db = this.dbManager.getAgentDb(agentId);
+    const db = this.dbManager.getLibraryDb();
     const store = new TopicStore(db);
     return store.create(agentId, name, description);
   }
@@ -396,22 +411,23 @@ export class HyperMem {
    * Get active topics.
    */
   getActiveTopics(agentId: string, limit: number = 20): unknown[] {
-    const db = this.dbManager.getAgentDb(agentId);
+    const db = this.dbManager.getLibraryDb();
     const store = new TopicStore(db);
     return store.getActive(agentId, limit);
   }
 
+  // ─── Episodes (L4: Library) ─────────────────────────────────
+
   /**
-   * Record an episode (significant event).
+   * Record an episode.
    */
   recordEpisode(agentId: string, eventType: string, summary: string, opts?: {
     significance?: number;
+    visibility?: string;
     participants?: string[];
-    conversationId?: number;
-    messageRangeStart?: number;
-    messageRangeEnd?: number;
+    sessionKey?: string;
   }): unknown {
-    const db = this.dbManager.getAgentDb(agentId);
+    const db = this.dbManager.getLibraryDb();
     const store = new EpisodeStore(db);
     return store.record(agentId, eventType as import('./types.js').EpisodeType, summary, opts);
   }
@@ -425,88 +441,203 @@ export class HyperMem {
     limit?: number;
     since?: string;
   }): unknown[] {
-    const db = this.dbManager.getAgentDb(agentId);
+    const db = this.dbManager.getLibraryDb();
     const store = new EpisodeStore(db);
     return store.getRecent(agentId, opts as Parameters<typeof store.getRecent>[1]);
   }
 
-  // ─── Cross-Agent Access ────────────────────────────────────────
-
-  private orgRegistry: OrgRegistry = defaultOrgRegistry();
+  // ─── Preferences (L4: Library) ──────────────────────────────
 
   /**
-   * Override the org registry (for custom fleet configurations).
+   * Set a preference.
    */
-  setOrgRegistry(registry: OrgRegistry): void {
-    this.orgRegistry = registry;
-  }
-
-  /**
-   * Query another agent's memory with visibility-scoped access control.
-   *
-   * What you CAN read:
-   * - fleet-visible facts, knowledge, episodes from any agent
-   * - council-visible data if you're a council seat
-   * - org-visible data if you're in the same org
-   * - Everything from yourself
-   *
-   * What you CANNOT read (ever, regardless of visibility):
-   * - Raw conversation messages (always private)
-   * - Identity-domain facts/knowledge (hardcoded exclusion)
-   * - Session-scoped facts (ephemeral, meaningless cross-agent)
-   */
-  queryAgent(requesterId: string, targetAgentId: string, opts?: {
-    query?: string;
+  setPreference(subject: string, key: string, value: string, opts?: {
     domain?: string;
-    memoryType?: 'facts' | 'knowledge' | 'topics' | 'episodes' | 'messages';
-    limit?: number;
-  }): unknown[] {
-    return crossAgentQuery(this.dbManager, {
-      requesterId,
-      targetAgentId,
-      query: opts?.query,
-      domain: opts?.domain,
-      memoryType: opts?.memoryType,
-      limit: opts?.limit,
-    }, this.orgRegistry);
+    agentId?: string;
+    confidence?: number;
+    visibility?: string;
+  }): Preference {
+    const db = this.dbManager.getLibraryDb();
+    const store = new PreferenceStore(db);
+    return store.set(subject, key, value, opts);
   }
 
   /**
-   * Query ALL agents that the requester has access to, aggregating results.
-   * Useful for "what does the fleet know about X?" queries.
+   * Get a preference.
    */
-  queryFleet(requesterId: string, opts?: {
-    query?: string;
-    domain?: string;
-    memoryType?: 'facts' | 'knowledge' | 'topics' | 'episodes';
-    limit?: number;
-  }): unknown[] {
-    const allAgents = this.dbManager.listAgents();
-    const results: unknown[] = [];
-    const perAgentLimit = Math.max(3, Math.ceil((opts?.limit || 20) / allAgents.length));
-
-    for (const agentId of allAgents) {
-      try {
-        const agentResults = this.queryAgent(requesterId, agentId, {
-          ...opts,
-          limit: perAgentLimit,
-        });
-        results.push(...agentResults);
-      } catch {
-        // Agent DB might not exist or be corrupted — skip
-      }
-    }
-
-    // Sort by relevance (confidence for facts/knowledge, significance for episodes)
-    return results.slice(0, opts?.limit || 20);
+  getPreference(subject: string, key: string, domain?: string): Preference | null {
+    const db = this.dbManager.getLibraryDb();
+    const store = new PreferenceStore(db);
+    return store.get(subject, key, domain);
   }
 
-  // ─── Vector / Semantic Search ────────────────────────────────
+  /**
+   * Get all preferences for a subject.
+   */
+  getPreferences(subject: string, domain?: string): Preference[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new PreferenceStore(db);
+    return store.getForSubject(subject, domain);
+  }
+
+  // ─── Fleet Registry (L4: Library) ───────────────────────────
+
+  /**
+   * Register or update a fleet agent.
+   */
+  upsertFleetAgent(id: string, data: {
+    displayName?: string;
+    tier?: string;
+    orgId?: string;
+    reportsTo?: string;
+    domains?: string[];
+    sessionKeys?: string[];
+    status?: string;
+    metadata?: Record<string, unknown>;
+  }): FleetAgent {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.upsertAgent(id, data);
+  }
+
+  /**
+   * Get a fleet agent.
+   */
+  getFleetAgent(id: string): FleetAgent | null {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.getAgent(id);
+  }
+
+  /**
+   * List fleet agents.
+   */
+  listFleetAgents(opts?: { tier?: string; orgId?: string; status?: string }): FleetAgent[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.listAgents(opts);
+  }
+
+  /**
+   * Register or update a fleet org.
+   */
+  upsertFleetOrg(id: string, data: { name: string; leadAgentId?: string; mission?: string }): FleetOrg {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.upsertOrg(id, data);
+  }
+
+  /**
+   * List fleet orgs.
+   */
+  listFleetOrgs(): FleetOrg[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.listOrgs();
+  }
+
+  // ─── System Registry (L4: Library) ──────────────────────────
+
+  /**
+   * Set a system state value.
+   */
+  setSystemState(category: string, key: string, value: unknown, opts?: {
+    updatedBy?: string;
+    ttl?: string;
+  }): SystemState {
+    const db = this.dbManager.getLibraryDb();
+    const store = new SystemStore(db);
+    return store.set(category, key, value, opts);
+  }
+
+  /**
+   * Get a system state value.
+   */
+  getSystemState(category: string, key: string): SystemState | null {
+    const db = this.dbManager.getLibraryDb();
+    const store = new SystemStore(db);
+    return store.get(category, key);
+  }
+
+  /**
+   * Get all state in a category.
+   */
+  getSystemCategory(category: string): SystemState[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new SystemStore(db);
+    return store.getCategory(category);
+  }
+
+  // ─── Work Items (L4: Library) ───────────────────────────────
+
+  /**
+   * Create a work item.
+   */
+  createWorkItem(data: {
+    title: string;
+    description?: string;
+    priority?: number;
+    agentId?: string;
+    createdBy: string;
+    domain?: string;
+    parentId?: string;
+    dueAt?: string;
+    metadata?: Record<string, unknown>;
+  }): WorkItem {
+    const db = this.dbManager.getLibraryDb();
+    const store = new WorkStore(db);
+    return store.create(data);
+  }
+
+  /**
+   * Update work item status.
+   */
+  updateWorkStatus(id: string, status: WorkStatus, agentId?: string, comment?: string): WorkItem | null {
+    const db = this.dbManager.getLibraryDb();
+    const store = new WorkStore(db);
+    return store.updateStatus(id, status, agentId, comment);
+  }
+
+  /**
+   * Get active work for an agent.
+   */
+  getAgentWork(agentId: string, status?: WorkStatus): WorkItem[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new WorkStore(db);
+    return store.getAgentWork(agentId, status);
+  }
+
+  /**
+   * Get the fleet kanban board.
+   */
+  getFleetKanban(opts?: { domain?: string; agentId?: string }): WorkItem[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new WorkStore(db);
+    return store.getKanban(opts);
+  }
+
+  /**
+   * Get work item stats.
+   */
+  getWorkStats(opts?: { agentId?: string; since?: string }): unknown {
+    const db = this.dbManager.getLibraryDb();
+    const store = new WorkStore(db);
+    return store.getStats(opts);
+  }
+
+  /**
+   * Get blocked work items.
+   */
+  getBlockedWork(): WorkItem[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new WorkStore(db);
+    return store.getBlocked();
+  }
+
+  // ─── Vector / Semantic Search (L3: Vectors DB) ──────────────
 
   /**
    * Semantic search across an agent's indexed memory.
-   * Uses sqlite-vec for KNN vector search with Ollama embeddings.
-   * Falls back gracefully if sqlite-vec is not available.
    */
   async semanticSearch(
     agentId: string,
@@ -517,53 +648,54 @@ export class HyperMem {
       maxDistance?: number;
     }
   ): Promise<VectorSearchResult[]> {
-    if (!this.dbManager.vecAvailable) {
+    const db = this.dbManager.getVectorDb(agentId);
+    if (!db) {
       console.warn('[hypermem] Semantic search unavailable — sqlite-vec not loaded');
       return [];
     }
-    const db = this.dbManager.getAgentDb(agentId);
-    const vs = new VectorStore(db, this.config.embedding);
+    const libraryDb = this.dbManager.getLibraryDb();
+    const vs = new VectorStore(db, this.config.embedding, libraryDb);
     return vs.search(query, opts);
   }
 
   /**
    * Index all un-indexed content for an agent.
-   * Called by the background indexer or manually.
    */
   async indexAgent(agentId: string): Promise<{ indexed: number; skipped: number }> {
-    if (!this.dbManager.vecAvailable) {
-      return { indexed: 0, skipped: 0 };
-    }
-    const db = this.dbManager.getAgentDb(agentId);
-    const vs = new VectorStore(db, this.config.embedding);
+    const db = this.dbManager.getVectorDb(agentId);
+    if (!db) return { indexed: 0, skipped: 0 };
+    const libraryDb = this.dbManager.getLibraryDb();
+    const vs = new VectorStore(db, this.config.embedding, libraryDb);
     vs.ensureTables();
     return vs.indexAll(agentId);
   }
 
   /**
-   * Get vector index statistics for an agent.
+   * Get vector index statistics.
    */
   getVectorStats(agentId: string): VectorIndexStats | null {
-    if (!this.dbManager.vecAvailable) return null;
-    const db = this.dbManager.getAgentDb(agentId);
-    const vs = new VectorStore(db, this.config.embedding);
+    const db = this.dbManager.getVectorDb(agentId);
+    if (!db) return null;
+    const libraryDb = this.dbManager.getLibraryDb();
+    const vs = new VectorStore(db, this.config.embedding, libraryDb);
     return vs.getStats();
   }
 
   /**
-   * Prune orphaned vector entries (source row deleted but vector remains).
+   * Prune orphaned vector entries.
    */
   pruneVectorOrphans(agentId: string): number {
-    if (!this.dbManager.vecAvailable) return 0;
-    const db = this.dbManager.getAgentDb(agentId);
-    const vs = new VectorStore(db, this.config.embedding);
+    const db = this.dbManager.getVectorDb(agentId);
+    if (!db) return 0;
+    const libraryDb = this.dbManager.getLibraryDb();
+    const vs = new VectorStore(db, this.config.embedding, libraryDb);
     return vs.pruneOrphans();
   }
 
-  // ─── Session Registry (Library) ────────────────────────────
+  // ─── Session Registry (L4: Library) ─────────────────────────
 
   /**
-   * Register a session start in the fleet-wide session registry.
+   * Register a session start.
    */
   registerSession(sessionKey: string, agentId: string, opts?: {
     channel?: string;
@@ -572,7 +704,6 @@ export class HyperMem {
     const db = this.dbManager.getLibraryDb();
     const now = new Date().toISOString();
 
-    // Upsert — session might restart
     const existing = db
       .prepare('SELECT id FROM session_registry WHERE id = ?')
       .get(sessionKey) as { id: string } | undefined;
@@ -587,14 +718,13 @@ export class HyperMem {
       ).run(sessionKey, agentId, opts?.channel || null, opts?.channelType || null, now);
     }
 
-    // Record start event
     db.prepare(
       'INSERT INTO session_events (session_id, event_type, timestamp, payload) VALUES (?, ?, ?, ?)'
     ).run(sessionKey, 'start', now, JSON.stringify({ channel: opts?.channel, channelType: opts?.channelType }));
   }
 
   /**
-   * Record a session event (compaction, decision, handoff, etc).
+   * Record a session event.
    */
   recordSessionEvent(sessionKey: string, eventType: string, payload?: Record<string, unknown>): void {
     const db = this.dbManager.getLibraryDb();
@@ -602,7 +732,6 @@ export class HyperMem {
       'INSERT INTO session_events (session_id, event_type, timestamp, payload) VALUES (?, ?, ?, ?)'
     ).run(sessionKey, eventType, new Date().toISOString(), payload ? JSON.stringify(payload) : null);
 
-    // Update counts based on event type
     if (eventType === 'decision') {
       db.prepare('UPDATE session_registry SET decisions_made = decisions_made + 1 WHERE id = ?').run(sessionKey);
     } else if (eventType === 'fact_extracted') {
@@ -611,7 +740,7 @@ export class HyperMem {
   }
 
   /**
-   * Close a session in the registry.
+   * Close a session.
    */
   closeSession(sessionKey: string, summary?: string): void {
     const db = this.dbManager.getLibraryDb();
@@ -627,7 +756,7 @@ export class HyperMem {
   }
 
   /**
-   * Query the session registry.
+   * Query sessions.
    */
   querySessions(opts?: {
     agentId?: string;
@@ -639,29 +768,18 @@ export class HyperMem {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
 
-    if (opts?.agentId) {
-      conditions.push('agent_id = ?');
-      params.push(opts.agentId);
-    }
-    if (opts?.status) {
-      conditions.push('status = ?');
-      params.push(opts.status);
-    }
-    if (opts?.since) {
-      conditions.push('started_at >= ?');
-      params.push(opts.since);
-    }
+    if (opts?.agentId) { conditions.push('agent_id = ?'); params.push(opts.agentId); }
+    if (opts?.status) { conditions.push('status = ?'); params.push(opts.status); }
+    if (opts?.since) { conditions.push('started_at >= ?'); params.push(opts.since); }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limit = opts?.limit || 50;
-
     return db
       .prepare(`SELECT * FROM session_registry ${where} ORDER BY started_at DESC LIMIT ?`)
-      .all(...params, limit);
+      .all(...params, opts?.limit || 50);
   }
 
   /**
-   * Get events for a specific session.
+   * Get session events.
    */
   getSessionEvents(sessionKey: string, limit: number = 50): unknown[] {
     const db = this.dbManager.getLibraryDb();
@@ -670,10 +788,68 @@ export class HyperMem {
       .all(sessionKey, limit);
   }
 
+  // ─── Cross-Agent Queries ─────────────────────────────────────
+
+  /**
+   * Query another agent's memory with visibility-scoped access.
+   */
+  queryAgent(
+    requesterId: string,
+    targetAgentId: string,
+    opts?: {
+      memoryType?: 'facts' | 'knowledge' | 'topics' | 'episodes' | 'messages';
+      domain?: string;
+      limit?: number;
+    },
+    registry?: OrgRegistry
+  ): unknown[] {
+    return crossAgentQuery(this.dbManager, {
+      requesterId,
+      targetAgentId,
+      memoryType: opts?.memoryType || 'facts',
+      domain: opts?.domain,
+      limit: opts?.limit,
+    }, registry || defaultOrgRegistry());
+  }
+
+  /**
+   * Query fleet-wide visible memory.
+   */
+  queryFleet(
+    requesterId: string,
+    opts?: {
+      memoryType?: 'facts' | 'knowledge' | 'topics' | 'episodes';
+      domain?: string;
+      limit?: number;
+    },
+    registry?: OrgRegistry
+  ): unknown[] {
+    const reg = registry || defaultOrgRegistry();
+    const results: unknown[] = [];
+
+    // Query all agents from the fleet registry
+    const libraryDb = this.dbManager.getLibraryDb();
+    const agents = libraryDb
+      .prepare("SELECT id FROM fleet_agents WHERE status = 'active'")
+      .all() as Array<{ id: string }>;
+
+    for (const agent of agents) {
+      if (agent.id === requesterId) continue;
+      try {
+        const agentResults = this.queryAgent(requesterId, agent.id, opts, reg);
+        results.push(...agentResults);
+      } catch {
+        // Skip agents we can't query (not in registry)
+      }
+    }
+
+    return results;
+  }
+
   // ─── Lifecycle ───────────────────────────────────────────────
 
   /**
-   * Clean shutdown: close all databases and Redis connection.
+   * Clean shutdown.
    */
   async close(): Promise<void> {
     await this.redis.disconnect();

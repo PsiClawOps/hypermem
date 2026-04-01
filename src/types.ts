@@ -129,12 +129,14 @@ export interface Fact {
   domain: string | null;
   content: string;
   confidence: number;
-  sourceConversationId: number | null;
-  sourceMessageId: number | null;
-  contradictsFactId: number | null;
+  visibility: string;
+  sourceType: string;
+  sourceSessionKey: string | null;
+  sourceRef: string | null;
   createdAt: string;
   updatedAt: string;
   expiresAt: string | null;
+  supersededBy: number | null;
   decayScore: number;
 }
 
@@ -148,8 +150,8 @@ export interface Topic {
   name: string;
   description: string | null;
   status: TopicStatus;
-  lastConversationId: number | null;
-  lastMessageId: number | null;
+  visibility: string;
+  lastSessionKey: string | null;
   messageCount: number;
   createdAt: string;
   updatedAt: string;
@@ -182,10 +184,9 @@ export interface Episode {
   eventType: EpisodeType;
   summary: string;
   significance: number;
+  visibility: string;
   participants: string[] | null;
-  conversationId: number | null;
-  messageRangeStart: number | null;
-  messageRangeEnd: number | null;
+  sessionKey: string | null;
   createdAt: string;
   decayScore: number;
 }

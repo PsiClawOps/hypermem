@@ -113,17 +113,20 @@ function vecToBytes(vec: Float32Array): Uint8Array {
 }
 
 /**
- * VectorStore — manages vector indexes in an agent's SQLite database.
+ * VectorStore — manages vector indexes in an agent's vector database.
  *
- * Creates vec0 virtual tables alongside existing content tables.
- * Provides KNN search with optional domain/type filtering.
+ * The vector DB (vectors.db) stores vec0 virtual tables and the index map.
+ * Source content (facts, knowledge, episodes) lives in the library DB.
+ * The VectorStore needs both: vectorDb for indexes, libraryDb for content.
  */
 export class VectorStore {
-  private readonly db: DatabaseSync;
+  private readonly db: DatabaseSync;       // vectors.db
+  private readonly libraryDb: DatabaseSync | null;  // library.db for source content
   private readonly config: EmbeddingConfig;
 
-  constructor(db: DatabaseSync, config?: Partial<EmbeddingConfig>) {
+  constructor(db: DatabaseSync, config?: Partial<EmbeddingConfig>, libraryDb?: DatabaseSync) {
     this.db = db;
+    this.libraryDb = libraryDb || null;
     this.config = { ...DEFAULT_EMBEDDING_CONFIG, ...config };
   }
 
@@ -379,15 +382,19 @@ export class VectorStore {
     table: string,
     id: number
   ): { content: string; domain?: string; agentId?: string; metadata?: string } | null {
+    // Source content lives in the library DB (facts, knowledge, episodes)
+    // or in the vector DB itself (if old schema). Try library first.
+    const sourceDb = this.libraryDb || this.db;
+
     switch (table) {
       case 'facts': {
-        const row = this.db
+        const row = sourceDb
           .prepare('SELECT content, domain, agent_id FROM facts WHERE id = ?')
           .get(id) as { content: string; domain: string; agent_id: string } | undefined;
         return row ? { content: row.content, domain: row.domain, agentId: row.agent_id } : null;
       }
       case 'knowledge': {
-        const row = this.db
+        const row = sourceDb
           .prepare('SELECT content, domain, agent_id, key FROM knowledge WHERE id = ?')
           .get(id) as { content: string; domain: string; agent_id: string; key: string } | undefined;
         return row
@@ -395,7 +402,7 @@ export class VectorStore {
           : null;
       }
       case 'episodes': {
-        const row = this.db
+        const row = sourceDb
           .prepare('SELECT summary, event_type, agent_id, participants FROM episodes WHERE id = ?')
           .get(id) as {
           summary: string;
@@ -423,53 +430,59 @@ export class VectorStore {
    */
   async indexAll(agentId: string): Promise<{ indexed: number; skipped: number }> {
     const items: Array<{ sourceTable: string; sourceId: number; content: string }> = [];
+    const sourceDb = this.libraryDb || this.db;
 
     // Count already-indexed items for accurate skip reporting
     const alreadyIndexed = (this.db
       .prepare('SELECT COUNT(*) as cnt FROM vec_index_map')
       .get() as { cnt: number }).cnt;
 
-    // Collect un-indexed facts
-    const facts = this.db
-      .prepare(
-        `SELECT f.id, f.content, f.domain 
-         FROM facts f 
-         LEFT JOIN vec_index_map m ON m.source_table = 'facts' AND m.source_id = f.id 
-         WHERE f.agent_id = ? AND m.id IS NULL`
-      )
+    // Get IDs already indexed (in vector DB)
+    const indexedFacts = new Set(
+      (this.db.prepare("SELECT source_id FROM vec_index_map WHERE source_table = 'facts'")
+        .all() as Array<{ source_id: number }>).map(r => r.source_id)
+    );
+    const indexedKnowledge = new Set(
+      (this.db.prepare("SELECT source_id FROM vec_index_map WHERE source_table = 'knowledge'")
+        .all() as Array<{ source_id: number }>).map(r => r.source_id)
+    );
+    const indexedEpisodes = new Set(
+      (this.db.prepare("SELECT source_id FROM vec_index_map WHERE source_table = 'episodes'")
+        .all() as Array<{ source_id: number }>).map(r => r.source_id)
+    );
+
+    // Collect un-indexed facts from library DB
+    const facts = sourceDb
+      .prepare('SELECT id, content, domain FROM facts WHERE agent_id = ? AND superseded_by IS NULL')
       .all(agentId) as Array<{ id: number; content: string; domain: string }>;
     for (const f of facts) {
-      items.push({ sourceTable: 'facts', sourceId: f.id, content: f.content });
+      if (!indexedFacts.has(f.id)) {
+        items.push({ sourceTable: 'facts', sourceId: f.id, content: f.content });
+      }
     }
 
-    // Collect un-indexed knowledge
-    const knowledge = this.db
-      .prepare(
-        `SELECT k.id, k.content, k.domain, k.key 
-         FROM knowledge k 
-         LEFT JOIN vec_index_map m ON m.source_table = 'knowledge' AND m.source_id = k.id 
-         WHERE k.agent_id = ? AND k.superseded_by IS NULL AND m.id IS NULL`
-      )
+    // Collect un-indexed knowledge from library DB
+    const knowledge = sourceDb
+      .prepare('SELECT id, content, domain, key FROM knowledge WHERE agent_id = ? AND superseded_by IS NULL')
       .all(agentId) as Array<{ id: number; content: string; domain: string; key: string }>;
     for (const k of knowledge) {
-      items.push({
-        sourceTable: 'knowledge',
-        sourceId: k.id,
-        content: `${k.key}: ${k.content}`,
-      });
+      if (!indexedKnowledge.has(k.id)) {
+        items.push({
+          sourceTable: 'knowledge',
+          sourceId: k.id,
+          content: `${k.key}: ${k.content}`,
+        });
+      }
     }
 
-    // Collect un-indexed episodes
-    const episodes = this.db
-      .prepare(
-        `SELECT e.id, e.summary, e.event_type 
-         FROM episodes e 
-         LEFT JOIN vec_index_map m ON m.source_table = 'episodes' AND m.source_id = e.id 
-         WHERE e.agent_id = ? AND m.id IS NULL`
-      )
+    // Collect un-indexed episodes from library DB
+    const episodes = sourceDb
+      .prepare('SELECT id, summary, event_type FROM episodes WHERE agent_id = ?')
       .all(agentId) as Array<{ id: number; summary: string; event_type: string }>;
     for (const e of episodes) {
-      items.push({ sourceTable: 'episodes', sourceId: e.id, content: e.summary });
+      if (!indexedEpisodes.has(e.id)) {
+        items.push({ sourceTable: 'episodes', sourceId: e.id, content: e.summary });
+      }
     }
 
     if (items.length === 0) {
@@ -485,21 +498,25 @@ export class VectorStore {
    */
   pruneOrphans(): number {
     let pruned = 0;
+    const sourceDb = this.libraryDb || this.db;
 
     for (const table of ['facts', 'knowledge', 'episodes']) {
-      const orphans = this.db
-        .prepare(
-          `SELECT m.id, m.vec_table 
-           FROM vec_index_map m 
-           LEFT JOIN ${table} t ON t.id = m.source_id 
-           WHERE m.source_table = ? AND t.id IS NULL`
-        )
-        .all(table) as Array<{ id: number; vec_table: string }>;
+      // Get all indexed IDs for this table
+      const indexed = this.db
+        .prepare('SELECT id, vec_table, source_id FROM vec_index_map WHERE source_table = ?')
+        .all(table) as Array<{ id: number; vec_table: string; source_id: number }>;
 
-      for (const orphan of orphans) {
-        this.db.prepare(`DELETE FROM ${orphan.vec_table} WHERE rowid = CAST(? AS INTEGER)`).run(orphan.id);
-        this.db.prepare('DELETE FROM vec_index_map WHERE id = ?').run(orphan.id);
-        pruned++;
+      for (const entry of indexed) {
+        // Check if source still exists in library DB
+        const exists = sourceDb
+          .prepare(`SELECT 1 FROM ${table} WHERE id = ?`)
+          .get(entry.source_id);
+
+        if (!exists) {
+          this.db.prepare(`DELETE FROM ${entry.vec_table} WHERE rowid = CAST(? AS INTEGER)`).run(entry.id);
+          this.db.prepare('DELETE FROM vec_index_map WHERE id = ?').run(entry.id);
+          pruned++;
+        }
       }
     }
 

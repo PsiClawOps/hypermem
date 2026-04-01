@@ -1,33 +1,37 @@
 /**
- * HyperMem SQLite Schema — Agent Database
+ * HyperMem Agent Message Schema
  *
- * One database per agent: ~/.openclaw/hypermem/{agentId}.db
- * Provider-neutral message storage with structured fields.
- * Agent-centric: conversations are a dimension, not the root entity.
+ * Per-agent database: ~/.openclaw/hypermem/agents/{agentId}/messages.db
+ * Write-heavy, temporal, rotatable.
+ * Contains ONLY conversation data — structured knowledge lives in library.db.
  */
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LATEST_SCHEMA_VERSION = 3;
+export const LATEST_SCHEMA_VERSION = 4;
 
 function nowIso(): string {
   return new Date().toISOString();
 }
 
 /**
- * Apply the complete HyperMem v1 schema.
- * Designed as a single migration for clean installs.
- * Future versions add incremental migrations.
+ * V1–V3: Legacy schema (monolithic agent DB with facts/knowledge/episodes).
+ * Kept for migration detection — if we open an old DB, we know what version it is.
  */
-function applyV1Schema(db: DatabaseSync): void {
-  // -- Agent registry --
+
+/**
+ * V4: Messages-only schema.
+ * Facts, knowledge, episodes, topics moved to library.db.
+ * Agent DB now contains only conversations, messages, summaries, and agent metadata.
+ */
+function applyV4MessagesOnly(db: DatabaseSync): void {
+  // -- Agent metadata (kept here for self-identification) --
   db.exec(`
-    CREATE TABLE IF NOT EXISTS agents (
+    CREATE TABLE IF NOT EXISTS agent_meta (
       id TEXT PRIMARY KEY,
       display_name TEXT,
       tier TEXT,
       org TEXT,
-      profile TEXT,
       config TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -40,7 +44,7 @@ function applyV1Schema(db: DatabaseSync): void {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_key TEXT NOT NULL UNIQUE,
       session_id TEXT,
-      agent_id TEXT NOT NULL REFERENCES agents(id),
+      agent_id TEXT NOT NULL,
       channel_type TEXT NOT NULL,
       channel_id TEXT,
       provider TEXT,
@@ -54,8 +58,8 @@ function applyV1Schema(db: DatabaseSync): void {
       ended_at TEXT
     )
   `);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_conversations_agent ON conversations(agent_id, status, updated_at DESC)');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(agent_id, channel_type, channel_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_conv_agent ON conversations(agent_id, status, updated_at DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_conv_channel ON conversations(agent_id, channel_type, channel_id)');
 
   // -- Messages (provider-neutral, structured) --
   db.exec(`
@@ -74,8 +78,8 @@ function applyV1Schema(db: DatabaseSync): void {
       created_at TEXT NOT NULL
     )
   `);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, message_index)');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_messages_agent_time ON messages(agent_id, created_at DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id, message_index)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_msg_agent_time ON messages(agent_id, created_at DESC)');
 
   // -- FTS5 for message full-text search --
   db.exec(`
@@ -85,127 +89,24 @@ function applyV1Schema(db: DatabaseSync): void {
       content_rowid='id'
     )
   `);
-
-  // -- Triggers to keep FTS in sync --
   db.exec(`
-    CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    CREATE TRIGGER IF NOT EXISTS msg_fts_ai AFTER INSERT ON messages BEGIN
       INSERT INTO messages_fts(rowid, text_content) VALUES (new.id, new.text_content);
     END
   `);
   db.exec(`
-    CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    CREATE TRIGGER IF NOT EXISTS msg_fts_ad AFTER DELETE ON messages BEGIN
       INSERT INTO messages_fts(messages_fts, rowid, text_content) VALUES('delete', old.id, old.text_content);
     END
   `);
   db.exec(`
-    CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+    CREATE TRIGGER IF NOT EXISTS msg_fts_au AFTER UPDATE ON messages BEGIN
       INSERT INTO messages_fts(messages_fts, rowid, text_content) VALUES('delete', old.id, old.text_content);
       INSERT INTO messages_fts(rowid, text_content) VALUES (new.id, new.text_content);
     END
   `);
 
-  // -- Facts (cross-session extracted knowledge) --
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS facts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      agent_id TEXT NOT NULL,
-      scope TEXT NOT NULL,
-      domain TEXT,
-      content TEXT NOT NULL,
-      confidence REAL DEFAULT 1.0,
-      visibility TEXT NOT NULL DEFAULT 'private',
-      source_conversation_id INTEGER REFERENCES conversations(id),
-      source_message_id INTEGER REFERENCES messages(id),
-      contradicts_fact_id INTEGER,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      expires_at TEXT,
-      decay_score REAL DEFAULT 0.0
-    )
-  `);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_facts_agent_scope ON facts(agent_id, scope, domain)');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(agent_id, decay_score, confidence DESC)');
-
-  // -- Topics (cross-session thread tracking) --
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS topics (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      agent_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      description TEXT,
-      status TEXT DEFAULT 'active',
-      last_conversation_id INTEGER REFERENCES conversations(id),
-      last_message_id INTEGER REFERENCES messages(id),
-      message_count INTEGER DEFAULT 0,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )
-  `);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_topics_agent_status ON topics(agent_id, status, updated_at DESC)');
-
-  // -- Topic-message junction --
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS topic_messages (
-      topic_id INTEGER NOT NULL REFERENCES topics(id),
-      message_id INTEGER NOT NULL REFERENCES messages(id),
-      conversation_id INTEGER NOT NULL REFERENCES conversations(id),
-      relevance REAL DEFAULT 1.0,
-      PRIMARY KEY (topic_id, message_id)
-    )
-  `);
-
-  // -- Knowledge (long-term, replaces MEMORY.md) --
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS knowledge (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      agent_id TEXT NOT NULL,
-      domain TEXT NOT NULL,
-      key TEXT NOT NULL,
-      content TEXT NOT NULL,
-      confidence REAL DEFAULT 1.0,
-      visibility TEXT NOT NULL DEFAULT 'private',
-      source_type TEXT NOT NULL,
-      source_ref TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      expires_at TEXT,
-      superseded_by INTEGER,
-      UNIQUE(agent_id, domain, key)
-    )
-  `);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_knowledge_agent_domain ON knowledge(agent_id, domain)');
-
-  // -- Knowledge relationships --
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS knowledge_links (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      from_id INTEGER NOT NULL REFERENCES knowledge(id),
-      to_id INTEGER NOT NULL REFERENCES knowledge(id),
-      link_type TEXT NOT NULL,
-      created_at TEXT NOT NULL
-    )
-  `);
-
-  // -- Episodes (significant events) --
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS episodes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      agent_id TEXT NOT NULL,
-      event_type TEXT NOT NULL,
-      summary TEXT NOT NULL,
-      significance REAL NOT NULL,
-      visibility TEXT NOT NULL DEFAULT 'org',
-      participants TEXT,
-      conversation_id INTEGER REFERENCES conversations(id),
-      message_range_start INTEGER,
-      message_range_end INTEGER,
-      created_at TEXT NOT NULL,
-      decay_score REAL DEFAULT 0.0
-    )
-  `);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_agent ON episodes(agent_id, significance DESC, created_at DESC)');
-
-  // -- Summaries (hierarchical, carried from ClawText) --
+  // -- Summaries (hierarchical compaction) --
   db.exec(`
     CREATE TABLE IF NOT EXISTS summaries (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -218,7 +119,7 @@ function applyV1Schema(db: DatabaseSync): void {
       updated_at TEXT NOT NULL
     )
   `);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_summaries_conversation ON summaries(conversation_id, depth)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_summaries_conv ON summaries(conversation_id, depth)');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS summary_messages (
@@ -236,22 +137,7 @@ function applyV1Schema(db: DatabaseSync): void {
     )
   `);
 
-  // -- Agent state snapshots --
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agent_snapshots (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      agent_id TEXT NOT NULL,
-      snapshot_type TEXT NOT NULL,
-      active_topics TEXT,
-      active_work TEXT,
-      profile_hash TEXT,
-      knowledge_count INTEGER,
-      fact_count INTEGER,
-      created_at TEXT NOT NULL
-    )
-  `);
-
-  // -- Index events (indexer audit trail) --
+  // -- Index events (for tracking what's been vectorized) --
   db.exec(`
     CREATE TABLE IF NOT EXISTS index_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -263,14 +149,13 @@ function applyV1Schema(db: DatabaseSync): void {
       created_at TEXT NOT NULL
     )
   `);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_index_events_agent ON index_events(agent_id, created_at DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_index_events ON index_events(agent_id, created_at DESC)');
 }
 
 /**
- * Run all pending migrations on an agent database.
+ * Run migrations on an agent message database.
  */
 export function migrate(db: DatabaseSync): void {
-  // Ensure schema_version table exists
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
       version INTEGER PRIMARY KEY,
@@ -291,93 +176,24 @@ export function migrate(db: DatabaseSync): void {
     return;
   }
 
-  if (currentVersion < 1) {
-    applyV1Schema(db);
-    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
-      .run(1, nowIso());
-  }
-
-  if (currentVersion < 2) {
-    applyV2Visibility(db);
-    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
-      .run(2, nowIso());
-  }
-
-  if (currentVersion < 3) {
-    applyV3VectorSearch(db);
-    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
-      .run(3, nowIso());
-  }
-
-  // Future migrations go here:
-  // if (currentVersion < 4) { ... }
-}
-
-/**
- * V2: Add visibility column to facts, knowledge, episodes.
- * Supports cross-agent memory access with scoped permissions.
- */
-function applyV2Visibility(db: DatabaseSync): void {
-  // Add visibility columns (safe: ALTER TABLE ADD is idempotent-ish in practice,
-  // but we guard with try/catch since SQLite doesn't have IF NOT EXISTS for columns)
-  const addCol = (table: string, defaultVal: string) => {
-    try {
-      db.exec(`ALTER TABLE ${table} ADD COLUMN visibility TEXT NOT NULL DEFAULT '${defaultVal}'`);
-    } catch {
-      // Column already exists (from fresh v2 schema) — safe to ignore
+  // For fresh DBs (version 0), jump straight to v4 (messages-only).
+  // For existing DBs (v1–v3), we skip the old schema — those tables will be
+  // left in place but unused. Data migration to library is a separate step.
+  if (currentVersion < 4) {
+    if (currentVersion === 0) {
+      // Fresh DB — create messages-only schema directly
+      applyV4MessagesOnly(db);
+    } else {
+      // Existing DB with old schema (v1–v3).
+      // The old tables (facts, knowledge, episodes, topics, agents) remain
+      // but are no longer written to. New tables get created alongside.
+      applyV4MessagesOnly(db);
+      // Note: old tables like 'facts', 'knowledge', etc. are left in place
+      // for data migration. A separate migration tool will move them to library.db.
     }
-  };
-
-  addCol('facts', 'private');
-  addCol('knowledge', 'private');
-  addCol('episodes', 'org');
-}
-
-/**
- * V3: Vector search tables (sqlite-vec).
- * Creates vec0 virtual tables for semantic KNN search over facts, knowledge, episodes.
- * Requires sqlite-vec extension to be loaded on the connection.
- */
-function applyV3VectorSearch(db: DatabaseSync): void {
-  // Try to load sqlite-vec — if not available, create placeholder tables note
-  try {
-    // vec0 virtual tables for KNN search (768 = nomic-embed-text dimensions)
-    db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts
-      USING vec0(embedding float[768])
-    `);
-    db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS vec_knowledge
-      USING vec0(embedding float[768])
-    `);
-    db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS vec_episodes
-      USING vec0(embedding float[768])
-    `);
-  } catch {
-    // sqlite-vec extension not loaded — skip vec table creation
-    // VectorStore.ensureTables() will retry when the extension is available
-    console.warn('[hypermem] sqlite-vec not available during migration — vector tables deferred');
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(4, nowIso());
   }
-
-  // Mapping table (plain SQLite, always works)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS vec_index_map (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      source_table TEXT NOT NULL,
-      source_id INTEGER NOT NULL,
-      vec_table TEXT NOT NULL,
-      content_hash TEXT NOT NULL,
-      indexed_at TEXT NOT NULL,
-      UNIQUE(source_table, source_id)
-    )
-  `);
-  db.exec(
-    'CREATE INDEX IF NOT EXISTS idx_vec_map_source ON vec_index_map(source_table, source_id)'
-  );
-  db.exec(
-    'CREATE INDEX IF NOT EXISTS idx_vec_map_vec ON vec_index_map(vec_table, id)'
-  );
 }
 
 export { LATEST_SCHEMA_VERSION as SCHEMA_VERSION };

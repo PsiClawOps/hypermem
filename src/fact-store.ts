@@ -2,6 +2,7 @@
  * HyperMem Fact Store
  *
  * CRUD operations for facts (extracted knowledge that spans sessions).
+ * Facts live in the central library DB, tagged by agent_id.
  * Facts have scope (agent/session/user), confidence, and decay.
  */
 
@@ -20,12 +21,14 @@ function parseFactRow(row: Record<string, unknown>): Fact {
     domain: (row.domain as string) || null,
     content: row.content as string,
     confidence: row.confidence as number,
-    sourceConversationId: (row.source_conversation_id as number) || null,
-    sourceMessageId: (row.source_message_id as number) || null,
-    contradictsFactId: (row.contradicts_fact_id as number) || null,
+    visibility: (row.visibility as string) || 'private',
+    sourceType: (row.source_type as string) || 'conversation',
+    sourceSessionKey: (row.source_session_key as string) || null,
+    sourceRef: (row.source_ref as string) || null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     expiresAt: (row.expires_at as string) || null,
+    supersededBy: (row.superseded_by as number) || null,
     decayScore: row.decay_score as number,
   };
 }
@@ -34,7 +37,7 @@ export class FactStore {
   constructor(private readonly db: DatabaseSync) {}
 
   /**
-   * Add a new fact. Checks for duplicates by content similarity.
+   * Add a new fact. Checks for duplicates by content.
    */
   addFact(
     agentId: string,
@@ -43,9 +46,10 @@ export class FactStore {
       scope?: FactScope;
       domain?: string;
       confidence?: number;
-      sourceConversationId?: number;
-      sourceMessageId?: number;
-      contradictsFactId?: number;
+      visibility?: string;
+      sourceType?: string;
+      sourceSessionKey?: string;
+      sourceRef?: string;
       expiresAt?: string;
     }
   ): Fact {
@@ -58,7 +62,6 @@ export class FactStore {
     `).get(agentId, content, scope) as Record<string, unknown> | undefined;
 
     if (existing) {
-      // Update confidence and timestamp instead of creating duplicate
       this.db.prepare(`
         UPDATE facts SET confidence = MAX(confidence, ?), updated_at = ? WHERE id = ?
       `).run(opts?.confidence || 1.0, now, existing.id as number);
@@ -66,33 +69,27 @@ export class FactStore {
       return parseFactRow({ ...existing, updated_at: now });
     }
 
-    // If this fact contradicts another, mark the old one
-    if (opts?.contradictsFactId) {
-      this.db.prepare(`
-        UPDATE facts SET decay_score = 0.9, updated_at = ? WHERE id = ?
-      `).run(now, opts.contradictsFactId);
-    }
-
     const result = this.db.prepare(`
       INSERT INTO facts (agent_id, scope, domain, content, confidence,
-        source_conversation_id, source_message_id, contradicts_fact_id,
+        visibility, source_type, source_session_key, source_ref,
         created_at, updated_at, expires_at, decay_score)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0)
     `).run(
       agentId,
       scope,
       opts?.domain || null,
       content,
       opts?.confidence || 1.0,
-      opts?.sourceConversationId || null,
-      opts?.sourceMessageId || null,
-      opts?.contradictsFactId || null,
+      opts?.visibility || 'private',
+      opts?.sourceType || 'conversation',
+      opts?.sourceSessionKey || null,
+      opts?.sourceRef || null,
       now,
       now,
       opts?.expiresAt || null
     );
 
-    const id = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
+    const id = Number((result as unknown as { lastInsertRowid: bigint }).lastInsertRowid);
 
     return {
       id,
@@ -101,12 +98,14 @@ export class FactStore {
       domain: opts?.domain || null,
       content,
       confidence: opts?.confidence || 1.0,
-      sourceConversationId: opts?.sourceConversationId || null,
-      sourceMessageId: opts?.sourceMessageId || null,
-      contradictsFactId: opts?.contradictsFactId || null,
+      visibility: opts?.visibility || 'private',
+      sourceType: opts?.sourceType || 'conversation',
+      sourceSessionKey: opts?.sourceSessionKey || null,
+      sourceRef: opts?.sourceRef || null,
       createdAt: now,
       updatedAt: now,
       expiresAt: opts?.expiresAt || null,
+      supersededBy: null,
       decayScore: 0,
     };
   }
@@ -126,6 +125,7 @@ export class FactStore {
     let sql = `
       SELECT * FROM facts
       WHERE agent_id = ?
+      AND superseded_by IS NULL
       AND (expires_at IS NULL OR expires_at > datetime('now'))
       AND decay_score < 0.8
     `;
@@ -156,33 +156,51 @@ export class FactStore {
   }
 
   /**
-   * Search facts by content.
+   * Full-text search facts.
    */
-  searchFacts(agentId: string, query: string, limit: number = 10): Fact[] {
-    // Simple LIKE search — FTS could be added later if needed
-    const rows = this.db.prepare(`
-      SELECT * FROM facts
-      WHERE agent_id = ?
-      AND content LIKE ?
-      AND decay_score < 0.8
-      ORDER BY confidence DESC
-      LIMIT ?
-    `).all(agentId, `%${query}%`, limit) as Record<string, unknown>[];
+  searchFacts(query: string, opts?: {
+    agentId?: string;
+    domain?: string;
+    visibility?: string;
+    limit?: number;
+  }): Fact[] {
+    let sql = `
+      SELECT f.* FROM facts f
+      JOIN facts_fts fts ON f.id = fts.rowid
+      WHERE facts_fts MATCH ?
+      AND f.superseded_by IS NULL
+      AND f.decay_score < 0.8
+    `;
+    const params: (string | number)[] = [query];
 
+    if (opts?.agentId) {
+      sql += ' AND f.agent_id = ?';
+      params.push(opts.agentId);
+    }
+    if (opts?.domain) {
+      sql += ' AND f.domain = ?';
+      params.push(opts.domain);
+    }
+    if (opts?.visibility) {
+      sql += ' AND f.visibility = ?';
+      params.push(opts.visibility);
+    }
+
+    sql += ' ORDER BY rank LIMIT ?';
+    params.push(opts?.limit || 20);
+
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
     return rows.map(parseFactRow);
   }
 
   /**
    * Decay all facts by a fixed rate.
-   * Called periodically by the indexer.
    */
   decayFacts(agentId: string, decayRate: number = 0.01): number {
     const result = this.db.prepare(`
       UPDATE facts
-      SET decay_score = MIN(decay_score + ?, 1.0),
-          updated_at = ?
-      WHERE agent_id = ?
-      AND decay_score < 1.0
+      SET decay_score = MIN(decay_score + ?, 1.0), updated_at = ?
+      WHERE agent_id = ? AND decay_score < 1.0
     `).run(decayRate, nowIso(), agentId);
 
     return (result as unknown as { changes: number }).changes;

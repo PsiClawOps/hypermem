@@ -89,12 +89,16 @@ async function run() {
   // ── Setup: populate agent data ──
   console.log('\n── Populating Test Data ──');
   hm.dbManager.ensureAgent('forge', { displayName: 'Forge', tier: 'council' });
-  const db = hm.dbManager.getAgentDb('forge');
 
-  // Check sqlite-vec after first DB open (extension loads lazily)
+  // Check sqlite-vec via getVectorDb (extension loads there, not in message DB)
+  const vecDb = hm.dbManager.getVectorDb('forge');
   assert(hm.dbManager.vecAvailable, 'sqlite-vec loaded successfully');
-  const vecVersion = db.prepare('SELECT vec_version() as v').get();
+  assert(vecDb !== null, 'Vector DB created');
+  const vecVersion = vecDb.prepare('SELECT vec_version() as v').get();
   assert(vecVersion.v.startsWith('v'), `sqlite-vec version: ${vecVersion.v}`);
+
+  // All structured knowledge goes in library DB
+  const libDb = hm.dbManager.getLibraryDb();
 
   // Insert facts
   const factContents = [
@@ -106,22 +110,22 @@ async function run() {
   ];
 
   for (const content of factContents) {
-    db.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, created_at, updated_at, decay_score)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 0.0)`)
+    libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
+      VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
       .run('forge', 'agent', 'infrastructure', content, 1.0, 'fleet');
   }
 
   // Insert knowledge
-  db.prepare(`INSERT INTO knowledge (agent_id, domain, key, content, confidence, visibility, source_type, created_at, updated_at)
+  libDb.prepare(`INSERT INTO knowledge (agent_id, domain, key, content, confidence, visibility, source_type, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
     .run('forge', 'operations', 'deploy-process', 'Run preflight checks, push containers, run health check, shift traffic', 0.9, 'fleet', 'conversation');
 
-  db.prepare(`INSERT INTO knowledge (agent_id, domain, key, content, confidence, visibility, source_type, created_at, updated_at)
+  libDb.prepare(`INSERT INTO knowledge (agent_id, domain, key, content, confidence, visibility, source_type, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
     .run('forge', 'architecture', 'memory-design', 'Three-layer architecture: hot Redis compositor, warm SQLite per-agent, cold library', 0.95, 'fleet', 'conversation');
 
   // Insert episodes
-  db.prepare(`INSERT INTO episodes (agent_id, event_type, summary, significance, visibility, participants, created_at, decay_score)
+  libDb.prepare(`INSERT INTO episodes (agent_id, event_type, summary, significance, visibility, participants, created_at, decay_score)
     VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 0.0)`)
     .run('forge', 'deployment', 'Deployed HyperMem Phase 1 with 52 passing tests', 8, 'fleet', JSON.stringify(['forge', 'ragesaq']));
 
@@ -185,9 +189,9 @@ async function run() {
 
   // ── Test: Orphan pruning ──
   console.log('\n── Orphan Pruning ──');
-  // Delete a fact and verify pruning works
-  const factToDelete = db.prepare('SELECT id FROM facts LIMIT 1').get();
-  db.prepare('DELETE FROM facts WHERE id = ?').run(factToDelete.id);
+  // Delete a fact from library and verify pruning works
+  const factToDelete = libDb.prepare('SELECT id FROM facts LIMIT 1').get();
+  libDb.prepare('DELETE FROM facts WHERE id = ?').run(factToDelete.id);
   const pruned = hm.pruneVectorOrphans('forge');
   assert(pruned === 1, `Pruned ${pruned} orphan(s) (expected 1)`);
 

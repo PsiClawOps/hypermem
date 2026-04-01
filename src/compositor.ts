@@ -69,7 +69,7 @@ export class Compositor {
    * Priority order determines which slots get budget first.
    * If budget is exhausted, lower-priority slots are truncated or omitted.
    */
-  async compose(request: ComposeRequest, db: DatabaseSync): Promise<ComposeResult> {
+  async compose(request: ComposeRequest, db: DatabaseSync, libraryDb?: DatabaseSync): Promise<ComposeResult> {
     const store = new MessageStore(db);
     const budget = request.tokenBudget || this.config.defaultTokenBudget;
     let remaining = budget;
@@ -162,7 +162,8 @@ export class Compositor {
         request.agentId,
         request.sessionKey,
         'facts',
-        db
+        db,
+        libraryDb
       );
 
       if (factsContent) {
@@ -192,7 +193,8 @@ export class Compositor {
         request.agentId,
         request.sessionKey,
         'context',
-        db
+        db,
+        libraryDb
       );
 
       if (contextContent) {
@@ -242,6 +244,7 @@ export class Compositor {
     opts?: {
       systemPrompt?: string;
       identity?: string;
+      libraryDb?: DatabaseSync;
     }
   ): Promise<void> {
     const store = new MessageStore(db);
@@ -252,11 +255,11 @@ export class Compositor {
     // Get recent history
     const history = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
 
-    // Build facts content from SQLite
-    const factsContent = this.buildFactsFromDb(agentId, db);
+    // Build facts content from SQLite (library DB if available)
+    const factsContent = this.buildFactsFromDb(agentId, opts?.libraryDb || db);
 
     // Build cross-session context
-    const contextContent = this.buildCrossSessionContext(agentId, sessionKey, db);
+    const contextContent = this.buildCrossSessionContext(agentId, sessionKey, db, opts?.libraryDb);
 
     // Warm Redis
     await this.redis.warmSession(agentId, sessionKey, {
@@ -287,7 +290,8 @@ export class Compositor {
     agentId: string,
     sessionKey: string,
     slot: string,
-    db: DatabaseSync
+    db: DatabaseSync,
+    libraryDb?: DatabaseSync
   ): Promise<string | null> {
     // Try Redis
     const cached = await this.redis.getSlot(agentId, sessionKey, slot);
@@ -296,9 +300,9 @@ export class Compositor {
     // Fall back to SQLite based on slot type
     switch (slot) {
       case 'facts':
-        return this.buildFactsFromDb(agentId, db);
+        return this.buildFactsFromDb(agentId, libraryDb || db);
       case 'context':
-        return this.buildCrossSessionContext(agentId, sessionKey, db);
+        return this.buildCrossSessionContext(agentId, sessionKey, db, libraryDb);
       default:
         return null; // system and identity are set externally
     }
@@ -330,9 +334,17 @@ export class Compositor {
    * Build facts content from SQLite.
    */
   private buildFactsFromDb(agentId: string, db: DatabaseSync): string | null {
+    // Check if facts table exists in this DB (library DB in new arch, agent DB in old)
+    const tableExists = db.prepare(
+      "SELECT count(*) as cnt FROM sqlite_master WHERE type='table' AND name='facts'"
+    ).get() as { cnt: number };
+
+    if (!tableExists || tableExists.cnt === 0) return null;
+
     const rows = db.prepare(`
       SELECT content, domain, confidence FROM facts
       WHERE agent_id = ?
+      AND superseded_by IS NULL
       AND (expires_at IS NULL OR expires_at > datetime('now'))
       AND decay_score < 0.8
       ORDER BY confidence DESC, decay_score ASC
@@ -357,38 +369,30 @@ export class Compositor {
   private buildCrossSessionContext(
     agentId: string,
     currentSessionKey: string,
-    db: DatabaseSync
+    db: DatabaseSync,
+    _libraryDb?: DatabaseSync
   ): string | null {
-    // Get topics active in the current session
+    // Get the current conversation
     const conversation = db.prepare(
       'SELECT id FROM conversations WHERE session_key = ?'
     ).get(currentSessionKey) as { id: number } | undefined;
 
     if (!conversation) return null;
 
-    // Find topics linked to the current conversation
-    const topicIds = db.prepare(`
-      SELECT DISTINCT tm.topic_id FROM topic_messages tm
-      WHERE tm.conversation_id = ?
-    `).all(conversation.id) as Array<{ topic_id: number }>;
-
-    if (topicIds.length === 0) return null;
-
-    // Find recent messages in OTHER conversations on the same topics
-    const placeholders = topicIds.map(() => '?').join(',');
+    // Find recent messages from OTHER conversations for this agent
+    // (cross-session context without topic_messages — just recent other-session activity)
     const rows = db.prepare(`
       SELECT m.text_content, m.role, c.channel_type, m.created_at
       FROM messages m
-      JOIN topic_messages tm ON m.id = tm.message_id
       JOIN conversations c ON m.conversation_id = c.id
-      WHERE tm.topic_id IN (${placeholders})
+      WHERE c.agent_id = ?
       AND m.conversation_id != ?
       AND m.text_content IS NOT NULL
       AND m.is_heartbeat = 0
       ORDER BY m.created_at DESC
       LIMIT 10
     `).all(
-      ...topicIds.map(t => t.topic_id),
+      agentId,
       conversation.id
     ) as Array<{
       text_content: string;
