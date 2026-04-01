@@ -75,10 +75,10 @@ User message arrives
   ├── L3 Vectors: KNN semantic recall on user's latest message
   │     └── Related facts/knowledge/episodes with relevance scores
   ├── L4 Library: structured knowledge injection
-  │     ├── Facts (30% budget cap): active, non-expired, sorted by confidence
-  │     ├── Knowledge (20%): grouped by domain, top 15 entries
-  │     └── Preferences (10%): behavioral patterns, grouped by subject
-  └── Cross-session (20%): context from related sessions
+  │     ├── Facts (up to 30% of remaining budget): active, non-expired, sorted by confidence
+  │     ├── Knowledge (up to 20% of remaining): grouped by domain, top 15 entries
+  │     └── Preferences (up to 10% of remaining): behavioral patterns, grouped by subject
+  └── Cross-session (up to 20% of remaining): context from related sessions
 ```
 
 Each slot gets a proportional budget cap. Smart truncation at line boundaries.
@@ -115,6 +115,30 @@ Token-bucket rate limiter for embedding API calls:
 - Reserved tokens for high-priority requests
 - `createRateLimitedEmbedder()` wraps any embedding function
 
+## Cross-Agent Access Control
+
+Visibility-tiered access model for cross-agent knowledge queries:
+
+- **`fleet`** — visible to all agents (default tier)
+- **`org`** — visible to agents in the same organizational unit
+- **`council`** — visible to council-tier agents and the org lead
+- **`private`** — visible only to the owning agent
+
+### Org Registry
+
+`visibilityFilter()` resolves access levels using an `OrgRegistry` — a mapping of agents to tiers, orgs, and capabilities. Currently loaded from a hardcoded `defaultOrgRegistry()` in `cross-agent.ts`.
+
+**Known limitation:** This duplicates fleet structure that lives authoritatively in `fleet_agents` + `fleet_orgs` in library.db. Near-term roadmap item: replace with live-loaded registry from library.db, with the hardcoded version as cold-start fallback only.
+
+### Unknown Agent Fallback (Restrictive Default)
+
+When a target agent is not found in the registry, `visibilityFilter()` applies a **restrictive default**: fleet-only visibility with a logged warning. This is a deliberate safety-side behavior — unknown agents see only fleet-visible data rather than failing the query entirely. The warning surfaces registry gaps for operators to fix.
+
+This means:
+- Queries succeed but return a narrowed result set
+- New agents provisioned in the DB but not yet in the registry will have reduced cross-agent visibility until registered
+- The warning message names the missing agent and suggests adding it to the registry
+
 ## Hook Integration
 
 `~/.openclaw/hooks/hypermem-core/handler.js` — OpenClaw gateway hook:
@@ -128,7 +152,7 @@ message:sent      → Record assistant message to SQLite + Redis
 
 Handler receives `InternalHookEvent` objects, dispatches on `${type}:${action}`.
 
-## Module Map (22 files, 8,475 lines)
+## Module Map (26 files, 10,730 lines)
 
 | Module | Lines | Layer | Purpose |
 |---|---|---|---|
@@ -155,20 +179,21 @@ Handler receives `InternalHookEvent` objects, dispatches on `${type}:${action}`.
 | `library-schema.ts` | ~400 | L4 | Library schema v5 + migrations |
 | `types.ts` | ~250 | - | Shared type definitions |
 
-## Test Coverage (297 tests, 10 suites)
+## Test Coverage (409 tests, 11 suites)
 
 | Suite | Tests | Coverage |
 |---|---|---|
-| smoke | 8 | End-to-end create/write/read/close |
+| smoke | 1 | End-to-end create/write/read/close |
 | redis-integration | 24 | Redis operations, slots, history |
 | cross-agent | 20 | Cross-agent queries, fleet search |
 | vector-search | 33 | Embedding, KNN, batch indexing |
 | library | 71 | All L4 collections (facts→desired state) |
-| compositor | 25 | Four-layer composition, budget, providers |
+| compositor | 39 | Four-layer composition, budget, providers |
 | fleet-cache | 32 | Redis fleet cache, hydration, cache-aside |
 | rotation | 29 | DB rotation, auto-rotate, collision handling |
 | knowledge-graph | 33 | DAG traversal, shortest path, analytics |
 | rate-limiter | 22 | Token bucket, priority, timeout, embedder |
+| doc-chunker | 105 | Markdown/file chunking, section-aware parsing |
 
 ## Dependencies
 

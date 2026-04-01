@@ -100,6 +100,12 @@ export function visibilityFilter(
 ): { clause: string; canReadPrivate: boolean; canReadOrg: boolean; canReadCouncil: boolean } {
   const target = registry.agents[targetAgentId];
   if (!target) {
+    // Restrictive Default: unknown agents get fleet-only visibility.
+    // This is a deliberate safety-side fallback — queries succeed with narrowed
+    // results rather than failing. The warning surfaces registry gaps so operators
+    // can add the missing agent to the org registry.
+    // See ARCHITECTURE.md § Cross-Agent Access Control → Unknown Agent Fallback.
+    console.warn(`[cross-agent] visibilityFilter: agent "${targetAgentId}" not found in registry — restricting to fleet-only visibility. Add this agent to the org registry if this is unexpected.`);
     return { clause: "visibility = 'fleet'", canReadPrivate: false, canReadOrg: false, canReadCouncil: false };
   }
 

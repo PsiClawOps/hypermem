@@ -55,6 +55,26 @@ const DEFAULT_DATA_DIR = path.join(
 );
 
 /**
+ * Validate agentId to prevent path traversal.
+ * Must match [a-z0-9][a-z0-9-]* (lowercase alphanumeric + hyphens, no dots or slashes).
+ */
+function validateAgentId(agentId: string): void {
+  if (!agentId || !/^[a-z0-9][a-z0-9-]*$/.test(agentId)) {
+    throw new Error(`Invalid agentId: "${agentId}". Must match [a-z0-9][a-z0-9-]*`);
+  }
+}
+
+/**
+ * Validate rotated DB filename to prevent path traversal.
+ * Must match the expected rotation pattern: messages_YYYYQN(_N)?.db
+ */
+function validateRotatedFilename(filename: string): void {
+  if (!/^messages_\d{4}Q[1-4](_\d+)?\.db$/.test(filename)) {
+    throw new Error(`Invalid rotated DB filename: "${filename}". Must match messages_YYYYQN.db pattern`);
+  }
+}
+
+/**
  * Apply standard pragmas to a database connection.
  */
 function applyPragmas(db: DatabaseSync): void {
@@ -70,6 +90,8 @@ function applyPragmas(db: DatabaseSync): void {
 function agentDir(dataDir: string, agentId: string): string {
   return path.join(dataDir, 'agents', agentId);
 }
+
+export { validateAgentId, validateRotatedFilename };
 
 export class DatabaseManager {
   private readonly dataDir: string;
@@ -93,6 +115,7 @@ export class DatabaseManager {
    * This is the write-heavy, rotatable conversation log.
    */
   getMessageDb(agentId: string): DatabaseSync {
+    validateAgentId(agentId);
     let db = this.messageDbs.get(agentId);
     if (db) return db;
 
@@ -114,6 +137,7 @@ export class DatabaseManager {
    * Returns null if sqlite-vec is not available.
    */
   getVectorDb(agentId: string): DatabaseSync | null {
+    validateAgentId(agentId);
     let db = this.vectorDbs.get(agentId);
     if (db) return db;
 
@@ -171,6 +195,7 @@ export class DatabaseManager {
     tier?: string;
     org?: string;
   }): void {
+    validateAgentId(agentId);
     const db = this.getMessageDb(agentId);
     const now = new Date().toISOString();
 
@@ -246,6 +271,7 @@ export class DatabaseManager {
    * Get the path to an agent's directory.
    */
   getAgentDir(agentId: string): string {
+    validateAgentId(agentId);
     return agentDir(this.dataDir, agentId);
   }
 
@@ -376,6 +402,8 @@ export class DatabaseManager {
    * Open a rotated message database as read-only for querying.
    */
   openRotatedDb(agentId: string, filename: string): DatabaseSync {
+    validateAgentId(agentId);
+    validateRotatedFilename(filename);
     const dir = agentDir(this.dataDir, agentId);
     const dbPath = path.join(dir, filename);
 

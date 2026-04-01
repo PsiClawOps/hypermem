@@ -32,7 +32,6 @@ const DEFAULT_CONFIG: CompositorConfig = {
   maxHistoryMessages: 50,
   maxFacts: 20,
   maxCrossSessionContext: 5000,
-  priorityOrder: ['system', 'identity', 'history', 'facts', 'knowledge', 'preferences', 'semanticRecall', 'context', 'library'],
 };
 
 // ─── Trigger Registry ────────────────────────────────────────────
@@ -189,6 +188,7 @@ export class Compositor {
   ) {
     // Accept either old-style (RedisLayer) or new-style (CompositorDeps)
     if (deps instanceof RedisLayer) {
+      console.warn('[compositor] DEPRECATED: Compositor(RedisLayer) constructor is deprecated. Pass CompositorDeps instead. Vector search and library DB are disabled in legacy mode.');
       this.redis = deps;
       this.vectorStore = null;
       this.libraryDb = null;
@@ -560,7 +560,8 @@ export class Compositor {
       messages: providerMessages,
       tokenCount: totalTokens,
       slots,
-      truncated: remaining < 0 || warnings.length > 0,
+      truncated: remaining < 0,
+      hasWarnings: warnings.length > 0,
       warnings,
     };
   }

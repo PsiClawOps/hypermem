@@ -2,7 +2,7 @@
 
 Agent-centric memory system for OpenClaw. Four-layer architecture: Redis hot cache → per-agent message DB → per-agent vector DB → shared fleet library.
 
-**Status:** Core complete — 22 modules, 8,475 lines, 297 tests across 10 suites. All passing.
+**Status:** Core complete — 26 modules, 10,730 lines, 409 tests across 11 suites. All passing.
 
 ## Architecture
 
@@ -17,7 +17,7 @@ L4  Library DB    Fleet-wide structured knowledge (10 collections + knowledge gr
 
 ### Key Components
 
-- **Compositor** — Assembles LLM prompts from all 4 layers with token budgeting. Budget caps per slot (facts 30%, knowledge 20%, preferences 10%, cross-session 20%). Multi-provider output (Anthropic + OpenAI).
+- **Compositor** — Assembles LLM prompts from all 4 layers with token budgeting. Each slot is capped at a percentage of *remaining* budget after prior slots are filled (facts up to 30%, knowledge 20%, preferences 10%, cross-session 20%). Multi-provider output (Anthropic + OpenAI).
 - **Fleet Cache** — Redis hot layer for agent profiles + fleet summary. Cache-aside reads, write-through invalidation, bulk hydration on gateway startup.
 - **Knowledge Graph** — DAG traversal over entity relationships. BFS with depth/direction/type filters, shortest path, degree analytics.
 - **Rate Limiter** — Token-bucket for embedding API calls. Priority queue (high > normal > low) with reserved tokens for user-facing recall.
@@ -134,17 +134,18 @@ await hm.close();
 
 | Suite | Tests | What's Covered |
 |---|---|---|
-| smoke | 8 | End-to-end create/write/read/close |
+| smoke | 1 | End-to-end create/write/read/close |
 | redis-integration | 24 | Redis slots, history, pub/sub |
 | cross-agent | 20 | Cross-agent queries, fleet search |
 | vector-search | 33 | Embedding, KNN, batch indexing |
 | library | 71 | All L4 collections (facts → desired state) |
-| compositor | 25 | Four-layer composition, budgets, providers |
+| compositor | 39 | Four-layer composition, budgets, providers |
 | fleet-cache | 32 | Redis fleet cache, hydration, cache-aside |
 | rotation | 29 | DB rotation, auto-rotate, collision handling |
 | knowledge-graph | 33 | DAG traversal, shortest path, analytics |
 | rate-limiter | 22 | Token bucket, priority, timeout, embedder |
-| **Total** | **297** | |
+| doc-chunker | 105 | Markdown/file chunking, section-aware parsing |
+| **Total** | **409** | |
 
 ## Roadmap
 

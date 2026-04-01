@@ -176,7 +176,7 @@ export interface Knowledge {
 
 // ─── Episode Types ───────────────────────────────────────────────
 
-export type EpisodeType = 'decision' | 'incident' | 'discovery' | 'interaction' | 'milestone';
+export type EpisodeType = 'decision' | 'incident' | 'discovery' | 'interaction' | 'milestone' | 'deployment' | 'config_change';
 
 export interface Episode {
   id: number;
@@ -223,7 +223,10 @@ export interface ComposeResult {
   messages: ProviderMessage[];
   tokenCount: number;
   slots: SlotTokenCounts;
+  /** True only when token budget was exceeded (remaining < 0). */
   truncated: boolean;
+  /** True when any non-fatal warnings were emitted (soft failures, truncated slots, etc.). */
+  hasWarnings: boolean;
   warnings: string[];
 }
 
@@ -299,7 +302,8 @@ export interface CompositorConfig {
   maxHistoryMessages: number;
   maxFacts: number;
   maxCrossSessionContext: number;  // tokens
-  priorityOrder: string[];
+  // Note: assembly order is fixed in compose() — system, identity, history,
+  // facts, knowledge, preferences, semanticRecall, cross-session, library.
 }
 
 export interface IndexerConfig {
