@@ -864,6 +864,69 @@ export class HyperMem {
     return vs.pruneOrphans();
   }
 
+  // ─── Message Rotation (L2: Messages) ────────────────────────
+
+  /**
+   * Get the size of an agent's active messages.db in bytes.
+   */
+  getMessageDbSize(agentId: string): number {
+    return this.dbManager.getMessageDbSize(agentId);
+  }
+
+  /**
+   * Check if an agent's message database needs rotation.
+   */
+  shouldRotate(agentId: string, opts?: {
+    maxSizeBytes?: number;
+    maxAgeDays?: number;
+  }): { reason: 'size' | 'age'; current: number; threshold: number } | null {
+    return this.dbManager.shouldRotate(agentId, opts);
+  }
+
+  /**
+   * Rotate an agent's message database.
+   * Returns the path to the rotated file, or null if no active DB exists.
+   */
+  rotateMessageDb(agentId: string): string | null {
+    return this.dbManager.rotateMessageDb(agentId);
+  }
+
+  /**
+   * List rotated message DB files for an agent.
+   */
+  listRotatedDbs(agentId: string): string[] {
+    return this.dbManager.listRotatedDbs(agentId);
+  }
+
+  /**
+   * Check and auto-rotate all agents' message databases.
+   * Call on heartbeat/startup.
+   * Returns agents that were rotated.
+   */
+  autoRotate(opts?: {
+    maxSizeBytes?: number;
+    maxAgeDays?: number;
+  }): Array<{ agentId: string; reason: string; rotatedTo: string }> {
+    const agents = this.dbManager.listAgents();
+    const rotated: Array<{ agentId: string; reason: string; rotatedTo: string }> = [];
+
+    for (const agentId of agents) {
+      const check = this.shouldRotate(agentId, opts);
+      if (check) {
+        const rotatedPath = this.rotateMessageDb(agentId);
+        if (rotatedPath) {
+          rotated.push({
+            agentId,
+            reason: `${check.reason}: ${check.current} > ${check.threshold}`,
+            rotatedTo: rotatedPath,
+          });
+        }
+      }
+    }
+
+    return rotated;
+  }
+
   // ─── Session Registry (L4: Library) ─────────────────────────
 
   /**

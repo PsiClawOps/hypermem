@@ -261,6 +261,133 @@ export class DatabaseManager {
   }
 
   /**
+   * Get the size of the active messages.db for an agent (in bytes).
+   */
+  getMessageDbSize(agentId: string): number {
+    const dir = agentDir(this.dataDir, agentId);
+    const dbPath = path.join(dir, 'messages.db');
+    try {
+      const stat = fs.statSync(dbPath);
+      return stat.size;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Rotate the message database for an agent.
+   * 
+   * 1. Closes the active messages.db connection
+   * 2. Renames messages.db → messages_{YYYYQN}.db (e.g., messages_2026Q1.db)
+   * 3. Removes associated WAL/SHM files
+   * 4. Next call to getMessageDb() creates a fresh database
+   * 
+   * The rotated file is read-only archive material. The vector index
+   * retains references to it via source_db in vec_index_map.
+   * 
+   * Returns the path to the rotated file, or null if rotation wasn't needed.
+   */
+  rotateMessageDb(agentId: string): string | null {
+    const dir = agentDir(this.dataDir, agentId);
+    const activePath = path.join(dir, 'messages.db');
+
+    if (!fs.existsSync(activePath)) return null;
+
+    // Close the active connection first
+    const existingDb = this.messageDbs.get(agentId);
+    if (existingDb) {
+      try {
+        // Checkpoint WAL into the main database before rotating
+        existingDb.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+        existingDb.close();
+      } catch { /* ignore */ }
+      this.messageDbs.delete(agentId);
+    }
+
+    // Generate rotation name: messages_YYYYQN.db
+    const now = new Date();
+    const year = now.getFullYear();
+    const quarter = Math.ceil((now.getMonth() + 1) / 3);
+    let rotatedName = `messages_${year}Q${quarter}.db`;
+    let rotatedPath = path.join(dir, rotatedName);
+
+    // Handle collision — append a suffix if this quarter already has a rotation
+    let suffix = 1;
+    while (fs.existsSync(rotatedPath)) {
+      rotatedName = `messages_${year}Q${quarter}_${suffix}.db`;
+      rotatedPath = path.join(dir, rotatedName);
+      suffix++;
+    }
+
+    // Rename the active DB to the rotated name
+    fs.renameSync(activePath, rotatedPath);
+
+    // Clean up WAL and SHM files
+    for (const ext of ['-wal', '-shm']) {
+      const walPath = activePath + ext;
+      if (fs.existsSync(walPath)) {
+        try { fs.unlinkSync(walPath); } catch { /* ignore */ }
+      }
+    }
+
+    return rotatedPath;
+  }
+
+  /**
+   * Check if an agent's message database needs rotation.
+   * Triggers on:
+   *   - Size exceeds threshold (default 100MB)
+   *   - Time since creation exceeds threshold (default 90 days)
+   * 
+   * Returns the reason for rotation, or null if no rotation needed.
+   */
+  shouldRotate(agentId: string, opts?: {
+    maxSizeBytes?: number;  // Default: 100MB
+    maxAgeDays?: number;    // Default: 90 days
+  }): { reason: 'size' | 'age'; current: number; threshold: number } | null {
+    const maxSize = opts?.maxSizeBytes ?? 100 * 1024 * 1024; // 100MB
+    const maxAge = opts?.maxAgeDays ?? 90;
+
+    // Check size
+    const size = this.getMessageDbSize(agentId);
+    if (size > maxSize) {
+      return { reason: 'size', current: size, threshold: maxSize };
+    }
+
+    // Check age — look at the earliest conversation in the DB
+    const db = this.getMessageDb(agentId);
+    const oldest = db.prepare(
+      'SELECT MIN(created_at) as earliest FROM conversations'
+    ).get() as { earliest: string | null } | undefined;
+
+    if (oldest?.earliest) {
+      const created = new Date(oldest.earliest);
+      const ageMs = Date.now() - created.getTime();
+      const ageDays = ageMs / (1000 * 60 * 60 * 24);
+      if (ageDays > maxAge) {
+        return { reason: 'age', current: Math.round(ageDays), threshold: maxAge };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Open a rotated message database as read-only for querying.
+   */
+  openRotatedDb(agentId: string, filename: string): DatabaseSync {
+    const dir = agentDir(this.dataDir, agentId);
+    const dbPath = path.join(dir, filename);
+
+    if (!fs.existsSync(dbPath)) {
+      throw new Error(`Rotated DB not found: ${dbPath}`);
+    }
+
+    const db = new DatabaseSync(dbPath, { readOnly: true } as unknown as Record<string, unknown>);
+    return db;
+  }
+
+  /**
    * Close all open database connections.
    */
   close(): void {
