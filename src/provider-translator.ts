@@ -46,7 +46,8 @@ export function normalizeToolCallId(providerId: string): string {
 
 export type ProviderType = 'anthropic' | 'openai' | 'openai-responses' | 'unknown';
 
-export function detectProvider(providerString: string): ProviderType {
+export function detectProvider(providerString: string | null | undefined): ProviderType {
+  if (!providerString) return 'unknown';
   const lower = providerString.toLowerCase();
   if (lower.includes('anthropic') || lower.includes('claude')) return 'anthropic';
   if (lower.includes('codex') || lower.includes('responses')) return 'openai-responses';
@@ -188,7 +189,7 @@ function toOpenAIResponses(messages: NeutralMessage[]): ProviderMessage[] {
  */
 export function toProviderFormat(
   messages: NeutralMessage[],
-  provider: string
+  provider: string | null | undefined
 ): ProviderMessage[] {
   const providerType = detectProvider(provider);
 

@@ -42,6 +42,7 @@ type HyperMemInstance = {
   recordUserMessage: (agentId: string, sessionKey: string, message: NeutralMessage) => Promise<unknown>;
   recordAssistantMessage: (agentId: string, sessionKey: string, message: NeutralMessage) => Promise<unknown>;
   compose: (request: ComposeRequest) => Promise<ComposeResult>;
+  warm: (agentId: string, sessionKey: string, opts?: { systemPrompt?: string; identity?: string }) => Promise<void>;
   dbManager: {
     getMessageDb: (agentId: string) => unknown;
     getLibraryDb: () => unknown;
@@ -62,7 +63,7 @@ type HyperMemInstance = {
 type NeutralMessage = {
   role: 'user' | 'assistant' | 'system';
   textContent: string | null;
-  toolCalls: unknown;
+  toolCalls: unknown[] | null;
   toolResults: unknown;
 };
 
@@ -71,6 +72,8 @@ type ComposeRequest = {
   sessionKey: string;
   tokenBudget?: number;
   tier?: string;
+  model?: string;
+  provider?: string;
   includeDocChunks?: boolean;
   prompt?: string;
 };
@@ -164,7 +167,7 @@ function toNeutralMessage(msg: InboundMessage): NeutralMessage {
   }
 
   // Detect tool calls/results
-  const toolCalls = (msg.tool_calls || msg.toolCalls) ?? null;
+  const toolCalls = ((msg.tool_calls || msg.toolCalls) ?? null) as unknown[] | null;
   const toolResults = (msg.role === 'tool' || msg.role === 'tool_result') ? msg.content : null;
 
   const role = msg.role === 'tool' || msg.role === 'tool_result'
@@ -200,7 +203,7 @@ function createHyperMemEngine(): ContextEngine {
         const agentId = extractAgentId(sk);
 
         // Warm Redis with the session — this pre-loads system/identity slots
-        await hm.redis.warmSession(sk, { agentId });
+        await hm.warm(agentId, sk);
 
         return { bootstrapped: true };
       } catch (err) {
@@ -257,7 +260,8 @@ function createHyperMemEngine(): ContextEngine {
      *   estimatedTokens — token count of assembled context
      *   systemPromptAddition — facts/recall/episodes injected before runtime system prompt
      */
-    async assemble({ sessionId, sessionKey, messages, tokenBudget, prompt }): ReturnType<ContextEngine['assemble']> {
+    async assemble({ sessionId, sessionKey, messages, tokenBudget, prompt, model }): ReturnType<ContextEngine['assemble']> {
+      try {
       const hm = await getHyperMem();
       const sk = resolveSessionKey(sessionId, sessionKey);
       const agentId = extractAgentId(sk);
@@ -276,6 +280,7 @@ function createHyperMemEngine(): ContextEngine {
         sessionKey: sk,
         tokenBudget,
         tier,
+        model,          // pass model for provider detection
         includeDocChunks: true,
         prompt,
       };
@@ -283,11 +288,13 @@ function createHyperMemEngine(): ContextEngine {
       const result: ComposeResult = await hm.compose(request);
 
       // Convert NeutralMessage[] → AgentMessage[] for the OpenClaw runtime.
-      // The compositor returns messages in HyperMem's neutral format.
+      // Filter out any malformed messages (missing role) before conversion.
       // Cast via unknown since InboundMessage doesn't satisfy AgentMessage's
       // strict discriminated union — the runtime accepts the wire shape at runtime.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const outputMessages = result.messages.map(neutralToAgentMessage) as unknown as any[];
+      const outputMessages = result.messages
+        .filter(m => m.role != null)
+        .map(neutralToAgentMessage) as unknown as any[];
 
       return {
         messages: outputMessages,
@@ -296,6 +303,10 @@ function createHyperMemEngine(): ContextEngine {
         // This is the facts/recall/episodes block assembled by the compositor.
         systemPromptAddition: result.contextBlock || undefined,
       };
+      } catch (err) {
+        console.error('[hypermem-plugin] assemble error (stack):', (err as Error).stack ?? err);
+        throw err; // Re-throw so the runtime falls back to legacy pipeline
+      }
     },
 
     /**
@@ -356,16 +367,22 @@ function neutralToAgentMessage(msg: NeutralMessage): InboundMessage {
     role: msg.role,
   };
 
-  if (msg.textContent !== null) {
+  if (msg.textContent != null) {
+    // Use != (not !==) to catch both null and undefined
     out.content = msg.textContent;
   }
 
-  if (msg.toolCalls) {
+  if (msg.toolCalls && msg.toolCalls.length > 0) {
     out.tool_calls = msg.toolCalls;
   }
 
   if (msg.toolResults) {
     out.content = msg.toolResults as string;
+  }
+
+  // Ensure content is always a string when role is user/assistant/system
+  if (out.content === undefined && !out.tool_calls) {
+    out.content = '';
   }
 
   return out;

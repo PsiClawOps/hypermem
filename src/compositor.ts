@@ -558,7 +558,8 @@ export class Compositor {
     }
 
     // ─── Translate to provider format ──────────────────────────
-    const providerMessages = toProviderFormat(messages, request.provider);
+    // Use provider if set; fall back to model string for detection
+    const providerMessages = toProviderFormat(messages, request.provider ?? request.model ?? null);
 
     const totalTokens = budget - remaining;
 
