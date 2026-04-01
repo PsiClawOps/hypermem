@@ -22,7 +22,7 @@ export { EpisodeStore } from './episode-store.js';
 export { PreferenceStore } from './preference-store.js';
 export type { Preference } from './preference-store.js';
 export { FleetStore } from './fleet-store.js';
-export type { FleetAgent, FleetOrg } from './fleet-store.js';
+export type { FleetAgent, FleetOrg, AgentCapability } from './fleet-store.js';
 export { SystemStore } from './system-store.js';
 export type { SystemState, SystemEvent } from './system-store.js';
 export { WorkStore } from './work-store.js';
@@ -96,7 +96,7 @@ import { KnowledgeStore } from './knowledge-store.js';
 import { TopicStore } from './topic-store.js';
 import { EpisodeStore } from './episode-store.js';
 import { PreferenceStore, type Preference } from './preference-store.js';
-import { FleetStore, type FleetAgent, type FleetOrg } from './fleet-store.js';
+import { FleetStore, type FleetAgent, type FleetOrg, type AgentCapability } from './fleet-store.js';
 import { SystemStore, type SystemState, type SystemEvent } from './system-store.js';
 import { WorkStore, type WorkItem, type WorkStatus } from './work-store.js';
 import { RedisLayer } from './redis.js';
@@ -534,6 +534,57 @@ export class HyperMem {
     const db = this.dbManager.getLibraryDb();
     const store = new FleetStore(db);
     return store.listOrgs();
+  }
+
+  // ─── Agent Capabilities (L4: Library) ────────────────────────
+
+  /**
+   * Register or update a capability for an agent.
+   */
+  upsertCapability(agentId: string, cap: {
+    capType: 'skill' | 'tool' | 'mcp_server';
+    name: string;
+    version?: string;
+    source?: string;
+    config?: Record<string, unknown>;
+    status?: string;
+  }): import('./fleet-store.js').AgentCapability {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.upsertCapability(agentId, cap);
+  }
+
+  /**
+   * Bulk-sync capabilities of a given type for an agent.
+   * Marks capabilities not in the list as 'removed'.
+   */
+  syncCapabilities(agentId: string, capType: 'skill' | 'tool' | 'mcp_server', caps: Array<{
+    name: string;
+    version?: string;
+    source?: string;
+    config?: Record<string, unknown>;
+  }>): void {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    store.syncCapabilities(agentId, capType, caps);
+  }
+
+  /**
+   * Get capabilities for an agent, optionally filtered by type.
+   */
+  getAgentCapabilities(agentId: string, capType?: string): import('./fleet-store.js').AgentCapability[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.getAgentCapabilities(agentId, capType);
+  }
+
+  /**
+   * Find agents that have a specific capability.
+   */
+  findAgentsByCapability(capType: string, name: string): FleetAgent[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.findByCapability(capType, name);
   }
 
   // ─── System Registry (L4: Library) ──────────────────────────

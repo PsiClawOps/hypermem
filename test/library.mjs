@@ -247,6 +247,85 @@ async function run() {
   const blocked = hm.getBlockedWork();
   assert(blocked.length === 0, 'No blocked items');
 
+  // ── Agent Capabilities ──
+  console.log('\n── Agent Capabilities ──');
+
+  // Register individual capabilities
+  const skillCap = hm.upsertCapability('forge', {
+    capType: 'skill',
+    name: 'skill-vetter',
+    version: '1.0.0',
+    source: 'clawhub',
+  });
+  assert(skillCap.capType === 'skill', 'Skill capability registered');
+  assert(skillCap.name === 'skill-vetter', `Skill name: ${skillCap.name}`);
+  assert(skillCap.version === '1.0.0', `Skill version: ${skillCap.version}`);
+
+  hm.upsertCapability('forge', {
+    capType: 'tool',
+    name: 'exec',
+    config: { scopes: ['sandbox', 'host'] },
+  });
+
+  hm.upsertCapability('forge', {
+    capType: 'tool',
+    name: 'web_search',
+    config: { provider: 'brave' },
+  });
+
+  hm.upsertCapability('forge', {
+    capType: 'mcp_server',
+    name: 'filesystem',
+    config: { transport: 'stdio' },
+  });
+
+  hm.upsertCapability('compass', {
+    capType: 'tool',
+    name: 'web_search',
+    config: { provider: 'brave' },
+  });
+
+  hm.upsertCapability('compass', {
+    capType: 'skill',
+    name: 'product-research',
+    version: '0.2.0',
+    source: 'local',
+  });
+
+  // Query capabilities
+  const forgeCaps = hm.getAgentCapabilities('forge');
+  assert(forgeCaps.length === 4, `Forge capabilities: ${forgeCaps.length}`);
+
+  const forgeSkills = hm.getAgentCapabilities('forge', 'skill');
+  assert(forgeSkills.length === 1, `Forge skills: ${forgeSkills.length}`);
+
+  const forgeTools = hm.getAgentCapabilities('forge', 'tool');
+  assert(forgeTools.length === 2, `Forge tools: ${forgeTools.length}`);
+
+  // Find agents by capability
+  const webSearchAgents = hm.findAgentsByCapability('tool', 'web_search');
+  assert(webSearchAgents.length === 2, `Agents with web_search: ${webSearchAgents.length}`);
+
+  const vetterAgents = hm.findAgentsByCapability('skill', 'skill-vetter');
+  assert(vetterAgents.length === 1, `Agents with skill-vetter: ${vetterAgents.length}`);
+  assert(vetterAgents[0].id === 'forge', `Vetter agent: ${vetterAgents[0].id}`);
+
+  // Denormalized capabilities on FleetAgent
+  const forgeWithCaps = hm.getFleetAgent('forge');
+  assert(forgeWithCaps.capabilities !== null, 'Fleet agent has capabilities JSON');
+  assert(forgeWithCaps.capabilities.length === 4, `Denormalized caps: ${forgeWithCaps.capabilities.length}`);
+
+  // Bulk sync (should mark missing ones as removed)
+  hm.syncCapabilities('forge', 'tool', [
+    { name: 'exec', config: { scopes: ['sandbox'] } },
+    { name: 'image', config: { provider: 'anthropic' } },
+  ]);
+
+  const afterSync = hm.getAgentCapabilities('forge', 'tool');
+  assert(afterSync.length === 2, `Tools after sync: ${afterSync.length} (exec + image, web_search removed)`);
+  const toolNames = afterSync.map(c => c.name).sort();
+  assert(toolNames[0] === 'exec' && toolNames[1] === 'image', `Tool names: ${toolNames.join(', ')}`);
+
   // ── Facts via Facade ──
   console.log('\n── Facts via Facade ──');
 

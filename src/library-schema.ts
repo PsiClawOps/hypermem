@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LIBRARY_SCHEMA_VERSION = 3;
+export const LIBRARY_SCHEMA_VERSION = 4;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -471,6 +471,35 @@ function applyV3Collections(db: DatabaseSync): void {
   `);
 }
 
+// ── V4: Agent capabilities ────────────────────────────────────
+// Skills, tools, MCP servers registered per agent for fleet-wide discoverability.
+
+function applyV4Capabilities(db: DatabaseSync): void {
+  // Add capabilities column to fleet_agents
+  db.exec('ALTER TABLE fleet_agents ADD COLUMN capabilities TEXT');
+
+  // Structured capabilities table for queryable skill/tool lookups
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_capabilities (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL REFERENCES fleet_agents(id),
+      cap_type TEXT NOT NULL,
+      name TEXT NOT NULL,
+      version TEXT,
+      source TEXT,
+      config TEXT,
+      status TEXT DEFAULT 'active',
+      last_verified TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(agent_id, cap_type, name)
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_agent_caps_agent ON agent_capabilities(agent_id, cap_type)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_agent_caps_type ON agent_capabilities(cap_type, name)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_agent_caps_status ON agent_capabilities(status, cap_type)');
+}
+
 // ── Migration runner ──────────────────────────────────────────
 
 export function migrateLibrary(db: DatabaseSync): void {
@@ -510,5 +539,11 @@ export function migrateLibrary(db: DatabaseSync): void {
     applyV3Collections(db);
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(3, nowIso());
+  }
+
+  if (currentVersion < 4) {
+    applyV4Capabilities(db);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(4, nowIso());
   }
 }

@@ -12,6 +12,16 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+export interface AgentCapability {
+  capType: 'skill' | 'tool' | 'mcp_server';
+  name: string;
+  version?: string;
+  source?: string;
+  config?: Record<string, unknown>;
+  status: string;
+  lastVerified?: string;
+}
+
 export interface FleetAgent {
   id: string;
   displayName: string;
@@ -25,6 +35,7 @@ export interface FleetAgent {
   createdAt: string;
   updatedAt: string;
   metadata: Record<string, unknown> | null;
+  capabilities: AgentCapability[] | null;
 }
 
 export interface FleetOrg {
@@ -49,6 +60,19 @@ function parseAgentRow(row: Record<string, unknown>): FleetAgent {
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     metadata: row.metadata ? JSON.parse(row.metadata as string) : null,
+    capabilities: row.capabilities ? JSON.parse(row.capabilities as string) : null,
+  };
+}
+
+function parseCapabilityRow(row: Record<string, unknown>): AgentCapability {
+  return {
+    capType: row.cap_type as AgentCapability['capType'],
+    name: row.name as string,
+    version: (row.version as string) || undefined,
+    source: (row.source as string) || undefined,
+    config: row.config ? JSON.parse(row.config as string) : undefined,
+    status: row.status as string,
+    lastVerified: (row.last_verified as string) || undefined,
   };
 }
 
@@ -250,5 +274,170 @@ export class FleetStore {
     ).all(orgId) as Record<string, unknown>[];
 
     return rows.map(parseAgentRow);
+  }
+
+  // ── Capabilities ────────────────────────────────────────────
+
+  /**
+   * Register or update a capability for an agent.
+   */
+  upsertCapability(agentId: string, cap: {
+    capType: AgentCapability['capType'];
+    name: string;
+    version?: string;
+    source?: string;
+    config?: Record<string, unknown>;
+    status?: string;
+  }): AgentCapability {
+    const now = nowIso();
+
+    this.db.prepare(`
+      INSERT INTO agent_capabilities (agent_id, cap_type, name, version, source, config, status, last_verified, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(agent_id, cap_type, name) DO UPDATE SET
+        version = COALESCE(excluded.version, version),
+        source = COALESCE(excluded.source, source),
+        config = COALESCE(excluded.config, config),
+        status = excluded.status,
+        last_verified = excluded.last_verified,
+        updated_at = excluded.updated_at
+    `).run(
+      agentId,
+      cap.capType,
+      cap.name,
+      cap.version || null,
+      cap.source || null,
+      cap.config ? JSON.stringify(cap.config) : null,
+      cap.status || 'active',
+      now,
+      now,
+      now
+    );
+
+    // Also update the denormalized JSON on fleet_agents
+    this._syncCapabilitiesJson(agentId);
+
+    return this.getCapability(agentId, cap.capType, cap.name)!;
+  }
+
+  /**
+   * Bulk-sync capabilities for an agent (replace all of a given type).
+   */
+  syncCapabilities(agentId: string, capType: AgentCapability['capType'], caps: Array<{
+    name: string;
+    version?: string;
+    source?: string;
+    config?: Record<string, unknown>;
+  }>): void {
+    const now = nowIso();
+    const capNames = caps.map(c => c.name);
+
+    // Mark missing ones as removed
+    const existing = this.db.prepare(
+      'SELECT name FROM agent_capabilities WHERE agent_id = ? AND cap_type = ? AND status = ?'
+    ).all(agentId, capType, 'active') as Array<{ name: string }>;
+
+    for (const row of existing) {
+      if (!capNames.includes(row.name)) {
+        this.db.prepare(
+          'UPDATE agent_capabilities SET status = ?, updated_at = ? WHERE agent_id = ? AND cap_type = ? AND name = ?'
+        ).run('removed', now, agentId, capType, row.name);
+      }
+    }
+
+    // Upsert current ones
+    for (const cap of caps) {
+      this.upsertCapability(agentId, { capType, ...cap });
+    }
+
+    this._syncCapabilitiesJson(agentId);
+  }
+
+  /**
+   * Get a specific capability.
+   */
+  getCapability(agentId: string, capType: string, name: string): AgentCapability | null {
+    const row = this.db.prepare(
+      'SELECT * FROM agent_capabilities WHERE agent_id = ? AND cap_type = ? AND name = ?'
+    ).get(agentId, capType, name) as Record<string, unknown> | undefined;
+
+    return row ? parseCapabilityRow(row) : null;
+  }
+
+  /**
+   * List capabilities for an agent, optionally filtered by type.
+   */
+  getAgentCapabilities(agentId: string, capType?: string): AgentCapability[] {
+    let sql = 'SELECT * FROM agent_capabilities WHERE agent_id = ? AND status = ?';
+    const params: (string)[] = [agentId, 'active'];
+
+    if (capType) {
+      sql += ' AND cap_type = ?';
+      params.push(capType);
+    }
+
+    sql += ' ORDER BY cap_type, name';
+
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    return rows.map(parseCapabilityRow);
+  }
+
+  /**
+   * Find agents that have a specific capability.
+   */
+  findByCapability(capType: string, name: string): FleetAgent[] {
+    const rows = this.db.prepare(`
+      SELECT fa.* FROM fleet_agents fa
+      INNER JOIN agent_capabilities ac ON ac.agent_id = fa.id
+      WHERE ac.cap_type = ? AND ac.name = ? AND ac.status = 'active' AND fa.status = 'active'
+      ORDER BY fa.tier, fa.id
+    `).all(capType, name) as Record<string, unknown>[];
+
+    return rows.map(parseAgentRow);
+  }
+
+  /**
+   * Find agents that have ANY of the given capabilities.
+   */
+  findByAnyCapability(caps: Array<{ capType: string; name: string }>): FleetAgent[] {
+    if (caps.length === 0) return [];
+
+    const conditions = caps.map(() => '(ac.cap_type = ? AND ac.name = ?)').join(' OR ');
+    const params = caps.flatMap(c => [c.capType, c.name]);
+
+    const rows = this.db.prepare(`
+      SELECT DISTINCT fa.* FROM fleet_agents fa
+      INNER JOIN agent_capabilities ac ON ac.agent_id = fa.id
+      WHERE (${conditions}) AND ac.status = 'active' AND fa.status = 'active'
+      ORDER BY fa.tier, fa.id
+    `).all(...params) as Record<string, unknown>[];
+
+    return rows.map(parseAgentRow);
+  }
+
+  /**
+   * Remove a capability from an agent.
+   */
+  removeCapability(agentId: string, capType: string, name: string): void {
+    const now = nowIso();
+    this.db.prepare(
+      'UPDATE agent_capabilities SET status = ?, updated_at = ? WHERE agent_id = ? AND cap_type = ? AND name = ?'
+    ).run('removed', now, agentId, capType, name);
+
+    this._syncCapabilitiesJson(agentId);
+  }
+
+  // ── Internal ────────────────────────────────────────────────
+
+  /**
+   * Sync the denormalized capabilities JSON on fleet_agents.
+   */
+  private _syncCapabilitiesJson(agentId: string): void {
+    const caps = this.getAgentCapabilities(agentId);
+    const now = nowIso();
+
+    this.db.prepare(
+      'UPDATE fleet_agents SET capabilities = ?, updated_at = ? WHERE id = ?'
+    ).run(JSON.stringify(caps), now, agentId);
   }
 }
