@@ -38,7 +38,16 @@ export class KnowledgeStore {
 
   /**
    * Upsert a knowledge entry.
-   * If the domain+key already exists, the old entry is superseded by the new one.
+   *
+   * Versioning semantics:
+   * - If no active entry exists: insert as version 1
+   * - If same content: refresh confidence + timestamp only (no new version)
+   * - If different content: insert as new version (max_version + 1), mark
+   *   previous active row as superseded_by = new_id
+   *
+   * This guarantees version history is real rows, not in-place overwrites.
+   * The unique constraint is (agent_id, domain, key, version) so each
+   * version is a distinct row.
    */
   upsert(
     agentId: string,
@@ -47,6 +56,7 @@ export class KnowledgeStore {
     content: string,
     opts?: {
       confidence?: number;
+      visibility?: string;
       sourceType?: string;
       sourceRef?: string;
       expiresAt?: string;
@@ -54,70 +64,69 @@ export class KnowledgeStore {
   ): Knowledge {
     const now = nowIso();
     const sourceType = opts?.sourceType || 'manual';
+    const confidence = opts?.confidence ?? 1.0;
+    const visibility = opts?.visibility ?? 'private';
 
-    // Check for existing entry
+    // Find current active entry (not superseded, not expired)
     const existing = this.db.prepare(`
       SELECT * FROM knowledge
       WHERE agent_id = ? AND domain = ? AND key = ?
       AND superseded_by IS NULL
+      AND (expires_at IS NULL OR expires_at > datetime('now'))
+      ORDER BY version DESC LIMIT 1
     `).get(agentId, domain, key) as Record<string, unknown> | undefined;
 
     if (existing && (existing.content as string) === content) {
-      // Same content — just update timestamp and confidence
-      this.db.prepare(`
-        UPDATE knowledge SET confidence = ?, updated_at = ? WHERE id = ?
-      `).run(opts?.confidence || existing.confidence as number, now, existing.id as number);
-
-      return parseKnowledgeRow({ ...existing, updated_at: now });
+      // Same content — refresh confidence and timestamp only, no new version
+      this.db.prepare(
+        'UPDATE knowledge SET confidence = ?, updated_at = ? WHERE id = ?'
+      ).run(confidence, now, existing.id as number);
+      return parseKnowledgeRow({ ...existing, confidence, updated_at: now });
     }
 
-    // Insert new entry
+    // Determine next version number
+    const maxVersionRow = this.db.prepare(`
+      SELECT MAX(version) AS max_version FROM knowledge
+      WHERE agent_id = ? AND domain = ? AND key = ?
+    `).get(agentId, domain, key) as { max_version: number | null } | undefined;
+
+    const nextVersion = (maxVersionRow?.max_version ?? 0) + 1;
+
+    // Insert new version row (no ON CONFLICT — version column ensures uniqueness)
     const result = this.db.prepare(`
-      INSERT INTO knowledge (agent_id, domain, key, content, confidence, source_type, source_ref, created_at, updated_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(agent_id, domain, key) DO UPDATE SET
-        content = excluded.content,
-        confidence = excluded.confidence,
-        source_type = excluded.source_type,
-        source_ref = excluded.source_ref,
-        updated_at = excluded.updated_at,
-        expires_at = excluded.expires_at
+      INSERT INTO knowledge
+        (agent_id, domain, key, version, content, confidence, visibility, source_type, source_ref,
+         created_at, updated_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      agentId,
-      domain,
-      key,
-      content,
-      opts?.confidence || 1.0,
-      sourceType,
-      opts?.sourceRef || null,
-      now,
-      now,
-      opts?.expiresAt || null
+      agentId, domain, key, nextVersion, content, confidence, visibility, sourceType,
+      opts?.sourceRef ?? null, now, now, opts?.expiresAt ?? null
     );
 
-    const id = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
+    const newId = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
 
-    // If there was an old entry with different content, create supersedes link
-    if (existing && (existing.content as string) !== content) {
-      this.db.prepare(`
-        UPDATE knowledge SET superseded_by = ? WHERE id = ?
-      `).run(id, existing.id as number);
+    // Mark previous active entry as superseded by this new version
+    if (existing) {
+      this.db.prepare(
+        'UPDATE knowledge SET superseded_by = ?, updated_at = ? WHERE id = ?'
+      ).run(newId, now, existing.id as number);
 
-      this.addLink(id, existing.id as number, 'supersedes');
+      // Link: new version supersedes old version
+      this.addLink(newId, existing.id as number, 'supersedes');
     }
 
     return {
-      id,
+      id: newId,
       agentId,
       domain,
       key,
       content,
-      confidence: opts?.confidence || 1.0,
+      confidence,
       sourceType,
-      sourceRef: opts?.sourceRef || null,
+      sourceRef: opts?.sourceRef ?? null,
       createdAt: now,
       updatedAt: now,
-      expiresAt: opts?.expiresAt || null,
+      expiresAt: opts?.expiresAt ?? null,
       supersededBy: null,
     };
   }

@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LIBRARY_SCHEMA_VERSION = 5;
+export const LIBRARY_SCHEMA_VERSION = 7;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -542,6 +542,181 @@ function applyV5DesiredState(db: DatabaseSync): void {
   db.exec('CREATE INDEX IF NOT EXISTS idx_config_events_agent ON agent_config_events(agent_id, config_key, created_at DESC)');
 }
 
+// ── V6: Document chunks ───────────────────────────────────────
+// Stores chunked ACA workspace documents for semantic retrieval.
+// Enables ACA offload: governance docs, identity files, memory → demand-loaded.
+//
+// Key design:
+// - Each chunk has a source_hash — atomic re-indexing via hash-based swap
+// - collection path mirrors ACA_COLLECTIONS (governance/policy, etc.)
+// - scope: shared-fleet | per-tier | per-agent
+// - FTS5 virtual table for keyword fallback when no embedder configured
+
+function applyV6DocChunks(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS doc_chunks (
+      id TEXT PRIMARY KEY,
+      collection TEXT NOT NULL,
+      section_path TEXT NOT NULL,
+      depth INTEGER NOT NULL DEFAULT 2,
+      content TEXT NOT NULL,
+      token_estimate INTEGER NOT NULL DEFAULT 0,
+      source_hash TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'shared-fleet',
+      tier TEXT,
+      agent_id TEXT,
+      parent_path TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_doc_chunks_collection ON doc_chunks(collection, scope)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_doc_chunks_agent ON doc_chunks(agent_id, collection)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_doc_chunks_hash ON doc_chunks(source_hash)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_doc_chunks_source ON doc_chunks(source_path)');
+
+  // Source file tracking: one row per indexed file
+  // Used to detect when a file has changed and needs re-indexing
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS doc_sources (
+      source_path TEXT NOT NULL,
+      collection TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'shared-fleet',
+      agent_id TEXT,
+      source_hash TEXT NOT NULL,
+      chunk_count INTEGER NOT NULL DEFAULT 0,
+      indexed_at TEXT NOT NULL,
+      PRIMARY KEY (source_path, collection)
+    )
+  `);
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_doc_sources_collection ON doc_sources(collection)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_doc_sources_agent ON doc_sources(agent_id)');
+
+  // FTS5 for keyword-based fallback retrieval
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS doc_chunks_fts USING fts5(
+      content,
+      section_path,
+      collection,
+      content='doc_chunks',
+      content_rowid='rowid'
+    )
+  `);
+
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS doc_chunks_fts_ai AFTER INSERT ON doc_chunks BEGIN
+      INSERT INTO doc_chunks_fts(rowid, content, section_path, collection)
+      VALUES (new.rowid, new.content, new.section_path, new.collection);
+    END
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS doc_chunks_fts_ad AFTER DELETE ON doc_chunks BEGIN
+      INSERT INTO doc_chunks_fts(doc_chunks_fts, rowid, content, section_path, collection)
+      VALUES ('delete', old.rowid, old.content, old.section_path, old.collection);
+    END
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS doc_chunks_fts_au AFTER UPDATE ON doc_chunks BEGIN
+      INSERT INTO doc_chunks_fts(doc_chunks_fts, rowid, content, section_path, collection)
+      VALUES ('delete', old.rowid, old.content, old.section_path, old.collection);
+      INSERT INTO doc_chunks_fts(rowid, content, section_path, collection)
+      VALUES (new.rowid, new.content, new.section_path, new.collection);
+    END
+  `);
+}
+
+// ── V7: Fix knowledge versioning ─────────────────────────────
+// The V1 knowledge table had UNIQUE(agent_id, domain, key) which prevented
+// true versioning — upsert would overwrite in-place, creating self-superseding rows.
+//
+// V7 recreates the knowledge table with:
+// - version INTEGER NOT NULL DEFAULT 1
+// - UNIQUE(agent_id, domain, key, version) — allows multiple versions per key
+// - Preserves existing data (current rows become version 1)
+
+function applyV7KnowledgeVersioning(db: DatabaseSync): void {
+  // Rename existing table
+  db.exec('ALTER TABLE knowledge RENAME TO knowledge_v6');
+
+  // Create new table with versioned unique constraint
+  db.exec(`
+    CREATE TABLE knowledge (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      key TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      content TEXT NOT NULL,
+      confidence REAL NOT NULL DEFAULT 1.0,
+      visibility TEXT NOT NULL DEFAULT 'private',
+      source_type TEXT NOT NULL DEFAULT 'manual',
+      source_ref TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      expires_at TEXT,
+      superseded_by INTEGER,
+      UNIQUE(agent_id, domain, key, version)
+    )
+  `);
+
+  // Recreate indexes
+  db.exec('CREATE INDEX IF NOT EXISTS idx_knowledge_agent ON knowledge(agent_id, domain, key)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_knowledge_active ON knowledge(agent_id, superseded_by)');
+
+  // Migrate existing data (all become version 1, preserve visibility)
+  db.exec(`
+    INSERT INTO knowledge (id, agent_id, domain, key, version, content, confidence, visibility,
+                           source_type, source_ref, created_at, updated_at, expires_at, superseded_by)
+    SELECT id, agent_id, domain, key, 1, content, confidence,
+           COALESCE(visibility, 'private'),
+           source_type, source_ref, created_at, updated_at, expires_at, superseded_by
+    FROM knowledge_v6
+  `);
+
+  // Drop old table
+  db.exec('DROP TABLE knowledge_v6');
+
+  // Recreate FTS5 virtual table (was created in V3 but references knowledge)
+  // FTS tables can't be migrated — drop and recreate
+  try {
+    db.exec('DROP TABLE IF EXISTS knowledge_fts');
+  } catch { /* ignore */ }
+
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+      content,
+      domain,
+      key,
+      content='knowledge',
+      content_rowid='id'
+    )
+  `);
+
+  // Repopulate FTS index from migrated data
+  db.exec(`INSERT INTO knowledge_fts(rowid, content, domain, key) SELECT id, content, domain, key FROM knowledge`);
+
+  // Recreate triggers
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS knowledge_fts_ai AFTER INSERT ON knowledge BEGIN
+      INSERT INTO knowledge_fts(rowid, content, domain, key) VALUES (new.id, new.content, new.domain, new.key);
+    END
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS knowledge_fts_au AFTER UPDATE ON knowledge BEGIN
+      INSERT INTO knowledge_fts(knowledge_fts, rowid, content, domain, key) VALUES('delete', old.id, old.content, old.domain, old.key);
+      INSERT INTO knowledge_fts(rowid, content, domain, key) VALUES (new.id, new.content, new.domain, new.key);
+    END
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS knowledge_fts_ad AFTER DELETE ON knowledge BEGIN
+      INSERT INTO knowledge_fts(knowledge_fts, rowid, content, domain, key) VALUES('delete', old.id, old.content, old.domain, old.key);
+    END
+  `);
+}
+
 // ── Migration runner ──────────────────────────────────────────
 
 export function migrateLibrary(db: DatabaseSync): void {
@@ -593,5 +768,17 @@ export function migrateLibrary(db: DatabaseSync): void {
     applyV5DesiredState(db);
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(5, nowIso());
+  }
+
+  if (currentVersion < 6) {
+    applyV6DocChunks(db);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(6, nowIso());
+  }
+
+  if (currentVersion < 7) {
+    applyV7KnowledgeVersioning(db);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(7, nowIso());
   }
 }

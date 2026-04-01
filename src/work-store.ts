@@ -80,12 +80,13 @@ function parseEventRow(row: Record<string, unknown>): WorkEvent {
 }
 
 /**
- * Generate a work item ID.
+ * Generate a work item ID candidate.
+ * Uses a 6-hex random suffix (~16.7M daily space).
  */
-function generateId(): string {
+function generateIdCandidate(): string {
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const seq = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
-  return `WQ-${date}-${seq}`;
+  const suffix = Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
+  return `WQ-${date}-${suffix}`;
 }
 
 export class WorkStore {
@@ -106,7 +107,25 @@ export class WorkStore {
     metadata?: Record<string, unknown>;
   }): WorkItem {
     const now = nowIso();
-    const id = data.metadata?.id as string || generateId();
+
+    // Use caller-supplied ID if provided, otherwise generate with retry-on-conflict.
+    // Random suffix collisions are rare but possible under bulk creation — retry
+    // up to 10 times before giving up. Each retry picks a new random suffix.
+    const callerSuppliedId = data.metadata?.id as string | undefined;
+    let id = callerSuppliedId || generateIdCandidate();
+    let attempts = 0;
+
+    while (attempts < 10) {
+      const existing = this.db
+        .prepare('SELECT id FROM work_items WHERE id = ?')
+        .get(id) as { id: string } | undefined;
+      if (!existing) break;
+      if (callerSuppliedId) {
+        throw new Error(`Work item ID already exists: ${id}`);
+      }
+      id = generateIdCandidate();
+      attempts++;
+    }
 
     this.db.prepare(`
       INSERT INTO work_items (id, title, description, status, priority, agent_id,

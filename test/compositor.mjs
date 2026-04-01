@@ -9,7 +9,8 @@
  */
 
 import { HyperMem } from '../dist/index.js';
-import { Compositor } from '../dist/compositor.js';
+import { Compositor, DEFAULT_TRIGGERS } from '../dist/compositor.js';
+import { chunkMarkdown } from '../dist/doc-chunker.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -260,6 +261,152 @@ async function run() {
   const slotTotal = Object.values(accountedResult.slots).reduce((a, b) => a + b, 0);
   assert(Math.abs(slotTotal - accountedResult.tokenCount) < 50,
     `Slot sum (${slotTotal}) ≈ total (${accountedResult.tokenCount})`);
+
+  // ── Trigger Registry ──
+  console.log('\n── Trigger Registry ──');
+
+  // Verify DEFAULT_TRIGGERS covers expected collections
+  const collections = DEFAULT_TRIGGERS.map(t => t.collection);
+  assert(collections.includes('governance/policy'), 'Trigger: governance/policy defined');
+  assert(collections.includes('governance/comms'), 'Trigger: governance/comms defined');
+  assert(collections.includes('identity/job'), 'Trigger: identity/job defined');
+  assert(collections.includes('memory/decisions'), 'Trigger: memory/decisions defined');
+
+  // Verify keyword matching logic
+  const policyTrigger = DEFAULT_TRIGGERS.find(t => t.collection === 'governance/policy');
+  assert(policyTrigger !== undefined, 'Policy trigger exists');
+  assert(policyTrigger.keywords.some(k => 'escalation decision'.includes(k)), 'Policy trigger matches "escalation"');
+
+  // ── Doc Chunk Retrieval in Composition ──
+  console.log('\n── Doc Chunk Retrieval (L4 Trigger-Based) ──');
+
+  // Seed some policy chunks into the library DB
+  const policyContent = `# POLICY.md
+
+Fleet governance policy.
+
+## §2 Escalation
+
+Four mandatory escalation triggers require human review. No autonomous resolution allowed.
+
+### Trigger 1: Policy Conflict
+
+If instructions conflict with safety or compliance policies, pause and ask.
+This is a hard requirement that cannot be bypassed.
+
+## §3 Decision States
+
+Green, Yellow, Red decision framework for operational status.
+GREEN = proceed normally, YELLOW = proceed with caution, RED = stop and escalate immediately.
+All council decisions must include a decision state in their response.
+`;
+
+  const policyChunks = chunkMarkdown(policyContent, {
+    collection: 'governance/policy',
+    sourcePath: '/workspace/POLICY.md',
+    scope: 'shared-fleet',
+  });
+  hm.indexDocChunks(policyChunks);
+
+  // Also seed job/deliberation chunks
+  const jobContent = `# JOB.md
+
+Performance criteria for the infrastructure seat.
+
+## Response Contract
+
+Every council response includes:
+1. Position — operationally fit, conditionally fit, or not fit
+2. Top risk — single most critical operational or architectural risk
+3. Confidence — high/medium/low
+4. Action — specific infrastructure work, test, or validation needed
+`;
+
+  const jobChunks = chunkMarkdown(jobContent, {
+    collection: 'identity/job',
+    sourcePath: '/workspace/JOB.md',
+    scope: 'per-agent',
+    agentId: 'forge',
+  });
+  hm.indexDocChunks(jobChunks);
+
+  // The seeded policy doc contains unique text that can ONLY appear via chunk injection,
+  // not from echoing the user message. We assert on that unique text.
+  // Unique sentinel in policyContent: "mandatory human review requirements"
+  // Unique sentinel in jobContent: "operationally fit, conditionally fit, or not fit"
+  //
+  // This ensures the test fails if FTS retrieval doesn't actually find the right chunks
+  // (Pylon's repro: user message contained "escalation" but no chunk was injected).
+
+  const chunkSessionKey = 'agent:forge:webchat:chunk-test';
+  await hm.recordUserMessage(agentId, chunkSessionKey, 'What are the escalation triggers I should follow?');
+
+  const escalationResult = await hm.compose({
+    agentId,
+    sessionKey: chunkSessionKey,
+    tokenBudget: 8000,
+    provider: 'anthropic',
+    includeDocChunks: true,
+  });
+
+  const escalationText = escalationResult.messages.map(m =>
+    typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+  ).join('\n');
+
+  // Assert on chunk-unique content — text that can only appear via chunk injection, not from the user message.
+  // The seeded policy chunk contains "No autonomous resolution allowed" — unique sentinel text
+  // that does not appear in the user question "What are the escalation triggers I should follow?"
+  assert(escalationText.includes('No autonomous resolution') || escalationText.includes('autonomous resolution'),
+    'Chunk-unique policy text injected (not just user message echo)');
+  assert(escalationResult.slots.library > 0,
+    'Library slot consumed (confirms chunk was actually injected, not just present in history)');
+
+  // Seed a deliberation-related message to trigger identity/job chunks
+  const deliberationSessionKey = 'agent:forge:webchat:deliberation-test';
+  await hm.recordUserMessage(agentId, deliberationSessionKey, 'We need a council round vote on this proposal and response contract.');
+
+  const deliberationResult = await hm.compose({
+    agentId,
+    sessionKey: deliberationSessionKey,
+    tokenBudget: 8000,
+    provider: 'anthropic',
+    includeDocChunks: true,
+  });
+
+  const deliberationText = deliberationResult.messages.map(m =>
+    typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+  ).join('\n');
+
+  // Assert on chunk-unique content from the seeded JOB.md
+  assert(deliberationText.includes('operationally fit') || deliberationText.includes('conditionally fit'),
+    'Chunk-unique job text injected (response contract from seeded JOB.md)');
+
+  const statsAfterSeed = hm.getDocIndexStats();
+  assert(statsAfterSeed.length >= 2, `Doc index has ${statsAfterSeed.length} collections after seeding`);
+  assert(statsAfterSeed.some(s => s.collection === 'governance/policy'), 'Policy collection indexed');
+  assert(statsAfterSeed.some(s => s.collection === 'identity/job'), 'Job collection indexed');
+
+  // Tier filter: council-scoped chunks should not appear for director queries
+  const councilChunks = chunkMarkdown('# Charter\n\n## Council Structure\n\nThis section is for council seats only — their specific roles and responsibilities.\n', {
+    collection: 'governance/charter',
+    sourcePath: '/workspace/forge/CHARTER.md',
+    scope: 'per-tier',
+    tier: 'council',
+  });
+  const directorChunks = chunkMarkdown('# Charter\n\n## Director Structure\n\nThis section is for directors only — their specific delegation and reporting lines.\n', {
+    collection: 'governance/charter',
+    sourcePath: '/workspace/pylon/CHARTER.md',
+    scope: 'per-tier',
+    tier: 'director',
+  });
+  hm.indexDocChunks(councilChunks);
+  hm.indexDocChunks(directorChunks);
+
+  // Query with tier filter — should only return matching tier
+  const councilOnly = hm.queryDocChunks({ collection: 'governance/charter', tier: 'council' });
+  const directorOnly = hm.queryDocChunks({ collection: 'governance/charter', tier: 'director' });
+  assert(councilOnly.every(c => !c.tier || c.tier === 'council'), 'Council tier filter excludes director chunks');
+  assert(directorOnly.every(c => !c.tier || c.tier === 'director'), 'Director tier filter excludes council chunks');
 
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
