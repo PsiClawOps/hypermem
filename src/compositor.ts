@@ -493,7 +493,10 @@ export class Compositor {
         toolResults: null,
       };
       // Insert after system/identity, before history
-      const insertIdx = messages.findIndex(m => m.role !== 'system') || messages.length;
+      // Insert context after all system/identity messages, before conversation history.
+      // findIndex returns -1 when all messages are system-role — handle explicitly.
+      const firstNonSystem = messages.findIndex(m => m.role !== 'system');
+      const insertIdx = firstNonSystem === -1 ? messages.length : firstNonSystem;
       messages.splice(insertIdx, 0, contextMsg);
     }
 
@@ -808,6 +811,7 @@ export class Compositor {
       JOIN conversations c ON m.conversation_id = c.id
       WHERE c.agent_id = ?
       AND m.conversation_id != ?
+      AND c.status = 'active'
       AND m.text_content IS NOT NULL
       AND m.is_heartbeat = 0
       ORDER BY m.created_at DESC

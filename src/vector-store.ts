@@ -14,6 +14,7 @@
  */
 
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 
 export interface EmbeddingConfig {
   /** Ollama base URL. Default: http://localhost:11434 */
@@ -183,12 +184,22 @@ export class VectorStore {
    * Index a single content item. Generates embedding and stores in vec table.
    * Skips if content hasn't changed (based on hash).
    */
+  /** Allowlisted source tables for vector indexing. Prevents SQL injection via table name interpolation. */
+  private static readonly ALLOWED_SOURCE_TABLES = new Set(['facts', 'knowledge', 'episodes', 'sessions']);
+
+  private validateSourceTable(sourceTable: string): void {
+    if (!VectorStore.ALLOWED_SOURCE_TABLES.has(sourceTable)) {
+      throw new Error(`Invalid sourceTable: "${sourceTable}". Must be one of: ${[...VectorStore.ALLOWED_SOURCE_TABLES].join(', ')}`);
+    }
+  }
+
   async indexItem(
     sourceTable: string,
     sourceId: number,
     content: string,
     domain?: string
   ): Promise<boolean> {
+    this.validateSourceTable(sourceTable);
     const vecTable = `vec_${sourceTable}`;
     const contentHash = simpleHash(content);
 
@@ -238,6 +249,11 @@ export class VectorStore {
   ): Promise<{ indexed: number; skipped: number }> {
     let indexed = 0;
     let skipped = 0;
+
+    // Validate all source tables before processing any items
+    for (const item of items) {
+      this.validateSourceTable(item.sourceTable);
+    }
 
     // Filter out already-indexed items
     const toIndex: typeof items = [];
@@ -551,17 +567,11 @@ export class VectorStore {
 }
 
 /**
- * Simple content hash for change detection.
- * Not cryptographic — just for dedup.
+ * SHA-256 content hash for change detection and deduplication.
+ * Replaces the prior 32-bit rolling hash which had collision risk on large corpora.
  */
 function simpleHash(str: string): string {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash; // Convert to 32-bit integer
-  }
-  return hash.toString(36);
+  return createHash('sha256').update(str).digest('hex').slice(0, 16);
 }
 
 /**

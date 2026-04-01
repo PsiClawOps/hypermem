@@ -8,9 +8,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "node --test dist/**/*.test.js",
-    "migrate": "node dist/cli/migrate.js",
-    "migrate:status": "node dist/cli/migrate.js --status"
+    "test": "node --experimental-test-runner test/smoke.mjs && node test/redis-integration.mjs && node test/cross-agent.mjs && node test/vector-search.mjs && node test/library.mjs && node test/compositor.mjs && node test/fleet-cache.mjs && node test/rotation.mjs && node test/knowledge-graph.mjs && node test/rate-limiter.mjs && node test/doc-chunker.mjs",
+    "test:quick": "node test/smoke.mjs && node test/library.mjs && node test/compositor.mjs"
   },
   "dependencies": {
     "ioredis": "^5.4.1",
@@ -28,5 +27,12 @@
     "dist/**/*.d.ts"
   ],
   "author": "PsiClawOps",
-  "license": "MIT"
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PsiClawOps/hypermem-internal.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
 }
