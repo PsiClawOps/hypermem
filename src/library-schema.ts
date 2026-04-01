@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LIBRARY_SCHEMA_VERSION = 4;
+export const LIBRARY_SCHEMA_VERSION = 5;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -500,6 +500,48 @@ function applyV4Capabilities(db: DatabaseSync): void {
   db.exec('CREATE INDEX IF NOT EXISTS idx_agent_caps_status ON agent_capabilities(status, cap_type)');
 }
 
+// ── V5: Agent desired state ───────────────────────────────────
+// Stores intended configuration for each agent: model, thinking, provider, etc.
+// Enables drift detection (desired vs actual) and fleet-wide config visibility.
+
+function applyV5DesiredState(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_desired_state (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      config_key TEXT NOT NULL,
+      desired_value TEXT NOT NULL,
+      actual_value TEXT,
+      source TEXT NOT NULL DEFAULT 'operator',
+      set_by TEXT,
+      drift_status TEXT DEFAULT 'unknown',
+      last_checked TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      notes TEXT,
+      UNIQUE(agent_id, config_key)
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_desired_agent ON agent_desired_state(agent_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_desired_drift ON agent_desired_state(drift_status)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_desired_key ON agent_desired_state(config_key)');
+
+  // Change log for desired state modifications
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_config_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      config_key TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      changed_by TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_config_events_agent ON agent_config_events(agent_id, config_key, created_at DESC)');
+}
+
 // ── Migration runner ──────────────────────────────────────────
 
 export function migrateLibrary(db: DatabaseSync): void {
@@ -545,5 +587,11 @@ export function migrateLibrary(db: DatabaseSync): void {
     applyV4Capabilities(db);
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(4, nowIso());
+  }
+
+  if (currentVersion < 5) {
+    applyV5DesiredState(db);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(5, nowIso());
   }
 }

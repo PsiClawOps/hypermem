@@ -326,6 +326,69 @@ async function run() {
   const toolNames = afterSync.map(c => c.name).sort();
   assert(toolNames[0] === 'exec' && toolNames[1] === 'image', `Tool names: ${toolNames.join(', ')}`);
 
+  // ── Agent Desired State ──
+  console.log('\n── Agent Desired State ──');
+
+  // Set desired config for forge
+  const modelState = hm.setDesiredState('forge', 'model', 'anthropic/claude-opus-4-6', {
+    source: 'operator',
+    setBy: 'ragesaq',
+    notes: 'Moved to anthropic direct — copilot-local had issues',
+  });
+  assert(modelState.configKey === 'model', 'Desired state set');
+  assert(modelState.desiredValue === 'anthropic/claude-opus-4-6', `Desired model: ${modelState.desiredValue}`);
+  assert(modelState.driftStatus === 'unknown', `Initial drift: ${modelState.driftStatus}`);
+
+  hm.setDesiredState('forge', 'thinkingDefault', 'high', { setBy: 'ragesaq' });
+  hm.setDesiredState('forge', 'provider', 'anthropic', { setBy: 'ragesaq' });
+  hm.setDesiredState('forge', 'tools.exec.host', 'sandbox', { setBy: 'ragesaq' });
+
+  // Set desired config for compass
+  hm.setDesiredState('compass', 'model', 'anthropic/claude-opus-4-6', { setBy: 'ragesaq' });
+  hm.setDesiredState('compass', 'thinkingDefault', 'high', { setBy: 'ragesaq' });
+
+  // Get all config for an agent
+  const forgeConfig = hm.getDesiredConfig('forge');
+  assert(Object.keys(forgeConfig).length === 4, `Forge config keys: ${Object.keys(forgeConfig).length}`);
+  assert(forgeConfig.model === 'anthropic/claude-opus-4-6', 'Config map works');
+
+  // Report actual state — matches desired (no drift)
+  const okDrift = hm.reportActualState('forge', 'model', 'anthropic/claude-opus-4-6');
+  assert(okDrift === 'ok', `Matching model drift: ${okDrift}`);
+
+  // Report actual state — differs from desired (drift!)
+  const driftedResult = hm.reportActualState('forge', 'thinkingDefault', 'medium');
+  assert(driftedResult === 'drifted', `Mismatched thinking drift: ${driftedResult}`);
+
+  // Bulk report
+  const bulkDrift = hm.reportActualStateBulk('compass', {
+    model: 'anthropic/claude-opus-4-6',
+    thinkingDefault: 'low',
+  });
+  assert(bulkDrift.model === 'ok', `Compass model: ${bulkDrift.model}`);
+  assert(bulkDrift.thinkingDefault === 'drifted', `Compass thinking: ${bulkDrift.thinkingDefault}`);
+
+  // Fleet-wide drift view
+  const drifted = hm.getDriftedState();
+  assert(drifted.length === 2, `Drifted entries: ${drifted.length} (forge thinking + compass thinking)`);
+
+  // Fleet-wide config key view
+  const fleetModels = hm.getFleetConfigKey('model');
+  assert(fleetModels.length === 2, `Fleet model entries: ${fleetModels.length}`);
+
+  // Drift summary
+  const summary = hm.getDriftSummary();
+  assert(summary.ok === 2, `OK: ${summary.ok}`);
+  assert(summary.drifted === 2, `Drifted: ${summary.drifted}`);
+  assert(summary.unknown === 2, `Unknown: ${summary.unknown}`);
+  assert(summary.total === 6, `Total: ${summary.total}`);
+
+  // Update desired state and verify history
+  hm.setDesiredState('forge', 'model', 'anthropic/claude-sonnet-4-6', { setBy: 'ragesaq' });
+  const history = hm.getConfigHistory('forge', 'model');
+  assert(history.length === 2, `History events: ${history.length} (set + changed)`);
+  assert(history[0].eventType === 'desired_changed', `Latest event: ${history[0].eventType}`);
+
   // ── Facts via Facade ──
   console.log('\n── Facts via Facade ──');
 

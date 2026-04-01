@@ -27,6 +27,8 @@ export { SystemStore } from './system-store.js';
 export type { SystemState, SystemEvent } from './system-store.js';
 export { WorkStore } from './work-store.js';
 export type { WorkItem, WorkEvent, WorkStatus } from './work-store.js';
+export { DesiredStateStore } from './desired-state-store.js';
+export type { DesiredStateEntry, ConfigEvent, DriftStatus } from './desired-state-store.js';
 
 export { RedisLayer } from './redis.js';
 
@@ -99,6 +101,7 @@ import { PreferenceStore, type Preference } from './preference-store.js';
 import { FleetStore, type FleetAgent, type FleetOrg, type AgentCapability } from './fleet-store.js';
 import { SystemStore, type SystemState, type SystemEvent } from './system-store.js';
 import { WorkStore, type WorkItem, type WorkStatus } from './work-store.js';
+import { DesiredStateStore, type DesiredStateEntry, type DriftStatus } from './desired-state-store.js';
 import { RedisLayer } from './redis.js';
 import { Compositor } from './compositor.js';
 import { VectorStore, type VectorSearchResult, type VectorIndexStats } from './vector-store.js';
@@ -683,6 +686,93 @@ export class HyperMem {
     const db = this.dbManager.getLibraryDb();
     const store = new WorkStore(db);
     return store.getBlocked();
+  }
+
+  // ─── Agent Desired State (L4: Library) ──────────────────────
+
+  /**
+   * Set desired configuration for an agent.
+   */
+  setDesiredState(agentId: string, configKey: string, desiredValue: unknown, opts?: {
+    source?: string;
+    setBy?: string;
+    notes?: string;
+  }): DesiredStateEntry {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.setDesired(agentId, configKey, desiredValue, opts);
+  }
+
+  /**
+   * Report actual runtime value for drift detection.
+   */
+  reportActualState(agentId: string, configKey: string, actualValue: unknown): DriftStatus {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.reportActual(agentId, configKey, actualValue);
+  }
+
+  /**
+   * Bulk report actual state (e.g., on session startup / heartbeat).
+   */
+  reportActualStateBulk(agentId: string, actuals: Record<string, unknown>): Record<string, DriftStatus> {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.reportActualBulk(agentId, actuals);
+  }
+
+  /**
+   * Get all desired state for an agent.
+   */
+  getDesiredState(agentId: string): DesiredStateEntry[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.getAgentState(agentId);
+  }
+
+  /**
+   * Get desired state as a flat config map.
+   */
+  getDesiredConfig(agentId: string): Record<string, unknown> {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.getAgentConfig(agentId);
+  }
+
+  /**
+   * Get all drifted entries across the fleet.
+   */
+  getDriftedState(): DesiredStateEntry[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.getDrifted();
+  }
+
+  /**
+   * Get fleet-wide view of a specific config key.
+   */
+  getFleetConfigKey(configKey: string): DesiredStateEntry[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.getFleetConfig(configKey);
+  }
+
+  /**
+   * Get config change history.
+   */
+  getConfigHistory(agentId: string, configKey?: string, limit?: number): import('./desired-state-store.js').ConfigEvent[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.getHistory(agentId, configKey, limit);
+  }
+
+  /**
+   * Get fleet drift summary.
+   */
+  getDriftSummary(): { total: number; ok: number; drifted: number; unknown: number; error: number } {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.getDriftSummary();
   }
 
   // ─── Vector / Semantic Search (L3: Vectors DB) ──────────────
