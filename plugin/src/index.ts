@@ -21,7 +21,6 @@
  */
 
 import { definePluginEntry, emptyPluginConfigSchema } from 'openclaw/plugin-sdk/plugin-entry';
-import { delegateCompactionToRuntime } from 'openclaw/plugin-sdk/core';
 import type { ContextEngine, ContextEngineInfo } from 'openclaw/plugin-sdk';
 import os from 'os';
 import path from 'path';
@@ -262,12 +261,46 @@ function toNeutralMessage(msg: InboundMessage): NeutralMessage {
  */
 const _warmInFlight = new Map<string, Promise<void>>();
 
+// ─── Token estimation ──────────────────────────────────────────
+
+/**
+ * Estimate tokens for a string using the same ~4 chars/token heuristic
+ * used by the HyperMem compositor. Fast and allocation-free — no tokenizer
+ * library needed for a budget guard.
+ */
+function estimateTokens(text: string | null | undefined): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Estimate total token cost of the current Redis history window for a session.
+ * Counts text content + tool call/result JSON for each message.
+ */
+async function estimateWindowTokens(hm: HyperMemInstance, agentId: string, sessionKey: string): Promise<number> {
+  try {
+    const window = await hm.redis.getWindow(agentId, sessionKey);
+    if (!window || window.length === 0) return 0;
+    return window.reduce((sum, msg) => {
+      let t = estimateTokens(msg.textContent);
+      if (msg.toolCalls) t += estimateTokens(JSON.stringify(msg.toolCalls));
+      if (msg.toolResults) t += estimateTokens(JSON.stringify(msg.toolResults));
+      return sum + t;
+    }, 0);
+  } catch {
+    return 0;
+  }
+}
+
 function createHyperMemEngine(): ContextEngine {
   return {
     info: {
       id: 'hypermem',
       name: 'HyperMem Context Engine',
       version: '0.1.0',
+      // We own compaction — assemble() trims to budget via the compositor safety
+      // valve, so runtime compaction is never needed. compact() handles any
+      // explicit calls by trimming the Redis history window directly.
       ownsCompaction: true,
     } satisfies ContextEngineInfo,
 
@@ -405,15 +438,20 @@ function createHyperMemEngine(): ContextEngine {
         // Non-fatal — tier filtering just won't apply
       }
 
-      // historyDepth: let the compositor use its default (maxHistoryMessages, typically 1000).
-      // Token budget enforcement is the real guard against context overflow.
-      // The previous hardcoded safeHistoryDepth=150 band-aid was removed after
-      // Gate 1 validation proved Redis limit enforcement works (commit 4d68de7).
+      // historyDepth: derive a safe message count from the token budget.
+      // Uses 60% of the budget for history, assumes ~500 tokens/message average
+      // (conservative for tool-heavy sessions). Floor at 50, ceiling at 150.
+      // This is a preventive guard — the compositor's safety valve still trims
+      // by token count post-assembly, but limiting depth up front avoids
+      // feeding the compactor a window it can't reduce.
+      const effectiveBudget = tokenBudget ?? 100000;
+      const historyDepth = Math.min(150, Math.max(50, Math.floor((effectiveBudget * 0.6) / 500)));
 
       const request: ComposeRequest = {
         agentId,
         sessionKey: sk,
         tokenBudget,
+        historyDepth,
         tier,
         model,          // pass model for provider detection
         includeDocChunks: true,
@@ -445,10 +483,65 @@ function createHyperMemEngine(): ContextEngine {
     },
 
     /**
-     * Compact context. We don't own compaction — delegate to runtime.
+     * Compact context. HyperMem owns compaction.
+     *
+     * Strategy: assemble() already trims the composed message list to the token
+     * budget via the compositor safety valve, so the model never receives an
+     * oversized context. compact() is called by the runtime when it detects
+     * overflow — at that point we:
+     *   1. Estimate tokens in the current Redis history window
+     *   2. If already under budget (compositor already handled it), report clean
+     *   3. If over budget (e.g. window was built before budget cap was applied),
+     *      trim the Redis window to a safe depth and invalidate the compose cache
+     *
+     * This prevents the runtime from running its own LLM-summarization compaction
+     * pass, which would destroy message history we're explicitly managing.
      */
-    async compact(params): ReturnType<ContextEngine['compact']> {
-      return delegateCompactionToRuntime(params);
+    async compact({ sessionId, sessionKey, tokenBudget, currentTokenCount }): ReturnType<ContextEngine['compact']> {
+      try {
+        const hm = await getHyperMem();
+        const sk = resolveSessionKey(sessionId, sessionKey);
+        const agentId = extractAgentId(sk);
+
+        // Use the caller's live estimate if provided; otherwise estimate from Redis window
+        const effectiveBudget = tokenBudget ?? 100_000;
+        const tokensBefore = currentTokenCount ?? await estimateWindowTokens(hm, agentId, sk);
+
+        // If already under 80% of budget, nothing to do — compositor handled it
+        if (tokensBefore <= effectiveBudget * 0.8) {
+          return {
+            ok: true,
+            compacted: false,
+            reason: 'within_budget',
+            result: { tokensBefore, tokensAfter: tokensBefore },
+          };
+        }
+
+        // Over budget: trim Redis window to a safe depth
+        // Target 60% of budget capacity, assume ~500 tokens/message average
+        const targetDepth = Math.max(20, Math.floor((effectiveBudget * 0.6) / 500));
+        const window = await hm.redis.getWindow(agentId, sk);
+        if (window && window.length > targetDepth) {
+          const trimmed = window.slice(-targetDepth);
+          await hm.redis.setWindow(agentId, sk, trimmed);
+        }
+
+        // Invalidate the compose cache so next assemble() re-builds from trimmed window
+        await hm.redis.invalidateWindow(agentId, sk).catch(() => {});
+
+        const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
+        console.log(`[hypermem-plugin] compact: trimmed ${tokensBefore} → ${tokensAfter} tokens (budget: ${effectiveBudget})`);
+
+        return {
+          ok: true,
+          compacted: true,
+          result: { tokensBefore, tokensAfter },
+        };
+      } catch (err) {
+        console.warn('[hypermem-plugin] compact failed:', (err as Error).message);
+        // Non-fatal: return ok so the runtime doesn't retry with its own compaction
+        return { ok: true, compacted: false, reason: (err as Error).message };
+      }
     },
 
     /**
