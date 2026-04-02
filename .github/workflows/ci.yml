@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test + Plugin Typecheck
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install root deps
+        run: npm ci
+
+      - name: Build core
+        run: npm run build
+
+      - name: Install plugin deps
+        run: npm ci --prefix plugin
+
+      - name: Run tests + plugin typecheck
+        run: npm run test:ci
+        env:
+          REDIS_URL: redis://localhost:6379
