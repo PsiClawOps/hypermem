@@ -347,6 +347,16 @@ export interface CompositorConfig {
   maxHistoryMessages: number;
   maxFacts: number;
   maxCrossSessionContext: number;  // tokens
+  /**
+   * How many recent tool call/result pairs to keep verbatim in history.
+   * Tool call/result content beyond this threshold is stripped to a compact
+   * stub ("[tool call omitted]"/"[result omitted]"), preserving turn structure
+   * while eliminating the bulk of old tool output from the context window.
+   * Only the most recent N pairs carry full content — enough for the model
+   * to understand current work context without replaying entire exec logs.
+   * Default: 3
+   */
+  maxRecentToolPairs: number;
   // Note: assembly order is fixed in compose() — system, identity, history,
   // facts, knowledge, preferences, semanticRecall, cross-session, library.
   //

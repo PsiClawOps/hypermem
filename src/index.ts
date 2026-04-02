@@ -177,6 +177,7 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     maxHistoryMessages: 1000,
     maxFacts: 20,
     maxCrossSessionContext: 5000,
+    maxRecentToolPairs: 3,
   },
   indexer: {
     enabled: true,

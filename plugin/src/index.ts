@@ -596,18 +596,21 @@ function createHyperMemEngine(): ContextEngine {
     },
 
     /**
-     * Dispose: close HyperMem connections cleanly.
+     * Dispose: intentionally a no-op.
+     *
+     * The runtime calls dispose() at the end of every request cycle, but
+     * HyperMem's Redis connection and SQLite handles are gateway-lifetime
+     * singletons — not request-scoped. Closing and nulling _hm here causes
+     * a full reconnect + re-init on every turn (~400-800ms latency per turn).
+     *
+     * ioredis manages its own reconnection on connection loss. If the gateway
+     * process exits, Node.js cleans up file handles automatically.
+     *
+     * If a true shutdown is needed (e.g. gateway restart signal), call
+     * _hm.close() directly from a gateway:shutdown hook instead.
      */
     async dispose(): Promise<void> {
-      if (_hm) {
-        try {
-          await _hm.close();
-        } catch {
-          // Best effort
-        }
-        _hm = null;
-        _hmInitPromise = null;
-      }
+      // Intentional no-op — see comment above.
     },
   };
 }

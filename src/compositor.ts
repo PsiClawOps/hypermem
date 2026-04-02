@@ -33,9 +33,10 @@ import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction
 
 const DEFAULT_CONFIG: CompositorConfig = {
   defaultTokenBudget: 100000,
-  maxHistoryMessages: 1000,
+  maxHistoryMessages: 100,
   maxFacts: 20,
   maxCrossSessionContext: 5000,
+  maxRecentToolPairs: 3,
 };
 
 /**
@@ -48,7 +49,7 @@ const DEFAULT_CONFIG: CompositorConfig = {
  *
  * The full SQLite archive remains available for deep retrieval on cache miss.
  */
-const WARM_BOOTSTRAP_CAP = 250;
+const WARM_BOOTSTRAP_CAP = 100;
 
 // ─── Trigger Registry ────────────────────────────────────────────
 
@@ -314,9 +315,47 @@ export class Compositor {
       let historyTokens = 0;
       const includedHistory: NeutralMessage[] = [];
 
-      // Include from most recent, working backwards
+      // ── Tool pair stripping ────────────────────────────────────
+      // Keep only the last maxRecentToolPairs tool call/result pairs verbatim.
+      // Older tool content is replaced with compact stubs — the model only
+      // needs recent tool context to understand current work state.
+      // Turn structure is preserved so provider pairing validation still passes.
+      const maxToolPairs = this.config.maxRecentToolPairs ?? 3;
+      let toolPairsSeen = 0;
+      // Walk from most recent to oldest counting tool pairs
+      const toolStripSet = new Set<number>();
       for (let i = historyMessages.length - 1; i >= 0; i--) {
         const msg = historyMessages[i];
+        const hasToolContent = (msg.toolCalls && msg.toolCalls.length > 0) ||
+                               (msg.toolResults && msg.toolResults.length > 0);
+        if (hasToolContent) {
+          toolPairsSeen++;
+          if (toolPairsSeen > maxToolPairs) {
+            toolStripSet.add(i);
+          }
+        }
+      }
+
+      // Include from most recent, working backwards
+      for (let i = historyMessages.length - 1; i >= 0; i--) {
+        let msg = historyMessages[i];
+
+        // Strip old tool content to stubs to save context budget
+        if (toolStripSet.has(i)) {
+          msg = {
+            ...msg,
+            textContent: msg.role === 'user' && msg.toolResults && msg.toolResults.length > 0
+              ? '[result omitted]'
+              : (msg.textContent || null),
+            toolCalls: msg.toolCalls && msg.toolCalls.length > 0
+              ? msg.toolCalls.map(tc => ({ ...tc, arguments: '{"_omitted":true}' }))
+              : msg.toolCalls,
+            toolResults: msg.toolResults && msg.toolResults.length > 0
+              ? msg.toolResults.map(tr => ({ ...tr, content: '[result omitted]' }))
+              : msg.toolResults,
+          };
+        }
+
         const msgTokens = estimateMessageTokens(msg);
 
         if (historyTokens + msgTokens > remaining) {
