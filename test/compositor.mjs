@@ -477,6 +477,35 @@ Every council response includes:
   assert(promptRecallResult.contextBlock?.includes('Related Memory') || promptRecallText.includes('## Related Memory'),
     'Prompt-aware retrieval produced a Related Memory block');
 
+  // 'P0.1: prompt drives retrieval before message is in history'
+  console.log('\n── P0.1: prompt drives retrieval before message is in history ──');
+
+  const freshPromptSessionKey = 'agent:forge:webchat:fresh-prompt-test';
+  const freshPromptResult = await hm.compose({
+    agentId,
+    sessionKey: freshPromptSessionKey,
+    tokenBudget: 8000,
+    provider: 'anthropic',
+    model: 'claude-opus-4-6',
+    includeDocChunks: true,
+    prompt: 'escalation triggers human review',
+  });
+
+  const freshPromptText = [
+    freshPromptResult.contextBlock || '',
+    ...freshPromptResult.messages.map(m =>
+      typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+    ),
+  ].join('\n');
+
+  assert(
+    freshPromptResult.slots.library > 0
+      || freshPromptText.includes('No autonomous resolution')
+      || freshPromptText.includes('human review')
+      || freshPromptText.includes('escalation'),
+    'P0.1: prompt drives retrieval before message is in history'
+  );
+
   // ── skipProviderTranslation (Plugin Path) ──
   console.log('\n── skipProviderTranslation (Plugin Path) ──');
 
