@@ -250,7 +250,7 @@ function createHyperMemEngine(): ContextEngine {
       id: 'hypermem',
       name: 'HyperMem Context Engine',
       version: '0.1.0',
-      ownsCompaction: false,
+      ownsCompaction: true,
     } satisfies ContextEngineInfo,
 
     /**

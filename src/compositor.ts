@@ -565,6 +565,43 @@ export class Compositor {
       messages.splice(insertIdx, 0, contextMsg);
     }
 
+    // ─── Safety Valve: Post-Assembly Budget Check ───────────────────
+    // Re-estimate total tokens after all slots are assembled. If the
+    // composition exceeds tokenBudget * 1.05 (5% tolerance for estimation
+    // drift), trim history messages from the oldest until we're under budget.
+    // History is the most compressible slot — system/identity are never
+    // truncated, and context (facts/recall/episodes) is more valuable per-token.
+    const estimatedTotal = messages.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
+    const hardCeiling = Math.floor(budget * 1.05);
+
+    if (estimatedTotal > hardCeiling) {
+      const overage = estimatedTotal - budget;
+      let trimmed = 0;
+      let trimCount = 0;
+
+      // Find history messages (non-system, after system/identity block)
+      // Walk forward from the first non-system message, trimming oldest history first
+      const firstNonSystemIdx = messages.findIndex(m => m.role !== 'system');
+      if (firstNonSystemIdx >= 0) {
+        let i = firstNonSystemIdx;
+        while (i < messages.length && trimmed < overage) {
+          // Don't trim the last user message (current prompt)
+          if (i === messages.length - 1 && messages[i].role === 'user') break;
+          const msgTokens = estimateMessageTokens(messages[i]);
+          messages.splice(i, 1);
+          trimmed += msgTokens;
+          trimCount++;
+          // Don't increment i — splice shifts everything down
+        }
+      }
+
+      if (trimCount > 0) {
+        slots.history = Math.max(0, slots.history - trimmed);
+        remaining += trimmed;
+        warnings.push(`Safety valve: trimmed ${trimCount} oldest history messages (${trimmed} tokens) to fit budget`);
+      }
+    }
+
     // ─── Translate to provider format (unless caller wants neutral) ───
     // When skipProviderTranslation is set, return NeutralMessages directly.
     // The context engine plugin uses this: the OpenClaw runtime handles its
@@ -579,7 +616,7 @@ export class Compositor {
       messages: outputMessages,
       tokenCount: totalTokens,
       slots,
-      truncated: remaining < 0,
+      truncated: remaining < 0 || estimatedTotal > hardCeiling,
       hasWarnings: warnings.length > 0,
       warnings,
       contextBlock: assembledContextBlock,
