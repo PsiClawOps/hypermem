@@ -370,6 +370,27 @@ function createHyperMemEngine(): ContextEngine {
      *   systemPromptAddition — facts/recall/episodes injected before runtime system prompt
      */
     async assemble({ sessionId, sessionKey, messages, tokenBudget, prompt, model }): ReturnType<ContextEngine['assemble']> {
+      // ── Tool-loop guard ──────────────────────────────────────────────────────
+      // When the last message is a toolResult, the runtime is mid tool-loop:
+      // the model already has full context from the initial turn assembly.
+      // Re-running the full compose pipeline here is wasteful and, in long
+      // tool loops, causes cumulative context growth that triggers preemptive
+      // context overflow. Pass the messages through as-is.
+      //
+      // Matches OpenClaw's legacy behavior: the legacy engine's assemble() is a
+      // pass-through that never re-injects context on tool-loop calls.
+      const lastMsg = messages[messages.length - 1] as unknown as InboundMessage | undefined;
+      const isToolLoop = lastMsg?.role === 'toolResult' || lastMsg?.role === 'tool';
+      if (isToolLoop) {
+        // Return the runtime-provided messages unchanged.
+        // estimatedTokens=0 signals no HyperMem token budget was consumed;
+        // the runtime uses its own estimate for the overflow check.
+        return {
+          messages: messages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
+          estimatedTokens: 0,
+        };
+      }
+
       try {
       const hm = await getHyperMem();
       const sk = resolveSessionKey(sessionId, sessionKey);

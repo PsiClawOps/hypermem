@@ -169,7 +169,11 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     flushInterval: 1000,
   },
   compositor: {
-    defaultTokenBudget: 100000,
+    // TUNE-008 (2026-04-02): Reduced from 100000 → 65000.
+    // Leaves ~43k token headroom for tool-loop accumulation before the
+    // runtime's preemptive overflow ceiling (contextWindow * 0.9 ≈ 108k
+    // for cp-sonnet's 120k window). Avoids context overflow on tool-heavy sessions.
+    defaultTokenBudget: 65000,
     maxHistoryMessages: 1000,
     maxFacts: 20,
     maxCrossSessionContext: 5000,

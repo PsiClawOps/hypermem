@@ -89,3 +89,12 @@ Each entry records the change, rationale, and date — so we can track drift ove
 - **Rationale:** A "default (default) / worker tier" identity anchor is worse than no anchor — it actively misleads models with wrong identity. No anchor is better than a wrong anchor.
 - **Date:** 2026-04-01
 - **Status:** active
+
+### TUNE-008 — Compositor token budget: reduce to prevent tool-loop overflow
+- **File:** `src/index.ts` — `DEFAULT_CONFIG.compositor.defaultTokenBudget`; `context-engine.js` — `HyperMem.create()` call
+- **Parameter:** `defaultTokenBudget` passed to the Compositor at initialization
+- **Before:** 100,000 tokens
+- **After:** 65,000 tokens
+- **Rationale:** The OpenClaw runtime preemptive overflow guard fires at `contextWindowTokens × 4 × 0.9` chars. For cp-sonnet (120k window) that's ~108k tokens. HyperMem was assembling up to 100k at start-of-turn; tool loops accumulate additional chars in the session file each turn. Heavy tool-call sessions (10+ calls with large results) push the live session past 108k, triggering compaction failure and session restart. Dropping assembly budget to 65k leaves ~43k headroom for tool accumulation. The context-engine.js plugin init now explicitly passes `compositor: { defaultTokenBudget: 65000 }` to HyperMem.create() so it survives hook reinstalls without requiring a source rebuild.
+- **Date:** 2026-04-02
+- **Status:** active
