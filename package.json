@@ -9,7 +9,8 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "node test/smoke.mjs && node test/redis-integration.mjs && node test/cross-agent.mjs && node test/vector-search.mjs && node test/library.mjs && node test/compositor.mjs && node test/fleet-cache.mjs && node test/rotation.mjs && node test/knowledge-graph.mjs && node test/rate-limiter.mjs && node test/doc-chunker.mjs",
-    "test:quick": "node test/smoke.mjs && node test/library.mjs && node test/compositor.mjs"
+    "test:quick": "node test/smoke.mjs && node test/library.mjs && node test/compositor.mjs",
+    "validate:plugin-pipeline": "npm --prefix plugin run build && node test/plugin-pipeline.mjs"
   },
   "dependencies": {
     "ioredis": "^5.4.1",

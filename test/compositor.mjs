@@ -432,6 +432,51 @@ Every council response includes:
   assert(councilOnly.every(c => !c.tier || c.tier === 'council'), 'Council tier filter excludes director chunks');
   assert(directorOnly.every(c => !c.tier || c.tier === 'director'), 'Director tier filter excludes council chunks');
 
+  // ── Prompt-Aware Retrieval (current turn, before history append) ──
+  console.log('\n── Prompt-Aware Retrieval (current turn) ──');
+
+  hm.upsertKnowledge(agentId, 'deployments', 'k8s-staging',
+    'K8S_STAGING_SENTINEL Kubernetes staging deployment requires readiness gates, rollout checks, and rollback verification.');
+
+  const promptRecallSessionKey = 'agent:forge:webchat:prompt-recall-test';
+  await hm.recordUserMessage(agentId, promptRecallSessionKey, 'Can you review our incident process?');
+  await hm.recordAssistantMessage(agentId, promptRecallSessionKey, {
+    role: 'assistant',
+    textContent: 'Yes — I can review the incident process.',
+    toolCalls: null,
+    toolResults: null,
+  });
+  await hm.recordUserMessage(agentId, promptRecallSessionKey, 'Focus on escalation policy gaps.');
+  await hm.recordAssistantMessage(agentId, promptRecallSessionKey, {
+    role: 'assistant',
+    textContent: 'I will focus on escalation policy gaps.',
+    toolCalls: null,
+    toolResults: null,
+  });
+  await hm.recordUserMessage(agentId, promptRecallSessionKey, 'We also need a governance summary.');
+
+  const promptRecallResult = await hm.compose({
+    agentId,
+    sessionKey: promptRecallSessionKey,
+    tokenBudget: 8000,
+    provider: 'anthropic',
+    model: 'claude-opus-4-6',
+    includeDocChunks: false,
+    prompt: 'kubernetes staging deployment',
+  });
+
+  const promptRecallText = [
+    promptRecallResult.contextBlock || '',
+    ...promptRecallResult.messages.map(m =>
+      typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+    ),
+  ].join('\n');
+
+  assert(promptRecallText.includes('K8S_STAGING_SENTINEL'),
+    'Semantic recall uses request.prompt before prompt is written to history');
+  assert(promptRecallResult.contextBlock?.includes('Related Memory') || promptRecallText.includes('## Related Memory'),
+    'Prompt-aware retrieval produced a Related Memory block');
+
   // ── skipProviderTranslation (Plugin Path) ──
   console.log('\n── skipProviderTranslation (Plugin Path) ──');
 
