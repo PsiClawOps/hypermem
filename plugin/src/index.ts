@@ -80,7 +80,8 @@ type ComposeRequest = {
 
 type ComposeResult = {
   messages: NeutralMessage[];
-  totalTokens: number;
+  tokenCount: number;       // actual field name in compositor output
+  totalTokens?: never;      // guard against the old wrong field name
   contextBlock?: string;
   truncated: boolean;
   hasWarnings: boolean;
@@ -341,7 +342,7 @@ function createHyperMemEngine(): ContextEngine {
 
       return {
         messages: outputMessages,
-        estimatedTokens: result.totalTokens,
+        estimatedTokens: result.tokenCount ?? 0,
         // systemPromptAddition injects HyperMem context before the runtime system prompt.
         // This is the facts/recall/episodes block assembled by the compositor.
         systemPromptAddition: result.contextBlock || undefined,
