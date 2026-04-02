@@ -253,6 +253,15 @@ function toNeutralMessage(msg: InboundMessage): NeutralMessage {
 
 // ─── Context Engine Implementation ─────────────────────────────
 
+/**
+ * In-flight warm dedup map.
+ * Key: "agentId::sessionKey" — Value: the in-progress warm() Promise.
+ * Prevents concurrent bootstrap() calls from firing multiple full warms
+ * for the same session key before the first one sets the Redis history key.
+ * Cleared on completion (success or failure) so the next cold start retries.
+ */
+const _warmInFlight = new Map<string, Promise<void>>();
+
 function createHyperMemEngine(): ContextEngine {
   return {
     info: {
@@ -288,8 +297,21 @@ function createHyperMemEngine(): ContextEngine {
           return { bootstrapped: true };
         }
 
+        // In-flight dedup: if a warm is already running for this session key,
+        // reuse that promise instead of launching a second concurrent warm.
+        const inflightKey = `${agentId}::${sk}`;
+        const existing = _warmInFlight.get(inflightKey);
+        if (existing) {
+          await existing;
+          return { bootstrapped: true };
+        }
+
         // Cold start: warm Redis with the session — pre-loads history + slots
-        await hm.warm(agentId, sk);
+        const warmPromise = hm.warm(agentId, sk).finally(() => {
+          _warmInFlight.delete(inflightKey);
+        });
+        _warmInFlight.set(inflightKey, warmPromise);
+        await warmPromise;
 
         return { bootstrapped: true };
       } catch (err) {
