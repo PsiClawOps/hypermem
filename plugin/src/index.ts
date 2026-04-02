@@ -39,7 +39,7 @@ let _hmInitPromise: Promise<HyperMemInstance> | null = null;
 
 // Minimal type shim — we import dynamically so TypeScript can't infer the full type
 type HyperMemInstance = {
-  recordUserMessage: (agentId: string, sessionKey: string, message: NeutralMessage) => Promise<unknown>;
+  recordUserMessage: (agentId: string, sessionKey: string, content: string, opts?: Record<string, unknown>) => Promise<unknown>;
   recordAssistantMessage: (agentId: string, sessionKey: string, message: NeutralMessage) => Promise<unknown>;
   compose: (request: ComposeRequest) => Promise<ComposeResult>;
   warm: (agentId: string, sessionKey: string, opts?: { systemPrompt?: string; identity?: string }) => Promise<void>;
@@ -247,7 +247,8 @@ function createHyperMemEngine(): ContextEngine {
 
         // Route to appropriate record method based on role
         if (neutral.role === 'user') {
-          await hm.recordUserMessage(agentId, sk, neutral);
+          // recordUserMessage expects (agentId, sessionKey, content: string, opts?)
+          await hm.recordUserMessage(agentId, sk, neutral.textContent ?? '');
         } else {
           await hm.recordAssistantMessage(agentId, sk, neutral);
         }
@@ -328,10 +329,13 @@ function createHyperMemEngine(): ContextEngine {
     },
 
     /**
-     * After-turn hook: trigger background indexer fire-and-forget.
-     * Indexes new messages into facts/episodes/topics without blocking.
+     * After-turn hook: ingest new messages then trigger background indexer.
+     *
+     * IMPORTANT: When afterTurn is defined, the runtime calls ONLY afterTurn —
+     * it never calls ingest() or ingestBatch(). So we must ingest the new
+     * messages here, using messages.slice(prePromptMessageCount).
      */
-    async afterTurn({ sessionId, sessionKey, isHeartbeat }): Promise<void> {
+    async afterTurn({ sessionId, sessionKey, messages, prePromptMessageCount, isHeartbeat }): Promise<void> {
       if (isHeartbeat) return;
 
       try {
@@ -339,8 +343,24 @@ function createHyperMemEngine(): ContextEngine {
         const sk = resolveSessionKey(sessionId, sessionKey);
         const agentId = extractAgentId(sk);
 
+        // Ingest only the new messages produced this turn
+        const newMessages = messages.slice(prePromptMessageCount);
+        for (const msg of newMessages) {
+          const m = msg as unknown as InboundMessage;
+          // Skip system messages — they come from the runtime, not the conversation
+          if (m.role === 'system') continue;
+          const neutral = toNeutralMessage(m);
+          if (neutral.role === 'user') {
+            // recordUserMessage expects (agentId, sessionKey, content: string, opts?)
+            // NOT a NeutralMessage object — pass the text content string
+            await hm.recordUserMessage(agentId, sk, neutral.textContent ?? '');
+          } else {
+            await hm.recordAssistantMessage(agentId, sk, neutral);
+          }
+        }
+
+        // Fire-and-forget background indexer — don't block the response
         if (hm.indexer?.processAgent) {
-          // Fire-and-forget — don't await, don't block the response
           hm.indexer.processAgent(agentId).catch((err: Error) => {
             console.warn('[hypermem-plugin] background indexer failed:', err.message);
           });
