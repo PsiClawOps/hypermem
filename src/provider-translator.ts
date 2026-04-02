@@ -116,11 +116,24 @@ function toAnthropic(messages: NeutralMessage[]): ProviderMessage[] {
 
       if (msg.toolCalls) {
         for (const tc of msg.toolCalls) {
+          // tc may be a NeutralToolCall { id, name, arguments: string }
+          // or a raw OpenClaw content block { type, id, name, input: object }
+          const rawTc = tc as unknown as Record<string, unknown>;
+          let input: unknown;
+          if (rawTc.input !== undefined) {
+            // Raw content block format — input is already an object
+            input = typeof rawTc.input === 'string' ? JSON.parse(rawTc.input) : rawTc.input;
+          } else if (tc.arguments !== undefined) {
+            // NeutralToolCall format — arguments is a JSON string
+            input = typeof tc.arguments === 'string' ? JSON.parse(tc.arguments) : (tc.arguments ?? {});
+          } else {
+            input = {};
+          }
           content.push({
             type: 'tool_use',
-            id: tc.id, // will need to be un-normalized if Anthropic expects toolu_ prefix
+            id: tc.id,
             name: tc.name,
-            input: JSON.parse(tc.arguments),
+            input,
           });
         }
       }
@@ -176,14 +189,26 @@ function toOpenAI(messages: NeutralMessage[]): ProviderMessage[] {
       };
 
       if (msg.toolCalls && msg.toolCalls.length > 0) {
-        providerMsg.tool_calls = msg.toolCalls.map(tc => ({
-          id: tc.id,
-          type: 'function',
-          function: {
-            name: tc.name,
-            arguments: tc.arguments,
-          },
-        }));
+        providerMsg.tool_calls = msg.toolCalls.map(tc => {
+          // Handle both NeutralToolCall { arguments: string } and raw content block { input: object }
+          const rawTc = tc as unknown as Record<string, unknown>;
+          let args: string;
+          if (rawTc.input !== undefined) {
+            args = typeof rawTc.input === 'string' ? rawTc.input : JSON.stringify(rawTc.input);
+          } else if (tc.arguments !== undefined) {
+            args = typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments);
+          } else {
+            args = '{}';
+          }
+          return {
+            id: tc.id,
+            type: 'function' as const,
+            function: {
+              name: tc.name,
+              arguments: args,
+            },
+          };
+        });
       }
 
       result.push(providerMsg);

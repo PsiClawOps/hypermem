@@ -167,18 +167,49 @@ function toNeutralMessage(msg: InboundMessage): NeutralMessage {
   }
 
   // Detect tool calls/results.
-  // OpenClaw stores tool calls as content blocks: { type: 'toolCall' | 'toolUse', ... }
-  // Legacy wire format stores them as a separate msg.tool_calls / msg.toolCalls array.
-  // Check both so history round-trips correctly.
+  // OpenClaw stores tool calls as content blocks: { type: 'toolCall' | 'toolUse', id, name, input }
+  // Legacy wire format stores them as a separate msg.tool_calls / msg.toolCalls array
+  // with OpenAI format: { id, type: 'function', function: { name, arguments } }
+  // Normalize everything to NeutralToolCall format: { id, name, arguments: string }
   const contentBlockToolCalls = Array.isArray(msg.content)
-    ? (msg.content as Array<{ type: string; [key: string]: unknown }>)
+    ? (msg.content as Array<{ type: string; id?: string; name?: string; input?: unknown; [key: string]: unknown }>)
         .filter(c => c.type === 'toolCall' || c.type === 'toolUse')
+        .map(c => ({
+          id: c.id ?? 'unknown',
+          name: c.name ?? 'unknown',
+          arguments: typeof c.input === 'string' ? c.input : JSON.stringify(c.input ?? {}),
+        }))
     : [];
 
-  const toolCalls: unknown[] | null =
-    (msg.tool_calls as unknown[] | null) ??
-    (msg.toolCalls as unknown[] | null) ??
-    (contentBlockToolCalls.length > 0 ? contentBlockToolCalls : null);
+  // Legacy wire format tool calls (OpenAI style)
+  const rawToolCalls = (msg.tool_calls as Array<Record<string, unknown>> | null)
+    ?? (msg.toolCalls as Array<Record<string, unknown>> | null)
+    ?? null;
+
+  let toolCalls: Array<{ id: string; name: string; arguments: string }> | null = null;
+  if (rawToolCalls && rawToolCalls.length > 0) {
+    toolCalls = rawToolCalls.map(tc => {
+      // OpenAI wire format: { id, type: 'function', function: { name, arguments } }
+      const fn = tc.function as Record<string, unknown> | undefined;
+      if (fn) {
+        return {
+          id: (tc.id as string) ?? 'unknown',
+          name: (fn.name as string) ?? 'unknown',
+          arguments: typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments ?? {}),
+        };
+      }
+      // Already NeutralToolCall-ish or content block format
+      return {
+        id: (tc.id as string) ?? 'unknown',
+        name: (tc.name as string) ?? 'unknown',
+        arguments: typeof tc.arguments === 'string' ? tc.arguments
+          : typeof tc.input === 'string' ? tc.input
+          : JSON.stringify(tc.arguments ?? tc.input ?? {}),
+      };
+    });
+  } else if (contentBlockToolCalls.length > 0) {
+    toolCalls = contentBlockToolCalls;
+  }
   const toolResults = (msg.role === 'tool' || msg.role === 'tool_result') ? msg.content : null;
 
   const role = msg.role === 'tool' || msg.role === 'tool_result'
