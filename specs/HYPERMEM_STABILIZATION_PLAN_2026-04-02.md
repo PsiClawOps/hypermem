@@ -82,25 +82,31 @@ Cold-start bootstrap should seed a reasonable context window (250 msgs), not the
 ## P1 — Follow-on (do after P0 is green and tested)
 
 ### P1.1 — Real window split (HYPERMEM_QUEUE_SPLIT.md Parts 2–4)
-- `RedisLayer`: add `getWindow/setWindow/invalidateWindow`
-- Compositor writes assembled output to window slot after compose()
-- Plugin checks window cache first in assemble()
-- afterTurn ingest invalidates window after new messages
-- Remove `safeHistoryDepth = 150` band-aid ONLY after Gate 1 validation test passes
+- `RedisLayer`: add `getWindow/setWindow/invalidateWindow` ✅
+- Compositor writes assembled output to window slot after compose() ✅
+- Plugin afterTurn: invalidates window after message ingest ✅
+- Remove `safeHistoryDepth = 150` band-aid ✅ (Gate 1 passed: 4d68de7)
+- ⚠️ Plugin assemble() window-first path NOT YET DONE (compose always runs fresh; window cache write is infrastructure for future optimization)
+
+**Status:** ✅ DONE (commit 53ed667)
 
 ### P1.2 — Cursor tracking (HYPERMEM_QUEUE_SPLIT.md Part 5)
-- Add `SessionCursor` type to `src/types.ts`
-- RedisLayer: `setCursor/getCursor`
-- Compositor: write cursor after window assembly
-- Background indexer: use cursor as high-signal mining boundary
-- Durability: dual-write cursor to SQLite (Compass Gate 2)
+- Add `SessionCursor` type to `src/types.ts` ✅
+- RedisLayer: `setCursor/getCursor` ✅
+- Compositor: write cursor after window assembly ✅
+- Background indexer: use cursor as high-signal mining boundary — NOT YET (deferred to indexer integration)
+- Durability: dual-write cursor to SQLite (Compass Gate 2) — NOT YET (cursor TTL = historyTTL = 24h for now)
+
+**Status:** ✅ CORE DONE (commit 53ed667), indexer integration and SQLite dual-write deferred
 
 ### P1.3 — Test hardening
-- Integration test: `historyDepth: N` constrains hot Redis sessions
-- Integration test: repeated bootstrap on warm session is a no-op
-- Integration test: repeated warm() doesn't grow Redis history
-- Integration test: prompt-aware retrieval works before prompt is in history
-- Plugin build in CI — root tests green + plugin typecheck red = false-green state
+- Integration test: `historyDepth: N` constrains hot Redis sessions ✅ (Pylon, 4d68de7)
+- Integration test: repeated bootstrap on warm session is a no-op ✅ (Pylon, 4d68de7)
+- Integration test: repeated warm() doesn't grow Redis history ✅ (existing)
+- Integration test: window cache set/get/invalidate ✅ (53ed667)
+- Integration test: cursor set/get after compose ✅ (53ed667)
+- Integration test: prompt-aware retrieval works before prompt is in history — NOT YET
+- Plugin build in CI — root tests green + plugin typecheck red = false-green state — NOT YET
 
 ### P1.4 — Docs update
 - `ARCHITECTURE.md`: split into explicit CURRENT vs PLANNED sections

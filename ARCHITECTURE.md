@@ -184,10 +184,10 @@ Deployed as managed hook at `~/.openclaw/hooks/hypermem-core/handler.js`.
                     │                         cap ongoing)             │
                     │                                                  │
                     │  hm:{a}:{s}:window   ── Submission buffer        │
-                    │    (compositor output)   (PLANNED, 120s TTL)     │
+                    │    (compositor output)   (120s TTL)              │
                     │                                                  │
                     │  hm:{a}:{s}:cursor   ── Last-sent pointer        │
-                    │    (compositor metadata)  (PLANNED, 120s TTL)    │
+                    │    (compositor metadata)  (24h TTL)              │
                     │                                                  │
                     │  hm:{a}:{s}:system   ── System prompt slot       │
                     │  hm:{a}:{s}:identity ── Identity slot            │
@@ -195,32 +195,17 @@ Deployed as managed hook at `~/.openclaw/hooks/hypermem-core/handler.js`.
                     │  hm:{a}:{s}:context  ── Cross-session slot       │
                     └──────────────────────────────────────────────────┘
 
-Data Flow (current — band-aid active):
+Data Flow (current — P0 stabilized, window/cursor active):
 
   bootstrap()                     assemble()                   afterTurn()
   ───────────                     ──────────                   ───────────
-  SQLite ─→ warmSession()         compose()                    slice(prePromptCount)
-         ─→ pushHistory(250)      ─→ getHistory(limit)          ─→ record*Message()
-         ─→ Redis :history        ─→ Redis :history              ─→ pushHistory(1 msg)
-                                     ⚠️ limit IGNORED              ─→ Redis :history
-                                  ─→ budget assembly             ─→ background indexer
-                                  ─→ → runtime → provider
-
-  CURRENT BAND-AID: safeHistoryDepth=150 in plugin caps compose() request
-
-Data Flow (planned — after queue split):
-
-  bootstrap()                     assemble()                   afterTurn()
-  ───────────                     ──────────                   ───────────
-  SQLite ─→ warmSession()         check :window cache          slice(prePromptCount)
-         ─→ pushHistory(250)      ─→ HIT: return cached          ─→ record*Message()
-         ─→ Redis :history        ─→ MISS: compose()             ─→ pushHistory(1 msg, dedup)
-         (NEVER writes :window)      ─→ getHistory(limit)          ─→ Redis :history
-                                     ─→ dedup by id                ─→ invalidateWindow()
-                                     ─→ budget assembly            ─→ invalidateCursor()
-                                     ─→ write :window (120s)       ─→ background indexer
-                                     ─→ write :cursor
-                                     ─→ → runtime → provider
+  ▸ sessionExists() → skip if hot  compose()                    slice(prePromptCount)
+  ▸ SQLite ─→ warmSession()        ─→ getHistory(limit) ✅      ─→ record*Message()
+           ─→ pushHistory(250)     ─→ dedup by id               ─→ pushHistory(1, dedup)
+           ─→ Redis :history       ─→ budget assembly            ─→ Redis :history
+                                   ─→ write :window (120s)      ─→ invalidateWindow()
+                                   ─→ write :cursor (24h)       ─→ background indexer
+                                   ─→ → runtime → provider
 
 ### Key Invariants
 
@@ -246,7 +231,7 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 | Module | Lines | Layer | Purpose |
 |---|---|---|---|
 | `index.ts` | ~1,340 | All | Facade — all public API |
-| `compositor.ts` | ~1,030 | L1-L4 | Prompt assembly + token budgeting + safety valve |
+| `compositor.ts` | ~1,140 | L1-L4 | Prompt assembly + token budgeting + safety valve + window/cursor write |
 | `library-schema.ts` | ~780 | L4 | Library schema v5 + migrations |
 | `background-indexer.ts` | ~680 | L2-L4 | LLM-powered extraction framework |
 | `vector-store.ts` | ~600 | L3 | Semantic search + embedding |
@@ -254,13 +239,13 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 | `fleet-store.ts` | ~440 | L4 | Fleet registry + capabilities |
 | `db.ts` | ~440 | - | Database manager + rotation |
 | `knowledge-graph.ts` | ~420 | L4 | DAG traversal + shortest path |
-| `redis.ts` | ~400 | L1 | Redis operations + fleet cache |
+| `redis.ts` | ~530 | L1 | Redis operations, window cache, cursor, fleet cache |
 | `doc-chunker.ts` | ~400 | - | Section-aware markdown/file parser |
 | `work-store.ts` | ~400 | L4 | Work queue + FTS5 |
 | `provider-translator.ts` | ~390 | - | Neutral ↔ provider format conversion |
 | `doc-chunk-store.ts` | ~375 | L4 | Chunk storage + deduplication |
 | `message-store.ts` | ~370 | L2 | Conversation recording + querying |
-| `types.ts` | ~330 | - | Shared type definitions |
+| `types.ts` | ~370 | - | Shared type definitions + SessionCursor |
 | `cross-agent.ts` | ~330 | L2-L4 | Cross-agent knowledge queries + visibility |
 | `desired-state-store.ts` | ~310 | L4 | Config drift detection |
 | `knowledge-store.ts` | ~300 | L4 | Domain/key/value structured data |
@@ -273,23 +258,25 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 | `episode-store.ts` | ~180 | L4 | Significant event tracking |
 | `preference-store.ts` | ~170 | L4 | Operator behavioral patterns |
 | `topic-store.ts` | ~160 | L4 | Cross-session thread tracking |
-| `plugin/src/index.ts` | ~550 | - | OpenClaw context engine plugin |
+| `plugin/src/index.ts` | ~590 | - | OpenClaw context engine plugin + window invalidation |
 
-## Test Coverage (419 tests, 11 suites)
+## Test Coverage (105 assertions, 11 suites)
 
-| Suite | Tests | Coverage |
-|---|---|---|
-| smoke | 10 | End-to-end create/write/read/close, provider translation |
-| redis-integration | 24 | Redis operations, slots, history |
-| cross-agent | 20 | Cross-agent queries, fleet search, visibility tiers |
-| vector-search | 33 | Embedding, KNN, batch indexing |
-| library | 71 | All L4 collections (facts → desired state) |
-| compositor | 50 | Four-layer composition, budgets, providers, safety valve |
-| fleet-cache | 32 | Redis fleet cache, hydration, cache-aside |
-| rotation | 29 | DB rotation, auto-rotate, collision handling |
-| knowledge-graph | 33 | DAG traversal, shortest path, analytics |
-| rate-limiter | 22 | Token bucket, priority, timeout, embedder |
-| doc-chunker | 105 | Markdown/file chunking, section-aware parsing, seeder |
+_Test count reflects assertions, not individual test blocks. Suites contain inline assertions._
+
+| Suite | Key coverage |
+|---|---|
+| smoke | End-to-end create/write/read/close, provider translation |
+| redis-integration | Redis ops, slots, history limits, window cache, cursor, warming, dedup |
+| cross-agent | Cross-agent queries, fleet search, visibility tiers |
+| vector-search | Embedding, KNN, batch indexing |
+| library | All L4 collections (facts → desired state) |
+| compositor | Four-layer composition, budgets, providers, safety valve, Gate 1 |
+| fleet-cache | Redis fleet cache, hydration, cache-aside |
+| rotation | DB rotation, auto-rotate, collision handling |
+| knowledge-graph | DAG traversal, shortest path, analytics |
+| rate-limiter | Token bucket, priority, timeout, embedder |
+| doc-chunker | Markdown/file chunking, section-aware parsing, seeder |
 
 ## Dependencies
 
