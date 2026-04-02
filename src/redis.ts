@@ -211,8 +211,27 @@ export class RedisLayer {
     if (!this.isConnected || messages.length === 0) return;
     const key = this.sessionKey(agentId, sessionKey, 'history');
 
+    // Tail-check dedup: read the last stored message id before appending.
+    // Filters out messages already present from a previous warm/push call.
+    // This is the primary defense against bootstrap re-runs duplicating history.
+    // Uses monotonically increasing StoredMessage.id for ordering guarantees.
+    let filteredMessages = messages;
+    try {
+      const tail = await this.client!.lrange(key, -1, -1);
+      if (tail.length > 0) {
+        const lastStored = JSON.parse(tail[0]) as StoredMessage;
+        if (lastStored.id != null) {
+          filteredMessages = messages.filter(m => m.id > lastStored.id);
+        }
+      }
+    } catch {
+      // Tail-check failure is non-fatal — fall through to full push
+    }
+
+    if (filteredMessages.length === 0) return;
+
     const pipeline = this.client!.pipeline();
-    for (const msg of messages) {
+    for (const msg of filteredMessages) {
       pipeline.rpush(key, JSON.stringify(msg));
     }
     // Soft cap — only trim if we're way over. This is a safety net,
@@ -225,12 +244,33 @@ export class RedisLayer {
 
   /**
    * Get session history from Redis.
+   *
+   * @param limit - When provided, return only the last N messages using
+   *   negative indexing (LRANGE -limit -1). This is the correct enforcement
+   *   point for historyDepth — previously the limit param was ignored on the
+   *   Redis path and only applied to the SQLite fallback.
    */
-  async getHistory(agentId: string, sessionKey: string): Promise<StoredMessage[]> {
+  async getHistory(agentId: string, sessionKey: string, limit?: number): Promise<StoredMessage[]> {
     if (!this.isConnected) return [];
     const key = this.sessionKey(agentId, sessionKey, 'history');
-    const items = await this.client!.lrange(key, 0, -1);
+    // When limit is provided, use LRANGE -limit -1 to fetch the last N messages.
+    // LRANGE 0 -1 returns everything; -limit -1 returns the last `limit` entries.
+    const start = limit ? -limit : 0;
+    const items = await this.client!.lrange(key, start, -1);
     return items.map((item: string) => JSON.parse(item));
+  }
+
+  /**
+   * Check whether a session already has history in Redis.
+   * Used by the bootstrap idempotency guard to avoid re-warming hot sessions.
+   *
+   * Single EXISTS call — sub-millisecond, no data transferred.
+   */
+  async sessionExists(agentId: string, sessionKey: string): Promise<boolean> {
+    if (!this.isConnected) return false;
+    const key = this.sessionKey(agentId, sessionKey, 'history');
+    const exists = await this.client!.exists(key);
+    return exists === 1;
   }
 
   // ─── Bulk Session Operations ─────────────────────────────────

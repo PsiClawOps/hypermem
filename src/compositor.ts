@@ -37,6 +37,18 @@ const DEFAULT_CONFIG: CompositorConfig = {
   maxCrossSessionContext: 5000,
 };
 
+/**
+ * Maximum messages to seed into Redis at bootstrap warm time.
+ * Deliberately separate from maxHistoryMessages (1000) which governs
+ * the ongoing Redis soft cap. Bootstrap warm is for session reconstruction
+ * only — seeding 1000 messages at cold start would mean 1000 messages are
+ * pushed to Redis before the first turn, creating an oversize submission
+ * candidate set that the compositor has to trim anyway.
+ *
+ * The full SQLite archive remains available for deep retrieval on cache miss.
+ */
+const WARM_BOOTSTRAP_CAP = 250;
+
 // ─── Trigger Registry ────────────────────────────────────────────
 
 /**
@@ -278,12 +290,25 @@ export class Compositor {
 
     // ─── Conversation History ──────────────────────────────────
     if (request.includeHistory !== false) {
-      const historyMessages = await this.getHistory(
+      const rawHistoryMessages = await this.getHistory(
         request.agentId,
         request.sessionKey,
         request.historyDepth || this.config.maxHistoryMessages,
         store
       );
+
+      // Deduplicate history by StoredMessage.id (second line of defense after
+      // pushHistory() tail-check dedup). Guards against any duplicates that
+      // slipped through the warm path — e.g. bootstrap re-runs on existing sessions.
+      const seenIds = new Set<number>();
+      const historyMessages = rawHistoryMessages.filter(m => {
+        const sm = m as import('./types.js').StoredMessage;
+        if (sm.id != null) {
+          if (seenIds.has(sm.id)) return false;
+          seenIds.add(sm.id);
+        }
+        return true;
+      });
 
       let historyTokens = 0;
       const includedHistory: NeutralMessage[] = [];
@@ -378,8 +403,11 @@ export class Compositor {
     // FTS5-only (no embeddings) still returns keyword matches.
     // KNN-only (no FTS terms) still returns semantic matches.
     // Both present → Reciprocal Rank Fusion.
+    // Use request.prompt as the retrieval query when available — it is the
+    // live current-turn text. Falling back to getLastUserMessage(messages)
+    // reads from the already-assembled history, which is one turn stale.
     if (remaining > 500 && (this.vectorStore || libDb)) {
-      const lastUserMsg = this.getLastUserMessage(messages);
+      const lastUserMsg = request.prompt?.trim() || this.getLastUserMessage(messages);
       if (lastUserMsg) {
         try {
           const semanticContent = await this.buildSemanticRecall(
@@ -408,7 +436,8 @@ export class Compositor {
     // conversation context. Replaces full ACA file injection for
     // the files that have been seeded into the doc chunk index.
     if (request.includeDocChunks !== false && remaining > 400 && libDb) {
-      const lastMsg = this.getLastUserMessage(messages) || '';
+      // Use request.prompt when available (current-turn text, not stale history)
+      const lastMsg = request.prompt?.trim() || this.getLastUserMessage(messages) || '';
       const triggered = matchTriggers(lastMsg, this.triggerRegistry);
 
       if (triggered.length > 0) {
@@ -678,7 +707,11 @@ export class Compositor {
 
     if (!conversation) return;
 
-    const history = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
+    // Use WARM_BOOTSTRAP_CAP (not maxHistoryMessages) for cold-start seeding.
+    // This prevents loading 1000 messages into Redis before the first turn,
+    // which would make the full archive the submission candidate set.
+    // The SQLite archive remains available as a cache-miss fallback.
+    const history = store.getRecentMessages(conversation.id, WARM_BOOTSTRAP_CAP);
 
     const libDb = opts?.libraryDb || this.libraryDb;
     const factsContent = this.buildFactsFromDb(agentId, libDb || db);
@@ -737,7 +770,10 @@ export class Compositor {
     limit: number,
     store: MessageStore
   ): Promise<NeutralMessage[]> {
-    const cached = await this.redis.getHistory(agentId, sessionKey);
+    // Pass limit through to Redis — this is the correct enforcement point.
+    // Previously getHistory() ignored the limit on the Redis path (LRANGE 0 -1),
+    // meaning historyDepth in the compose request had no effect on hot sessions.
+    const cached = await this.redis.getHistory(agentId, sessionKey, limit);
     if (cached.length > 0) return cached;
 
     const conversation = store.getConversation(sessionKey);

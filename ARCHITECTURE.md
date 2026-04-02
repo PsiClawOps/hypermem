@@ -84,6 +84,26 @@ User message arrives
 Each slot gets a proportional budget cap. Smart truncation at line boundaries.
 Multi-provider output: Anthropic and OpenAI message formats.
 
+### Tuning Parameters (TUNE-001–007)
+
+Compositor behavior is tuned via parameters tracked in `tune/TUNING_REGISTRY.md`:
+
+| ID | Parameter | Value | Effect |
+|---|---|---|---|
+| TUNE-001 | Semantic recall min RRF score | 0.008 | Drops noise results from hybrid search |
+| TUNE-002 | Facts confidence floor | 0.5 | Excludes low-confidence facts from injection |
+| TUNE-003 | Differentiated fact confidence | 0.60–0.75 by type | Decisions/incidents score higher than config/prefs |
+| TUNE-004 | config_change episode significance | 0.5 (was 0.4) | Config changes no longer silently dropped |
+| TUNE-005 | Extraction slot guard | suppress on default | No-op when strategy is lightweight/default |
+| TUNE-006 | Advisor slot guard | suppress bare seat list | No-op when no domain routes matched |
+| TUNE-007 | Identity anchor guard | suppress on default identity | No-op when identity resolves to 'default' |
+
+### Safety Mechanisms
+
+- **Budget safety valve:** Post-assembly check — if estimated tokens exceed budget × 1.05, trims oldest history messages until under budget. System/identity/current prompt are never touched.
+- **Compaction fence:** Per-conversation boundary protecting the LLM's recent tail from compaction. Only moves forward (monotone progress). No fence = no compaction (explicit opt-in).
+- **Preservation gate:** Nomic-space geometric verification that summaries stay faithful to source content. Centroid alignment + source coverage → combined score (threshold: 0.65).
+
 ## Fleet Cache (Redis Hot Layer)
 
 ```
@@ -146,13 +166,80 @@ This means:
 ```
 gateway:startup     → Init HyperMem, auto-rotate DBs, hydrate fleet cache
 agent:bootstrap     → Warm session (history, facts, profile → Redis)
-message:received    → Record user message to SQLite + Redis
-message:sent        → Record assistant message to SQLite + Redis
-context:compose     → Full four-layer prompt assembly within token budget
+context:assemble    → Full four-layer prompt assembly within token budget
+agent:afterTurn     → Ingest new messages to SQLite + Redis, trigger background indexer
 ```
 
 Registers with `ownsCompaction: true` — runtime skips legacy compaction entirely.
 Deployed as managed hook at `~/.openclaw/hooks/hypermem-core/handler.js`.
+
+### Plugin Data Flow
+
+```
+                    ┌──────────────────────────────────────────────────┐
+                    │             REDIS (L1 Hot Layer)                  │
+                    │                                                  │
+                    │  hm:{a}:{s}:history  ── Session archive (250 cap │
+                    │    (append-only)        at bootstrap, 1000 soft  │
+                    │                         cap ongoing)             │
+                    │                                                  │
+                    │  hm:{a}:{s}:window   ── Submission buffer        │
+                    │    (compositor output)   (PLANNED, 120s TTL)     │
+                    │                                                  │
+                    │  hm:{a}:{s}:cursor   ── Last-sent pointer        │
+                    │    (compositor metadata)  (PLANNED, 120s TTL)    │
+                    │                                                  │
+                    │  hm:{a}:{s}:system   ── System prompt slot       │
+                    │  hm:{a}:{s}:identity ── Identity slot            │
+                    │  hm:{a}:{s}:facts    ── Cached facts slot        │
+                    │  hm:{a}:{s}:context  ── Cross-session slot       │
+                    └──────────────────────────────────────────────────┘
+
+Data Flow (current — band-aid active):
+
+  bootstrap()                     assemble()                   afterTurn()
+  ───────────                     ──────────                   ───────────
+  SQLite ─→ warmSession()         compose()                    slice(prePromptCount)
+         ─→ pushHistory(250)      ─→ getHistory(limit)          ─→ record*Message()
+         ─→ Redis :history        ─→ Redis :history              ─→ pushHistory(1 msg)
+                                     ⚠️ limit IGNORED              ─→ Redis :history
+                                  ─→ budget assembly             ─→ background indexer
+                                  ─→ → runtime → provider
+
+  CURRENT BAND-AID: safeHistoryDepth=150 in plugin caps compose() request
+
+Data Flow (planned — after queue split):
+
+  bootstrap()                     assemble()                   afterTurn()
+  ───────────                     ──────────                   ───────────
+  SQLite ─→ warmSession()         check :window cache          slice(prePromptCount)
+         ─→ pushHistory(250)      ─→ HIT: return cached          ─→ record*Message()
+         ─→ Redis :history        ─→ MISS: compose()             ─→ pushHistory(1 msg, dedup)
+         (NEVER writes :window)      ─→ getHistory(limit)          ─→ Redis :history
+                                     ─→ dedup by id                ─→ invalidateWindow()
+                                     ─→ budget assembly            ─→ invalidateCursor()
+                                     ─→ write :window (120s)       ─→ background indexer
+                                     ─→ write :cursor
+                                     ─→ → runtime → provider
+
+### Key Invariants
+
+1. Redis `history` is the warm archive. Append-only. Nothing reads it for direct submission.
+2. Redis `window` is the compositor's output cache. Written ONLY by `compose()`. Read ONLY by `assemble()`. Invalidated by `afterTurn`.
+3. Redis `cursor` tracks the newest message in the last window. Used by background indexer for high-signal mining.
+4. `warmSession()` seeds `history` only (capped at 250). Never writes `window`.
+5. `pushHistory()` tail-checks before append (no duplicate IDs in Redis list).
+6. `compose()` deduplicates history by `id` before budget assembly.
+7. `getHistory()` honors its `limit` parameter on BOTH Redis and SQLite paths.
+
+Design spec: `specs/HYPERMEM_QUEUE_SPLIT.md`
+Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
+
+### Runtime Contract
+
+**Exclusive dispatch:** The OpenClaw runtime calls either `afterTurn()` OR `ingest()`/`ingestBatch()`, never both. Since HyperMem implements `afterTurn`, it must handle message ingestion there. `ingest()` exists for API compatibility but is never called by the runtime in practice.
+
+**Provider translation:** The plugin sets `skipProviderTranslation: true` on compose requests. The compositor returns NeutralMessages; the plugin converts to AgentMessages. The runtime handles provider-specific translation. Two-stage translation (compositor → provider format → plugin → agent format) was the root cause of Incident 1 (silent tool call drops).
 
 ## Module Map (29 files, ~12,300 lines)
 

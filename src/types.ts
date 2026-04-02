@@ -209,6 +209,15 @@ export interface ComposeRequest {
   includeContext?: boolean;
   includeLibrary?: boolean;
   /**
+   * The current-turn prompt text. Used as the retrieval query for semantic recall
+   * and doc chunk trigger matching. When provided, this is preferred over reading
+   * the last user message from the assembled history (which is one turn stale).
+   *
+   * Without this, retrieval fires against the previously-recorded user message,
+   * meaning first-turn retrieval is blind and all retrieval lags by one turn.
+   */
+  prompt?: string;
+  /**
    * When true, skip provider-specific translation and return NeutralMessage[]
    * instead of ProviderMessage[]. Used by the context engine plugin, which
    * returns messages to the OpenClaw runtime for its own provider translation.

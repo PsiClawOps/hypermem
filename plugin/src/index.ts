@@ -52,6 +52,7 @@ type HyperMemInstance = {
   };
   redis: {
     warmSession: (sessionKey: string, opts?: unknown) => Promise<void>;
+    sessionExists: (agentId: string, sessionKey: string) => Promise<boolean>;
     close: () => Promise<void>;
   };
   indexer?: {
@@ -91,6 +92,8 @@ type ComposeRequest = {
   includeDocChunks?: boolean;
   prompt?: string;
   skipProviderTranslation?: boolean;
+  /** Max history messages to include — enforced at Redis layer (LRANGE -N -1) */
+  historyDepth?: number;
 };
 
 type ComposeResult = {
@@ -256,6 +259,16 @@ function createHyperMemEngine(): ContextEngine {
 
     /**
      * Bootstrap: warm Redis session for this agent, register in fleet if needed.
+     *
+     * Idempotent — skips warming if the session is already hot in Redis.
+     * Without this guard, the OpenClaw runtime calls bootstrap() on every turn
+     * (not just session start), causing:
+     *   1. A SQLite read + Redis pipeline push on every message (lane lock)
+     *   2. 250 messages re-pushed to Redis per turn (dedup in pushHistory helps,
+     *      but the read cost still runs)
+     *   3. Followup queue drain blocked until warm completes
+     *
+     * With this guard: cold start = full warm; hot session = single EXISTS check.
      */
     async bootstrap({ sessionId, sessionKey }): ReturnType<NonNullable<ContextEngine['bootstrap']>> {
       try {
@@ -263,7 +276,14 @@ function createHyperMemEngine(): ContextEngine {
         const sk = resolveSessionKey(sessionId, sessionKey);
         const agentId = extractAgentId(sk);
 
-        // Warm Redis with the session — this pre-loads system/identity slots
+        // Fast path: if session already has history in Redis, skip warm entirely.
+        // sessionExists() is a single EXISTS call — sub-millisecond cost.
+        const alreadyWarm = await hm.redis.sessionExists(agentId, sk);
+        if (alreadyWarm) {
+          return { bootstrapped: true };
+        }
+
+        // Cold start: warm Redis with the session — pre-loads history + slots
         await hm.warm(agentId, sk);
 
         return { bootstrapped: true };
@@ -337,6 +357,12 @@ function createHyperMemEngine(): ContextEngine {
         // Non-fatal — tier filtering just won't apply
       }
 
+      // Cap history depth to prevent overflow on long-running agents.
+      // The compositor default of 1000 messages can exceed context budget before
+      // compaction has a chance to run. 150 messages is safe for most council/director
+      // agents on 200k context windows. Adjust per-agent if needed.
+      const safeHistoryDepth = 150;
+
       const request: ComposeRequest = {
         agentId,
         sessionKey: sk,
@@ -346,6 +372,7 @@ function createHyperMemEngine(): ContextEngine {
         includeDocChunks: true,
         prompt,
         skipProviderTranslation: true,  // runtime handles provider translation
+        historyDepth: safeHistoryDepth,
       };
 
       const result: ComposeResult = await hm.compose(request);
