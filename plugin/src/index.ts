@@ -146,7 +146,7 @@ function resolveSessionKey(sessionId: string, sessionKey?: string): string {
 
 type InboundMessage = {
   role: string;
-  content?: string | Array<{ type: string; text?: string }>;
+  content?: string | Array<{ type: string; text?: string; [key: string]: unknown }>;
   [key: string]: unknown;
 };
 
@@ -166,8 +166,19 @@ function toNeutralMessage(msg: InboundMessage): NeutralMessage {
     textContent = textParts.length > 0 ? textParts.join('\n') : null;
   }
 
-  // Detect tool calls/results
-  const toolCalls = ((msg.tool_calls || msg.toolCalls) ?? null) as unknown[] | null;
+  // Detect tool calls/results.
+  // OpenClaw stores tool calls as content blocks: { type: 'toolCall' | 'toolUse', ... }
+  // Legacy wire format stores them as a separate msg.tool_calls / msg.toolCalls array.
+  // Check both so history round-trips correctly.
+  const contentBlockToolCalls = Array.isArray(msg.content)
+    ? (msg.content as Array<{ type: string; [key: string]: unknown }>)
+        .filter(c => c.type === 'toolCall' || c.type === 'toolUse')
+    : [];
+
+  const toolCalls: unknown[] | null =
+    (msg.tool_calls as unknown[] | null) ??
+    (msg.toolCalls as unknown[] | null) ??
+    (contentBlockToolCalls.length > 0 ? contentBlockToolCalls : null);
   const toolResults = (msg.role === 'tool' || msg.role === 'tool_result') ? msg.content : null;
 
   const role = msg.role === 'tool' || msg.role === 'tool_result'
@@ -367,13 +378,19 @@ function neutralToAgentMessage(msg: NeutralMessage): InboundMessage {
     role: msg.role,
   };
 
-  if (msg.textContent != null) {
+  if (msg.toolCalls && msg.toolCalls.length > 0) {
+    // Reconstruct as content blocks (OpenClaw format), not a wire-level tool_calls array.
+    // extractToolCallsFromAssistant() in the runtime expects content-block format.
+    // Include text block first if present, then tool call blocks.
+    const blocks: Array<{ type: string; [key: string]: unknown }> = [];
+    if (msg.textContent != null) {
+      blocks.push({ type: 'text', text: msg.textContent });
+    }
+    blocks.push(...(msg.toolCalls as Array<{ type: string; [key: string]: unknown }>));
+    out.content = blocks;
+  } else if (msg.textContent != null) {
     // Use != (not !==) to catch both null and undefined
     out.content = msg.textContent;
-  }
-
-  if (msg.toolCalls && msg.toolCalls.length > 0) {
-    out.tool_calls = msg.toolCalls;
   }
 
   if (msg.toolResults) {
