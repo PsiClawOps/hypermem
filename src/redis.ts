@@ -8,7 +8,7 @@
 
 import { Redis as RedisClient } from 'ioredis';
 type RedisInstance = RedisClient;
-import type { RedisConfig, SessionMeta, StoredMessage } from './types.js';
+import type { RedisConfig, SessionMeta, SessionCursor, StoredMessage, NeutralMessage } from './types.js';
 
 const DEFAULT_CONFIG: RedisConfig = {
   host: 'localhost',
@@ -273,6 +273,76 @@ export class RedisLayer {
     return exists === 1;
   }
 
+  // ─── Window Cache Operations ───────────────────────────────
+
+  /**
+   * Cache the compositor's assembled submission window.
+   *
+   * The window is the token-budgeted, deduplicated output of compose() —
+   * what actually gets sent to the provider. Separate from history (the
+   * append-only archive). Short TTL: 120s default, refreshed each compose.
+   */
+  async setWindow(
+    agentId: string,
+    sessionKey: string,
+    messages: NeutralMessage[],
+    ttlSeconds: number = 120
+  ): Promise<void> {
+    if (!this.isConnected) return;
+    const key = this.sessionKey(agentId, sessionKey, 'window');
+    await this.client!.set(key, JSON.stringify(messages), 'EX', ttlSeconds);
+  }
+
+  /**
+   * Get the cached submission window.
+   * Returns null on cache miss — caller should run full compose().
+   */
+  async getWindow(agentId: string, sessionKey: string): Promise<NeutralMessage[] | null> {
+    if (!this.isConnected) return null;
+    const key = this.sessionKey(agentId, sessionKey, 'window');
+    const val = await this.client!.get(key);
+    return val ? JSON.parse(val) : null;
+  }
+
+  /**
+   * Invalidate the submission window cache.
+   * Called after afterTurn ingest writes new messages — ensures the next
+   * compose() runs fresh instead of serving a stale cached window.
+   */
+  async invalidateWindow(agentId: string, sessionKey: string): Promise<void> {
+    if (!this.isConnected) return;
+    const key = this.sessionKey(agentId, sessionKey, 'window');
+    await this.client!.del(key);
+  }
+
+  // ─── Session Cursor Operations ─────────────────────────────
+
+  /**
+   * Write the session cursor after compose().
+   * Tracks the boundary between "LLM has seen this" and "new since last compose."
+   * TTL matches history (24h) so the cursor outlives the window cache.
+   */
+  async setCursor(
+    agentId: string,
+    sessionKey: string,
+    cursor: SessionCursor
+  ): Promise<void> {
+    if (!this.isConnected) return;
+    const key = this.sessionKey(agentId, sessionKey, 'cursor');
+    await this.client!.set(key, JSON.stringify(cursor), 'EX', this.config.historyTTL);
+  }
+
+  /**
+   * Get the session cursor.
+   * Returns null if no cursor exists (first compose, or Redis eviction).
+   */
+  async getCursor(agentId: string, sessionKey: string): Promise<SessionCursor | null> {
+    if (!this.isConnected) return null;
+    const key = this.sessionKey(agentId, sessionKey, 'cursor');
+    const val = await this.client!.get(key);
+    return val ? JSON.parse(val) : null;
+  }
+
   // ─── Bulk Session Operations ─────────────────────────────────
 
   /**
@@ -335,7 +405,7 @@ export class RedisLayer {
   async evictSession(agentId: string, sessionKey: string): Promise<void> {
     if (!this.isConnected) return;
 
-    const slots = ['system', 'identity', 'history', 'context', 'facts', 'tools', 'meta'];
+    const slots = ['system', 'identity', 'history', 'window', 'cursor', 'context', 'facts', 'tools', 'meta'];
     const keys = slots.map(s => this.sessionKey(agentId, sessionKey, s));
     await this.client!.del(...keys);
     await this.removeActiveSession(agentId, sessionKey);
@@ -354,6 +424,8 @@ export class RedisLayer {
       ['system', this.config.sessionTTL],
       ['identity', this.config.sessionTTL],
       ['history', this.config.historyTTL],
+      ['window', 120],                      // short-lived compose output cache
+      ['cursor', this.config.historyTTL],    // lives as long as history
       ['context', this.config.sessionTTL],
       ['facts', this.config.sessionTTL],
       ['tools', this.config.sessionTTL],

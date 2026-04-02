@@ -262,6 +262,29 @@ export interface ProviderMessage {
   [key: string]: unknown;
 }
 
+// ─── Session Cursor ──────────────────────────────────────────────
+
+/**
+ * Tracks the most recently composed submission window boundary.
+ * Written by compose() after every assembly, read by the background indexer
+ * to identify high-signal unprocessed messages.
+ *
+ * Stored in Redis (hm:{a}:s:{s}:cursor) with dual-write to SQLite for
+ * durability across Redis eviction (Compass Gate 2).
+ */
+export interface SessionCursor {
+  /** StoredMessage.id of the newest message included in the last window */
+  lastSentId: number;
+  /** messageIndex of the newest message — for ordering guarantees */
+  lastSentIndex: number;
+  /** ISO timestamp of when the window was composed */
+  lastSentAt: string;
+  /** Number of messages in the composed window */
+  windowSize: number;
+  /** Token count of the composed window */
+  tokenCount: number;
+}
+
 // ─── Redis Slot Types ────────────────────────────────────────────
 
 export interface SessionSlots {

@@ -121,6 +121,7 @@ export type {
   MemoryVisibility,
   CrossAgentQuery,
   AgentIdentity,
+  SessionCursor,
 } from './types.js';
 
 export type { ProviderType } from './provider-translator.js';

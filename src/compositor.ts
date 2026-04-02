@@ -21,6 +21,7 @@ import type {
   StoredMessage,
   CompositorConfig,
   SessionMeta,
+  SessionCursor,
 } from './types.js';
 import { RedisLayer } from './redis.js';
 import { MessageStore } from './message-store.js';
@@ -641,6 +642,41 @@ export class Compositor {
       : toProviderFormat(messages, request.provider ?? request.model ?? null);
 
     const totalTokens = budget - remaining;
+
+    // ─── Write Window Cache ───────────────────────────────────
+    // Cache the composed message array so the plugin can serve it directly
+    // on the next assemble() call without re-running the full compose pipeline.
+    // Short TTL (120s) — invalidated by afterTurn when new messages arrive.
+    try {
+      await this.redis.setWindow(request.agentId, request.sessionKey, messages, 120);
+    } catch {
+      // Window cache write is best-effort
+    }
+
+    // ─── Write Session Cursor ─────────────────────────────────
+    // Record the newest message included in the submission window.
+    // Background indexer uses this to find unprocessed high-signal content.
+    if (request.includeHistory !== false && slots.history > 0) {
+      try {
+        const historyMsgs = messages.filter(m => m.role !== 'system');
+        const lastHistoryMsg = historyMsgs.length > 0 ? historyMsgs[historyMsgs.length - 1] : null;
+        if (lastHistoryMsg) {
+          const sm = lastHistoryMsg as import('./types.js').StoredMessage;
+          if (sm.id != null && sm.messageIndex != null) {
+            const cursor: SessionCursor = {
+              lastSentId: sm.id,
+              lastSentIndex: sm.messageIndex,
+              lastSentAt: new Date().toISOString(),
+              windowSize: historyMsgs.length,
+              tokenCount: totalTokens,
+            };
+            await this.redis.setCursor(request.agentId, request.sessionKey, cursor);
+          }
+        }
+      } catch {
+        // Cursor write is best-effort
+      }
+    }
 
     // ─── Compaction Fence Update ──────────────────────────────
     // Record the oldest message ID that the LLM can see in this compose

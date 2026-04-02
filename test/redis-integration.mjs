@@ -144,6 +144,50 @@ async function run() {
     assert(rewarmedHistory.length === warmedHistory.length,
       `Repeated warm does not duplicate Redis history (${warmedHistory.length} -> ${rewarmedHistory.length})`);
 
+    // ── Window cache test ──
+    console.log('\n── Window cache (setWindow / getWindow / invalidateWindow) ──');
+
+    // Before compose, window should be null (evicted session was re-warmed)
+    const preComposeWindow = await hm.redis.getWindow(agentId, sessionKey1);
+    // compose() writes the window, so after our warmedResult call above it should exist
+    // Let's compose fresh and check
+    const windowTestResult = await hm.compose({
+      agentId, sessionKey: sessionKey1, tokenBudget: 4000,
+      provider: 'anthropic', model: 'claude-opus-4-6',
+      includeFacts: false, includeContext: false, includeLibrary: false, includeDocChunks: false,
+    });
+    const cachedWindow = await hm.redis.getWindow(agentId, sessionKey1);
+    assert(cachedWindow !== null, 'Window cache populated after compose()');
+    assert(Array.isArray(cachedWindow), 'Window cache is an array');
+    assert(cachedWindow.length === windowTestResult.messages.length,
+      `Window cache length matches compose output (${cachedWindow.length} === ${windowTestResult.messages.length})`);
+
+    // Invalidate and verify
+    await hm.redis.invalidateWindow(agentId, sessionKey1);
+    const afterInvalidate = await hm.redis.getWindow(agentId, sessionKey1);
+    assert(afterInvalidate === null, 'Window cache null after invalidateWindow()');
+
+    // ── Session cursor test ──
+    console.log('\n── Session cursor (setCursor / getCursor) ──');
+
+    // compose() writes the cursor when history is included
+    const cursorTestResult = await hm.compose({
+      agentId, sessionKey: sessionKey1, tokenBudget: 4000,
+      provider: 'anthropic', model: 'claude-opus-4-6',
+      includeFacts: false, includeContext: false, includeLibrary: false, includeDocChunks: false,
+    });
+    const cursor = await hm.redis.getCursor(agentId, sessionKey1);
+    assert(cursor !== null, 'Cursor written after compose()');
+    assert(typeof cursor.lastSentId === 'number', 'cursor.lastSentId is a number');
+    assert(typeof cursor.lastSentIndex === 'number', 'cursor.lastSentIndex is a number');
+    assert(typeof cursor.lastSentAt === 'string', 'cursor.lastSentAt is a string');
+    assert(cursor.windowSize > 0, `cursor.windowSize > 0 (got ${cursor.windowSize})`);
+    assert(cursor.tokenCount > 0, `cursor.tokenCount > 0 (got ${cursor.tokenCount})`);
+
+    // Cursor survives across compose() calls (refreshed, not destroyed)
+    const cursor2 = await hm.redis.getCursor(agentId, sessionKey1);
+    assert(cursor2.lastSentId === cursor.lastSentId, 'Cursor stable across reads (same lastSentId)');
+
     // ── Cross-session query ──
     console.log('\n── Cross-session queries ──');
 

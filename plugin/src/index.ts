@@ -53,6 +53,11 @@ type HyperMemInstance = {
   redis: {
     warmSession: (sessionKey: string, opts?: unknown) => Promise<void>;
     sessionExists: (agentId: string, sessionKey: string) => Promise<boolean>;
+    getWindow: (agentId: string, sessionKey: string) => Promise<NeutralMessage[] | null>;
+    setWindow: (agentId: string, sessionKey: string, messages: NeutralMessage[], ttl?: number) => Promise<void>;
+    invalidateWindow: (agentId: string, sessionKey: string) => Promise<void>;
+    getCursor: (agentId: string, sessionKey: string) => Promise<unknown>;
+    setCursor: (agentId: string, sessionKey: string, cursor: unknown) => Promise<void>;
     close: () => Promise<void>;
   };
   indexer?: {
@@ -357,11 +362,10 @@ function createHyperMemEngine(): ContextEngine {
         // Non-fatal — tier filtering just won't apply
       }
 
-      // Cap history depth to prevent overflow on long-running agents.
-      // The compositor default of 1000 messages can exceed context budget before
-      // compaction has a chance to run. 150 messages is safe for most council/director
-      // agents on 200k context windows. Adjust per-agent if needed.
-      const safeHistoryDepth = 150;
+      // historyDepth: let the compositor use its default (maxHistoryMessages, typically 1000).
+      // Token budget enforcement is the real guard against context overflow.
+      // The previous hardcoded safeHistoryDepth=150 band-aid was removed after
+      // Gate 1 validation proved Redis limit enforcement works (commit 4d68de7).
 
       const request: ComposeRequest = {
         agentId,
@@ -372,7 +376,6 @@ function createHyperMemEngine(): ContextEngine {
         includeDocChunks: true,
         prompt,
         skipProviderTranslation: true,  // runtime handles provider translation
-        historyDepth: safeHistoryDepth,
       };
 
       const result: ComposeResult = await hm.compose(request);
@@ -434,6 +437,14 @@ function createHyperMemEngine(): ContextEngine {
           } else {
             await hm.recordAssistantMessage(agentId, sk, neutral);
           }
+        }
+
+        // Invalidate the window cache after ingesting new messages.
+        // The next assemble() call will re-compose with the new data.
+        try {
+          await hm.redis.invalidateWindow(agentId, sk);
+        } catch {
+          // Window invalidation is best-effort
         }
 
         // Fire-and-forget background indexer — don't block the response
