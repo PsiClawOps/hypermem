@@ -63,8 +63,22 @@ type HyperMemInstance = {
 type NeutralMessage = {
   role: 'user' | 'assistant' | 'system';
   textContent: string | null;
-  toolCalls: unknown[] | null;
-  toolResults: unknown;
+  toolCalls: NeutralToolCall[] | null;
+  toolResults: NeutralToolResult[] | null;
+  metadata?: Record<string, unknown>;
+};
+
+type NeutralToolCall = {
+  id: string;
+  name: string;
+  arguments: string;
+};
+
+type NeutralToolResult = {
+  callId: string;
+  name: string;
+  content: string;
+  isError?: boolean;
 };
 
 type ComposeRequest = {
@@ -76,6 +90,7 @@ type ComposeRequest = {
   provider?: string;
   includeDocChunks?: boolean;
   prompt?: string;
+  skipProviderTranslation?: boolean;
 };
 
 type ComposeResult = {
@@ -211,7 +226,9 @@ function toNeutralMessage(msg: InboundMessage): NeutralMessage {
   } else if (contentBlockToolCalls.length > 0) {
     toolCalls = contentBlockToolCalls;
   }
-  const toolResults = (msg.role === 'tool' || msg.role === 'tool_result') ? msg.content : null;
+  const toolResults: NeutralToolResult[] | null = (msg.role === 'tool' || msg.role === 'tool_result')
+    ? (msg.content as unknown as NeutralToolResult[] | null) ?? null
+    : null;
 
   const role = msg.role === 'tool' || msg.role === 'tool_result'
     ? 'assistant'  // Tool results are part of the assistant turn in our model
@@ -327,18 +344,18 @@ function createHyperMemEngine(): ContextEngine {
         model,          // pass model for provider detection
         includeDocChunks: true,
         prompt,
+        skipProviderTranslation: true,  // runtime handles provider translation
       };
 
       const result: ComposeResult = await hm.compose(request);
 
       // Convert NeutralMessage[] → AgentMessage[] for the OpenClaw runtime.
-      // Filter out any malformed messages (missing role) before conversion.
-      // Cast via unknown since InboundMessage doesn't satisfy AgentMessage's
-      // strict discriminated union — the runtime accepts the wire shape at runtime.
+      // neutralToAgentMessage can return a single message or an array (tool results
+      // expand to individual ToolResultMessage objects), so we flatMap.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const outputMessages = result.messages
         .filter(m => m.role != null)
-        .map(neutralToAgentMessage) as unknown as any[];
+        .flatMap(m => neutralToAgentMessage(m as unknown as NeutralMessage)) as unknown as any[];
 
       return {
         messages: outputMessages,
@@ -424,37 +441,96 @@ function createHyperMemEngine(): ContextEngine {
 
 /**
  * Convert HyperMem's NeutralMessage back to OpenClaw's AgentMessage format.
+ *
+ * The runtime expects messages conforming to pi-ai's Message union:
+ *   UserMessage:       { role: 'user', content: string | ContentBlock[], timestamp }
+ *   AssistantMessage:  { role: 'assistant', content: ContentBlock[], api, provider, model, usage, stopReason, timestamp }
+ *   ToolResultMessage: { role: 'toolResult', toolCallId, toolName, content, isError, timestamp }
+ *
+ * HyperMem stores tool results as NeutralMessage with role='user' and toolResults[].
+ * These must be expanded into individual ToolResultMessage objects.
+ *
+ * For assistant messages with tool calls, NeutralToolCall.arguments is a JSON string
+ * but the runtime's ToolCall.arguments is Record<string, any>. We parse it here.
+ *
+ * Missing metadata fields (api, provider, model, usage, stopReason) are filled with
+ * sentinel values. The runtime's convertToLlm strips them before the API call, and
+ * the session transcript already has the real values. These are just structural stubs
+ * so the AgentMessage type is satisfied at runtime.
  */
-function neutralToAgentMessage(msg: NeutralMessage): InboundMessage {
-  const out: InboundMessage = {
-    role: msg.role,
-  };
+function neutralToAgentMessage(msg: NeutralMessage): InboundMessage | InboundMessage[] {
+  const now = Date.now();
+
+  // Tool results: expand to individual ToolResultMessage objects
+  if (msg.toolResults && msg.toolResults.length > 0) {
+    return (msg.toolResults as Array<{ callId: string; name: string; content: string; isError?: boolean }>).map(tr => ({
+      role: 'toolResult' as const,
+      toolCallId: tr.callId,
+      toolName: tr.name,
+      content: [{ type: 'text' as const, text: tr.content ?? '' }],
+      isError: tr.isError ?? false,
+      timestamp: now,
+    }));
+  }
+
+  if (msg.role === 'user') {
+    return {
+      role: 'user' as const,
+      content: msg.textContent ?? '',
+      timestamp: now,
+    };
+  }
+
+  if (msg.role === 'system') {
+    // System messages are passed through as-is; the runtime handles them separately
+    return {
+      role: 'system' as const,
+      content: msg.textContent ?? '',
+      timestamp: now,
+      // Preserve dynamicBoundary metadata for prompt caching
+      ...(msg.metadata as Record<string, unknown> | undefined)?.dynamicBoundary
+        ? { metadata: { dynamicBoundary: true } }
+        : {},
+    };
+  }
+
+  // Assistant message
+  const content: Array<{ type: string; [key: string]: unknown }> = [];
+
+  if (msg.textContent) {
+    content.push({ type: 'text', text: msg.textContent });
+  }
 
   if (msg.toolCalls && msg.toolCalls.length > 0) {
-    // Reconstruct as content blocks (OpenClaw format), not a wire-level tool_calls array.
-    // extractToolCallsFromAssistant() in the runtime expects content-block format.
-    // Include text block first if present, then tool call blocks.
-    const blocks: Array<{ type: string; [key: string]: unknown }> = [];
-    if (msg.textContent != null) {
-      blocks.push({ type: 'text', text: msg.textContent });
+    for (const tc of msg.toolCalls) {
+      // Parse arguments from JSON string → object (runtime expects Record<string, any>)
+      let args: Record<string, unknown>;
+      try {
+        args = typeof tc.arguments === 'string' ? JSON.parse(tc.arguments) : (tc.arguments ?? {});
+      } catch {
+        args = {};
+      }
+      content.push({
+        type: 'toolCall',
+        id: tc.id,
+        name: tc.name,
+        arguments: args,
+      });
     }
-    blocks.push(...(msg.toolCalls as Array<{ type: string; [key: string]: unknown }>));
-    out.content = blocks;
-  } else if (msg.textContent != null) {
-    // Use != (not !==) to catch both null and undefined
-    out.content = msg.textContent;
   }
 
-  if (msg.toolResults) {
-    out.content = msg.toolResults as string;
-  }
-
-  // Ensure content is always a string when role is user/assistant/system
-  if (out.content === undefined && !out.tool_calls) {
-    out.content = '';
-  }
-
-  return out;
+  // Stub metadata fields — the runtime needs these structurally but convertToLlm
+  // strips them before the API call. Real values live in the session transcript.
+  return {
+    role: 'assistant' as const,
+    content: content.length > 0 ? content : [{ type: 'text', text: '' }],
+    api: 'unknown',
+    provider: 'unknown',
+    model: 'unknown',
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    stopReason: 'stop',
+    timestamp: now,
+  };
 }
 
 // ─── Plugin Entry ───────────────────────────────────────────────

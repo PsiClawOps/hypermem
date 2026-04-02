@@ -17,6 +17,7 @@ import type {
   ComposeResult,
   SlotTokenCounts,
   NeutralMessage,
+  ProviderMessage,
   StoredMessage,
   CompositorConfig,
   SessionMeta,
@@ -564,14 +565,18 @@ export class Compositor {
       messages.splice(insertIdx, 0, contextMsg);
     }
 
-    // ─── Translate to provider format ──────────────────────────
-    // Use provider if set; fall back to model string for detection
-    const providerMessages = toProviderFormat(messages, request.provider ?? request.model ?? null);
+    // ─── Translate to provider format (unless caller wants neutral) ───
+    // When skipProviderTranslation is set, return NeutralMessages directly.
+    // The context engine plugin uses this: the OpenClaw runtime handles its
+    // own provider translation, so double-translating corrupts tool calls.
+    const outputMessages = request.skipProviderTranslation
+      ? messages as unknown as ProviderMessage[]
+      : toProviderFormat(messages, request.provider ?? request.model ?? null);
 
     const totalTokens = budget - remaining;
 
     return {
-      messages: providerMessages,
+      messages: outputMessages,
       tokenCount: totalTokens,
       slots,
       truncated: remaining < 0,

@@ -208,6 +208,12 @@ export interface ComposeRequest {
   includeFacts?: boolean;
   includeContext?: boolean;
   includeLibrary?: boolean;
+  /**
+   * When true, skip provider-specific translation and return NeutralMessage[]
+   * instead of ProviderMessage[]. Used by the context engine plugin, which
+   * returns messages to the OpenClaw runtime for its own provider translation.
+   */
+  skipProviderTranslation?: boolean;
 }
 
 export interface SlotTokenCounts {

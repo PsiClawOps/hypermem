@@ -408,6 +408,103 @@ Every council response includes:
   assert(councilOnly.every(c => !c.tier || c.tier === 'council'), 'Council tier filter excludes director chunks');
   assert(directorOnly.every(c => !c.tier || c.tier === 'director'), 'Director tier filter excludes council chunks');
 
+  // ── skipProviderTranslation (Plugin Path) ──
+  console.log('\n── skipProviderTranslation (Plugin Path) ──');
+
+  // Record a conversation with tool calls to test round-trip
+  const pluginSessionKey = `agent:${agentId}:webchat:plugin-test`;
+  await hm.recordUserMessage(agentId, pluginSessionKey, 'Read my TOOLS.md file');
+  await hm.recordAssistantMessage(agentId, pluginSessionKey, {
+    role: 'assistant',
+    textContent: 'Let me read that for you.',
+    toolCalls: [
+      { id: 'hm_test_001', name: 'read', arguments: '{"path":"/workspace/TOOLS.md"}' },
+    ],
+    toolResults: null,
+  });
+  await hm.recordAssistantMessage(agentId, pluginSessionKey, {
+    role: 'user',
+    textContent: null,
+    toolCalls: null,
+    toolResults: [
+      { callId: 'hm_test_001', name: 'read', content: '# TOOLS.md contents here', isError: false },
+    ],
+  });
+  await hm.recordAssistantMessage(agentId, pluginSessionKey, {
+    role: 'assistant',
+    textContent: 'Here are the contents of TOOLS.md.',
+    toolCalls: null,
+    toolResults: null,
+  });
+
+  // Compose with skipProviderTranslation — should get NeutralMessages back
+  const pluginCompositor = new Compositor({
+    redis: hm.redis,
+    vectorStore: null,
+    libraryDb: libDb,
+  });
+
+  const neutralResult = await pluginCompositor.compose({
+    agentId,
+    sessionKey: pluginSessionKey,
+    tokenBudget: 50000,
+    model: 'claude-opus-4-6',
+    skipProviderTranslation: true,
+  }, hm.dbManager.getMessageDb(agentId), libDb);
+
+  // Messages should be NeutralMessage format, not provider-translated
+  const historyMsgs = neutralResult.messages.filter(m => m.role !== 'system');
+  assert(historyMsgs.length >= 4, `Plugin path: got ${historyMsgs.length} history messages (expected ≥4)`);
+
+  // Find the assistant message with tool calls
+  const tcMsg = neutralResult.messages.find(m =>
+    m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0
+  );
+  assert(tcMsg !== undefined, 'Plugin path: found assistant message with tool calls');
+  if (tcMsg) {
+    // In neutral format, toolCalls should be NeutralToolCall objects with arguments as string
+    const tc = tcMsg.toolCalls[0];
+    assert(typeof tc.arguments === 'string', `Plugin path: tool call arguments is string (got ${typeof tc.arguments})`);
+    assert(tc.name === 'read', `Plugin path: tool call name preserved (got ${tc.name})`);
+    assert(tc.id === 'hm_test_001', `Plugin path: tool call ID preserved (got ${tc.id})`);
+
+    // Parse and verify
+    const parsed = JSON.parse(tc.arguments);
+    assert(parsed.path === '/workspace/TOOLS.md', `Plugin path: tool call arguments parseable`);
+  }
+
+  // Find tool result message
+  const trMsg = neutralResult.messages.find(m =>
+    m.role === 'user' && m.toolResults && m.toolResults.length > 0
+  );
+  assert(trMsg !== undefined, 'Plugin path: found tool result message');
+  if (trMsg) {
+    const tr = trMsg.toolResults[0];
+    assert(tr.callId === 'hm_test_001', `Plugin path: tool result callId preserved`);
+    assert(tr.content.includes('TOOLS.md'), `Plugin path: tool result content preserved`);
+  }
+
+  // Compare with provider-translated output — should be different format
+  const providerResult = await pluginCompositor.compose({
+    agentId,
+    sessionKey: pluginSessionKey,
+    tokenBudget: 50000,
+    provider: 'anthropic',
+    model: 'claude-opus-4-6',
+    skipProviderTranslation: false,
+  }, hm.dbManager.getMessageDb(agentId), libDb);
+
+  // Provider format should have tool_use blocks, not NeutralToolCall
+  const providerTcMsg = providerResult.messages.find(m =>
+    m.role === 'assistant' && Array.isArray(m.content) && m.content.some(c => c.type === 'tool_use')
+  );
+  assert(providerTcMsg !== undefined, 'Provider path: has Anthropic tool_use blocks');
+
+  // Neutral format should NOT have tool_use blocks
+  assert(tcMsg && !Array.isArray(tcMsg.content), 'Plugin path: does NOT have provider-translated content blocks');
+
+  console.log('  (skipProviderTranslation returns NeutralMessage format — plugin path validated)');
+
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
   await hm.redis.flushPrefix();
