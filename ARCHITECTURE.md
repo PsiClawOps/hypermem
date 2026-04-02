@@ -139,61 +139,70 @@ This means:
 - New agents provisioned in the DB but not yet in the registry will have reduced cross-agent visibility until registered
 - The warning message names the missing agent and suggests adding it to the registry
 
-## Hook Integration
+## Context Engine Plugin
 
-`~/.openclaw/hooks/hypermem-core/handler.js` — OpenClaw gateway hook:
+`plugin/src/index.ts` — OpenClaw context engine plugin (replaces basic hook integration):
 
 ```
-gateway:startup   → Init HyperMem, auto-rotate DBs, hydrate fleet cache
-agent:bootstrap   → Warm session (history, facts, profile → Redis)
-message:received  → Record user message to SQLite + Redis
-message:sent      → Record assistant message to SQLite + Redis
+gateway:startup     → Init HyperMem, auto-rotate DBs, hydrate fleet cache
+agent:bootstrap     → Warm session (history, facts, profile → Redis)
+message:received    → Record user message to SQLite + Redis
+message:sent        → Record assistant message to SQLite + Redis
+context:compose     → Full four-layer prompt assembly within token budget
 ```
 
-Handler receives `InternalHookEvent` objects, dispatches on `${type}:${action}`.
+Registers with `ownsCompaction: true` — runtime skips legacy compaction entirely.
+Deployed as managed hook at `~/.openclaw/hooks/hypermem-core/handler.js`.
 
-## Module Map (26 files, 10,730 lines)
+## Module Map (29 files, ~12,300 lines)
 
 | Module | Lines | Layer | Purpose |
 |---|---|---|---|
-| `index.ts` | ~1,100 | All | Facade — all public API |
-| `compositor.ts` | ~500 | L1-L4 | Prompt assembly + token budgeting |
-| `redis.ts` | ~400 | L1 | Redis operations + fleet cache |
-| `message-store.ts` | ~400 | L2 | Conversation recording + querying |
+| `index.ts` | ~1,340 | All | Facade — all public API |
+| `compositor.ts` | ~1,030 | L1-L4 | Prompt assembly + token budgeting + safety valve |
+| `library-schema.ts` | ~780 | L4 | Library schema v5 + migrations |
+| `background-indexer.ts` | ~680 | L2-L4 | LLM-powered extraction framework |
 | `vector-store.ts` | ~600 | L3 | Semantic search + embedding |
-| `fact-store.ts` | ~300 | L4 | Facts with confidence + expiry |
-| `knowledge-store.ts` | ~200 | L4 | Domain/key/value structured data |
-| `knowledge-graph.ts` | ~400 | L4 | DAG traversal + shortest path |
-| `preference-store.ts` | ~150 | L4 | Operator behavioral patterns |
-| `episode-store.ts` | ~200 | L4 | Significant event tracking |
-| `topic-store.ts` | ~200 | L4 | Cross-session thread tracking |
-| `fleet-store.ts` | ~400 | L4 | Fleet registry + capabilities |
-| `desired-state-store.ts` | ~350 | L4 | Config drift detection |
+| `hybrid-retrieval.ts` | ~450 | L3-L4 | FTS5 + KNN with Reciprocal Rank Fusion |
+| `fleet-store.ts` | ~440 | L4 | Fleet registry + capabilities |
+| `db.ts` | ~440 | - | Database manager + rotation |
+| `knowledge-graph.ts` | ~420 | L4 | DAG traversal + shortest path |
+| `redis.ts` | ~400 | L1 | Redis operations + fleet cache |
+| `doc-chunker.ts` | ~400 | - | Section-aware markdown/file parser |
+| `work-store.ts` | ~400 | L4 | Work queue + FTS5 |
+| `provider-translator.ts` | ~390 | - | Neutral ↔ provider format conversion |
+| `doc-chunk-store.ts` | ~375 | L4 | Chunk storage + deduplication |
+| `message-store.ts` | ~370 | L2 | Conversation recording + querying |
+| `types.ts` | ~330 | - | Shared type definitions |
+| `cross-agent.ts` | ~330 | L2-L4 | Cross-agent knowledge queries + visibility |
+| `desired-state-store.ts` | ~310 | L4 | Config drift detection |
+| `knowledge-store.ts` | ~300 | L4 | Domain/key/value structured data |
+| `secret-scanner.ts` | ~285 | - | Credential/secret detection |
 | `system-store.ts` | ~250 | L4 | Service state tracking |
-| `work-store.ts` | ~250 | L4 | Work queue + FTS5 |
-| `cross-agent.ts` | ~200 | L2-L4 | Cross-agent knowledge queries |
+| `seed.ts` | ~250 | L4 | Workspace seeder + collection inference |
+| `fact-store.ts` | ~230 | L4 | Facts with confidence + expiry |
 | `rate-limiter.ts` | ~230 | L3 | Token-bucket for embedding API |
-| `provider-translator.ts` | ~250 | - | Neutral ↔ provider format conversion |
-| `db.ts` | ~350 | - | Database manager + rotation |
-| `schema.ts` | ~100 | L2 | Messages schema + migrations |
-| `library-schema.ts` | ~400 | L4 | Library schema v5 + migrations |
-| `types.ts` | ~250 | - | Shared type definitions |
+| `schema.ts` | ~200 | L2 | Messages schema + migrations |
+| `episode-store.ts` | ~180 | L4 | Significant event tracking |
+| `preference-store.ts` | ~170 | L4 | Operator behavioral patterns |
+| `topic-store.ts` | ~160 | L4 | Cross-session thread tracking |
+| `plugin/src/index.ts` | ~550 | - | OpenClaw context engine plugin |
 
-## Test Coverage (409 tests, 11 suites)
+## Test Coverage (419 tests, 11 suites)
 
 | Suite | Tests | Coverage |
 |---|---|---|
-| smoke | 1 | End-to-end create/write/read/close |
+| smoke | 10 | End-to-end create/write/read/close, provider translation |
 | redis-integration | 24 | Redis operations, slots, history |
-| cross-agent | 20 | Cross-agent queries, fleet search |
+| cross-agent | 20 | Cross-agent queries, fleet search, visibility tiers |
 | vector-search | 33 | Embedding, KNN, batch indexing |
-| library | 71 | All L4 collections (facts→desired state) |
-| compositor | 39 | Four-layer composition, budget, providers |
+| library | 71 | All L4 collections (facts → desired state) |
+| compositor | 50 | Four-layer composition, budgets, providers, safety valve |
 | fleet-cache | 32 | Redis fleet cache, hydration, cache-aside |
 | rotation | 29 | DB rotation, auto-rotate, collision handling |
 | knowledge-graph | 33 | DAG traversal, shortest path, analytics |
 | rate-limiter | 22 | Token bucket, priority, timeout, embedder |
-| doc-chunker | 105 | Markdown/file chunking, section-aware parsing |
+| doc-chunker | 105 | Markdown/file chunking, section-aware parsing, seeder |
 
 ## Dependencies
 
