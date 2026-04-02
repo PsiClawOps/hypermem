@@ -96,19 +96,40 @@ async function run() {
     });
     assert(result2.messages.length >= 2, `Session 2 compose: ≥2 messages (got ${result2.messages.length})`);
 
+    // ── Redis history limit passthrough ──
+    console.log('\n── Redis history limit passthrough ──');
+
+    const limitedRedisHistory = await hm.redis.getHistory(agentId, sessionKey1, 2);
+    assert(limitedRedisHistory.length === 2, `Redis getHistory(limit=2): 2 messages (got ${limitedRedisHistory.length})`);
+    assert(limitedRedisHistory[0]?.textContent?.includes('preflight checks')
+      && limitedRedisHistory[1]?.textContent?.includes('Check if Redis is configured'),
+      'Redis getHistory(limit) returns last 2 messages in chronological order');
+
+    const limitedCompose = await hm.compose({
+      agentId, sessionKey: sessionKey1, tokenBudget: 4000,
+      provider: 'openai', model: 'gpt-5.4',
+      includeFacts: false, includeContext: false, includeLibrary: false, includeDocChunks: false,
+      historyDepth: 2,
+    });
+    const limitedNonSystem = limitedCompose.messages.filter(m => m.role !== 'system');
+    assert(limitedNonSystem.length === 2,
+      `Compose historyDepth=2 on hot Redis session returns 2 non-system messages (got ${limitedNonSystem.length})`);
+
     // ── Session warming test ──
     console.log('\n── Session warming (simulate cold start) ──');
+
+    const hotBeforeEvict = await hm.redis.sessionExists(agentId, sessionKey1);
+    assert(hotBeforeEvict, 'sessionExists=true before evict');
 
     // Clear Redis to simulate cold start
     await hm.redis.evictSession(agentId, sessionKey1);
 
-    // Verify Redis is empty for this session
-    const historySlot = await hm.redis.getSlot(agentId, sessionKey1, 'history');
-    const isCleared = !historySlot || historySlot === '[]' || historySlot === '';
-    assert(isCleared, 'Redis slot cleared (simulated cold start)');
+    const isCleared = !(await hm.redis.sessionExists(agentId, sessionKey1));
+    assert(isCleared, 'sessionExists=false after evict (simulated cold start)');
 
     // Warm from SQLite
     await hm.warm(agentId, sessionKey1);
+    assert(await hm.redis.sessionExists(agentId, sessionKey1), 'sessionExists=true after warm');
 
     // Verify warming restored the data
     const warmedResult = await hm.compose({
@@ -116,6 +137,12 @@ async function run() {
       provider: 'anthropic', model: 'claude-opus-4-6',
     });
     assert(warmedResult.messages.length >= 3, `Warmed session: ≥3 messages (got ${warmedResult.messages.length})`);
+
+    const warmedHistory = await hm.redis.getHistory(agentId, sessionKey1);
+    await hm.warm(agentId, sessionKey1);
+    const rewarmedHistory = await hm.redis.getHistory(agentId, sessionKey1);
+    assert(rewarmedHistory.length === warmedHistory.length,
+      `Repeated warm does not duplicate Redis history (${warmedHistory.length} -> ${rewarmedHistory.length})`);
 
     // ── Cross-session query ──
     console.log('\n── Cross-session queries ──');

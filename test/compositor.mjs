@@ -217,6 +217,30 @@ async function run() {
 
   assert(warmedContent.includes('Forge'), 'System prompt from Redis');
 
+  // ── Test 4b: Gate 1 — historyDepth constrains hot Redis sessions ──
+  console.log('\n── Gate 1: historyDepth limits hot Redis sessions ──');
+
+  const isWarm = await hm.redis.sessionExists(agentId, sessionKey);
+  assert(isWarm, 'Session marked warm in Redis');
+
+  const gatedResult = await compositor.compose({
+    agentId,
+    sessionKey,
+    tokenBudget: 50000,
+    provider: 'anthropic',
+    model: 'claude-opus-4-6',
+    includeFacts: false,
+    includeLibrary: false,
+    includeContext: false,
+    includeDocChunks: false,
+    historyDepth: 2,
+  }, msgDb, libDb);
+
+  const gateHistoryCount = gatedResult.messages.filter(m => m.role !== 'system').length;
+  assert(gateHistoryCount === 2,
+    `Hot Redis historyDepth=2 returns 2 non-system messages (got ${gateHistoryCount})`);
+  assert(gatedResult.tokenCount <= 50000, `Gate 1 token count ${gatedResult.tokenCount} within budget`);
+
   // ── Test 5: Empty session composition ──
   console.log('\n── Empty Session Composition ──');
 
