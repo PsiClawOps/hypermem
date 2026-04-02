@@ -14,7 +14,8 @@ const DEFAULT_CONFIG: RedisConfig = {
   host: 'localhost',
   port: 6379,
   keyPrefix: 'hm:',
-  sessionTTL: 14400,     // 4 hours
+  sessionTTL: 14400,     // 4 hours — slots like system/identity/meta
+  historyTTL: 86400,     // 24 hours — history list ages out after a day
   flushInterval: 1000,   // 1 second
 };
 
@@ -190,13 +191,22 @@ export class RedisLayer {
   }
 
   /**
-   * Push messages to the session history slot (capped list).
+   * Push messages to the session history list.
+   *
+   * History retention strategy:
+   *   - No aggressive LTRIM. Cap at maxMessages (default 1000) to prevent
+   *     unbounded growth, but the real budget enforcement happens in the
+   *     compositor at compose time.
+   *   - TTL is historyTTL (default 24h), not sessionTTL. History outlives
+   *     other session slots because it's the primary context source.
+   *   - System/identity slots are refreshed on every warmSession() call,
+   *     so they effectively never expire during an active session.
    */
   async pushHistory(
     agentId: string,
     sessionKey: string,
     messages: StoredMessage[],
-    maxMessages: number = 50
+    maxMessages: number = 1000
   ): Promise<void> {
     if (!this.isConnected || messages.length === 0) return;
     const key = this.sessionKey(agentId, sessionKey, 'history');
@@ -205,9 +215,11 @@ export class RedisLayer {
     for (const msg of messages) {
       pipeline.rpush(key, JSON.stringify(msg));
     }
-    // Trim to max
+    // Soft cap — only trim if we're way over. This is a safety net,
+    // not a context management strategy. The compositor handles budget.
     pipeline.ltrim(key, -maxMessages, -1);
-    pipeline.expire(key, this.config.sessionTTL);
+    // History gets its own longer TTL
+    pipeline.expire(key, this.config.historyTTL);
     await pipeline.exec();
   }
 
@@ -293,14 +305,23 @@ export class RedisLayer {
 
   /**
    * Refresh TTL on all session keys.
+   * Uses historyTTL for the history slot, sessionTTL for everything else.
    */
   async touchSession(agentId: string, sessionKey: string): Promise<void> {
     if (!this.isConnected) return;
 
-    const slots = ['system', 'identity', 'history', 'context', 'facts', 'tools', 'meta'];
+    const slotTTLs: Array<[string, number]> = [
+      ['system', this.config.sessionTTL],
+      ['identity', this.config.sessionTTL],
+      ['history', this.config.historyTTL],
+      ['context', this.config.sessionTTL],
+      ['facts', this.config.sessionTTL],
+      ['tools', this.config.sessionTTL],
+      ['meta', this.config.sessionTTL],
+    ];
     const pipeline = this.client!.pipeline();
-    for (const slot of slots) {
-      pipeline.expire(this.sessionKey(agentId, sessionKey, slot), this.config.sessionTTL);
+    for (const [slot, ttl] of slotTTLs) {
+      pipeline.expire(this.sessionKey(agentId, sessionKey, slot), ttl);
     }
     await pipeline.exec();
   }

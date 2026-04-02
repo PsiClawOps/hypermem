@@ -119,7 +119,8 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         host: 'localhost',
         port: 6379,
         keyPrefix: 'hm:',
-        sessionTTL: 86400,
+        sessionTTL: 14400,     // 4h for system/identity/meta slots
+        historyTTL: 86400,     // 24h for history — ages out, not count-trimmed
       },
     });
 

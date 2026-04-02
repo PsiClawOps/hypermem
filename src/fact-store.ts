@@ -164,14 +164,20 @@ export class FactStore {
     visibility?: string;
     limit?: number;
   }): Fact[] {
+    const limit = opts?.limit || 20;
+    const hasFilters = !!(opts?.agentId || opts?.domain || opts?.visibility);
+    const innerLimit = hasFilters ? limit * 4 : limit;
+
+    // Two-phase: FTS in subquery, then filter on small set.  See hybrid-retrieval.ts.
     let sql = `
-      SELECT f.* FROM facts f
-      JOIN facts_fts fts ON f.id = fts.rowid
-      WHERE facts_fts MATCH ?
-      AND f.superseded_by IS NULL
+      SELECT f.* FROM (
+        SELECT rowid, rank FROM facts_fts WHERE facts_fts MATCH ? ORDER BY rank LIMIT ?
+      ) sub
+      JOIN facts f ON f.id = sub.rowid
+      WHERE f.superseded_by IS NULL
       AND f.decay_score < 0.8
     `;
-    const params: (string | number)[] = [query];
+    const params: (string | number)[] = [query, innerLimit];
 
     if (opts?.agentId) {
       sql += ' AND f.agent_id = ?';
@@ -186,8 +192,8 @@ export class FactStore {
       params.push(opts.visibility);
     }
 
-    sql += ' ORDER BY rank LIMIT ?';
-    params.push(opts?.limit || 20);
+    sql += ' ORDER BY sub.rank LIMIT ?';
+    params.push(limit);
 
     const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
     return rows.map(parseFactRow);

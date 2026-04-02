@@ -217,20 +217,21 @@ export class DocChunkStore {
   keywordSearch(keyword: string, query: Omit<ChunkQuery, 'keyword'>): DocChunkRow[] {
     const { collection, agentId, tier, limit = 20 } = query;
 
-    const conditions: string[] = ['doc_chunks_fts MATCH ?'];
-    const params: SQLInputValue[] = [keyword];
+    const hasFilters = !!(agentId || tier);
+    const innerLimit = hasFilters ? limit * 4 : limit;
 
-    // Join back to doc_chunks for metadata filtering
+    // Two-phase: FTS in subquery, metadata filter on small result set.
     let sql = `
       SELECT c.id, c.collection, c.section_path, c.depth, c.content, c.token_estimate,
              c.source_hash, c.source_path, c.scope, c.tier, c.agent_id, c.parent_path,
              c.created_at, c.updated_at
-      FROM doc_chunks_fts f
-      JOIN doc_chunks c ON c.rowid = f.rowid
-      WHERE doc_chunks_fts MATCH ?
-        AND c.collection = ?
+      FROM (
+        SELECT rowid, rank FROM doc_chunks_fts WHERE doc_chunks_fts MATCH ? ORDER BY rank LIMIT ?
+      ) sub
+      JOIN doc_chunks c ON c.rowid = sub.rowid
+      WHERE c.collection = ?
     `;
-    params.push(collection);
+    const params: SQLInputValue[] = [keyword, innerLimit, collection];
 
     if (agentId) {
       sql += ' AND (c.agent_id = ? OR c.agent_id IS NULL)';
@@ -242,7 +243,7 @@ export class DocChunkStore {
       params.push(tier);
     }
 
-    sql += ' ORDER BY rank LIMIT ?';
+    sql += ' ORDER BY sub.rank LIMIT ?';
     params.push(limit);
 
     const rows = this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;

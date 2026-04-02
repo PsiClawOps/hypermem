@@ -305,7 +305,8 @@ export interface RedisConfig {
   port: number;
   password?: string;
   keyPrefix: string;
-  sessionTTL: number;        // seconds
+  sessionTTL: number;        // seconds — TTL for non-history slots (system, identity, etc.)
+  historyTTL: number;        // seconds — TTL for history list (longer than session, data ages out)
   flushInterval: number;     // milliseconds
 }
 
@@ -316,6 +317,11 @@ export interface CompositorConfig {
   maxCrossSessionContext: number;  // tokens
   // Note: assembly order is fixed in compose() — system, identity, history,
   // facts, knowledge, preferences, semanticRecall, cross-session, library.
+  //
+  // History trimming strategy: Redis stores up to maxHistoryMessages (default 1000).
+  // Budget-based trimming happens at compose time, not storage time.
+  // This ensures the compositor always has access to the full recent window
+  // and can make intelligent decisions about what to include.
 }
 
 export interface IndexerConfig {

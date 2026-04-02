@@ -113,22 +113,28 @@ function searchFactsFts(
   agentId?: string,
   limit: number = 20
 ): FtsResult[] {
+  // Two-phase query: FTS runs first in subquery (fast), then filters on
+  // the small result set.  Joining FTS + non-FTS predicates + ORDER BY rank
+  // in one pass forces SQLite to materialise the full FTS match set before
+  // applying LIMIT — O(matches) instead of O(limit).  See data-access-bench.
+  const innerLimit = agentId ? limit * 4 : limit;   // over-fetch to survive filter
   let sql = `
-    SELECT f.id, fts.rank, f.content, f.domain, f.agent_id
-    FROM facts f
-    JOIN facts_fts fts ON f.id = fts.rowid
-    WHERE facts_fts MATCH ?
-    AND f.superseded_by IS NULL
+    SELECT f.id, sub.rank, f.content, f.domain, f.agent_id
+    FROM (
+      SELECT rowid, rank FROM facts_fts WHERE facts_fts MATCH ? ORDER BY rank LIMIT ?
+    ) sub
+    JOIN facts f ON f.id = sub.rowid
+    WHERE f.superseded_by IS NULL
     AND f.decay_score < 0.8
   `;
-  const params: (string | number)[] = [query];
+  const params: (string | number)[] = [query, innerLimit];
 
   if (agentId) {
     sql += ' AND f.agent_id = ?';
     params.push(agentId);
   }
 
-  sql += ' ORDER BY fts.rank LIMIT ?';
+  sql += ' ORDER BY sub.rank LIMIT ?';
   params.push(limit);
 
   const rows = db.prepare(sql).all(...params) as Array<{
@@ -153,21 +159,23 @@ function searchKnowledgeFts(
   agentId?: string,
   limit: number = 20
 ): FtsResult[] {
+  const innerLimit = agentId ? limit * 4 : limit;
   let sql = `
-    SELECT k.id, fts.rank, k.content, k.domain, k.agent_id, k.key
-    FROM knowledge k
-    JOIN knowledge_fts fts ON k.id = fts.rowid
-    WHERE knowledge_fts MATCH ?
-    AND k.superseded_by IS NULL
+    SELECT k.id, sub.rank, k.content, k.domain, k.agent_id, k.key
+    FROM (
+      SELECT rowid, rank FROM knowledge_fts WHERE knowledge_fts MATCH ? ORDER BY rank LIMIT ?
+    ) sub
+    JOIN knowledge k ON k.id = sub.rowid
+    WHERE k.superseded_by IS NULL
   `;
-  const params: (string | number)[] = [query];
+  const params: (string | number)[] = [query, innerLimit];
 
   if (agentId) {
     sql += ' AND k.agent_id = ?';
     params.push(agentId);
   }
 
-  sql += ' ORDER BY fts.rank LIMIT ?';
+  sql += ' ORDER BY sub.rank LIMIT ?';
   params.push(limit);
 
   const rows = db.prepare(sql).all(...params) as Array<{
@@ -194,20 +202,22 @@ function searchEpisodesFts(
   limit: number = 20
 ): FtsResult[] {
   let sql = `
-    SELECT e.id, fts.rank, e.summary, e.event_type, e.agent_id, e.participants
-    FROM episodes e
-    JOIN episodes_fts fts ON e.id = fts.rowid
-    WHERE episodes_fts MATCH ?
-    AND e.decay_score < 0.8
+    SELECT e.id, sub.rank, e.summary, e.event_type, e.agent_id, e.participants
+    FROM (
+      SELECT rowid, rank FROM episodes_fts WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?
+    ) sub
+    JOIN episodes e ON e.id = sub.rowid
+    WHERE e.decay_score < 0.8
   `;
-  const params: (string | number)[] = [query];
+  const innerLimit = agentId ? limit * 4 : limit;
+  const params: (string | number)[] = [query, innerLimit];
 
   if (agentId) {
     sql += ' AND e.agent_id = ?';
     params.push(agentId);
   }
 
-  sql += ' ORDER BY fts.rank LIMIT ?';
+  sql += ' ORDER BY sub.rank LIMIT ?';
   params.push(limit);
 
   const rows = db.prepare(sql).all(...params) as Array<{

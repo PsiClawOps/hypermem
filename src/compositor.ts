@@ -28,10 +28,11 @@ import { toProviderFormat } from './provider-translator.js';
 import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
 import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
+import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction-fence.js';
 
 const DEFAULT_CONFIG: CompositorConfig = {
   defaultTokenBudget: 100000,
-  maxHistoryMessages: 50,
+  maxHistoryMessages: 1000,
   maxFacts: 20,
   maxCrossSessionContext: 5000,
 };
@@ -611,6 +612,41 @@ export class Compositor {
       : toProviderFormat(messages, request.provider ?? request.model ?? null);
 
     const totalTokens = budget - remaining;
+
+    // ─── Compaction Fence Update ──────────────────────────────
+    // Record the oldest message ID that the LLM can see in this compose
+    // cycle. Everything below this ID becomes eligible for compaction.
+    // If history was included, query the DB for the oldest included message.
+    if (request.includeHistory !== false && slots.history > 0) {
+      try {
+        const conversation = store.getConversation(request.sessionKey);
+        if (conversation) {
+          // The compositor included N history messages (after truncation).
+          // Count how many non-system messages are in the output to determine
+          // how far back we reached.
+          const historyMsgCount = messages.filter(m => m.role !== 'system').length;
+          if (historyMsgCount > 0) {
+            // Get the oldest message we would have included.
+            // getRecentMessages returns the last N in chronological order,
+            // so the first element is the oldest included.
+            const oldestIncluded = db.prepare(`
+              SELECT id FROM messages
+              WHERE conversation_id = ?
+              ORDER BY message_index DESC
+              LIMIT 1 OFFSET ?
+            `).get(conversation.id, historyMsgCount - 1) as { id: number } | undefined;
+
+            if (oldestIncluded) {
+              ensureCompactionFenceSchema(db);
+              updateCompactionFence(db, conversation.id, oldestIncluded.id);
+            }
+          }
+        }
+      } catch {
+        // Fence update is best-effort — never fail composition
+        warnings.push('Compaction fence update failed (non-fatal)');
+      }
+    }
 
     return {
       messages: outputMessages,

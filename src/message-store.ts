@@ -331,14 +331,16 @@ export class MessageStore {
    * Full-text search across all messages for an agent.
    */
   searchMessages(agentId: string, query: string, limit: number = 20): StoredMessage[] {
+    // Per-agent DB contains only one agent's data, so agent_id filter is
+    // redundant and catastrophically slows FTS (forces full result scan +
+    // join before LIMIT). Omitted by design — see bench/data-access-bench.mjs.
     const rows = this.db.prepare(`
       SELECT m.* FROM messages m
       JOIN messages_fts fts ON m.id = fts.rowid
       WHERE messages_fts MATCH ?
-      AND m.agent_id = ?
       ORDER BY fts.rank
       LIMIT ?
-    `).all(query, agentId, limit) as Record<string, unknown>[];
+    `).all(query, limit) as Record<string, unknown>[];
 
     return rows.map(parseMessageRow);
   }

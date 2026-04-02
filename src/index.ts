@@ -40,6 +40,21 @@ export { RedisLayer } from './redis.js';
 export { Compositor, type CompositorDeps } from './compositor.js';
 
 export {
+  ensureCompactionFenceSchema,
+  updateCompactionFence,
+  getCompactionFence,
+  getCompactionEligibility,
+  getCompactableMessages,
+} from './compaction-fence.js';
+export type { CompactionFence, CompactionEligibility } from './compaction-fence.js';
+
+export {
+  verifyPreservation,
+  verifyPreservationFromVectors,
+} from './preservation-gate.js';
+export type { PreservationResult, PreservationConfig } from './preservation-gate.js';
+
+export {
   toProviderFormat,
   fromProviderFormat,
   userMessageToNeutral,
@@ -148,12 +163,13 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     host: 'localhost',
     port: 6379,
     keyPrefix: 'hm:',
-    sessionTTL: 14400,
+    sessionTTL: 14400,      // 4 hours — system/identity/meta slots
+    historyTTL: 86400,      // 24 hours — history list outlives other slots
     flushInterval: 1000,
   },
   compositor: {
     defaultTokenBudget: 100000,
-    maxHistoryMessages: 50,
+    maxHistoryMessages: 1000,
     maxFacts: 20,
     maxCrossSessionContext: 5000,
   },
