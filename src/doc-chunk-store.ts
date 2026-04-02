@@ -244,10 +244,22 @@ export class DocChunkStore {
     }
 
     sql += ' ORDER BY sub.rank LIMIT ?';
-    params.push(limit);
+    params.push(limit * 3); // over-fetch to allow dedup
 
     const rows = this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
-    return rows.map(this.mapRow);
+
+    // Deduplicate by source_hash to avoid returning identical content
+    // from multiple agent-specific copies of shared-fleet docs.
+    const seenHashes = new Set<string>();
+    const deduped = rows.filter(r => {
+      const hash = r['source_hash'] as string | null;
+      if (!hash) return true;
+      if (seenHashes.has(hash)) return false;
+      seenHashes.add(hash);
+      return true;
+    });
+
+    return deduped.slice(0, limit).map(this.mapRow);
   }
 
   /**
