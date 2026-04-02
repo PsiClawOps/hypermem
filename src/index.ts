@@ -178,6 +178,8 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     maxFacts: 20,
     maxCrossSessionContext: 5000,
     maxRecentToolPairs: 3,
+    maxProseToolPairs: 10,
+    warmHistoryBudgetFraction: 0.4,
   },
   indexer: {
     enabled: true,

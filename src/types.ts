@@ -349,14 +349,23 @@ export interface CompositorConfig {
   maxCrossSessionContext: number;  // tokens
   /**
    * How many recent tool call/result pairs to keep verbatim in history.
-   * Tool call/result content beyond this threshold is stripped to a compact
-   * stub ("[tool call omitted]"/"[result omitted]"), preserving turn structure
-   * while eliminating the bulk of old tool output from the context window.
-   * Only the most recent N pairs carry full content — enough for the model
-   * to understand current work context without replaying entire exec logs.
+   * Tool call/result content beyond this threshold gets prose-stub treatment.
    * Default: 3
    */
   maxRecentToolPairs: number;
+  /**
+   * How many tool pairs beyond the verbatim threshold to convert to heuristic
+   * prose stubs (e.g. "Read /src/foo.ts (1.2KB)"). Pairs beyond this are
+   * dropped entirely (text content preserved, tool payloads nulled).
+   * Default: 10
+   */
+  maxProseToolPairs: number;
+  /**
+   * Fraction of defaultTokenBudget to allocate for history during warm bootstrap.
+   * Replaces the old WARM_BOOTSTRAP_CAP message-count constant.
+   * Default: 0.4 (40% of defaultTokenBudget)
+   */
+  warmHistoryBudgetFraction: number;
   // Note: assembly order is fixed in compose() — system, identity, history,
   // facts, knowledge, preferences, semanticRecall, cross-session, library.
   //

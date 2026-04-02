@@ -37,19 +37,9 @@ const DEFAULT_CONFIG: CompositorConfig = {
   maxFacts: 20,
   maxCrossSessionContext: 5000,
   maxRecentToolPairs: 3,
+  maxProseToolPairs: 10,
+  warmHistoryBudgetFraction: 0.4,
 };
-
-/**
- * Maximum messages to seed into Redis at bootstrap warm time.
- * Deliberately separate from maxHistoryMessages (1000) which governs
- * the ongoing Redis soft cap. Bootstrap warm is for session reconstruction
- * only — seeding 1000 messages at cold start would mean 1000 messages are
- * pushed to Redis before the first turn, creating an oversize submission
- * candidate set that the compositor has to trim anyway.
- *
- * The full SQLite archive remains available for deep retrieval on cache miss.
- */
-const WARM_BOOTSTRAP_CAP = 100;
 
 // ─── Trigger Registry ────────────────────────────────────────────
 
@@ -171,17 +161,150 @@ function estimateTokens(text: string | null | undefined): number {
   return Math.ceil(text.length / 4);
 }
 
+/**
+ * Dense token estimation for tool content (JSON, code, base64).
+ * Tool payloads are typically 2x denser than English prose.
+ */
+function estimateToolTokens(text: string): number {
+  return Math.ceil(text.length / 2);
+}
+
 function estimateMessageTokens(msg: NeutralMessage): number {
   let tokens = estimateTokens(msg.textContent);
   if (msg.toolCalls) {
-    tokens += estimateTokens(JSON.stringify(msg.toolCalls));
+    tokens += estimateToolTokens(JSON.stringify(msg.toolCalls)); // dense: /2 not /4
   }
   if (msg.toolResults) {
-    tokens += estimateTokens(JSON.stringify(msg.toolResults));
+    tokens += estimateToolTokens(JSON.stringify(msg.toolResults)); // dense: /2 not /4
   }
   // Overhead per message (role, formatting)
   tokens += 4;
   return tokens;
+}
+
+/**
+ * Extract a heuristic prose summary from a tool call/result pair.
+ * Returns a natural-language sentence (~15-30 tokens) instead of raw payloads.
+ * Used for Tier 2 tool treatment in applyToolGradient().
+ */
+function extractToolProseSummary(msg: NeutralMessage): string {
+  const parts: string[] = [];
+
+  if (msg.toolCalls && msg.toolCalls.length > 0) {
+    for (const tc of msg.toolCalls) {
+      let args: Record<string, unknown> = {};
+      try { args = JSON.parse(tc.arguments); } catch { /* best-effort */ }
+
+      const resultContent = msg.toolResults?.find(r => r.callId === tc.id)?.content ?? '';
+      const resultKB = resultContent ? `${(resultContent.length / 1024).toFixed(1)}KB` : '';
+
+      switch (tc.name) {
+        case 'read': {
+          const p = (args.path ?? args.file_path ?? args.filePath ?? '') as string;
+          parts.push(p ? `Read ${p}${resultKB ? ` (${resultKB})` : ''}` : 'Read a file');
+          break;
+        }
+        case 'write': {
+          const p = (args.path ?? args.file ?? args.filePath ?? '') as string;
+          parts.push(p ? `Wrote ${p}${resultKB ? ` (${resultKB})` : ''}` : 'Wrote a file');
+          break;
+        }
+        case 'edit': {
+          const p = (args.path ?? args.file ?? args.filePath ?? '') as string;
+          parts.push(p ? `Edited ${p}` : 'Edited a file');
+          break;
+        }
+        case 'exec': {
+          const cmd = ((args.command ?? '') as string).slice(0, 60);
+          const firstLine = resultContent.split('\n')[0]?.slice(0, 80) ?? '';
+          parts.push(cmd ? `Ran ${cmd}${firstLine ? ` — ${firstLine}` : ''}` : 'Ran a command');
+          break;
+        }
+        case 'web_search': {
+          const q = (args.query ?? '') as string;
+          parts.push(q ? `Searched '${q.slice(0, 60)}'` : 'Searched the web');
+          break;
+        }
+        case 'web_fetch': {
+          const u = (args.url ?? '') as string;
+          parts.push(u ? `Fetched ${u.slice(0, 80)}` : 'Fetched a URL');
+          break;
+        }
+        case 'sessions_send': {
+          const target = (args.sessionKey ?? args.label ?? '') as string;
+          parts.push(target ? `Sent message to ${target}` : 'Sent an inter-session message');
+          break;
+        }
+        case 'memory_search': {
+          const q = (args.query ?? '') as string;
+          parts.push(q ? `Searched memory for '${q.slice(0, 60)}'` : 'Searched memory');
+          break;
+        }
+        default:
+          parts.push(`Used ${tc.name}`);
+      }
+    }
+  } else if (msg.toolResults && msg.toolResults.length > 0) {
+    // Result-only message (no matching call visible)
+    const content = msg.toolResults[0].content?.slice(0, 100) ?? '';
+    parts.push(content ? `Tool result: ${content}` : 'Tool result received');
+  }
+
+  return parts.join('; ');
+}
+
+/**
+ * Apply gradient tool treatment to a message array.
+ *
+ * Tiers (newest-to-oldest):
+ *   Tier 1 — last maxRecentToolPairs: verbatim (untouched)
+ *   Tier 2 — next maxProseToolPairs:  heuristic prose stub replaces tool payloads
+ *   Tier 3 — beyond:                 tool payloads nulled, text content preserved
+ *
+ * Message text (assistant reasoning, user text) is NEVER modified.
+ * This pass runs before the budget loop so estimateMessageTokens() measures
+ * the actual cost that will be submitted, not the pre-transform cost.
+ */
+function applyToolGradient(
+  messages: NeutralMessage[],
+  maxRecentToolPairs: number,
+  maxProseToolPairs: number,
+): NeutralMessage[] {
+  let toolPairsSeen = 0;
+
+  // Walk newest→oldest to assign tiers, transform in place (new objects)
+  const result = [...messages];
+  for (let i = result.length - 1; i >= 0; i--) {
+    const msg = result[i];
+    const hasToolContent = (msg.toolCalls && msg.toolCalls.length > 0) ||
+                           (msg.toolResults && msg.toolResults.length > 0);
+    if (!hasToolContent) continue;
+
+    toolPairsSeen++;
+
+    if (toolPairsSeen <= maxRecentToolPairs) {
+      // Tier 1: verbatim — no change
+      continue;
+    } else if (toolPairsSeen <= maxRecentToolPairs + maxProseToolPairs) {
+      // Tier 2: prose stub
+      const prose = extractToolProseSummary(msg);
+      result[i] = {
+        ...msg,
+        textContent: prose || msg.textContent,  // prose replaces payload; fallback to existing text
+        toolCalls: null,
+        toolResults: null,
+      };
+    } else {
+      // Tier 3: drop tool payload entirely, preserve text
+      result[i] = {
+        ...msg,
+        toolCalls: null,
+        toolResults: null,
+      };
+    }
+  }
+
+  return result;
 }
 
 export interface CompositorDeps {
@@ -312,50 +435,24 @@ export class Compositor {
         return true;
       });
 
+      // ── Transform-first: apply gradient tool treatment BEFORE budget math ──
+      // All tool payloads are in their final form before any token estimation.
+      // This ensures estimateMessageTokens() measures actual submission cost,
+      // not pre-transform cost (which caused overflow: dense tool JSON was
+      // undercounted at length/4 when it should be measured post-stub).
+      const transformedHistory = applyToolGradient(
+        historyMessages,
+        this.config.maxRecentToolPairs ?? 3,
+        this.config.maxProseToolPairs ?? 10,
+      );
+
+      // ── Budget-fit: walk newest→oldest, drop until it fits ──────────────
+      // No transformation happens here — only include/exclude decisions.
       let historyTokens = 0;
       const includedHistory: NeutralMessage[] = [];
 
-      // ── Tool pair stripping ────────────────────────────────────
-      // Keep only the last maxRecentToolPairs tool call/result pairs verbatim.
-      // Older tool content is replaced with compact stubs — the model only
-      // needs recent tool context to understand current work state.
-      // Turn structure is preserved so provider pairing validation still passes.
-      const maxToolPairs = this.config.maxRecentToolPairs ?? 3;
-      let toolPairsSeen = 0;
-      // Walk from most recent to oldest counting tool pairs
-      const toolStripSet = new Set<number>();
-      for (let i = historyMessages.length - 1; i >= 0; i--) {
-        const msg = historyMessages[i];
-        const hasToolContent = (msg.toolCalls && msg.toolCalls.length > 0) ||
-                               (msg.toolResults && msg.toolResults.length > 0);
-        if (hasToolContent) {
-          toolPairsSeen++;
-          if (toolPairsSeen > maxToolPairs) {
-            toolStripSet.add(i);
-          }
-        }
-      }
-
-      // Include from most recent, working backwards
-      for (let i = historyMessages.length - 1; i >= 0; i--) {
-        let msg = historyMessages[i];
-
-        // Strip old tool content to stubs to save context budget
-        if (toolStripSet.has(i)) {
-          msg = {
-            ...msg,
-            textContent: msg.role === 'user' && msg.toolResults && msg.toolResults.length > 0
-              ? '[result omitted]'
-              : (msg.textContent || null),
-            toolCalls: msg.toolCalls && msg.toolCalls.length > 0
-              ? msg.toolCalls.map(tc => ({ ...tc, arguments: '{"_omitted":true}' }))
-              : msg.toolCalls,
-            toolResults: msg.toolResults && msg.toolResults.length > 0
-              ? msg.toolResults.map(tr => ({ ...tr, content: '[result omitted]' }))
-              : msg.toolResults,
-          };
-        }
-
+      for (let i = transformedHistory.length - 1; i >= 0; i--) {
+        const msg = transformedHistory[i];
         const msgTokens = estimateMessageTokens(msg);
 
         if (historyTokens + msgTokens > remaining) {
@@ -782,11 +879,29 @@ export class Compositor {
 
     if (!conversation) return;
 
-    // Use WARM_BOOTSTRAP_CAP (not maxHistoryMessages) for cold-start seeding.
-    // This prevents loading 1000 messages into Redis before the first turn,
-    // which would make the full archive the submission candidate set.
-    // The SQLite archive remains available as a cache-miss fallback.
-    const history = store.getRecentMessages(conversation.id, WARM_BOOTSTRAP_CAP);
+    // Fetch a generous pool from SQLite, apply gradient transform, then
+    // token-budget-cap the warm set. This replaces the old WARM_BOOTSTRAP_CAP
+    // message-count constant which was a blunt instrument — 100 messages of
+    // large tool results can massively exceed the history budget allocation.
+    const warmBudget = Math.floor(
+      (this.config.defaultTokenBudget) * (this.config.warmHistoryBudgetFraction ?? 0.4)
+    );
+    const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
+    const transformedForWarm = applyToolGradient(
+      rawHistory,
+      this.config.maxRecentToolPairs ?? 3,
+      this.config.maxProseToolPairs ?? 10,
+    );
+
+    // Walk newest→oldest, accumulate transformed token cost, stop when budget exhausted
+    let warmTokens = 0;
+    const history: typeof rawHistory = [];
+    for (let i = transformedForWarm.length - 1; i >= 0; i--) {
+      const cost = estimateMessageTokens(transformedForWarm[i]);
+      if (warmTokens + cost > warmBudget) break;
+      history.unshift(transformedForWarm[i] as typeof rawHistory[0]);
+      warmTokens += cost;
+    }
 
     const libDb = opts?.libraryDb || this.libraryDb;
     const factsContent = this.buildFactsFromDb(agentId, libDb || db);
