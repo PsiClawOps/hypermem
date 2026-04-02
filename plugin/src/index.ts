@@ -247,8 +247,9 @@ async function estimateWindowTokens(hm: HyperMemInstance, agentId: string, sessi
     if (!window || window.length === 0) return 0;
     return window.reduce((sum, msg) => {
       let t = estimateTokens(msg.textContent);
-      if (msg.toolCalls) t += estimateTokens(JSON.stringify(msg.toolCalls));
-      if (msg.toolResults) t += estimateTokens(JSON.stringify(msg.toolResults));
+      // Tool payloads are dense JSON — use /2 not /4 to avoid systematic undercount
+      if (msg.toolCalls) t += Math.ceil(JSON.stringify(msg.toolCalls).length / 2);
+      if (msg.toolResults) t += Math.ceil(JSON.stringify(msg.toolResults).length / 2);
       return sum + t;
     }, 0);
   } catch {
@@ -467,12 +468,19 @@ function createHyperMemEngine(): ContextEngine {
         const sk = resolveSessionKey(sessionId, sessionKey);
         const agentId = extractAgentId(sk);
 
-        // Use the caller's live estimate if provided; otherwise estimate from Redis window
+        // Always re-estimate from the actual Redis window rather than trusting
+        // the caller's currentTokenCount. The runtime's estimate is what triggered
+        // compaction — if it were accurate, we wouldn't be here. Our own estimate
+        // uses the corrected tool-density heuristic (length/2 for JSON payloads).
         const effectiveBudget = tokenBudget ?? 100_000;
-        const tokensBefore = currentTokenCount ?? await estimateWindowTokens(hm, agentId, sk);
+        const tokensBefore = await estimateWindowTokens(hm, agentId, sk);
+        if (currentTokenCount != null && Math.abs(currentTokenCount - tokensBefore) > effectiveBudget * 0.1) {
+          console.warn(`[hypermem-plugin] compact: runtime estimate (${currentTokenCount}) diverges from window estimate (${tokensBefore}) by >10% — using window estimate`);
+        }
 
-        // If already under 80% of budget, nothing to do — compositor handled it
-        if (tokensBefore <= effectiveBudget * 0.8) {
+        // Under 70% of budget by our own estimate — nothing to do.
+        // 70% not 80%: meaningful margin so we don't refuse on sessions close to the edge.
+        if (tokensBefore <= effectiveBudget * 0.7) {
           return {
             ok: true,
             compacted: false,
