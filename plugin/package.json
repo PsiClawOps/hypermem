@@ -10,16 +10,18 @@
       "name": "HyperMem Context Engine",
       "kind": "context-engine"
     },
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {},
   "devDependencies": {
-    "typescript": "^5.4.0",
-    "openclaw": "*"
+    "@psiclawops/hypermem": "file:..",
+    "openclaw": "*",
+    "typescript": "^5.4.0"
   },
   "peerDependencies": {
     "openclaw": "*"

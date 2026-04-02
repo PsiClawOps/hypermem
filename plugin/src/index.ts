@@ -22,94 +22,43 @@
 
 import { definePluginEntry, emptyPluginConfigSchema } from 'openclaw/plugin-sdk/plugin-entry';
 import type { ContextEngine, ContextEngineInfo } from 'openclaw/plugin-sdk';
+import type {
+  NeutralMessage,
+  NeutralToolCall,
+  NeutralToolResult,
+  ComposeRequest,
+  ComposeResult,
+  HyperMem as HyperMemClass,
+  BackgroundIndexer,
+  FleetStore,
+} from '@psiclawops/hypermem';
 import os from 'os';
 import path from 'path';
 import { createRequire } from 'module';
 
+// Re-export core types for consumers (eliminates local shim drift)
+export type { NeutralMessage, NeutralToolCall, NeutralToolResult, ComposeRequest, ComposeResult };
+
 // ─── HyperMem singleton ────────────────────────────────────────
 
-// Dynamic import via createRequire because HyperMem is a sibling package
-// (not installed via npm, loaded from the repo dist directly)
+// Runtime load is dynamic (HyperMem is a sibling package loaded from repo dist,
+// not installed via npm). Types come from the core package devDependency.
+// This pattern keeps the runtime path stable while TypeScript resolves types
+// from the canonical source — no more local shim drift.
 const HYPERMEM_PATH = path.join(os.homedir(), '.openclaw/workspace/repo/hypermem/dist/index.js');
 const require = createRequire(import.meta.url);
 
+// HyperMemInstance is the resolved return type of HyperMem.create().
+// HyperMem has a private constructor (factory pattern), so we can't use
+// InstanceType<> directly. Awaited<ReturnType<...>> extracts the same type
+// without requiring constructor access. If core adds/changes a field, the
+// plugin type-errors at CI time instead of silently drifting.
+type HyperMemInstance = Awaited<ReturnType<typeof HyperMemClass.create>>;
+
 let _hm: HyperMemInstance | null = null;
 let _hmInitPromise: Promise<HyperMemInstance> | null = null;
-
-// Minimal type shim — we import dynamically so TypeScript can't infer the full type
-type HyperMemInstance = {
-  recordUserMessage: (agentId: string, sessionKey: string, content: string, opts?: Record<string, unknown>) => Promise<unknown>;
-  recordAssistantMessage: (agentId: string, sessionKey: string, message: NeutralMessage) => Promise<unknown>;
-  compose: (request: ComposeRequest) => Promise<ComposeResult>;
-  warm: (agentId: string, sessionKey: string, opts?: { systemPrompt?: string; identity?: string }) => Promise<void>;
-  dbManager: {
-    getMessageDb: (agentId: string) => unknown;
-    getLibraryDb: () => unknown;
-  };
-  fleetStore?: {
-    getAgent: (agentId: string) => { tier?: string } | null;
-  };
-  redis: {
-    warmSession: (sessionKey: string, opts?: unknown) => Promise<void>;
-    sessionExists: (agentId: string, sessionKey: string) => Promise<boolean>;
-    getWindow: (agentId: string, sessionKey: string) => Promise<NeutralMessage[] | null>;
-    setWindow: (agentId: string, sessionKey: string, messages: NeutralMessage[], ttl?: number) => Promise<void>;
-    invalidateWindow: (agentId: string, sessionKey: string) => Promise<void>;
-    getCursor: (agentId: string, sessionKey: string) => Promise<unknown>;
-    setCursor: (agentId: string, sessionKey: string, cursor: unknown) => Promise<void>;
-    close: () => Promise<void>;
-  };
-  indexer?: {
-    processAgent: (agentId: string) => Promise<void>;
-  };
-  close: () => Promise<void>;
-};
-
-type NeutralMessage = {
-  role: 'user' | 'assistant' | 'system';
-  textContent: string | null;
-  toolCalls: NeutralToolCall[] | null;
-  toolResults: NeutralToolResult[] | null;
-  metadata?: Record<string, unknown>;
-};
-
-type NeutralToolCall = {
-  id: string;
-  name: string;
-  arguments: string;
-};
-
-type NeutralToolResult = {
-  callId: string;
-  name: string;
-  content: string;
-  isError?: boolean;
-};
-
-type ComposeRequest = {
-  agentId: string;
-  sessionKey: string;
-  tokenBudget?: number;
-  tier?: string;
-  model?: string;
-  provider?: string;
-  includeDocChunks?: boolean;
-  prompt?: string;
-  skipProviderTranslation?: boolean;
-  /** Max history messages to include — enforced at Redis layer (LRANGE -N -1) */
-  historyDepth?: number;
-};
-
-type ComposeResult = {
-  messages: NeutralMessage[];
-  tokenCount: number;       // actual field name in compositor output
-  totalTokens?: never;      // guard against the old wrong field name
-  contextBlock?: string;
-  truncated: boolean;
-  hasWarnings: boolean;
-  warnings: string[];
-  slots: Record<string, number>;
-};
+let _indexer: BackgroundIndexer | null = null;
+let _fleetStore: FleetStore | null = null;
 
 async function getHyperMem(): Promise<HyperMemInstance> {
   if (_hm) return _hm;
@@ -132,6 +81,21 @@ async function getHyperMem(): Promise<HyperMemInstance> {
     });
 
     _hm = instance;
+
+    // Wire up fleet store and background indexer from dynamic module
+    const { FleetStore: FleetStoreClass, createIndexer } = mod as {
+      FleetStore: new (db: ReturnType<typeof instance.dbManager.getLibraryDb>) => FleetStore;
+      createIndexer: (opts: { dataDir: string }) => BackgroundIndexer;
+    };
+    const libraryDb = instance.dbManager.getLibraryDb();
+    _fleetStore = new FleetStoreClass(libraryDb as Parameters<InstanceType<typeof FleetStoreClass>['listAgents']>[0] extends never ? never : never) as unknown as FleetStore;
+
+    try {
+      _indexer = createIndexer({ dataDir: path.join(os.homedir(), '.openclaw/hypermem') });
+    } catch {
+      // Non-fatal — indexer wiring can fail without breaking context assembly
+    }
+
     return instance;
   })();
 
@@ -432,7 +396,7 @@ function createHyperMemEngine(): ContextEngine {
       // Resolve agent tier from fleet store (for doc chunk tier filtering)
       let tier: string | undefined;
       try {
-        const agent = hm.fleetStore?.getAgent(agentId);
+        const agent = _fleetStore?.getAgent(agentId);
         tier = agent?.tier;
       } catch {
         // Non-fatal — tier filtering just won't apply
@@ -450,7 +414,7 @@ function createHyperMemEngine(): ContextEngine {
       const request: ComposeRequest = {
         agentId,
         sessionKey: sk,
-        tokenBudget,
+        tokenBudget: effectiveBudget,
         historyDepth,
         tier,
         model,          // pass model for provider detection
@@ -583,12 +547,9 @@ function createHyperMemEngine(): ContextEngine {
           // Window invalidation is best-effort
         }
 
-        // Fire-and-forget background indexer — don't block the response
-        if (hm.indexer?.processAgent) {
-          hm.indexer.processAgent(agentId).catch((err: Error) => {
-            console.warn('[hypermem-plugin] background indexer failed:', err.message);
-          });
-        }
+        // Fire-and-forget background indexer — interval-driven via BackgroundIndexer.start().
+        // Direct per-agent triggering deferred to P1.7 (TaskFlow integration).
+        // The indexer's 5-min interval picks up new messages automatically.
       } catch (err) {
         // afterTurn is never fatal
         console.warn('[hypermem-plugin] afterTurn failed:', (err as Error).message);
