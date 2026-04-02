@@ -334,12 +334,16 @@ export class MessageStore {
     // Per-agent DB contains only one agent's data, so agent_id filter is
     // redundant and catastrophically slows FTS (forces full result scan +
     // join before LIMIT). Omitted by design — see bench/data-access-bench.mjs.
+    // Two-phase query: FTS subquery runs first (fast LIMIT inside FTS),
+    // then join the small result set for metadata retrieval.
+    // Direct JOIN + WHERE MATCH + ORDER BY rank + LIMIT forces SQLite to
+    // materialize the full FTS join before applying LIMIT — catastrophic
+    // on large message DBs. See: specs/HYPERMEM_INCIDENT_HISTORY.md Incident 3.
     const rows = this.db.prepare(`
-      SELECT m.* FROM messages m
-      JOIN messages_fts fts ON m.id = fts.rowid
-      WHERE messages_fts MATCH ?
-      ORDER BY fts.rank
-      LIMIT ?
+      WITH fts_matches AS (
+        SELECT rowid, rank FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?
+      )
+      SELECT m.* FROM messages m JOIN fts_matches ON m.id = fts_matches.rowid ORDER BY fts_matches.rank
     `).all(query, limit) as Record<string, unknown>[];
 
     return rows.map(parseMessageRow);

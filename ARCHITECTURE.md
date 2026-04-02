@@ -220,6 +220,16 @@ Data Flow (current — P0 stabilized, window/cursor active):
 Design spec: `specs/HYPERMEM_QUEUE_SPLIT.md`
 Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 
+### Open Items (Tracked)
+
+| Item | WQ | Status | Notes |
+|---|---|---|---|
+| Cross-session context boundary markers | WQ-20260402-001 | 🟡 OPEN | `buildCrossSessionContext()` renders flat previews, no per-message boundaries or sender identity. Incident 6. |
+| Cursor durability (SQLite dual-write) | — | 🟡 DEFERRED | Cursor TTL = 24h. Dual-write to SQLite required before background indexer reads cursor. Gate 2. |
+| Plugin type unification | — | 🟡 DEFERRED | Plugin uses dynamic imports; can't use TS types from core. Shims are intentional. Structural change needed. |
+| ACA Step 4 — retrieval stubs replace static files | — | 🔲 PENDING | `systemPromptAddition` carries governance doc chunks instead of embedding full workspace files. Blocked on Step 3 ✅ |
+| ACA Step 5 — governance context assembly | — | 🔲 PENDING | Full on-demand assembly replaces static prompt injection. Requires Step 4. |
+
 ### Runtime Contract
 
 **Exclusive dispatch:** The OpenClaw runtime calls either `afterTurn()` OR `ingest()`/`ingestBatch()`, never both. Since HyperMem implements `afterTurn`, it must handle message ingestion there. `ingest()` exists for API compatibility but is never called by the runtime in practice.
