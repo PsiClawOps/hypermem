@@ -545,6 +545,50 @@ export class VectorStore {
   }
 
   /**
+   * Tombstone vector entries for superseded facts and knowledge.
+   *
+   * When fact A is superseded by fact B (facts.superseded_by = B.id), the old
+   * vector for A should not surface in semantic recall. Without this, recalled
+   * context can include contradicted/outdated facts alongside their replacements.
+   *
+   * Strategy: find all indexed facts/knowledge with superseded_by IS NOT NULL
+   * and delete their vec_index_map entries + vec table rows. The source row
+   * stays in library.db (audit trail) but disappears from recall.
+   *
+   * @returns Number of vector entries tombstoned.
+   */
+  tombstoneSuperseded(): number {
+    const sourceDb = this.libraryDb || this.db;
+    let tombstoned = 0;
+
+    for (const table of ['facts', 'knowledge'] as const) {
+      // Find all indexed entries whose source row has been superseded
+      const indexed = this.db
+        .prepare('SELECT vim.id, vim.vec_table, vim.source_id FROM vec_index_map vim WHERE vim.source_table = ?')
+        .all(table) as Array<{ id: number; vec_table: string; source_id: number }>;
+
+      for (const entry of indexed) {
+        const row = sourceDb
+          .prepare(`SELECT superseded_by FROM ${table} WHERE id = ?`)
+          .get(entry.source_id) as { superseded_by: number | null } | undefined;
+
+        if (row?.superseded_by != null) {
+          // Remove from vector table
+          this.db.prepare(`DELETE FROM ${entry.vec_table} WHERE rowid = CAST(? AS INTEGER)`).run(entry.id);
+          // Remove from index map
+          this.db.prepare('DELETE FROM vec_index_map WHERE id = ?').run(entry.id);
+          tombstoned++;
+        }
+      }
+    }
+
+    if (tombstoned > 0) {
+      console.log(`[hypermem-vector] tombstoneSuperseded: removed ${tombstoned} stale vector entries`);
+    }
+    return tombstoned;
+  }
+
+  /**
    * Get index statistics.
    */
   getStats(): VectorIndexStats {

@@ -198,6 +198,60 @@ async function run() {
   const statsAfterPrune = hm.getVectorStats('forge');
   assert(statsAfterPrune.totalVectors === 7, `Vectors after prune: ${statsAfterPrune.totalVectors} (expected 7)`);
 
+  // ── Test: Supersedes Tombstoning ──
+  console.log('\n── Supersedes Tombstoning ──');
+  // Add two facts, index them (one will be newly indexed), then mark one superseded.
+  // tombstoneSuperseded() should remove the superseded fact's vec_index_map entry.
+  const statsBeforeTombstone = hm.getVectorStats('forge');
+
+  // Insert a fact that's already indexed (simulate: manually insert into vec_index_map)
+  const supersededFact = libDb.prepare(`
+    INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility,
+      source_type, created_at, updated_at, decay_score)
+    VALUES ('forge', 'agent', null, 'HyperMem uses Redis for hot cache (SUPERSEDED)', 1.0, 'private',
+      'test', datetime('now'), datetime('now'), 0.0)
+  `).run();
+  const supersededId = Number(supersededFact.lastInsertRowid);
+
+  const newFact = libDb.prepare(`
+    INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility,
+      source_type, created_at, updated_at, decay_score)
+    VALUES ('forge', 'agent', null, 'HyperMem uses Redis for hot cache (NEW)', 1.0, 'private',
+      'test', datetime('now'), datetime('now'), 0.0)
+  `).run();
+  const newFactId = Number(newFact.lastInsertRowid);
+
+  // Manually insert a vec_index_map entry for the superseded fact
+  const tombstoneVecDb = hm.dbManager.getVectorDb('forge');
+  tombstoneVecDb.prepare(`
+    INSERT OR IGNORE INTO vec_index_map (source_table, source_id, vec_table, content_hash, indexed_at)
+    VALUES ('facts', ?, 'vec_facts', 'fakehash_superseded', datetime('now'))
+  `).run(supersededId);
+  const statsWithSuperseded = hm.getVectorStats('forge');
+  assert(
+    statsWithSuperseded.totalVectors === statsBeforeTombstone.totalVectors + 1,
+    `Vec count increased by 1 after inserting superseded entry: ${statsWithSuperseded.totalVectors}`
+  );
+
+  // Mark the fact as superseded
+  libDb.prepare('UPDATE facts SET superseded_by = ? WHERE id = ?').run(newFactId, supersededId);
+
+  // indexAgent triggers tombstoneSuperseded()
+  const tombstoneIndexResult = await hm.indexAgent('forge');
+  assert(tombstoneIndexResult.tombstoned >= 1, `Tombstoned ${tombstoneIndexResult.tombstoned} superseded entry (expected >= 1)`);
+
+  const statsAfterTombstone = hm.getVectorStats('forge');
+  // Net: +1 for newFact indexed - 1 tombstoned = same as before we inserted supersededFact
+  // i.e. statsBeforeTombstone (which already had superseded in index) or slightly higher
+  assert(
+    statsAfterTombstone.totalVectors <= statsWithSuperseded.totalVectors,
+    `Vectors after tombstone (${statsAfterTombstone.totalVectors}) ≤ pre-tombstone (${statsWithSuperseded.totalVectors}) — superseded was removed`
+  );
+
+  // Cleanup tombstone test facts
+  libDb.prepare('DELETE FROM facts WHERE id IN (?, ?)').run(supersededId, newFactId);
+  hm.pruneVectorOrphans('forge');
+
   // ── Test: Session Registry ──
   console.log('\n── Session Registry ──');
 

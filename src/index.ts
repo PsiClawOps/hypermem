@@ -971,13 +971,16 @@ export class HyperMem {
   /**
    * Index all un-indexed content for an agent.
    */
-  async indexAgent(agentId: string): Promise<{ indexed: number; skipped: number }> {
+  async indexAgent(agentId: string): Promise<{ indexed: number; skipped: number; tombstoned: number }> {
     const db = this.dbManager.getVectorDb(agentId);
-    if (!db) return { indexed: 0, skipped: 0 };
+    if (!db) return { indexed: 0, skipped: 0, tombstoned: 0 };
     const libraryDb = this.dbManager.getLibraryDb();
     const vs = new VectorStore(db, this.config.embedding, libraryDb);
     vs.ensureTables();
-    return vs.indexAll(agentId);
+    const result = await vs.indexAll(agentId);
+    // Tombstone superseded facts/knowledge so they don't surface in recall
+    const tombstoned = vs.tombstoneSuperseded();
+    return { ...result, tombstoned };
   }
 
   /**
