@@ -603,6 +603,36 @@ Every council response includes:
 
   console.log('  (skipProviderTranslation returns NeutralMessage format — plugin path validated)');
 
+  // ── Cursor Dual-Write (P1.3) ──
+  console.log('\n── Cursor Dual-Write (P1.3) ──');
+  // After compose(), the cursor should be written to both Redis AND SQLite.
+  // Compose has already been called above — check the conversations table for cursor columns.
+  const cursorDb = hm.dbManager.getMessageDb('forge');
+  const cursorRow = cursorDb.prepare(`
+    SELECT cursor_last_sent_id, cursor_last_sent_index, cursor_last_sent_at,
+           cursor_window_size, cursor_token_count
+    FROM conversations
+    WHERE session_key = 'agent:forge:webchat:main'
+  `).get();
+  assert(cursorRow !== undefined, 'Cursor row exists in conversations table');
+  assert(cursorRow.cursor_last_sent_id !== null, `SQLite cursor_last_sent_id: ${cursorRow?.cursor_last_sent_id}`);
+  assert(cursorRow.cursor_last_sent_at !== null, `SQLite cursor_last_sent_at: ${cursorRow?.cursor_last_sent_at}`);
+  assert(cursorRow.cursor_window_size > 0, `SQLite cursor_window_size: ${cursorRow?.cursor_window_size}`);
+  assert(cursorRow.cursor_token_count > 0, `SQLite cursor_token_count: ${cursorRow?.cursor_token_count}`);
+
+  // Verify Redis has the same cursor
+  const redisCursor = await hm.redis.getCursor('forge', 'agent:forge:webchat:main');
+  assert(redisCursor !== null, 'Redis cursor exists');
+  assert(redisCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Redis/SQLite cursor_last_sent_id match');
+
+  // Verify facade fallback: flush Redis prefix (simulates eviction), then getSessionCursor should fallback to SQLite
+  await hm.redis.flushPrefix();
+  const redisCursorAfterFlush = await hm.redis.getCursor('forge', 'agent:forge:webchat:main');
+  assert(redisCursorAfterFlush === null, 'Redis cursor is null after flush');
+  const fallbackCursor = await hm.getSessionCursor('forge', 'agent:forge:webchat:main');
+  assert(fallbackCursor !== null, 'Fallback cursor from SQLite works after Redis eviction');
+  assert(fallbackCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Fallback cursor data matches SQLite');
+
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
   await hm.redis.flushPrefix();

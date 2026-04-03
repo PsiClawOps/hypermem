@@ -8,7 +8,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LATEST_SCHEMA_VERSION = 4;
+export const LATEST_SCHEMA_VERSION = 5;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -193,6 +193,30 @@ export function migrate(db: DatabaseSync): void {
     }
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(4, nowIso());
+  }
+
+  // v4 → v5: add cursor columns to conversations table for dual-write durability
+  if (currentVersion < 5) {
+    // ALTER TABLE ADD COLUMN is safe on existing rows — all default to NULL
+    const cols = (db.prepare('PRAGMA table_info(conversations)').all() as Array<{ name: string }>)
+      .map(r => r.name);
+    if (!cols.includes('cursor_last_sent_id')) {
+      db.exec('ALTER TABLE conversations ADD COLUMN cursor_last_sent_id INTEGER');
+    }
+    if (!cols.includes('cursor_last_sent_index')) {
+      db.exec('ALTER TABLE conversations ADD COLUMN cursor_last_sent_index INTEGER');
+    }
+    if (!cols.includes('cursor_last_sent_at')) {
+      db.exec('ALTER TABLE conversations ADD COLUMN cursor_last_sent_at TEXT');
+    }
+    if (!cols.includes('cursor_window_size')) {
+      db.exec('ALTER TABLE conversations ADD COLUMN cursor_window_size INTEGER');
+    }
+    if (!cols.includes('cursor_token_count')) {
+      db.exec('ALTER TABLE conversations ADD COLUMN cursor_token_count INTEGER');
+    }
+    db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(5, nowIso());
   }
 }
 

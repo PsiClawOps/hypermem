@@ -1005,6 +1005,48 @@ export class HyperMem {
     return vs.pruneOrphans();
   }
 
+  // ─── Session Cursor (dual-read: Redis → SQLite fallback) ──────
+
+  /**
+   * Get the session cursor for an agent+session.
+   * Reads from Redis first; falls back to SQLite if Redis returns null
+   * (e.g. after eviction or restart). This is the P1.3 durability guarantee.
+   */
+  async getSessionCursor(agentId: string, sessionKey: string): Promise<import('./types.js').SessionCursor | null> {
+    // Try Redis first (hot path)
+    const redisCursor = await this.redis.getCursor(agentId, sessionKey);
+    if (redisCursor) return redisCursor;
+
+    // Fallback to SQLite
+    const db = this.dbManager.getMessageDb(agentId);
+    if (!db) return null;
+    const row = db.prepare(`
+      SELECT cursor_last_sent_id, cursor_last_sent_index, cursor_last_sent_at,
+             cursor_window_size, cursor_token_count
+      FROM conversations
+      WHERE session_key = ? AND cursor_last_sent_id IS NOT NULL
+    `).get(sessionKey) as Record<string, unknown> | undefined;
+
+    if (!row || row.cursor_last_sent_id == null) return null;
+
+    const cursor: import('./types.js').SessionCursor = {
+      lastSentId: row.cursor_last_sent_id as number,
+      lastSentIndex: row.cursor_last_sent_index as number,
+      lastSentAt: row.cursor_last_sent_at as string,
+      windowSize: row.cursor_window_size as number,
+      tokenCount: row.cursor_token_count as number,
+    };
+
+    // Re-warm Redis so subsequent reads are fast
+    try {
+      await this.redis.setCursor(agentId, sessionKey, cursor);
+    } catch {
+      // Best-effort re-warm
+    }
+
+    return cursor;
+  }
+
   // ─── Message Rotation (L2: Messages) ────────────────────────
 
   /**

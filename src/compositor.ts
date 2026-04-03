@@ -807,6 +807,28 @@ export class Compositor {
               tokenCount: totalTokens,
             };
             await this.redis.setCursor(request.agentId, request.sessionKey, cursor);
+
+            // Dual-write cursor to SQLite for durability across Redis eviction (P1.3)
+            try {
+              db.prepare(`
+                UPDATE conversations
+                SET cursor_last_sent_id = ?,
+                    cursor_last_sent_index = ?,
+                    cursor_last_sent_at = ?,
+                    cursor_window_size = ?,
+                    cursor_token_count = ?
+                WHERE session_key = ?
+              `).run(
+                cursor.lastSentId,
+                cursor.lastSentIndex,
+                cursor.lastSentAt,
+                cursor.windowSize,
+                cursor.tokenCount,
+                request.sessionKey
+              );
+            } catch {
+              // SQLite cursor write is best-effort — don't block compose
+            }
           }
         }
       } catch {
