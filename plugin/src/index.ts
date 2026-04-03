@@ -91,7 +91,8 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         getLibraryDb: () => any,
         listAgents: () => string[],
         config?: Partial<{ enabled: boolean; periodicInterval: number }>,
-        getCursor?: (agentId: string, sessionKey: string) => Promise<unknown>
+        getCursor?: (agentId: string, sessionKey: string) => Promise<unknown>,
+        vectorStore?: any
       ) => BackgroundIndexer;
     };
     const libraryDb = instance.dbManager.getLibraryDb();
@@ -119,7 +120,9 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         // Cursor fetcher: reads from Redis → SQLite fallback
         async (agentId: string, sessionKey: string) => {
           return instance.getSessionCursor(agentId, sessionKey);
-        }
+        },
+        // Pass vector store so new facts/episodes are embedded at index time
+        instance.getVectorStore() ?? undefined
       );
       _indexer.start();
     } catch {

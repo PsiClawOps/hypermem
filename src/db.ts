@@ -163,6 +163,35 @@ export class DatabaseManager {
   }
 
   /**
+   * Get or create the shared (fleet-wide) vector database.
+   * Unlike per-agent vector DBs, this is a single vectors.db at the root of dataDir,
+   * shared across all agents. Facts and episodes from all agents are indexed together,
+   * keyed by (source_table, source_id) in vec_index_map.
+   * Returns null if sqlite-vec is not available.
+   */
+  getSharedVectorDb(): DatabaseSync | null {
+    const sharedKey = '__shared__';
+    let db = this.vectorDbs.get(sharedKey);
+    if (db) return db;
+
+    const dbPath = path.join(this.dataDir, 'vectors.db');
+
+    db = new DatabaseSync(dbPath, { allowExtension: true });
+    applyPragmas(db);
+
+    const vecLoaded = loadSqliteVec(db);
+    this._vecAvailable = vecLoaded;
+
+    if (!vecLoaded) {
+      try { db.close(); } catch { /* ignore */ }
+      return null;
+    }
+
+    this.vectorDbs.set(sharedKey, db);
+    return db;
+  }
+
+  /**
    * Get or create the shared library database.
    * This is the fleet-wide knowledge store — the crown jewel.
    */

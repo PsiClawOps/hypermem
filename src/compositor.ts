@@ -318,7 +318,7 @@ export interface CompositorDeps {
 export class Compositor {
   private readonly config: CompositorConfig;
   private readonly redis: RedisLayer;
-  private readonly vectorStore: VectorStore | null;
+  private vectorStore: VectorStore | null;
   private readonly libraryDb: DatabaseSync | null;
   private readonly triggerRegistry: CollectionTrigger[];
 
@@ -340,6 +340,14 @@ export class Compositor {
       this.triggerRegistry = deps.triggerRegistry || DEFAULT_TRIGGERS;
     }
     this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  /**
+   * Set or replace the vector store after construction.
+   * Called by HyperMem.create() once sqlite-vec is confirmed available.
+   */
+  setVectorStore(vs: VectorStore): void {
+    this.vectorStore = vs;
   }
 
   /**

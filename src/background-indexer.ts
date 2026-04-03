@@ -25,6 +25,7 @@ import { EpisodeStore } from './episode-store.js';
 import { TopicStore } from './topic-store.js';
 import { KnowledgeStore } from './knowledge-store.js';
 import { isSafeForSharedVisibility } from './secret-scanner.js';
+import type { VectorStore } from './vector-store.js';
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -391,6 +392,7 @@ export class BackgroundIndexer {
   private readonly config: IndexerConfig;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private vectorStore: VectorStore | null = null;
 
   constructor(
     config?: Partial<IndexerConfig>,
@@ -408,6 +410,14 @@ export class BackgroundIndexer {
       episodeSignificanceThreshold: config?.episodeSignificanceThreshold ?? 0.5,
       periodicInterval: config?.periodicInterval ?? 300000, // 5 minutes
     };
+  }
+
+  /**
+   * Set the vector store for embedding new facts/episodes at index time.
+   * Optional — if not set, indexer runs without embedding (FTS5-only mode).
+   */
+  setVectorStore(vs: VectorStore): void {
+    this.vectorStore = vs;
   }
 
   /**
@@ -577,7 +587,7 @@ export class BackgroundIndexer {
       const factCandidates = extractFactCandidates(content);
       for (const { content: factContent, confidence: factConfidence } of factCandidates) {
         try {
-          factStore.addFact(agentId, factContent, {
+          const fact = factStore.addFact(agentId, factContent, {
             scope: 'agent',
             confidence: factConfidence,
             sourceType: 'indexer',
@@ -585,6 +595,11 @@ export class BackgroundIndexer {
             sourceRef: `msg:${msg.id}`,
           });
           factsExtracted++;
+          // Embed new fact for semantic recall (best-effort, non-blocking)
+          if (this.vectorStore && fact.id) {
+            this.vectorStore.indexItem('facts', fact.id, factContent, fact.domain || undefined)
+              .catch(() => { /* embedding failure is non-fatal */ });
+          }
         } catch {
           // Duplicate or constraint violation — skip
         }
@@ -597,12 +612,17 @@ export class BackgroundIndexer {
         // Downgrade to 'private' rather than drop, so we don't lose the episode.
         const episodeVisibility = isSafeForSharedVisibility(episode.summary) ? 'org' : 'private';
         try {
-          episodeStore.record(agentId, episode.type, episode.summary, {
+          const recorded = episodeStore.record(agentId, episode.type, episode.summary, {
             significance: episode.significance,
             visibility: episodeVisibility,
             sessionKey: this.getSessionKeyForMessage(messageDb, msg.conversationId),
           });
           episodesRecorded++;
+          // Embed high-significance episodes (decisions, incidents, deployments)
+          if (this.vectorStore && recorded?.id && episode.significance >= 0.7) {
+            this.vectorStore.indexItem('episodes', recorded.id, episode.summary, episode.type)
+              .catch(() => { /* embedding failure is non-fatal */ });
+          }
         } catch {
           // Skip duplicate episodes
         }
@@ -831,7 +851,10 @@ export function createIndexer(
   getLibraryDb: () => DatabaseSync,
   listAgents: () => string[],
   config?: Partial<IndexerConfig>,
-  getCursor?: CursorFetcher
+  getCursor?: CursorFetcher,
+  vectorStore?: VectorStore
 ): BackgroundIndexer {
-  return new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor);
+  const indexer = new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor);
+  if (vectorStore) indexer.setVectorStore(vectorStore);
+  return indexer;
 }

@@ -150,3 +150,18 @@ Each entry records the change, rationale, and date — so we can track drift ove
 - **After:** ~11 unique knowledge entries per 200 messages (paths, services). Episode FTS5 2.3ms. Two fewer Redis writes per session warm.
 - **Date:** 2026-04-02
 - **Status:** active
+
+### T2.2 — Vector Store Wiring (semantic recall)
+- **Files:** `src/compositor.ts`, `src/db.ts`, `src/index.ts`, `src/background-indexer.ts`, `plugin/src/index.ts`, `scripts/embed-existing.mjs`
+- **Changes:**
+  - `Compositor.vectorStore`: changed from `readonly` to mutable; added `setVectorStore()` setter
+  - `DatabaseManager.getSharedVectorDb()`: new method — opens/creates `vectors.db` at dataDir root with `allowExtension: true`, loads sqlite-vec, caches handle
+  - `HyperMem.create()`: calls `getSharedVectorDb()` + wires VectorStore to compositor after Redis init. Non-fatal — FTS5 fallback if sqlite-vec unavailable
+  - `HyperMem.getVectorStore()`: public getter so plugin can pass VS to indexer
+  - `BackgroundIndexer.setVectorStore()`: new method; `createIndexer()` accepts optional 6th arg for VS
+  - New facts/episodes are embedded at index time (best-effort, fire-and-forget)
+  - `scripts/embed-existing.mjs`: one-time bulk migration — embeds all clean facts + high-sig episodes
+- **Before:** `vectorStore: null` always. FTS5-only semantic recall. No embeddings anywhere.
+- **After:** sqlite-vec + nomic-embed-text wired. 1,875 facts embedded. Episodes being embedded in background. Compose now runs true hybrid FTS5+KNN recall.
+- **Date:** 2026-04-02
+- **Status:** active (episode bulk-embed in progress)

@@ -227,6 +227,14 @@ export class HyperMem {
   }
 
   /**
+   * Get the active vector store, if initialized.
+   * Used by the plugin to wire embeddings into the background indexer.
+   */
+  getVectorStore(): VectorStore | null {
+    return (this.compositor as unknown as { vectorStore: VectorStore | null }).vectorStore;
+  }
+
+  /**
    * Create and initialize a HyperMem instance.
    */
   static async create(config?: Partial<HyperMemConfig>): Promise<HyperMem> {
@@ -249,6 +257,26 @@ export class HyperMem {
       console.log('[hypermem] Redis connected');
     } else {
       console.warn('[hypermem] Redis unavailable — running in SQLite-only mode');
+    }
+
+    // ── Vector store init ─────────────────────────────────────
+    // Attempt to wire up sqlite-vec + nomic-embed-text for semantic recall.
+    // Non-fatal: if sqlite-vec isn't available or Ollama is down,
+    // hybridSearch() continues in FTS5-only mode.
+    // The vector store is shared (not per-agent) — facts/episodes from all agents
+    // are indexed together, keyed by (source_table, source_id).
+    try {
+      const vectorDb = hm.dbManager.getSharedVectorDb();
+      if (vectorDb) {
+        const vs = new VectorStore(vectorDb, merged.embedding, hm.dbManager.getLibraryDb());
+        vs.ensureTables();
+        hm.compositor.setVectorStore(vs);
+        console.log('[hypermem] Vector store initialized (sqlite-vec + nomic-embed-text)');
+      } else {
+        console.warn('[hypermem] sqlite-vec unavailable — semantic recall in FTS5-only mode');
+      }
+    } catch (err) {
+      console.warn('[hypermem] Vector store init failed (non-fatal):', (err as Error).message);
     }
 
     return hm;
