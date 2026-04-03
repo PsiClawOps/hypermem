@@ -36,6 +36,8 @@ export interface IndexerStats {
   episodesRecorded: number;
   topicsUpdated: number;
   knowledgeUpserted: number;
+  /** Number of superseded fact vectors tombstoned from the vector index this tick. */
+  tombstoned: number;
   elapsedMs: number;
   /** Number of messages that were post-cursor (unseen by model, high-signal priority). */
   postCursorMessages: number;
@@ -476,7 +478,7 @@ export class BackgroundIndexer {
       for (const agentId of agents) {
         try {
           const stats = await this.processAgent(agentId, libraryDb);
-          if (stats.messagesProcessed > 0) {
+          if (stats.messagesProcessed > 0 || stats.tombstoned > 0) {
             results.push(stats);
           }
         } catch (err: unknown) {
@@ -489,8 +491,10 @@ export class BackgroundIndexer {
         const totalMessages = results.reduce((s, r) => s + r.messagesProcessed, 0);
         const totalFacts = results.reduce((s, r) => s + r.factsExtracted, 0);
         const totalEpisodes = results.reduce((s, r) => s + r.episodesRecorded, 0);
+        const totalTombstoned = results.reduce((s, r) => s + r.tombstoned, 0);
+        const tombstonedPart = totalTombstoned > 0 ? `, ${totalTombstoned} tombstoned` : '';
         console.log(
-          `[indexer] Tick complete: ${totalMessages} messages → ${totalFacts} facts, ${totalEpisodes} episodes`
+          `[indexer] Tick complete: ${totalMessages} messages → ${totalFacts} facts, ${totalEpisodes} episodes${tombstonedPart}`
         );
       }
 
@@ -532,6 +536,12 @@ export class BackgroundIndexer {
     const messages = this.getUnindexedMessages(messageDb, agentId, lastProcessedId, 100);
 
     if (messages.length === 0) {
+      // Even with no new messages, run tombstone cleanup in case supersedes
+      // were written externally (e.g. via FactStore.markSuperseded()).
+      let tombstoned = 0;
+      if (this.vectorStore) {
+        tombstoned = this.vectorStore.tombstoneSuperseded();
+      }
       return {
         agentId,
         messagesProcessed: 0,
@@ -539,6 +549,7 @@ export class BackgroundIndexer {
         episodesRecorded: 0,
         topicsUpdated: 0,
         knowledgeUpserted: 0,
+        tombstoned,
         postCursorMessages: 0,
         elapsedMs: Date.now() - start,
       };
@@ -574,6 +585,7 @@ export class BackgroundIndexer {
     let episodesRecorded = 0;
     let topicsUpdated = 0;
     let knowledgeUpserted = 0;
+    let supersededFacts = 0;
     let maxMessageId = lastProcessedId;
 
     for (const msg of ordered) {
@@ -595,6 +607,25 @@ export class BackgroundIndexer {
             sourceRef: `msg:${msg.id}`,
           });
           factsExtracted++;
+
+          // ── Supersedes detection ─────────────────────────────────
+          // Check if the newly extracted fact supersedes an existing one.
+          // A supersede is detected when an existing active fact shares the
+          // same 60-char prefix (same topic, different phrasing/update).
+          if (fact.id) {
+            const oldFactId = factStore.findSupersedableByContent(agentId, factContent);
+            if (oldFactId !== null && oldFactId !== fact.id) {
+              const didSupersede = factStore.markSuperseded(oldFactId, fact.id);
+              if (didSupersede) {
+                supersededFacts++;
+                // Immediately remove the stale vector so it can't surface in KNN recall
+                if (this.vectorStore) {
+                  this.vectorStore.removeItem('facts', oldFactId);
+                }
+              }
+            }
+          }
+
           // Embed new fact for semantic recall (best-effort, non-blocking)
           if (this.vectorStore && fact.id) {
             this.vectorStore.indexItem('facts', fact.id, factContent, fact.domain || undefined)
@@ -664,6 +695,13 @@ export class BackgroundIndexer {
     // Update watermark
     this.setWatermark(libraryDb, agentId, maxMessageId);
 
+    // Run tombstone pass: remove vector entries for any facts marked superseded
+    // (covers both the supersedes detected above and external markSuperseded calls).
+    let tombstoned = 0;
+    if (this.vectorStore) {
+      tombstoned = this.vectorStore.tombstoneSuperseded();
+    }
+
     return {
       agentId,
       messagesProcessed: messages.length,
@@ -671,6 +709,7 @@ export class BackgroundIndexer {
       episodesRecorded,
       topicsUpdated,
       knowledgeUpserted,
+      tombstoned,
       postCursorMessages: postCursor.length,
       elapsedMs: Date.now() - start,
     };

@@ -499,13 +499,13 @@ export class VectorStore {
     switch (table) {
       case 'facts': {
         const row = sourceDb
-          .prepare('SELECT content, domain, agent_id FROM facts WHERE id = ?')
+          .prepare('SELECT content, domain, agent_id FROM facts WHERE id = ? AND superseded_by IS NULL')
           .get(id) as { content: string; domain: string; agent_id: string } | undefined;
         return row ? { content: row.content, domain: row.domain, agentId: row.agent_id } : null;
       }
       case 'knowledge': {
         const row = sourceDb
-          .prepare('SELECT content, domain, agent_id, key FROM knowledge WHERE id = ?')
+          .prepare('SELECT content, domain, agent_id, key FROM knowledge WHERE id = ? AND superseded_by IS NULL')
           .get(id) as { content: string; domain: string; agent_id: string; key: string } | undefined;
         return row
           ? { content: row.content, domain: row.domain, agentId: row.agent_id, metadata: row.key }
@@ -631,6 +631,29 @@ export class VectorStore {
     }
 
     return pruned;
+  }
+
+  /**
+   * Remove the vector index entry for a single source item.
+   *
+   * Deletes both the vec table row and the vec_index_map entry for the given
+   * (sourceTable, sourceId) pair. Used by the background indexer for immediate
+   * point-in-time removal when a supersedes relationship is detected.
+   *
+   * @returns true if an entry was found and removed, false if nothing was indexed.
+   */
+  removeItem(sourceTable: string, sourceId: number): boolean {
+    this.validateSourceTable(sourceTable);
+
+    const entry = this.db
+      .prepare('SELECT id, vec_table FROM vec_index_map WHERE source_table = ? AND source_id = ?')
+      .get(sourceTable, sourceId) as { id: number; vec_table: string } | undefined;
+
+    if (!entry) return false;
+
+    this.db.prepare(`DELETE FROM ${entry.vec_table} WHERE rowid = CAST(? AS INTEGER)`).run(entry.id);
+    this.db.prepare('DELETE FROM vec_index_map WHERE id = ?').run(entry.id);
+    return true;
   }
 
   /**

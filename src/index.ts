@@ -126,6 +126,8 @@ export type {
 } from './types.js';
 
 export type { ProviderType } from './provider-translator.js';
+export { classifyContentType, signalWeight, isSignalBearing, SIGNAL_WEIGHT } from './content-type-classifier.js';
+export type { ContentType, ContentTypeResult } from './content-type-classifier.js';
 
 import { DatabaseManager } from './db.js';
 import { MessageStore } from './message-store.js';

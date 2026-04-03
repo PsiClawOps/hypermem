@@ -200,6 +200,62 @@ export class FactStore {
   }
 
   /**
+   * Mark an old fact as superseded by a new one.
+   *
+   * Sets `superseded_by` on the old fact row so it is excluded from active
+   * retrieval queries (both FTS and KNN paths check `superseded_by IS NULL`).
+   * Returns false if the fact is already superseded or does not exist.
+   */
+  markSuperseded(oldFactId: number, newFactId: number): boolean {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(`
+        UPDATE facts
+        SET superseded_by = ?, updated_at = ?
+        WHERE id = ? AND superseded_by IS NULL
+      `)
+      .run(newFactId, now, oldFactId);
+    return (result as unknown as { changes: number }).changes > 0;
+  }
+
+  /**
+   * Find the most recent active fact for an agent whose content is a near-duplicate
+   * of the given content (same first 100 chars, different suffix, or same domain+topic).
+   * Used by the background indexer to detect supersedes relationships.
+   *
+   * Returns the existing fact id if a candidate is found, otherwise null.
+   */
+  findSupersedableByContent(
+    agentId: string,
+    content: string,
+    opts?: { domain?: string }
+  ): number | null {
+    // Look for active facts from the same agent whose content starts with the
+    // same 60-character prefix (covers rephrased facts about the same topic).
+    const prefix = content.slice(0, 60);
+    const params: (string | number)[] = [agentId, `${prefix}%`];
+
+    let sql = `
+      SELECT id FROM facts
+      WHERE agent_id = ?
+        AND content LIKE ?
+        AND content != ?
+        AND superseded_by IS NULL
+    `;
+    params.push(content);
+
+    if (opts?.domain) {
+      sql += ' AND domain = ?';
+      params.push(opts.domain);
+    }
+
+    sql += ' ORDER BY created_at DESC LIMIT 1';
+
+    const row = this.db.prepare(sql).get(...params) as { id: number } | undefined;
+    return row?.id ?? null;
+  }
+
+  /**
    * Decay all facts by a fixed rate.
    */
   decayFacts(agentId: string, decayRate: number = 0.01): number {
