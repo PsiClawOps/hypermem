@@ -194,7 +194,7 @@ export class RedisLayer {
    * Push messages to the session history list.
    *
    * History retention strategy:
-   *   - No aggressive LTRIM. Cap at maxMessages (default 1000) to prevent
+   *   - No aggressive LTRIM. Cap at maxMessages (default 250) to prevent
    *     unbounded growth, but the real budget enforcement happens in the
    *     compositor at compose time.
    *   - TTL is historyTTL (default 24h), not sessionTTL. History outlives
@@ -206,7 +206,7 @@ export class RedisLayer {
     agentId: string,
     sessionKey: string,
     messages: StoredMessage[],
-    maxMessages: number = 1000
+    maxMessages: number = 250
   ): Promise<void> {
     if (!this.isConnected || messages.length === 0) return;
     const key = this.sessionKey(agentId, sessionKey, 'history');

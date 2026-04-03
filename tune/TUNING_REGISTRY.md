@@ -98,3 +98,18 @@ Each entry records the change, rationale, and date — so we can track drift ove
 - **Rationale:** The OpenClaw runtime preemptive overflow guard fires at `contextWindowTokens × 4 × 0.9` chars. For cp-sonnet (120k window) that's ~108k tokens. HyperMem was assembling up to 100k at start-of-turn; tool loops accumulate additional chars in the session file each turn. Heavy tool-call sessions (10+ calls with large results) push the live session past 108k, triggering compaction failure and session restart. Dropping assembly budget to 65k leaves ~43k headroom for tool accumulation. The context-engine.js plugin init now explicitly passes `compositor: { defaultTokenBudget: 65000 }` to HyperMem.create() so it survives hook reinstalls without requiring a source rebuild.
 - **Date:** 2026-04-02
 - **Status:** active
+
+### TUNE-009 — Align fallback budgets and reduce maxHistoryMessages
+- **File:** `src/compositor.ts`, `src/index.ts`, `src/redis.ts`, `plugin/src/index.ts`
+- **Parameter:** Multiple alignment fixes:
+  - `compositor.ts` `DEFAULT_CONFIG.defaultTokenBudget`: 100,000 → 65,000
+  - `compositor.ts` `DEFAULT_CONFIG.maxHistoryMessages`: 100 → 250
+  - `index.ts` `DEFAULT_CONFIG.compositor.maxHistoryMessages`: 1,000 → 250
+  - `redis.ts` `pushHistory()` default `maxMessages`: 1,000 → 250
+  - `plugin/src/index.ts` `assemble()` fallback budget: 100,000 → 65,000
+  - `plugin/src/index.ts` `compact()` fallback budget: 100,000 → 65,000
+- **Before:** TUNE-008 set core config to 65k but compositor internal default, plugin fallbacks, and Redis LTRIM cap were still at old values (100k/1000)
+- **After:** All paths consistently use 65k token budget and 250-message history cap. Token-budget walk is the real overflow guard; 250 messages gives the budget walk ample material (~3x composition window) without the 1000-message fetch that contributed to warming overflow loops.
+- **Rationale:** Defence in depth — even if the runtime doesn't pass `tokenBudget`, the fallback matches TUNE-008. History cap of 250 balances information density (token-budget walk picks the best ~78 messages from 250) against overflow risk (1000 was causing warming loops).
+- **Date:** 2026-04-02
+- **Status:** active

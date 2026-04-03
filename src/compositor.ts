@@ -32,8 +32,8 @@ import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction-fence.js';
 
 const DEFAULT_CONFIG: CompositorConfig = {
-  defaultTokenBudget: 100000,
-  maxHistoryMessages: 100,
+  defaultTokenBudget: 65000,
+  maxHistoryMessages: 250,
   maxFacts: 20,
   maxCrossSessionContext: 5000,
   maxRecentToolPairs: 3,

@@ -515,7 +515,7 @@ function createHyperMemEngine(): ContextEngine {
       // This is a preventive guard — the compositor's safety valve still trims
       // by token count post-assembly, but limiting depth up front avoids
       // feeding the compactor a window it can't reduce.
-      const effectiveBudget = tokenBudget ?? 100000;
+      const effectiveBudget = tokenBudget ?? 65000;
       const historyDepth = Math.min(150, Math.max(50, Math.floor((effectiveBudget * 0.6) / 500)));
 
       // ── Redis guardrail: trim history to token budget ────────────────────
@@ -596,7 +596,7 @@ function createHyperMemEngine(): ContextEngine {
         // the caller's currentTokenCount. The runtime's estimate is what triggered
         // compaction — if it were accurate, we wouldn't be here. Our own estimate
         // uses the corrected tool-density heuristic (length/2 for JSON payloads).
-        const effectiveBudget = tokenBudget ?? 100_000;
+        const effectiveBudget = tokenBudget ?? 65_000;
         const tokensBefore = await estimateWindowTokens(hm, agentId, sk);
         if (currentTokenCount != null && Math.abs(currentTokenCount - tokensBefore) > effectiveBudget * 0.1) {
           console.warn(`[hypermem-plugin] compact: runtime estimate (${currentTokenCount}) diverges from window estimate (${tokensBefore}) by >10% — using window estimate`);

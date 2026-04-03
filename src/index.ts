@@ -175,7 +175,7 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     // runtime's preemptive overflow ceiling (contextWindow * 0.9 ≈ 108k
     // for cp-sonnet's 120k window). Avoids context overflow on tool-heavy sessions.
     defaultTokenBudget: 65000,
-    maxHistoryMessages: 1000,
+    maxHistoryMessages: 250,
     maxFacts: 20,
     maxCrossSessionContext: 5000,
     maxRecentToolPairs: 3,
