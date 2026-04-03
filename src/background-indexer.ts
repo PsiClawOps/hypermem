@@ -277,53 +277,86 @@ function extractKnowledgeCandidates(
   const results: Array<{ domain: string; key: string; value: string }> = [];
   if (!content || content.length < 30) return results;
 
-  // Path/location patterns
-  const pathPatterns = [
-    /(?:path|located at|lives at|stored at|found at)[:\s]+(`[^`]+`|\/\S+)/gi,
-    /(?:workspace|directory|repo)[:\s]+(`[^`]+`|\/\S+)/gi,
-  ];
+  // TUNE-012: Broadened path extraction.
+  // Real messages use paths inline without explicit prefixes like "located at".
+  // Match any absolute path that's at least 3 segments deep (filters /tmp, /etc noise).
+  const pathMatches = content.matchAll(
+    /(?:`([/][\w./-]{10,})`|(?:^|[\s:=])(\/home\/[\w./-]{10,}|\/opt\/[\w./-]{10,}|\/var\/[\w./-]{10,}))/gm
+  );
+  for (const match of pathMatches) {
+    const value = (match[1] || match[2]).replace(/[`'".,;:)]+$/, '').trim();
+    if (value.length > 10 && value.split('/').length >= 4) {
+      const segments = value.split('/').filter(s => s.length > 0);
+      const lastSeg = segments[segments.length - 1] || '';
+      // Reject truncated paths (last segment < 3 chars unless it's a known ext)
+      if (lastSeg.length < 3 && !lastSeg.includes('.')) continue;
+      const key = lastSeg || segments[segments.length - 2] || 'unknown';
+      results.push({ domain: 'paths', key, value });
+    }
+  }
 
-  for (const pattern of pathPatterns) {
+  // Explicit location references (original patterns, kept for completeness)
+  const locationPatterns = [
+    /(?:path|located at|lives at|stored at|found at|repo at|running at)[:\s]+(`[^`]+`|\/\S+)/gi,
+    /(?:workspace|directory|repo|project)[:\s]+(`[^`]+`|\/\S+)/gi,
+  ];
+  for (const pattern of locationPatterns) {
     pattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(content)) !== null) {
-      const value = match[1].replace(/`/g, '').trim();
-      if (value.startsWith('/') && value.length > 5) {
+      const value = match[1].replace(/[`'".,;:)]+/g, '').trim();
+      if (value.startsWith('/') && value.length > 10 && !results.some(r => r.value === value)) {
         const key = value.split('/').pop() || 'unknown';
         results.push({ domain: 'paths', key, value });
       }
     }
   }
 
-  // Service/port patterns
+  // Service/port patterns — broadened to catch "port NNNN" and "on :NNNN"
   const servicePatterns = [
-    /(\S+)\s+(?:runs on|listening on|port)\s+(\d{2,5})/gi,
+    /(\S+)\s+(?:runs on|listening on|port|on port)\s+(\d{2,5})/gi,
     /(?:service|server|daemon)\s+(\S+)\s+(?:on |at |: )(\S+)/gi,
+    /(?:localhost|127\.0\.0\.1):(\d{2,5})\b/gi,
   ];
 
   for (const pattern of servicePatterns) {
     pattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(content)) !== null) {
-      results.push({ domain: 'services', key: match[1], value: match[2] });
+      if (pattern.source.includes('localhost')) {
+        // localhost:PORT pattern — key is the port, value is the URL
+        results.push({ domain: 'services', key: `port:${match[1]}`, value: match[0] });
+      } else {
+        results.push({ domain: 'services', key: match[1], value: match[2] });
+      }
     }
   }
 
-  // Agent identity patterns
+  // Agent identity patterns — broadened
   const identityPatterns = [
-    /(\w+)\s+(?:is|was)\s+(?:the\s+)?(\w+)\s+(?:seat|director|specialist)/gi,
+    /(\w+)\s+(?:is|was)\s+(?:the\s+)?(\w+)\s+(?:seat|director|specialist|council)/gi,
     /(\w+)\s+(?:reports to|owned by|managed by)\s+(\w+)/gi,
+    /(?:agents?|directors?|seats?)[:\s]+(\w+)(?:\s*[,/]\s*(\w+))+/gi,
   ];
 
   for (const pattern of identityPatterns) {
     pattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(content)) !== null) {
-      results.push({ domain: 'fleet', key: match[1].toLowerCase(), value: `${match[1]} ${match[2]}` });
+      if (match[2]) {
+        results.push({ domain: 'fleet', key: match[1].toLowerCase(), value: `${match[1]} ${match[2]}` });
+      }
     }
   }
 
-  return results;
+  // Dedup by domain+key
+  const seen = new Set<string>();
+  return results.filter(r => {
+    const k = `${r.domain}:${r.key}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
 
 /**

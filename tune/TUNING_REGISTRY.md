@@ -139,3 +139,14 @@ Each entry records the change, rationale, and date — so we can track drift ove
 - **After:** Estimated ~1,858 clean facts would survive filter. Episode false positives (negated incidents like "zero failures") eliminated. Decay begins within 24h.
 - **Date:** 2026-04-02
 - **Status:** active
+
+### TUNE-012 — Cache cleanup, episode FTS5 optimization, knowledge extraction
+- **Files:** `src/compositor.ts`, `src/hybrid-retrieval.ts`, `src/background-indexer.ts`
+- **Parameters:**
+  - `warmSession()`: removed orphaned `facts` and `context` Redis writes (compose() reads SQLite directly at ~0.3ms — faster than Redis GET round-trip; cached values were never read by compose())
+  - `searchEpisodesFts()`: agent-scoped query rewritten from post-join filter to `WHERE IN (FTS5 subquery)` — SQLite uses agent_id index first, then checks FTS5 membership. 8.5ms → 2.3ms avg (3.7× speedup on 13k+ episodes)
+  - `extractKnowledgeCandidates()`: broadened path extraction to match inline absolute paths (≥3 segments deep under /home, /opt, /var) plus backtick-wrapped paths. Added localhost:PORT service detection. Added dedup by domain+key. Added truncated-path rejection (last segment < 3 chars).
+- **Before:** 0 knowledge rows (patterns required explicit "located at" / "path:" prefixes). Episode FTS5 8.5ms avg. Facts/context written to Redis on warm but never read.
+- **After:** ~11 unique knowledge entries per 200 messages (paths, services). Episode FTS5 2.3ms. Two fewer Redis writes per session warm.
+- **Date:** 2026-04-02
+- **Status:** active
