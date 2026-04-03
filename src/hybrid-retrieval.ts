@@ -201,24 +201,43 @@ function searchEpisodesFts(
   agentId?: string,
   limit: number = 20
 ): FtsResult[] {
-  let sql = `
-    SELECT e.id, sub.rank, e.summary, e.event_type, e.agent_id, e.participants
-    FROM (
-      SELECT rowid, rank FROM episodes_fts WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?
-    ) sub
-    JOIN episodes e ON e.id = sub.rowid
-    WHERE e.decay_score < 0.8
-  `;
-  const innerLimit = agentId ? limit * 4 : limit;
-  const params: (string | number)[] = [query, innerLimit];
+  // When agentId is provided, filter inside the FTS subquery via shadow table join.
+  // Previously we used a post-join WHERE which scanned all 13k+ episodes before
+  // filtering to one agent — 8.3ms avg. Pushing agent_id into the inner query
+  // lets SQLite use the episodes.agent_id index first, then rank.
+  let sql: string;
+  let params: (string | number)[];
 
   if (agentId) {
-    sql += ' AND e.agent_id = ?';
-    params.push(agentId);
+    // Agent-scoped: join FTS shadow table with episodes on rowid, filter agent first
+    sql = `
+      SELECT e.id, sub.rank, e.summary, e.event_type, e.agent_id, e.participants
+      FROM (
+        SELECT fts.rowid, fts.rank
+        FROM episodes_fts fts
+        JOIN episodes ep ON ep.id = fts.rowid
+        WHERE fts.episodes_fts MATCH ?
+          AND ep.agent_id = ?
+          AND ep.decay_score < 0.8
+        ORDER BY fts.rank
+        LIMIT ?
+      ) sub
+      JOIN episodes e ON e.id = sub.rowid
+      ORDER BY sub.rank LIMIT ?
+    `;
+    params = [query, agentId, limit, limit];
+  } else {
+    sql = `
+      SELECT e.id, sub.rank, e.summary, e.event_type, e.agent_id, e.participants
+      FROM (
+        SELECT rowid, rank FROM episodes_fts WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?
+      ) sub
+      JOIN episodes e ON e.id = sub.rowid
+      WHERE e.decay_score < 0.8
+      ORDER BY sub.rank LIMIT ?
+    `;
+    params = [query, limit, limit];
   }
-
-  sql += ' ORDER BY sub.rank LIMIT ?';
-  params.push(limit);
 
   const rows = db.prepare(sql).all(...params) as Array<{
     id: number; rank: number; summary: string; event_type: string; agent_id: string; participants: string | null;

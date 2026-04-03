@@ -971,15 +971,16 @@ export class Compositor {
     }
 
     const libDb = opts?.libraryDb || this.libraryDb;
-    const factsContent = this.buildFactsFromDb(agentId, libDb || db);
-    const contextContent = this.buildCrossSessionContext(agentId, sessionKey, db, libDb);
+
+    // Note: facts and context are intentionally NOT cached here.
+    // compose() calls buildFactsFromDb() and buildCrossSessionContext() directly
+    // from SQLite on every turn (~0.3ms each) — faster than a Redis GET round-trip.
+    // Caching them here would create stale entries that compose() ignores anyway.
 
     await this.redis.warmSession(agentId, sessionKey, {
       system: opts?.systemPrompt,
       identity: opts?.identity,
       history,
-      facts: factsContent || undefined,
-      context: contextContent || undefined,
       meta: {
         agentId,
         sessionKey,
