@@ -86,6 +86,7 @@ export {
   canAccess,
   visibilityFilter,
   defaultOrgRegistry,
+  buildOrgRegistryFromDb,
 } from './cross-agent.js';
 export type { OrgRegistry } from './cross-agent.js';
 
@@ -154,7 +155,7 @@ import type {
   Conversation,
   ChannelType,
 } from './types.js';
-import { crossAgentQuery, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
+import { crossAgentQuery, defaultOrgRegistry, buildOrgRegistryFromDb, type OrgRegistry } from './cross-agent.js';
 import path from 'node:path';
 
 const DEFAULT_CONFIG: HyperMemConfig = {
@@ -1227,7 +1228,7 @@ export class HyperMem {
       memoryType: opts?.memoryType || 'facts',
       domain: opts?.domain,
       limit: opts?.limit,
-    }, registry || defaultOrgRegistry());
+    }, registry || buildOrgRegistryFromDb(this.dbManager.getLibraryDb()));
   }
 
   /**
@@ -1242,7 +1243,7 @@ export class HyperMem {
     },
     registry?: OrgRegistry
   ): unknown[] {
-    const reg = registry || defaultOrgRegistry();
+    const reg = registry || buildOrgRegistryFromDb(this.dbManager.getLibraryDb());
     const results: unknown[] = [];
 
     // Query all agents from the fleet registry

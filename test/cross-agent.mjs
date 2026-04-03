@@ -49,7 +49,11 @@ async function run() {
     // Forge (council, infra org lead)
     hm.dbManager.ensureAgent('forge', { displayName: 'Forge', tier: 'council' });
     // Pylon (director, forge-org)
-    hm.dbManager.ensureAgent('pylon', { displayName: 'Pylon', tier: 'director' });
+    hm.dbManager.ensureAgent('pylon', { displayName: 'Pylon', tier: 'director', org: 'forge-org' });
+    // Set reportsTo for pylon via FleetStore (ensureAgent doesn't support it)
+    const { FleetStore } = await import('../dist/fleet-store.js');
+    const fleetStore = new FleetStore(hm.dbManager.getLibraryDb());
+    fleetStore.upsertAgent('pylon', { reportsTo: 'forge', orgId: 'forge-org' });
     // Compass (council, product org lead)
     hm.dbManager.ensureAgent('compass', { displayName: 'Compass', tier: 'council' });
     // Crucible (specialist, no org)
