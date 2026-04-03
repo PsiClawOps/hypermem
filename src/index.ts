@@ -170,14 +170,15 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     flushInterval: 1000,
   },
   compositor: {
-    // TUNE-008 (2026-04-02): Reduced from 100000 → 65000.
-    // Leaves ~43k token headroom for tool-loop accumulation before the
-    // runtime's preemptive overflow ceiling (contextWindow * 0.9 ≈ 108k
-    // for cp-sonnet's 120k window). Avoids context overflow on tool-heavy sessions.
-    defaultTokenBudget: 65000,
+    // TUNE-010 (2026-04-02): Raised from 65000 → 90000.
+    // TUNE-008 dropped to 65k as a tool-loop overflow band-aid. The real fix
+    // (tool-loop pass-through guard in assemble()) means tool turns don't
+    // re-run composition, so 90k is safe — leaves ~30k headroom for in-flight
+    // tool results on a 120k window. Budget is better spent on context quality.
+    defaultTokenBudget: 90000,
     maxHistoryMessages: 250,
-    maxFacts: 20,
-    maxCrossSessionContext: 5000,
+    maxFacts: 40,
+    maxCrossSessionContext: 8000,
     maxRecentToolPairs: 3,
     maxProseToolPairs: 10,
     warmHistoryBudgetFraction: 0.4,

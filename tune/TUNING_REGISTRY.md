@@ -97,7 +97,7 @@ Each entry records the change, rationale, and date — so we can track drift ove
 - **After:** 65,000 tokens
 - **Rationale:** The OpenClaw runtime preemptive overflow guard fires at `contextWindowTokens × 4 × 0.9` chars. For cp-sonnet (120k window) that's ~108k tokens. HyperMem was assembling up to 100k at start-of-turn; tool loops accumulate additional chars in the session file each turn. Heavy tool-call sessions (10+ calls with large results) push the live session past 108k, triggering compaction failure and session restart. Dropping assembly budget to 65k leaves ~43k headroom for tool accumulation. The context-engine.js plugin init now explicitly passes `compositor: { defaultTokenBudget: 65000 }` to HyperMem.create() so it survives hook reinstalls without requiring a source rebuild.
 - **Date:** 2026-04-02
-- **Status:** active
+- **Status:** superseded by TUNE-010 (budget raised to 90k)
 
 ### TUNE-009 — Align fallback budgets and reduce maxHistoryMessages
 - **File:** `src/compositor.ts`, `src/index.ts`, `src/redis.ts`, `plugin/src/index.ts`
@@ -111,5 +111,20 @@ Each entry records the change, rationale, and date — so we can track drift ove
 - **Before:** TUNE-008 set core config to 65k but compositor internal default, plugin fallbacks, and Redis LTRIM cap were still at old values (100k/1000)
 - **After:** All paths consistently use 65k token budget and 250-message history cap. Token-budget walk is the real overflow guard; 250 messages gives the budget walk ample material (~3x composition window) without the 1000-message fetch that contributed to warming overflow loops.
 - **Rationale:** Defence in depth — even if the runtime doesn't pass `tokenBudget`, the fallback matches TUNE-008. History cap of 250 balances information density (token-budget walk picks the best ~78 messages from 250) against overflow risk (1000 was causing warming loops).
+- **Date:** 2026-04-02
+- **Status:** superseded by TUNE-010
+
+### TUNE-010 — Budget expansion: 65k→90k, slot rebalancing
+- **File:** `src/index.ts` (core config), `src/compositor.ts` (compositor defaults), `plugin/src/index.ts` (plugin fallbacks)
+- **Parameters:**
+  - `defaultTokenBudget`: 65,000 → 90,000
+  - `maxFacts`: 20 → 40
+  - `maxCrossSessionContext`: 5,000 → 8,000
+  - Plugin `historyDepth` ceiling: 150 → 200
+  - Plugin history budget share: 60% → 50% (more budget for L3/L4)
+  - Plugin compact target: 60% → 50%
+- **Before:** 65k budget used 54% of 120k window. History took 60% of budget (~39k), L3/L4 context slots were starved. 55k of window wasted as tool headroom.
+- **After:** 90k budget uses 75% of window. History gets 50% (~45k), L3/L4 slots get proportionally more room (facts up to 40 entries, cross-session up to 8k). 30k tool headroom — still generous given tool-loop pass-through guard prevents composition re-runs during tool loops.
+- **Rationale:** TUNE-008's 65k was a band-aid before the tool-loop guard landed. With the guard in place (assemble() returns pass-through on toolResult messages), tool turns don't re-compose. The real constraint is the runtime's overflow ceiling at contextWindow*0.9 (~108k for 120k). 90k assembly + ~15k tool overhead = ~105k, safely under 108k. The freed budget goes to higher-value slots: more facts, more cross-session context, room for keystone history (T2.1, planned).
 - **Date:** 2026-04-02
 - **Status:** active
