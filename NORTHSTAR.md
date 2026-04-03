@@ -29,9 +29,9 @@ HyperMem prioritizes signal quality over completeness. An agent that remembers e
 ## Core Goals
 
 ### 1 — Full Session Continuity
-New sessions don't feel like new sessions. Compactions don't impact production quality. Memories feel always available. Recall speed never impedes functionality.
+New sessions don't feel like new sessions. Compactions don't impact production quality. Recall is reliable and relevant enough that the operator never notices gaps. Recall speed never impedes functionality.
 
-This is the foundational promise. If we hit this mark, it "just works, always." The operator doesn't think about memory — it's invisible infrastructure.
+This is the foundational promise. If we hit this mark, it "just works, always." The operator doesn't think about memory — it's invisible infrastructure. "Always available" is not an availability claim; it's a retrieval quality claim. Relevant memories surface at the right moment. When a specific memory isn't surfaced, that's a recall quality problem — not a missing feature.
 
 ### 2 — Rich Memory Capability
 Specific search, semantic search, and relational traversal. Agents find what they're looking for — not close approximations. Indexing schemas are designed around the access patterns agents actually use: FTS5 for exact recall, KNN for semantic similarity, graph traversal for related concepts.
@@ -41,6 +41,8 @@ Sophisticated enough to deliver continuity and recall. Simple enough that a solo
 
 ### 4 — Maximum Automation
 As automatic as possible. Agent-led when it isn't. Operators do not learn to manage a memory subsystem. Ingestion, classification, indexing, cleanup, checkpoint creation, and compaction happen without operator intervention. When agent input is needed, the agent drives — not a settings panel.
+
+Operators who want visibility have it — dashboards, review queues, and approval gates exist (see Goals 9, 12, 17). Operators who don't want to think about it don't have to. "No management required" does not mean "black box" — it means the default path requires no operator action, while the full observability surface is always available.
 
 ### 5 — Rich Integration Platform
 HyperMem is the best place to put memory data — not a mandatory dependency every product must couple to. Deep integration with ClawDispatch, SDLC, WoW, and future PsiClawOps products via extensible hooks. Products that need agent memory can integrate with HyperMem rather than building their own. The plugin boundary stays strict: HyperMem doesn't become a monolithic bottleneck; it becomes the obvious choice.
@@ -52,7 +54,9 @@ Any kind of data, routed to its best-fit layer. Documents → doc chunks (L4). F
 Agents send rich data to other agents. Within a platform: agents share pointers to specific memories. Across platforms: export to GitHub Gist, structured JSON, or any dissemination format so knowledge can transfer between operators and fleets. Brain transfer — the ability to package and share a trained knowledge corpus.
 
 ### 8 — Checkpoints
-Agents checkpoint frequently. Work details survive context bloat, session boundaries, server restarts. HyperMem is the durable substrate — not files. Agents are encouraged to use checkpoints as the default persistence mechanism, replacing the pattern of writing state to workspace files.
+Agents checkpoint by default. Work details survive context bloat, session boundaries, server restarts, and model handoffs. HyperMem is the durable substrate — workspace file persistence is the exception, not the pattern.
+
+Checkpoints are not manual save points — they are the automatic result of agents doing work. HyperMem moves the fleet away from the anti-pattern of writing state to files that get lost when context compacts.
 
 ### 9 — Operational Learning
 Tool failures, recovery workflows, and successful operational patterns are captured automatically on error. A review queue accumulates candidates with recurrence scoring — one-time failures don't surface, repeated patterns do. The agent proposes promotions. The operator approves. Promoted patterns persist as permanent retrievable guidance for all future sessions.
@@ -60,8 +64,12 @@ Tool failures, recovery workflows, and successful operational patterns are captu
 ### 10 — Reflection
 LLM-powered generation of compressed, high-signal memories. Raw conversation → synthesized insight. The reflection pass produces the same contextual information in a denser, higher-value format. High-signal reflections are prioritized in prompt composition over verbatim history.
 
+Verbatim history is retained and accessible; reflections are prioritized for composition, not replacements. When verbatim and reflection conflict, verbatim is the authoritative source. Reflections can be lossy or subtly distorted — they are optimization artifacts, not ground truth.
+
 ### 11 — Complete Authority Over Prompt Composition
 HyperMem owns the prompt. Budget dynamically scales to the provider + model's context window. Composition protects the system prompt, attaches facts, knowledge, high-signal memories, keystone history, topic threads, and recent verbatim turns — each in priority order within the remaining budget. The operator gets the best possible prompt the model can receive, automatically, every turn.
+
+On authority and overrides: operators can inject content into specific composition slots via configuration. The system prompt slot is always operator-controlled. HyperMem manages all other slots. Agents influence what goes into memory (proposals, checkpoints, ingestion) — HyperMem controls what reaches the prompt. These are separate concerns. No runtime override of HyperMem's slot assembly is possible without explicit operator configuration.
 
 ### 12 — Proactive Reindexing
 The indexing system monitors its own effectiveness. Recall quality metrics accumulate. When signal degrades — stale embeddings, low-hit queries, schema drift — HyperMem detects it and proposes reindexing. Improvements are agent-proposed, operator-approved, and applied without downtime.
