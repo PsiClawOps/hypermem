@@ -1,0 +1,470 @@
+/**
+ * Proactive Pass Tests (P2.3)
+ *
+ * Tests: noise sweep, tool decay, and background indexer integration.
+ * Uses a temp HyperMem instance with a seeded conversation of 50 messages.
+ */
+
+import { HyperMem } from '../dist/index.js';
+import { runNoiseSweep, runToolDecay } from '../dist/proactive-pass.js';
+import { BackgroundIndexer } from '../dist/background-indexer.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-proactive-'));
+
+let passed = 0;
+let failed = 0;
+
+function assert(condition, msg) {
+  if (condition) {
+    console.log(`  ✅ ${msg}`);
+    passed++;
+  } else {
+    console.log(`  ❌ FAIL: ${msg}`);
+    failed++;
+  }
+}
+
+// ─── Setup ───────────────────────────────────────────────────────
+
+let hm;
+
+async function setup() {
+  hm = await HyperMem.create({
+    dataDir: tmpDir,
+    redis: { host: '127.0.0.1', port: 6379, keyPrefix: 'hm_proactive_test:', sessionTTL: 60, flushInterval: 100 },
+  });
+}
+
+/**
+ * Seed a conversation with a controlled mix of message types.
+ * Returns { db, convId } so tests can query directly.
+ *
+ * Message layout (50 messages, indices 0–49):
+ *   - Indices 0–29: OUTSIDE recent window (cutoff = maxIndex - 20 = 29)
+ *     - 0: heartbeat (is_heartbeat=1) → noise sweep target
+ *     - 1: "ok" (ack) → noise sweep target
+ *     - 2: "👍" (ack) → noise sweep target
+ *     - 3: "NO_REPLY" (noise) → noise sweep target
+ *     - 4: "" empty string → noise sweep target
+ *     - 5: "hi" (≤3 chars) → noise sweep target
+ *     - 6–9: normal messages → NOT deleted
+ *     - 10–19: messages with large tool_results (>2000 chars) → tool decay target
+ *     - 20–24: messages with small tool_results (<2000 chars) → NOT decayed
+ *     - 25–29: normal messages with no tool_results → NOT touched
+ *   - Indices 30–49: INSIDE recent window
+ *     - 30: heartbeat (is_heartbeat=1) → NOT deleted (in window)
+ *     - 31: "ok" (ack) → NOT deleted (in window)
+ *     - 32: normal message → NOT deleted
+ *     - 33–39: messages with large tool_results → NOT decayed (in window)
+ *     - 40–49: normal messages → NOT touched
+ */
+function seedConversation(db, convId, agentId) {
+  const LARGE_CONTENT = 'x'.repeat(600);  // >500 chars → triggers per-result truncation
+  const SMALL_CONTENT = 'y'.repeat(100);  // <500 chars → not truncated
+
+  function largeToolResults() {
+    // Array of 4 results, each with >500-char content → total >2000 chars
+    return JSON.stringify([
+      { role: 'tool', callId: 'call_1', content: LARGE_CONTENT },
+      { role: 'tool', callId: 'call_2', content: LARGE_CONTENT },
+      { role: 'tool', callId: 'call_3', content: LARGE_CONTENT },
+      { role: 'tool', callId: 'call_4', content: LARGE_CONTENT },
+    ]);
+  }
+
+  function smallToolResults() {
+    // Array of 2 results, small content → total <2000 chars
+    return JSON.stringify([
+      { role: 'tool', callId: 'call_s1', content: SMALL_CONTENT },
+      { role: 'tool', callId: 'call_s2', content: SMALL_CONTENT },
+    ]);
+  }
+
+  const insertMsg = db.prepare(`
+    INSERT INTO messages
+      (conversation_id, agent_id, role, text_content, tool_results, message_index, is_heartbeat, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const now = new Date().toISOString();
+
+  for (let i = 0; i < 50; i++) {
+    let textContent = `Normal message number ${i} with enough content to be significant.`;
+    let toolResults = null;
+    let isHeartbeat = 0;
+    let role = i % 2 === 0 ? 'user' : 'assistant';
+
+    if (i === 0) {
+      // heartbeat outside window
+      textContent = 'HEARTBEAT_OK';
+      isHeartbeat = 1;
+    } else if (i === 1) {
+      textContent = 'ok';
+    } else if (i === 2) {
+      textContent = '👍';
+    } else if (i === 3) {
+      textContent = 'NO_REPLY';
+    } else if (i === 4) {
+      textContent = '';
+    } else if (i === 5) {
+      textContent = 'hi';
+    } else if (i >= 10 && i <= 19) {
+      // large tool results outside window
+      textContent = null;
+      toolResults = largeToolResults();
+      role = 'tool';
+    } else if (i >= 20 && i <= 24) {
+      // small tool results outside window
+      textContent = null;
+      toolResults = smallToolResults();
+      role = 'tool';
+    } else if (i === 30) {
+      // heartbeat INSIDE window — should NOT be deleted
+      textContent = 'HEARTBEAT_OK';
+      isHeartbeat = 1;
+    } else if (i === 31) {
+      // ack INSIDE window — should NOT be deleted
+      textContent = 'ok';
+    } else if (i >= 33 && i <= 39) {
+      // large tool results INSIDE window — should NOT be decayed
+      textContent = null;
+      toolResults = largeToolResults();
+      role = 'tool';
+    }
+
+    insertMsg.run(convId, agentId, role, textContent, toolResults, i, isHeartbeat, now);
+  }
+}
+
+// ─── Test helpers ────────────────────────────────────────────────
+
+function countMessages(db, convId) {
+  return db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?').get(convId).n;
+}
+
+function getMessageByIndex(db, convId, idx) {
+  return db.prepare('SELECT * FROM messages WHERE conversation_id = ? AND message_index = ?').get(convId, idx);
+}
+
+function getToolResultsAtIndex(db, convId, idx) {
+  const row = db.prepare('SELECT tool_results FROM messages WHERE conversation_id = ? AND message_index = ?').get(convId, idx);
+  return row ? row.tool_results : null;
+}
+
+// ─── Noise Sweep Tests ───────────────────────────────────────────
+
+async function testNoiseSweep() {
+  console.log('\n── Noise Sweep ──\n');
+
+  const agentId = 'proactive-noise-test';
+  const db = hm.dbManager.getMessageDb(agentId);
+  const sessionKey = 'agent:proactive-noise-test:webchat:main';
+
+  db.prepare(`
+    INSERT INTO conversations
+      (session_key, agent_id, channel_type, status, message_count,
+       token_count_in, token_count_out, created_at, updated_at)
+    VALUES (?, ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+  `).run(sessionKey, agentId);
+
+  const convRow = db.prepare('SELECT id FROM conversations WHERE session_key = ?').get(sessionKey);
+  const convId = convRow.id;
+
+  seedConversation(db, convId, agentId);
+  assert(countMessages(db, convId) === 50, 'Setup: 50 messages seeded');
+
+  // Run noise sweep
+  const result = runNoiseSweep(db, convId);
+  assert(result.passType === 'noise_sweep', 'passType is noise_sweep');
+
+  // Heartbeat at index 0 (outside window) → deleted
+  assert(getMessageByIndex(db, convId, 0) === undefined, 'Heartbeat (idx 0) outside window deleted');
+
+  // Ack "ok" at index 1 (outside window) → deleted
+  assert(getMessageByIndex(db, convId, 1) === undefined, '"ok" (idx 1) outside window deleted');
+
+  // Ack "👍" at index 2 (outside window) → deleted
+  assert(getMessageByIndex(db, convId, 2) === undefined, '"👍" (idx 2) outside window deleted');
+
+  // Noise "NO_REPLY" at index 3 (outside window) → deleted
+  assert(getMessageByIndex(db, convId, 3) === undefined, '"NO_REPLY" (idx 3) outside window deleted');
+
+  // Empty string at index 4 (outside window) → deleted
+  assert(getMessageByIndex(db, convId, 4) === undefined, 'Empty (idx 4) outside window deleted');
+
+  // "hi" (≤3 chars) at index 5 (outside window) → deleted
+  assert(getMessageByIndex(db, convId, 5) === undefined, '"hi" (idx 5) outside window deleted');
+
+  // Normal messages outside window at indices 6–9 → NOT deleted
+  assert(getMessageByIndex(db, convId, 6) !== undefined, 'Normal msg (idx 6) outside window preserved');
+  assert(getMessageByIndex(db, convId, 9) !== undefined, 'Normal msg (idx 9) outside window preserved');
+
+  // Heartbeat at index 30 (inside window) → NOT deleted
+  assert(getMessageByIndex(db, convId, 30) !== undefined, 'Heartbeat (idx 30) inside window preserved');
+
+  // Ack "ok" at index 31 (inside window) → NOT deleted
+  assert(getMessageByIndex(db, convId, 31) !== undefined, '"ok" (idx 31) inside window preserved');
+
+  // messagesDeleted count matches expected noise messages (indices 0–5 = 6 noise messages)
+  assert(result.messagesDeleted === 6, `messagesDeleted = 6 (got ${result.messagesDeleted})`);
+
+  // Total message count reduced by 6
+  assert(countMessages(db, convId) === 44, `44 messages remain after sweep (got ${countMessages(db, convId)})`);
+}
+
+// ─── Tool Decay Tests ────────────────────────────────────────────
+
+async function testToolDecay() {
+  console.log('\n── Tool Decay ──\n');
+
+  const agentId = 'proactive-decay-test';
+  const db = hm.dbManager.getMessageDb(agentId);
+  const sessionKey = 'agent:proactive-decay-test:webchat:main';
+
+  db.prepare(`
+    INSERT INTO conversations
+      (session_key, agent_id, channel_type, status, message_count,
+       token_count_in, token_count_out, created_at, updated_at)
+    VALUES (?, ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+  `).run(sessionKey, agentId);
+
+  const convRow = db.prepare('SELECT id FROM conversations WHERE session_key = ?').get(sessionKey);
+  const convId = convRow.id;
+
+  seedConversation(db, convId, agentId);
+
+  // Capture original tool_results for comparison
+  const originalLarge = getToolResultsAtIndex(db, convId, 10);
+  const originalSmall = getToolResultsAtIndex(db, convId, 20);
+  const originalInWindow = getToolResultsAtIndex(db, convId, 33);
+
+  assert(originalLarge !== null, 'Setup: large tool_results exist at idx 10');
+  assert(originalSmall !== null, 'Setup: small tool_results exist at idx 20');
+  assert(originalInWindow !== null, 'Setup: large tool_results exist at idx 33 (in window)');
+  assert(originalLarge.length > 2000, `Setup: large tool_results > 2000 chars (${originalLarge.length})`);
+
+  // Run tool decay
+  const result = runToolDecay(db, convId);
+  assert(result.passType === 'tool_decay', 'passType is tool_decay');
+
+  // Large tool_results outside window (indices 10–19) → truncated
+  const decayedLarge = getToolResultsAtIndex(db, convId, 10);
+  assert(decayedLarge !== null, 'tool_results at idx 10 still exists (not deleted)');
+  assert(decayedLarge !== originalLarge, 'Large tool_results at idx 10 was modified');
+  assert(decayedLarge.includes('[tool result truncated'), 'Truncated placeholder present in idx 10');
+  assert(decayedLarge.length < originalLarge.length, `Decayed tool_results smaller (${decayedLarge.length} < ${originalLarge.length})`);
+
+  // Structure preserved: still valid JSON array
+  let parsed;
+  try { parsed = JSON.parse(decayedLarge); } catch { parsed = null; }
+  assert(Array.isArray(parsed), 'Decayed tool_results is still valid JSON array');
+  assert(parsed !== null && parsed.length === 4, `JSON array still has 4 entries (got ${parsed?.length})`);
+  assert(
+    parsed !== null && parsed.every(entry => typeof entry.callId === 'string'),
+    'All entries preserve callId field'
+  );
+  assert(
+    parsed !== null && parsed.every(entry => entry.content.startsWith('[tool result truncated')),
+    'All entries have truncated placeholder content'
+  );
+
+  // Placeholder includes original byte count
+  assert(
+    parsed !== null && parsed[0].content.includes('bytes'),
+    'Placeholder includes byte count'
+  );
+
+  // Small tool_results outside window (indices 20–24) → NOT changed
+  const unchangedSmall = getToolResultsAtIndex(db, convId, 20);
+  assert(unchangedSmall === originalSmall, 'Small tool_results at idx 20 unchanged (<2000 chars total)');
+
+  // Large tool_results INSIDE window (indices 33–39) → NOT changed
+  const unchangedInWindow = getToolResultsAtIndex(db, convId, 33);
+  assert(unchangedInWindow === originalInWindow, 'Large tool_results at idx 33 (inside window) unchanged');
+
+  // Result counts
+  assert(result.messagesUpdated === 10, `messagesUpdated = 10 (indices 10–19) (got ${result.messagesUpdated})`);
+  assert(result.bytesFreed > 0, `bytesFreed > 0 (got ${result.bytesFreed})`);
+}
+
+// ─── Edge Cases ───────────────────────────────────────────────────
+
+async function testEdgeCases() {
+  console.log('\n── Edge Cases ──\n');
+
+  const agentId = 'proactive-edge-test';
+  const db = hm.dbManager.getMessageDb(agentId);
+  const sessionKey = 'agent:proactive-edge-test:webchat:main';
+
+  db.prepare(`
+    INSERT INTO conversations
+      (session_key, agent_id, channel_type, status, message_count,
+       token_count_in, token_count_out, created_at, updated_at)
+    VALUES (?, ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+  `).run(sessionKey, agentId);
+
+  const convRow = db.prepare('SELECT id FROM conversations WHERE session_key = ?').get(sessionKey);
+  const convId = convRow.id;
+
+  // Empty conversation → both passes return zero without error
+  const noiseEmpty = runNoiseSweep(db, convId);
+  assert(noiseEmpty.messagesDeleted === 0, 'Noise sweep on empty conversation returns 0 deleted');
+  assert(noiseEmpty.passType === 'noise_sweep', 'Empty noise sweep has correct passType');
+
+  const decayEmpty = runToolDecay(db, convId);
+  assert(decayEmpty.messagesUpdated === 0, 'Tool decay on empty conversation returns 0 updated');
+  assert(decayEmpty.passType === 'tool_decay', 'Empty tool decay has correct passType');
+
+  // Short conversation (only 5 messages, all in window) → nothing touched
+  const insertMsg = db.prepare(`
+    INSERT INTO messages
+      (conversation_id, agent_id, role, text_content, message_index, is_heartbeat, created_at)
+    VALUES (?, ?, 'user', ?, ?, 0, datetime('now'))
+  `);
+  for (let i = 0; i < 5; i++) {
+    insertMsg.run(convId, agentId, 'ok', i);
+  }
+
+  const noiseShort = runNoiseSweep(db, convId);
+  assert(noiseShort.messagesDeleted === 0, 'Noise sweep on short conv (all in window) deletes nothing');
+
+  // Non-existent conversation → zero result, no throw
+  const noiseNone = runNoiseSweep(db, 99999);
+  assert(noiseNone.messagesDeleted === 0, 'Noise sweep on non-existent convId returns 0');
+
+  const decayNone = runToolDecay(db, 99999);
+  assert(decayNone.messagesUpdated === 0, 'Tool decay on non-existent convId returns 0');
+
+  // Custom window size respected
+  const agentId2 = 'proactive-window-test';
+  const db2 = hm.dbManager.getMessageDb(agentId2);
+  const sessionKey2 = 'agent:proactive-window-test:webchat:main';
+
+  db2.prepare(`
+    INSERT INTO conversations
+      (session_key, agent_id, channel_type, status, message_count,
+       token_count_in, token_count_out, created_at, updated_at)
+    VALUES (?, ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+  `).run(sessionKey2, agentId2);
+
+  const convRow2 = db2.prepare('SELECT id FROM conversations WHERE session_key = ?').get(sessionKey2);
+  const convId2 = convRow2.id;
+
+  // Insert 10 messages with acks; with window=5, indices 0–4 are outside, indices 5–9 inside
+  const insertMsg2 = db2.prepare(`
+    INSERT INTO messages
+      (conversation_id, agent_id, role, text_content, message_index, is_heartbeat, created_at)
+    VALUES (?, ?, 'user', 'ok', ?, 0, datetime('now'))
+  `);
+  for (let i = 0; i < 10; i++) {
+    insertMsg2.run(convId2, agentId2, i);
+  }
+
+  const noiseCustomWindow = runNoiseSweep(db2, convId2, 5);
+  // maxIndex=9, cutoff = 9-5 = 4, so indices 0–3 are outside (< 4)
+  assert(noiseCustomWindow.messagesDeleted === 4, `Custom window=5: 4 noise msgs deleted (got ${noiseCustomWindow.messagesDeleted})`);
+
+  // Large window covers everything → nothing deleted
+  const noiseFullWindow = runNoiseSweep(db2, convId2, 100);
+  assert(noiseFullWindow.messagesDeleted === 0, 'Window=100 protects all remaining messages');
+}
+
+// ─── Integration Test (Indexer Tick) ─────────────────────────────
+
+async function testIndexerIntegration() {
+  console.log('\n── Indexer Integration ──\n');
+
+  const agentId = 'proactive-indexer-test';
+  const db = hm.dbManager.getMessageDb(agentId);
+  const sessionKey = 'agent:proactive-indexer-test:webchat:main';
+
+  db.prepare(`
+    INSERT INTO conversations
+      (session_key, agent_id, channel_type, status, message_count,
+       token_count_in, token_count_out, created_at, updated_at)
+    VALUES (?, ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+  `).run(sessionKey, agentId);
+
+  const convRow = db.prepare('SELECT id FROM conversations WHERE session_key = ?').get(sessionKey);
+  const convId = convRow.id;
+
+  // Seed 50 messages with noise + large tool results
+  seedConversation(db, convId, agentId);
+
+  const beforeCount = countMessages(db, convId);
+  assert(beforeCount === 50, `Before tick: 50 messages (got ${beforeCount})`);
+
+  // Count large tool_results outside window before tick
+  const largeBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND message_index < 30 AND tool_results IS NOT NULL AND length(tool_results) > 2000`
+  ).get(convId).n;
+  assert(largeBefore === 10, `Before tick: 10 large tool_results outside window (got ${largeBefore})`);
+
+  // Wire up a BackgroundIndexer with access to this agent's DB
+  const libraryDb = hm.dbManager.getLibraryDb();
+
+  const indexer = new BackgroundIndexer(
+    { enabled: false },   // disabled = no auto-start
+    (id) => hm.dbManager.getMessageDb(id),
+    () => libraryDb,
+    () => [agentId],
+  );
+
+  // Run one tick
+  await indexer.tick();
+
+  // After tick: noise messages deleted
+  const afterCount = countMessages(db, convId);
+  assert(afterCount < beforeCount, `After tick: message count reduced (${beforeCount} → ${afterCount})`);
+  assert(afterCount === 44, `After tick: exactly 44 messages remain (got ${afterCount})`);
+
+  // After tick: large tool_results outside window are truncated
+  const largeAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND message_index < 30 AND tool_results IS NOT NULL AND length(tool_results) > 2000`
+  ).get(convId).n;
+  assert(largeAfter === 0, `After tick: 0 large tool_results outside window (got ${largeAfter})`);
+
+  // After tick: messages inside window untouched
+  const insideWindowCount = db.prepare(
+    `SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND message_index >= 30`
+  ).get(convId).n;
+  assert(insideWindowCount === 20, `After tick: 20 messages inside window untouched (got ${insideWindowCount})`);
+}
+
+// ─── Cleanup ─────────────────────────────────────────────────────
+
+async function cleanup() {
+  if (hm) await hm.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+}
+
+// ─── Run ─────────────────────────────────────────────────────────
+
+console.log('═══════════════════════════════════════════════════');
+console.log('  HyperMem Proactive Passes Test (P2.3)');
+console.log('═══════════════════════════════════════════════════');
+
+try {
+  await setup();
+  await testNoiseSweep();
+  await testToolDecay();
+  await testEdgeCases();
+  await testIndexerIntegration();
+  await cleanup();
+
+  console.log('\n═══════════════════════════════════════════════════');
+  if (failed === 0) {
+    console.log(`  ALL ${passed} TESTS PASSED ✅`);
+  } else {
+    console.log(`  ${passed} passed, ${failed} FAILED ❌`);
+  }
+  console.log('═══════════════════════════════════════════════════');
+  process.exit(failed > 0 ? 1 : 0);
+} catch (err) {
+  console.error('❌ Test suite crashed:', err);
+  try { await cleanup(); } catch { /* ignore */ }
+  process.exit(1);
+}

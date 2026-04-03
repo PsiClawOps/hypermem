@@ -20,6 +20,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { StoredMessage, IndexerConfig, EpisodeType, SessionCursor } from './types.js';
 import { MessageStore } from './message-store.js';
+import { runNoiseSweep, runToolDecay } from './proactive-pass.js';
 import { FactStore } from './fact-store.js';
 import { EpisodeStore } from './episode-store.js';
 import { TopicStore } from './topic-store.js';
@@ -500,6 +501,34 @@ export class BackgroundIndexer {
 
       // Run decay on every tick
       this.applyDecay(libraryDb);
+
+      // Run proactive passes on each agent's message DB
+      for (const agentId of agents) {
+        const messageDb = this.getMessageDb!(agentId);
+        if (!messageDb) continue;
+
+        // Get active conversations for this agent
+        let convRows: Array<{ id: number }>;
+        try {
+          convRows = messageDb.prepare(
+            `SELECT id FROM conversations WHERE agent_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 10`
+          ).all(agentId) as Array<{ id: number }>;
+        } catch {
+          continue;
+        }
+
+        for (const conv of convRows) {
+          const noiseSweepResult = runNoiseSweep(messageDb, conv.id);
+          const toolDecayResult = runToolDecay(messageDb, conv.id);
+          // Log only if something changed
+          if (noiseSweepResult.messagesDeleted > 0 || toolDecayResult.messagesUpdated > 0) {
+            console.log(
+              `[indexer] Proactive pass (conv ${conv.id}): swept ${noiseSweepResult.messagesDeleted} noise msgs, ` +
+              `decayed ${toolDecayResult.messagesUpdated} tool results (${toolDecayResult.bytesFreed} bytes freed)`
+            );
+          }
+        }
+      }
 
     } finally {
       this.running = false;
