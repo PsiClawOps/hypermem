@@ -50,6 +50,8 @@ HyperMem is the best place to put memory data — not a mandatory dependency eve
 ### 6 — Data Ingestion
 Any kind of data, routed to its best-fit layer. Documents → doc chunks (L4). Facts → facts collection (L4). Conversations → messages DB (L2) + episodes (L4). Raw files → seeder pipeline. Agents are guided on which layer fits their data — not left to figure it out. Ingest from URL, file, API, or conversation.
 
+The ingest API validates and classifies before writing, not after. Quality gates run at the ingest boundary: minimum signal threshold, secret scanning, deduplication check, and layer-fit classification. Content that fails validation is rejected with a reason — it does not silently degrade the index. The most common failure mode in production memory systems is over-eager ingestion that floods the index with noise; HyperMem's quality contract is the primary defense against this.
+
 ### 7 — Data Export & Brain Transfer
 Agents send rich data to other agents. Within a platform: agents share pointers to specific memories. Across platforms: export to GitHub Gist, structured JSON, or any dissemination format so knowledge can transfer between operators and fleets. Brain transfer — the ability to package and share a trained knowledge corpus.
 
@@ -72,7 +74,13 @@ HyperMem owns the prompt. Budget dynamically scales to the provider + model's co
 On authority and overrides: operators can inject content into specific composition slots via configuration. The system prompt slot is always operator-controlled. HyperMem manages all other slots. Agents influence what goes into memory (proposals, checkpoints, ingestion) — HyperMem controls what reaches the prompt. These are separate concerns. No runtime override of HyperMem's slot assembly is possible without explicit operator configuration.
 
 ### 12 — Proactive Reindexing
-The indexing system monitors its own effectiveness. Recall quality metrics accumulate. When signal degrades — stale embeddings, low-hit queries, schema drift — HyperMem detects it and proposes reindexing. Improvements are agent-proposed, operator-approved, and applied without downtime.
+The indexing system monitors its own effectiveness. Recall quality metrics accumulate. When signal degrades, HyperMem detects it and proposes the appropriate response — agent-proposed, operator-approved, applied without downtime.
+
+Two distinct degradation signals require different responses:
+- **Embedding staleness:** The embedding model has been updated or swapped, existing vectors are in a stale space, and KNN recall has degraded. Response: reindex affected collections against the current model.
+- **Content staleness:** Content exists in the index but is no longer queried — not because of embedding drift, but because it's no longer relevant. Response: decay-based archival (see Goal 12a), not reindexing.
+
+Conflating these produces wrong responses: reindexing stale content doesn't improve recall quality, and archiving content with good embeddings wastes a working index.
 
 ### 12a — Memory Lifecycle & Unlearning
 Knowledge accumulation without garbage collection becomes noise. HyperMem needs a clear philosophy for forgetting:
@@ -88,7 +96,11 @@ Each agent has private memory channels for its own context and identity continui
 An agent's context is not locked to a single channel or conversation surface. Topics are portable — the context for "product A development" travels with the agent regardless of which channel the conversation is happening in. Cross-channel topic continuity enables agentic behavior that doesn't reset every time the surface changes.
 
 ### 15 — Deep Integration With Native OpenClaw Features
-Support all OpenClaw features. Identify enhancement opportunities — task management, sessions, routing, context engines, plugin hooks. As OpenClaw adds features, HyperMem integrates rather than bypasses. Where native features have ceilings, HyperMem pushes past them with richer data backing.
+HyperMem ships as a `contextEngine` plugin with `ownsCompaction: true`. This is the canonical integration contract with OpenClaw (ContextEngine interface, `registerContextEngine()`, lifecycle methods: `bootstrap`, `ingest`, `assemble`, `compact`, `afterTurn`). HyperMem owns the `contextEngine` slot — the runtime's legacy compaction is bypassed entirely.
+
+Phase 6 maps to specific lifecycle deepening: richer `assemble()` slot composition, `afterTurn()` background indexer integration, TaskFlow registration for long-running ops. As OpenClaw adds features (task management, session routing, new plugin hooks), HyperMem integrates rather than bypasses. Where native features have ceilings, HyperMem pushes past them with richer data backing.
+
+Acceptance criteria for Phase 6: all five lifecycle hooks exercised with full fidelity, TaskFlow-visible background ops, and no runtime-managed context remaining outside HyperMem's assembly.
 
 ### 16 — RBAC / Content Access Control
 Data is classified at write time. Access is scoped to intended operators, agents, or groups. Sensitive fleet knowledge is not visible to all agents by default. Org-level, agent-level, and operator-level visibility tiers. Enforcement at the retrieval layer — not just at the application layer.
@@ -99,6 +111,8 @@ Operators can see what HyperMem is doing. The indexer runs in the background, th
 At minimum: compositor budget breakdown per turn (how tokens were allocated across slots), indexer health metrics (facts/episodes extracted per tick, error rates, queue depth), proactive pass audit log (what was deleted or decayed and why), and vector store health (index coverage, embedding freshness). Surfaced through ClawDash and queryable via API.
 
 *Note: Message provenance verification (HMAC signing) is a transport concern, not a memory concern. It belongs in ClawDispatch or OpenClaw's messaging core. HyperMem can store and surface provenance metadata for messages that arrive pre-signed, but it does not own the signing/verification infrastructure.*
+
+*Note on ContextEngine integration: The plugin registration with `ownsCompaction: true` was established in Phase 1/2. Phase 6 is not "figure out OpenClaw integration" — it is deepening an already-locked integration contract. The sequencing risk of building Phases 3–5 on an unstable interface does not apply: the ContextEngine slot is claimed and the lifecycle hooks are operational.*
 
 ---
 
@@ -157,7 +171,7 @@ These decisions are load-bearing. Changing them is a large undertaking.
 | **Local embeddings (nomic-embed-text)** | Benchmarked against alternatives. Domain recall wins 8-1. 40ms cold / 0.02ms cached with LRU. No API cost, no latency variance, no privacy risk. |
 | **SQLite as the durable layer** | No external DB dependency. FTS5 built in. sqlite-vec for KNN. node:sqlite in Node 22 stdlib. Scales to fleet size without Postgres operational overhead. |
 | **Plugin model for OpenClaw integration** | HyperMem is not a patch to OpenClaw internals. Drop-in context engine via plugin API. OpenClaw upgrades don't break HyperMem. |
-| **ownsCompaction: true** | HyperMem bypasses the runtime's lossy summarization compaction entirely. Compaction means structured tiering, not information destruction. |
+| **ownsCompaction: true** | HyperMem bypasses the runtime's lossy summarization compaction entirely. Compaction means structured tiering, not information destruction. **Fallback contract:** If OpenClaw's compact lifecycle hook doesn't fire as expected, HyperMem degrades gracefully — it does not hang or corrupt state. The compositor continues to assemble from whatever is in storage; the next successful `afterTurn` tick cleans up. The `ownsCompaction` bet depends on a relatively new interface (ContextEngine, March 2026); if the interface evolves, HyperMem tracks it explicitly rather than silently breaking. |
 
 ---
 
@@ -170,7 +184,7 @@ These decisions are load-bearing. Changing them is a large undertaking.
 | Phase 3 — Checkpoints + Reflection | 🔲 Next | Durable work state, LLM reflection passes, operational learning queue |
 | Phase 4 — Topic Inference | 🔲 Planned | Cross-turn thread tracking: automatic topic detection, sessionless portability — built on top of durable checkpoints |
 | Phase 5 — Multi-Agent + RBAC | 🔲 Planned | Cross-agent queries, visibility tiers, message validation, brain transfer |
-| Phase 6 — Platform Integration | 🔲 Future | Deep OpenClaw native integration, ingestion APIs, export pipeline |
+| Phase 6 — Platform Integration | 🔲 Future | Deepen established ContextEngine integration: full lifecycle fidelity, TaskFlow ops, ingestion APIs, export pipeline |
 | Phase 7 — Publish | 🔲 Future | Agent-led installer, public README, benchmark suite, product page, npm release |
 
 ---
@@ -180,7 +194,9 @@ These decisions are load-bearing. Changing them is a large undertaking.
 - **Not a RAG system for arbitrary external corpora.** It's a memory system for agent conversations and structured knowledge. Bulk document indexing is a specific ingestion path, not the core use case.
 - **Not a governance layer.** POLICY.md and council governance own policy decisions. HyperMem enforces visibility scoping; it doesn't make policy.
 - **Not a replacement for human judgment.** It surfaces context. The agent decides what to do with it.
-- **Not a conversation logger.** HyperMem stores message history as a means to an end — context composition — not as an archival system. Operators should not treat HyperMem as a compliance transcript store or conversation backup. If you need full conversation preservation for audit or legal purposes, that's a different product. This protects the decision to compact, decay, and delete messages: operators who expect HyperMem to preserve everything will fight every cleanup operation.
+- **Not a conversation logger.** HyperMem stores message history as a means to an end — context composition — not as an archival system. It retains the conversation data it needs to compose high-quality prompts: recent history in full fidelity, older history tiered and selectively retained by signal value. What it does not do is guarantee full-fidelity preservation of every message for audit, compliance, or playback purposes. If you need complete transcript preservation for legal or compliance reasons, that's a different product. This distinction matters operationally: HyperMem will compact, decay, and delete messages as part of normal lifecycle management. Operators who expect total preservation will fight every cleanup operation.
+
+- **Not a real-time streaming memory system.** HyperMem is optimized for turn-level and session-level persistence. It is not designed for sub-turn event streaming or high-frequency event ingestion. Systems requiring <100ms write latency for continuous high-frequency events should not use HyperMem as their primary store. This is an architectural constraint, not a roadmap gap.
 
 ---
 
