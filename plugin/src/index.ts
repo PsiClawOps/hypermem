@@ -638,14 +638,27 @@ function createHyperMemEngine(): ContextEngine {
           };
         }
 
-        // Over budget: trim Redis window to a safe depth
+        // Over budget: trim both the window cache AND the history list.
+        // Bug fix: if no window cache exists (fresh/never-compacted session),
+        // compact() was only trying to trim the window (which was null) and
+        // the history list was left untouched → 0 actual trimming → timeout
+        // compaction death spiral.
         const window = await hm.redis.getWindow(agentId, sk);
         if (window && window.length > targetDepth) {
           const trimmed = window.slice(-targetDepth);
           await hm.redis.setWindow(agentId, sk, trimmed);
         }
 
-        // Invalidate the compose cache so next assemble() re-builds from trimmed window
+        // Always trim the underlying history list — this is the source of truth
+        // when no window cache exists. trimHistoryToTokenBudget walks newest→oldest
+        // and LTRIMs everything beyond the budget.
+        const trimBudget = Math.floor(effectiveBudget * 0.5);
+        const historyTrimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, trimBudget);
+        if (historyTrimmed > 0) {
+          console.log(`[hypermem-plugin] compact: trimmed ${historyTrimmed} messages from history list`);
+        }
+
+        // Invalidate the compose cache so next assemble() re-builds from trimmed data
         await hm.redis.invalidateWindow(agentId, sk).catch(() => {});
 
         const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
