@@ -41,7 +41,7 @@ Sophisticated enough to deliver continuity and recall. Simple enough that a solo
 As automatic as possible. Agent-led when it isn't. Operators do not learn to manage a memory subsystem. Ingestion, classification, indexing, cleanup, checkpoint creation, and compaction happen without operator intervention. When agent input is needed, the agent drives — not a settings panel.
 
 ### 5 — Rich Integration Platform
-HyperMem is the one stop shop. Deep integration with ClawDispatch, SDLC, WoW, and future PsiClawOps products. Extensible hooks so any product can write to or read from HyperMem's layers. If another system needs agent memory, it integrates with HyperMem rather than building its own.
+HyperMem is the best place to put memory data — not a mandatory dependency every product must couple to. Deep integration with ClawDispatch, SDLC, WoW, and future PsiClawOps products via extensible hooks. Products that need agent memory can integrate with HyperMem rather than building their own. The plugin boundary stays strict: HyperMem doesn't become a monolithic bottleneck; it becomes the obvious choice.
 
 ### 6 — Data Ingestion
 Any kind of data, routed to its best-fit layer. Documents → doc chunks (L4). Facts → facts collection (L4). Conversations → messages DB (L2) + episodes (L4). Raw files → seeder pipeline. Agents are guided on which layer fits their data — not left to figure it out. Ingest from URL, file, API, or conversation.
@@ -63,6 +63,13 @@ HyperMem owns the prompt. Budget dynamically scales to the provider + model's co
 
 ### 12 — Proactive Reindexing
 The indexing system monitors its own effectiveness. Recall quality metrics accumulate. When signal degrades — stale embeddings, low-hit queries, schema drift — HyperMem detects it and proposes reindexing. Improvements are agent-proposed, operator-approved, and applied without downtime.
+
+### 12a — Memory Lifecycle & Unlearning
+Knowledge accumulation without garbage collection becomes noise. HyperMem needs a clear philosophy for forgetting:
+- **Scoped wipe:** An operator can request removal of a specific project, topic, or agent's memory — and HyperMem executes it cleanly across all layers (facts, episodes, vectors, library).
+- **Decay-based archival:** Low-signal memories age out automatically based on configurable half-life per type (decisions longer, acknowledgments shorter). Archived memories are queryable but not injected.
+- **Operator-initiated forget:** Explicit `forget(query)` that marks matching memories as archived with provenance — not silent deletion, but deliberate removal that can be audited.
+After six months of fleet operation, an agent's memory should be *more* accurate, not just *larger*.
 
 ### 13 — Multi-Agent Memory Architecture
 Each agent has private memory channels for its own context and identity continuity. Agents don't drift in topic or identity because their working memory is scoped correctly. Shared knowledge is promoted to the fleet layer (L4) when it has cross-agent value. Agents can query each other's promoted knowledge without leaking private context.
@@ -96,7 +103,13 @@ Tells the story. What problem does HyperMem solve? Why is the architecture the r
 A page on the PsiClawOps site dedicated to HyperMem. Narrative-first — the problem, the solution, the differentiation. Benchmarks presented visually. Compelling enough that an operator links a colleague to it. Supports the README story with richer formatting and demo artifacts.
 
 ### P5 — Industry Benchmark Positioning
-Benchmark against established agent memory systems (MemGPT/OpenMemory, Zep, Mem0, LangMem). Use MTEB-adjacent recall benchmarks for the embedding layer. Position HyperMem correctly: not "yet another RAG wrapper," but a structured, production-grade agent memory system with novel prompt composition architecture.
+Do not fight Zep, Mem0, or LangMem on retrieval benchmarks alone — those are RAG-optimized retrieval engines optimized for single-query recall. HyperMem is a prompt composition engine. Fighting on their turf hides the actual differentiation.
+
+The benchmark that matters: **Context Drift over N turns.** Show a standard agent losing early decisions after 3 compactions vs HyperMem retaining them because composition draws from structured L4 facts rather than a degraded transcript. Run at 25, 50, and 100 turns. Measure: instruction retention, decision recall, identity coherence.
+
+Architectural peer comparison: MemGPT/OpenMemory is the closest peer (both bypass standard sliding-window compaction with hierarchical memory). Position HyperMem as an **Agent OS Memory Subsystem** — not a RAG API, not a vector database wrapper, but the memory layer of an agent operating system.
+
+Also benchmark the embedding layer (nomic-embed-text domain recall vs alternatives) and composition latency at scale — these are supporting evidence, not the headline.
 
 ---
 
@@ -134,8 +147,8 @@ These decisions are load-bearing. Changing them is a large undertaking.
 |---|---|---|
 | Phase 1 — Stabilization | ✅ Complete | Foundation: CI, types, durability, classification, indexing quality |
 | Phase 2 — Context Quality | ✅ Complete | Smarter context: keystones, classifiers, proactive cleanup, vector store live |
-| Phase 3 — Topic Inference | 🔲 Next | Cross-turn thread tracking: automatic topic detection, sessionless portability |
-| Phase 4 — Checkpoints + Reflection | 🔲 Planned | Durable work state, LLM reflection passes, operational learning queue |
+| Phase 3 — Checkpoints + Reflection | 🔲 Next | Durable work state, LLM reflection passes, operational learning queue |
+| Phase 4 — Topic Inference | 🔲 Planned | Cross-turn thread tracking: automatic topic detection, sessionless portability — built on top of durable checkpoints |
 | Phase 5 — Multi-Agent + RBAC | 🔲 Planned | Cross-agent queries, visibility tiers, message validation, brain transfer |
 | Phase 6 — Platform Integration | 🔲 Future | Deep OpenClaw native integration, ingestion APIs, export pipeline |
 | Phase 7 — Publish | 🔲 Future | Agent-led installer, public README, benchmark suite, product page, npm release |
