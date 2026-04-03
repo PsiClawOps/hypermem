@@ -34,6 +34,7 @@ import type {
 } from '@psiclawops/hypermem';
 import os from 'os';
 import path from 'path';
+import fs from 'fs/promises';
 import { createRequire } from 'module';
 
 // Re-export core types for consumers (eliminates local shim drift)
@@ -462,7 +463,7 @@ function createHyperMemEngine(): ContextEngine {
      * This prevents the runtime from running its own LLM-summarization compaction
      * pass, which would destroy message history we're explicitly managing.
      */
-    async compact({ sessionId, sessionKey, tokenBudget, currentTokenCount }): ReturnType<ContextEngine['compact']> {
+    async compact({ sessionId, sessionKey, sessionFile, tokenBudget, currentTokenCount }): ReturnType<ContextEngine['compact']> {
       try {
         const hm = await getHyperMem();
         const sk = resolveSessionKey(sessionId, sessionKey);
@@ -503,6 +504,75 @@ function createHyperMemEngine(): ContextEngine {
 
         const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
         console.log(`[hypermem-plugin] compact: trimmed ${tokensBefore} → ${tokensAfter} tokens (budget: ${effectiveBudget})`);
+
+        // ── JSONL truncation ─────────────────────────────────────────────
+        // The runtime loads messages from the JSONL session file, NOT from
+        // Redis. If we only trim Redis, the runtime reloads the same bloated
+        // JSONL on the next attempt and overflows again.
+        //
+        // ownsCompaction: true means the runtime trusts us to handle this.
+        // The runtime has truncateSessionAfterCompaction() but only calls it
+        // in the legacy (non-owning) path. So we truncate the JSONL ourselves.
+        //
+        // Strategy: keep the session header + the last `targetDepth` message
+        // entries + all non-message entries (compaction, model_change, etc).
+        // This mirrors what truncateSessionAfterCompaction does but doesn't
+        // require SessionManager (which is in a separate package).
+        if (sessionFile && typeof sessionFile === 'string') {
+          try {
+            const raw = await fs.readFile(sessionFile, 'utf-8');
+            const lines = raw.split('\n').filter(l => l.trim());
+            if (lines.length > 0) {
+              // First line is the session header
+              const header = lines[0];
+              const entries: Array<{ line: string; parsed: any }> = [];
+              for (let i = 1; i < lines.length; i++) {
+                try {
+                  entries.push({ line: lines[i], parsed: JSON.parse(lines[i]) });
+                } catch {
+                  // Malformed line — keep it (conservative)
+                  entries.push({ line: lines[i], parsed: null });
+                }
+              }
+
+              // Separate message entries from non-message (metadata) entries
+              const messageEntries: typeof entries = [];
+              const metadataEntries: typeof entries = [];
+              for (const e of entries) {
+                if (e.parsed?.type === 'message') {
+                  messageEntries.push(e);
+                } else {
+                  metadataEntries.push(e);
+                }
+              }
+
+              // Only truncate if we have significantly more messages than target depth
+              if (messageEntries.length > targetDepth * 1.5) {
+                const keptMessages = messageEntries.slice(-targetDepth);
+                // Rebuild: header + all metadata + kept messages (in original order)
+                const keptSet = new Set(keptMessages.map(e => e.line));
+                const metaSet = new Set(metadataEntries.map(e => e.line));
+                const rebuilt = [header];
+                // Preserve original ordering by iterating original entries
+                for (const e of entries) {
+                  if (metaSet.has(e.line) || keptSet.has(e.line)) {
+                    rebuilt.push(e.line);
+                  }
+                }
+                const beforeCount = entries.length;
+                const afterCount = rebuilt.length - 1; // minus header
+                // Write atomically via temp file
+                const tmpPath = `${sessionFile}.hm-compact-${process.pid}-${Date.now()}.tmp`;
+                await fs.writeFile(tmpPath, rebuilt.join('\n') + '\n', 'utf-8');
+                await fs.rename(tmpPath, sessionFile);
+                console.log(`[hypermem-plugin] compact: truncated JSONL ${beforeCount} → ${afterCount} entries (kept ${keptMessages.length} messages + ${metadataEntries.length} metadata)`);
+              }
+            }
+          } catch (jsonlErr) {
+            // Non-fatal: JSONL truncation failure shouldn't block compaction
+            console.warn('[hypermem-plugin] compact: JSONL truncation failed:', (jsonlErr as Error).message);
+          }
+        }
 
         return {
           ok: true,
