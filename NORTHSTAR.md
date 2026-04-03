@@ -22,6 +22,8 @@ HyperMem fixes this at the infrastructure level.
 
 That's not a UX aspiration. It's an engineering specification. Every goal below is a concrete test of whether we've hit it.
 
+HyperMem prioritizes signal quality over completeness. An agent that remembers everything important is more valuable than one that remembers everything. Total recall is not the goal — it tanks prompt quality and creates noise. Selective, high-fidelity recall is.
+
 ---
 
 ## Core Goals
@@ -83,8 +85,12 @@ Support all OpenClaw features. Identify enhancement opportunities — task manag
 ### 16 — RBAC / Content Access Control
 Data is classified at write time. Access is scoped to intended operators, agents, or groups. Sensitive fleet knowledge is not visible to all agents by default. Org-level, agent-level, and operator-level visibility tiers. Enforcement at the retrieval layer — not just at the application layer.
 
-### 17 — Message Validation
-HMAC or HMAC-equivalent signing for messages, events, and control signals. Provenance is verifiable. Particularly critical for messaging bus and inter-agent control signals — a message claiming to be from Anvil can be validated as actually from Anvil. Foundation for trustworthy multi-agent coordination.
+### 17 — Operational Observability
+Operators can see what HyperMem is doing. The indexer runs in the background, the compositor assembles prompts silently, and proactive passes delete content — if any of these go wrong, the failure mode is degraded agent behavior with no signal. That's not acceptable for production infrastructure.
+
+At minimum: compositor budget breakdown per turn (how tokens were allocated across slots), indexer health metrics (facts/episodes extracted per tick, error rates, queue depth), proactive pass audit log (what was deleted or decayed and why), and vector store health (index coverage, embedding freshness). Surfaced through ClawDash and queryable via API.
+
+*Note: Message provenance verification (HMAC signing) is a transport concern, not a memory concern. It belongs in ClawDispatch or OpenClaw's messaging core. HyperMem can store and surface provenance metadata for messages that arrive pre-signed, but it does not own the signing/verification infrastructure.*
 
 ---
 
@@ -101,6 +107,12 @@ Tells the story. What problem does HyperMem solve? Why is the architecture the r
 
 ### P4 — Product Website
 A page on the PsiClawOps site dedicated to HyperMem. Narrative-first — the problem, the solution, the differentiation. Benchmarks presented visually. Compelling enough that an operator links a colleague to it. Supports the README story with richer formatting and demo artifacts.
+
+### P6 — Migration Story
+Operators coming from memory-core (OpenClaw's built-in), Zep, or Mem0 have existing memory data. If HyperMem can't ingest from those systems, adoption requires starting from scratch — a significant barrier. Brain transfer (Goal 7) covers fleet-to-fleet HyperMem transfers; this covers migration from other products. Minimum: import from memory-core file format. Stretch: Zep/Mem0 JSON export ingestion.
+
+### P7 — Schema Versioning & Migration
+HyperMem ships as an OpenClaw plugin with a versioned SQLite schema. When HyperMem updates its schema, operators with existing `library.db` files need a safe migration path. Schema migration strategy is load-bearing infrastructure: automatic migration on startup with rollback on failure, `schemaVersion` in all state files, and documented upgrade path between major versions.
 
 ### P5 — Industry Benchmark Positioning
 Do not fight Zep, Mem0, or LangMem on retrieval benchmarks alone — those are RAG-optimized retrieval engines optimized for single-query recall. HyperMem is a prompt composition engine. Fighting on their turf hides the actual differentiation.
@@ -160,6 +172,7 @@ These decisions are load-bearing. Changing them is a large undertaking.
 - **Not a RAG system for arbitrary external corpora.** It's a memory system for agent conversations and structured knowledge. Bulk document indexing is a specific ingestion path, not the core use case.
 - **Not a governance layer.** POLICY.md and council governance own policy decisions. HyperMem enforces visibility scoping; it doesn't make policy.
 - **Not a replacement for human judgment.** It surfaces context. The agent decides what to do with it.
+- **Not a conversation logger.** HyperMem stores message history as a means to an end — context composition — not as an archival system. Operators should not treat HyperMem as a compliance transcript store or conversation backup. If you need full conversation preservation for audit or legal purposes, that's a different product. This protects the decision to compact, decay, and delete messages: operators who expect HyperMem to preserve everything will fight every cleanup operation.
 
 ---
 
