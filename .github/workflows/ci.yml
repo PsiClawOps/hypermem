@@ -40,7 +40,13 @@ jobs:
       - name: Install plugin deps
         run: npm ci --prefix plugin
 
-      - name: Run tests + plugin typecheck
-        run: npm run test:ci
+      - name: Typecheck core
+        run: npm run typecheck
+
+      - name: Plugin typecheck
+        run: npm --prefix plugin run typecheck
+
+      - name: Run tests
+        run: npm test
         env:
           REDIS_URL: redis://localhost:6379
