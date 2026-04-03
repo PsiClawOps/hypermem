@@ -258,6 +258,75 @@ async function estimateWindowTokens(hm: HyperMemInstance, agentId: string, sessi
   }
 }
 
+/**
+ * Truncate a JSONL session file to keep only the last `targetDepth` message
+ * entries plus all non-message entries (header, compaction, model_change, etc).
+ *
+ * This is needed because the runtime loads messages from the JSONL file
+ * (not from Redis) to build its overflow estimate. When ownsCompaction=true,
+ * OpenClaw's truncateSessionAfterCompaction() is never called, so we do it
+ * ourselves.
+ *
+ * Returns true if the file was actually truncated, false if no action was
+ * needed or the file didn't exist.
+ */
+async function truncateJsonlIfNeeded(
+  sessionFile: string | undefined,
+  targetDepth: number,
+): Promise<boolean> {
+  if (!sessionFile || typeof sessionFile !== 'string') return false;
+  try {
+    const raw = await fs.readFile(sessionFile, 'utf-8');
+    const lines = raw.split('\n').filter(l => l.trim());
+    if (lines.length === 0) return false;
+
+    const header = lines[0];
+    const entries: Array<{ line: string; parsed: any }> = [];
+    for (let i = 1; i < lines.length; i++) {
+      try {
+        entries.push({ line: lines[i], parsed: JSON.parse(lines[i]) });
+      } catch {
+        entries.push({ line: lines[i], parsed: null });
+      }
+    }
+
+    const messageEntries: typeof entries = [];
+    const metadataEntries: typeof entries = [];
+    for (const e of entries) {
+      if (e.parsed?.type === 'message') {
+        messageEntries.push(e);
+      } else {
+        metadataEntries.push(e);
+      }
+    }
+
+    // Only rewrite if meaningfully over target
+    if (messageEntries.length <= targetDepth * 1.5) return false;
+
+    const keptMessages = messageEntries.slice(-targetDepth);
+    const keptSet = new Set(keptMessages.map(e => e.line));
+    const metaSet = new Set(metadataEntries.map(e => e.line));
+    const rebuilt = [header];
+    for (const e of entries) {
+      if (metaSet.has(e.line) || keptSet.has(e.line)) {
+        rebuilt.push(e.line);
+      }
+    }
+
+    const tmpPath = `${sessionFile}.hm-compact-${process.pid}-${Date.now()}.tmp`;
+    await fs.writeFile(tmpPath, rebuilt.join('\n') + '\n', 'utf-8');
+    await fs.rename(tmpPath, sessionFile);
+    console.log(
+      `[hypermem-plugin] truncateJsonl: ${entries.length} → ${rebuilt.length - 1} entries ` +
+      `(kept ${keptMessages.length} messages + ${metadataEntries.length} metadata, file=${sessionFile.split('/').pop()})`,
+    );
+    return true;
+  } catch (err) {
+    console.warn('[hypermem-plugin] truncateJsonl failed (non-fatal):', (err as Error).message);
+    return false;
+  }
+}
+
 function createHyperMemEngine(): ContextEngine {
   return {
     info: {
@@ -479,9 +548,25 @@ function createHyperMemEngine(): ContextEngine {
           console.warn(`[hypermem-plugin] compact: runtime estimate (${currentTokenCount}) diverges from window estimate (${tokensBefore}) by >10% — using window estimate`);
         }
 
-        // Under 70% of budget by our own estimate — nothing to do.
-        // 70% not 80%: meaningful margin so we don't refuse on sessions close to the edge.
+        // Target depth for both Redis trimming and JSONL truncation.
+        // Target 60% of budget capacity, assume ~500 tokens/message average.
+        const targetDepth = Math.max(20, Math.floor((effectiveBudget * 0.6) / 500));
+
+        // Under 70% of budget by our own Redis estimate.
+        // We still need to check the JSONL — the runtime's overflow is based on JSONL
+        // message count, not Redis. If the JSONL is bloated (> targetDepth * 1.5 messages)
+        // we truncate it even if Redis looks fine, then return compacted=true so the
+        // runtime retries with the trimmed file instead of killing the session.
         if (tokensBefore <= effectiveBudget * 0.7) {
+          const jsonlTruncated = await truncateJsonlIfNeeded(sessionFile, targetDepth);
+          if (jsonlTruncated) {
+            console.log(`[hypermem-plugin] compact: Redis within_budget but JSONL was bloated — truncated to ${targetDepth} messages`);
+            return {
+              ok: true,
+              compacted: true,
+              result: { tokensBefore, tokensAfter: tokensBefore },
+            };
+          }
           return {
             ok: true,
             compacted: false,
@@ -491,8 +576,6 @@ function createHyperMemEngine(): ContextEngine {
         }
 
         // Over budget: trim Redis window to a safe depth
-        // Target 60% of budget capacity, assume ~500 tokens/message average
-        const targetDepth = Math.max(20, Math.floor((effectiveBudget * 0.6) / 500));
         const window = await hm.redis.getWindow(agentId, sk);
         if (window && window.length > targetDepth) {
           const trimmed = window.slice(-targetDepth);
@@ -505,74 +588,8 @@ function createHyperMemEngine(): ContextEngine {
         const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
         console.log(`[hypermem-plugin] compact: trimmed ${tokensBefore} → ${tokensAfter} tokens (budget: ${effectiveBudget})`);
 
-        // ── JSONL truncation ─────────────────────────────────────────────
-        // The runtime loads messages from the JSONL session file, NOT from
-        // Redis. If we only trim Redis, the runtime reloads the same bloated
-        // JSONL on the next attempt and overflows again.
-        //
-        // ownsCompaction: true means the runtime trusts us to handle this.
-        // The runtime has truncateSessionAfterCompaction() but only calls it
-        // in the legacy (non-owning) path. So we truncate the JSONL ourselves.
-        //
-        // Strategy: keep the session header + the last `targetDepth` message
-        // entries + all non-message entries (compaction, model_change, etc).
-        // This mirrors what truncateSessionAfterCompaction does but doesn't
-        // require SessionManager (which is in a separate package).
-        if (sessionFile && typeof sessionFile === 'string') {
-          try {
-            const raw = await fs.readFile(sessionFile, 'utf-8');
-            const lines = raw.split('\n').filter(l => l.trim());
-            if (lines.length > 0) {
-              // First line is the session header
-              const header = lines[0];
-              const entries: Array<{ line: string; parsed: any }> = [];
-              for (let i = 1; i < lines.length; i++) {
-                try {
-                  entries.push({ line: lines[i], parsed: JSON.parse(lines[i]) });
-                } catch {
-                  // Malformed line — keep it (conservative)
-                  entries.push({ line: lines[i], parsed: null });
-                }
-              }
-
-              // Separate message entries from non-message (metadata) entries
-              const messageEntries: typeof entries = [];
-              const metadataEntries: typeof entries = [];
-              for (const e of entries) {
-                if (e.parsed?.type === 'message') {
-                  messageEntries.push(e);
-                } else {
-                  metadataEntries.push(e);
-                }
-              }
-
-              // Only truncate if we have significantly more messages than target depth
-              if (messageEntries.length > targetDepth * 1.5) {
-                const keptMessages = messageEntries.slice(-targetDepth);
-                // Rebuild: header + all metadata + kept messages (in original order)
-                const keptSet = new Set(keptMessages.map(e => e.line));
-                const metaSet = new Set(metadataEntries.map(e => e.line));
-                const rebuilt = [header];
-                // Preserve original ordering by iterating original entries
-                for (const e of entries) {
-                  if (metaSet.has(e.line) || keptSet.has(e.line)) {
-                    rebuilt.push(e.line);
-                  }
-                }
-                const beforeCount = entries.length;
-                const afterCount = rebuilt.length - 1; // minus header
-                // Write atomically via temp file
-                const tmpPath = `${sessionFile}.hm-compact-${process.pid}-${Date.now()}.tmp`;
-                await fs.writeFile(tmpPath, rebuilt.join('\n') + '\n', 'utf-8');
-                await fs.rename(tmpPath, sessionFile);
-                console.log(`[hypermem-plugin] compact: truncated JSONL ${beforeCount} → ${afterCount} entries (kept ${keptMessages.length} messages + ${metadataEntries.length} metadata)`);
-              }
-            }
-          } catch (jsonlErr) {
-            // Non-fatal: JSONL truncation failure shouldn't block compaction
-            console.warn('[hypermem-plugin] compact: JSONL truncation failed:', (jsonlErr as Error).message);
-          }
-        }
+        // Truncate the JSONL to match the Redis window depth
+        await truncateJsonlIfNeeded(sessionFile, targetDepth);
 
         return {
           ok: true,
