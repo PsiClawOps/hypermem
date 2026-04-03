@@ -61,6 +61,9 @@ let _hmInitPromise: Promise<HyperMemInstance> | null = null;
 let _indexer: BackgroundIndexer | null = null;
 let _fleetStore: FleetStore | null = null;
 let _generateEmbeddings: ((texts: string[]) => Promise<Float32Array[]>) | null = null;
+// P1.7: TaskFlow runtime reference — bound at registration time, best-effort.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _taskFlowRuntime: any | null = null;
 
 async function getHyperMem(): Promise<HyperMemInstance> {
   if (_hm) return _hm;
@@ -749,9 +752,39 @@ function createHyperMemEngine(): ContextEngine {
           // Pre-embed is entirely non-fatal
         }
 
-        // Fire-and-forget background indexer — interval-driven via BackgroundIndexer.start().
-        // Direct per-agent triggering deferred to P1.7 (TaskFlow integration).
-        // The indexer's 5-min interval picks up new messages automatically.
+        // P1.7: Direct per-agent tick after each turn — no need to wait for 5-min interval.
+        if (_indexer) {
+          const _agentIdForTick = agentId;
+          const _skForTick = sk;
+          const runTick = async () => {
+            if (_taskFlowRuntime) {
+              try {
+                const flow = _taskFlowRuntime.createManaged({
+                  controllerId: 'hypermem/indexer',
+                  goal: `Index messages for ${_agentIdForTick}`,
+                });
+                _taskFlowRuntime.runTask({
+                  flowId: flow.flowId,
+                  runtime: 'local',
+                  childSessionKey: _skForTick,
+                  task: `Indexer tick — ${_agentIdForTick}`,
+                  status: 'running',
+                  startedAt: Date.now(),
+                });
+                await _indexer!.tick();
+                // createManaged tracks completion automatically
+              } catch {
+                // TaskFlow wrapping is best-effort — fall back to bare tick
+                await _indexer!.tick();
+              }
+            } else {
+              await _indexer!.tick();
+            }
+          };
+          runTick().catch(() => {
+            // Non-fatal: indexer tick failure never blocks afterTurn
+          });
+        }
       } catch (err) {
         // afterTurn is never fatal
         console.warn('[hypermem-plugin] afterTurn failed:', (err as Error).message);
@@ -886,5 +919,20 @@ export default definePluginEntry({
   configSchema: emptyPluginConfigSchema(),
   register(api) {
     api.registerContextEngine('hypermem', () => engine);
+
+    // P1.7: Bind TaskFlow runtime for task visibility — best-effort.
+    // Guard: api.runtime.taskFlow may not exist on older OpenClaw versions.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tf = (api as any).runtime?.taskFlow;
+      if (tf && typeof tf.bindSession === 'function') {
+        _taskFlowRuntime = tf.bindSession({
+          sessionKey: 'hypermem-plugin',
+          requesterOrigin: 'hypermem-plugin',
+        });
+      }
+    } catch {
+      // TaskFlow binding is best-effort — plugin remains fully functional without it
+    }
   },
 });
