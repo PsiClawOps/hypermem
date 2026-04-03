@@ -157,10 +157,11 @@ import type {
 } from './types.js';
 import { crossAgentQuery, defaultOrgRegistry, buildOrgRegistryFromDb, type OrgRegistry } from './cross-agent.js';
 import path from 'node:path';
+import os from 'node:os';
 
 const DEFAULT_CONFIG: HyperMemConfig = {
   enabled: true,
-  dataDir: path.join(process.env.HOME || '/home/lumadmin', '.openclaw', 'hypermem'),
+  dataDir: path.join(process.env.HOME || os.homedir(), '.openclaw', 'hypermem'),
   redis: {
     host: 'localhost',
     port: 6379,

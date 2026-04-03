@@ -11,6 +11,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { migrate } from './schema.js';
 import { migrateLibrary } from './library-schema.js';
@@ -49,7 +50,7 @@ export interface DatabaseManagerConfig {
 }
 
 const DEFAULT_DATA_DIR = path.join(
-  process.env.HOME || '/home/lumadmin',
+  process.env.HOME || os.homedir(),
   '.openclaw',
   'hypermem'
 );

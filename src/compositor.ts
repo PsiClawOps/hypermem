@@ -582,11 +582,21 @@ export class Compositor {
       const lastUserMsg = request.prompt?.trim() || this.getLastUserMessage(messages);
       if (lastUserMsg) {
         try {
+          // Check Redis for a pre-computed embedding from afterTurn()
+          let precomputedEmbedding: Float32Array | undefined;
+          try {
+            const cached = await this.redis.getQueryEmbedding(request.agentId, request.sessionKey);
+            if (cached) precomputedEmbedding = cached;
+          } catch {
+            // Redis lookup is best-effort — fall through to Ollama
+          }
+
           const semanticContent = await this.buildSemanticRecall(
             lastUserMsg,
             request.agentId,
             Math.floor(remaining * 0.15), // Cap at 15% of remaining
-            libDb || undefined
+            libDb || undefined,
+            precomputedEmbedding
           );
           if (semanticContent) {
             const tokens = estimateTokens(semanticContent);
@@ -1183,12 +1193,16 @@ export class Compositor {
    * Uses Reciprocal Rank Fusion to merge keyword and vector results.
    * Gracefully degrades: FTS5-only when no vector store, KNN-only
    * when FTS query is empty (all stop words), both when available.
+   *
+   * @param precomputedEmbedding — optional pre-computed embedding for the query.
+   *   When provided, the Ollama call inside VectorStore.search() is skipped.
    */
   private async buildSemanticRecall(
     userMessage: string,
     agentId: string,
     maxTokens: number,
-    libraryDb?: DatabaseSync
+    libraryDb?: DatabaseSync,
+    precomputedEmbedding?: Float32Array
   ): Promise<string | null> {
     const libDb = libraryDb || this.libraryDb;
     if (!libDb && !this.vectorStore) return null;
@@ -1200,6 +1214,7 @@ export class Compositor {
         limit: 10,
         agentId,
         maxKnnDistance: 1.2,
+        precomputedEmbedding,
       });
 
       if (results.length === 0) return null;
@@ -1227,6 +1242,7 @@ export class Compositor {
       tables: ['facts', 'knowledge', 'episodes'],
       limit: 8,
       maxDistance: 1.2,
+      precomputedEmbedding,
     });
 
     if (results.length === 0) return null;

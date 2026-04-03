@@ -49,6 +49,8 @@ export interface HybridSearchOptions {
   knnWeight?: number;
   /** Minimum number of FTS terms to attempt a query (skip if fewer). Default: 1 */
   minFtsTerms?: number;
+  /** Pre-computed embedding for the query — skips Ollama call in VectorStore.search() */
+  precomputedEmbedding?: Float32Array;
 }
 
 // ─── FTS5 Query Building ───────────────────────────────────────
@@ -404,6 +406,7 @@ export async function hybridSearch(
         tables,
         limit: Math.ceil(limit * 1.5),
         maxDistance: maxKnnDistance,
+        precomputedEmbedding: opts?.precomputedEmbedding,
       });
 
       knnResults.forEach((r, i) => {

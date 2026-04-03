@@ -28,15 +28,30 @@
   },
   "files": [
     "dist/**/*.js",
-    "dist/**/*.d.ts"
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map",
+    "README.md",
+    "ARCHITECTURE.md",
+    "LICENSE"
   ],
   "author": "PsiClawOps",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/PsiClawOps/hypermem-internal.git"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
-  }
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "keywords": [
+    "openclaw",
+    "agent-memory",
+    "context-engine",
+    "llm",
+    "semantic-search",
+    "sqlite-vec",
+    "redis",
+    "rag"
+  ]
 }

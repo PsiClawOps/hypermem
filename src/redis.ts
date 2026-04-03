@@ -583,6 +583,45 @@ export class RedisLayer {
     await this.delFleetCache('summary'); // Summary includes this agent
   }
 
+  // ─── Query Embedding Pre-Compute Cache ────────────────────────
+
+  /**
+   * Stash a pre-computed query embedding in Redis.
+   *
+   * Called by afterTurn() after ingesting the user's message so that the
+   * NEXT compose() can skip the ~341ms Ollama call entirely.
+   *
+   * Key: `${keyPrefix}${agentId}:s:${sessionKey}:qembed`
+   * Value: base64-encoded raw Float32Array bytes
+   * TTL: sessionTTL (4 hours)
+   */
+  async setQueryEmbedding(agentId: string, sessionKey: string, embedding: Float32Array): Promise<void> {
+    if (!this.isConnected) return;
+    const key = this.sessionKey(agentId, sessionKey, 'qembed');
+    const encoded = Buffer.from(embedding.buffer).toString('base64');
+    await this.client!.set(key, encoded, 'EX', this.config.sessionTTL);
+  }
+
+  /**
+   * Retrieve a pre-computed query embedding from Redis.
+   *
+   * Returns null when not found (cache miss) or when Redis is down.
+   * The compositor falls back to calling Ollama directly on null.
+   */
+  async getQueryEmbedding(agentId: string, sessionKey: string): Promise<Float32Array | null> {
+    if (!this.isConnected) return null;
+    try {
+      const key = this.sessionKey(agentId, sessionKey, 'qembed');
+      const val = await this.client!.get(key);
+      if (!val) return null;
+      const buf = Buffer.from(val, 'base64');
+      return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+    } catch {
+      return null;
+    }
+  }
+
+
   // ─── Lifecycle ───────────────────────────────────────────────
 
   async disconnect(): Promise<void> {

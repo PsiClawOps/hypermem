@@ -60,6 +60,7 @@ let _hm: HyperMemInstance | null = null;
 let _hmInitPromise: Promise<HyperMemInstance> | null = null;
 let _indexer: BackgroundIndexer | null = null;
 let _fleetStore: FleetStore | null = null;
+let _generateEmbeddings: ((texts: string[]) => Promise<Float32Array[]>) | null = null;
 
 async function getHyperMem(): Promise<HyperMemInstance> {
   if (_hm) return _hm;
@@ -69,6 +70,11 @@ async function getHyperMem(): Promise<HyperMemInstance> {
     // Dynamic import — HyperMem is loaded from repo dist
     const mod = await import(HYPERMEM_PATH);
     const HyperMem = mod.HyperMem;
+
+    // Capture generateEmbeddings from the dynamic module for use in afterTurn()
+    if (typeof mod.generateEmbeddings === 'function') {
+      _generateEmbeddings = mod.generateEmbeddings as (texts: string[]) => Promise<Float32Array[]>;
+    }
 
     const instance = await HyperMem.create({
       dataDir: path.join(os.homedir(), '.openclaw/hypermem'),
@@ -697,6 +703,37 @@ function createHyperMemEngine(): ContextEngine {
           await hm.redis.invalidateWindow(agentId, sk);
         } catch {
           // Window invalidation is best-effort
+        }
+
+        // Pre-compute embedding for the last user message so the next compose()
+        // can skip the ~341ms Ollama call entirely (fire-and-forget).
+        // Wrapped in try/catch — non-fatal if Ollama is unavailable or slow.
+        try {
+          // Find the last user message text from the newly ingested messages
+          let lastUserText: string | null = null;
+          for (let i = newMessages.length - 1; i >= 0; i--) {
+            const m = newMessages[i] as unknown as InboundMessage;
+            if (m.role === 'user') {
+              const neutral = toNeutralMessage(m);
+              if (neutral.textContent) {
+                lastUserText = neutral.textContent;
+                break;
+              }
+            }
+          }
+
+          if (lastUserText && _generateEmbeddings) {
+            // Fire-and-forget: don't await, don't block afterTurn
+            _generateEmbeddings([lastUserText]).then(async ([embedding]) => {
+              if (embedding) {
+                await hm.redis.setQueryEmbedding(agentId, sk, embedding);
+              }
+            }).catch(() => {
+              // Non-fatal: embedding pre-compute failed, compose() will call Ollama
+            });
+          }
+        } catch {
+          // Pre-embed is entirely non-fatal
         }
 
         // Fire-and-forget background indexer — interval-driven via BackgroundIndexer.start().

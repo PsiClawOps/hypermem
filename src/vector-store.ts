@@ -9,7 +9,8 @@
  *   - One vec0 virtual table per indexed content type
  *   - Embeddings generated via local Ollama (nomic-embed-text, 768d)
  *   - Vectors stored alongside content in the same agent DB
- *   - Embedding cache to avoid redundant API calls
+ *   - LRU embedding cache (module-level, per-process) to avoid redundant Ollama calls
+ *   - Precomputed embedding passthrough: callers can supply an embedding to skip Ollama
  *   - Batch embedding support for bulk indexing
  */
 
@@ -27,6 +28,8 @@ export interface EmbeddingConfig {
   timeout: number;
   /** Max texts per batch request. Default: 32 */
   batchSize: number;
+  /** LRU cache max entries. Default: 128 */
+  cacheSize?: number;
 }
 
 export interface VectorSearchResult {
@@ -52,11 +55,55 @@ const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
   dimensions: 768,
   timeout: 10000,
   batchSize: 32,
+  cacheSize: 128,
 };
+
+// ─── LRU Embedding Cache ─────────────────────────────────────────
+// Module-level, per-process. Survives across compose calls within the
+// same gateway process. Key: SHA-256 hash of text (first 16 chars).
+
+interface CacheEntry {
+  embedding: Float32Array;
+  timestamp: number;
+}
+
+const _embeddingCache = new Map<string, CacheEntry>();
+
+/**
+ * Insert an entry into the LRU cache, evicting the oldest if over capacity.
+ */
+function cachePut(key: string, embedding: Float32Array, maxSize: number): void {
+  if (_embeddingCache.has(key)) {
+    // Update existing entry (refresh timestamp)
+    _embeddingCache.delete(key);
+  } else if (_embeddingCache.size >= maxSize) {
+    // Evict oldest entry by timestamp
+    let oldestKey: string | undefined;
+    let oldestTime = Infinity;
+    for (const [k, v] of _embeddingCache) {
+      if (v.timestamp < oldestTime) {
+        oldestTime = v.timestamp;
+        oldestKey = k;
+      }
+    }
+    if (oldestKey !== undefined) {
+      _embeddingCache.delete(oldestKey);
+    }
+  }
+  _embeddingCache.set(key, { embedding, timestamp: Date.now() });
+}
+
+/**
+ * Clear the embedding cache. Primarily for testing.
+ */
+export function clearEmbeddingCache(): void {
+  _embeddingCache.clear();
+}
 
 /**
  * Generate embeddings via Ollama API.
  * Supports single and batch embedding.
+ * Results are cached per text hash — cache hits skip the Ollama call entirely.
  */
 export async function generateEmbeddings(
   texts: string[],
@@ -64,11 +111,32 @@ export async function generateEmbeddings(
 ): Promise<Float32Array[]> {
   if (texts.length === 0) return [];
 
-  const results: Float32Array[] = [];
+  const maxSize = config.cacheSize ?? DEFAULT_EMBEDDING_CONFIG.cacheSize ?? 128;
+  const results: (Float32Array | null)[] = new Array(texts.length).fill(null);
+
+  // Check cache first — build list of texts that need Ollama calls
+  const uncachedIndices: number[] = [];
+  for (let i = 0; i < texts.length; i++) {
+    const key = simpleHash(texts[i]);
+    const cached = _embeddingCache.get(key);
+    if (cached) {
+      results[i] = cached.embedding;
+    } else {
+      uncachedIndices.push(i);
+    }
+  }
+
+  if (uncachedIndices.length === 0) {
+    return results as Float32Array[];
+  }
+
+  // Fetch uncached texts from Ollama in batches
+  const uncachedTexts = uncachedIndices.map(i => texts[i]);
+  const ollamaResults: Float32Array[] = [];
 
   // Ollama /api/embed supports batch via `input` array
-  for (let i = 0; i < texts.length; i += config.batchSize) {
-    const batch = texts.slice(i, i + config.batchSize);
+  for (let i = 0; i < uncachedTexts.length; i += config.batchSize) {
+    const batch = uncachedTexts.slice(i, i + config.batchSize);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), config.timeout);
@@ -96,14 +164,22 @@ export async function generateEmbeddings(
             `Embedding dimension mismatch: expected ${config.dimensions}, got ${embedding.length}`
           );
         }
-        results.push(new Float32Array(embedding));
+        ollamaResults.push(new Float32Array(embedding));
       }
     } finally {
       clearTimeout(timer);
     }
   }
 
-  return results;
+  // Populate cache and fill results array
+  for (let j = 0; j < uncachedIndices.length; j++) {
+    const origIdx = uncachedIndices[j];
+    const embedding = ollamaResults[j];
+    results[origIdx] = embedding;
+    cachePut(simpleHash(texts[origIdx]), embedding, maxSize);
+  }
+
+  return results as Float32Array[];
 }
 
 /**
@@ -321,6 +397,10 @@ export class VectorStore {
 
   /**
    * Semantic KNN search across one or all vector tables.
+   *
+   * @param precomputedEmbedding — optional pre-computed embedding for the query.
+   *   When provided, skips the Ollama call entirely. The precomputed embedding
+   *   is still inserted into the LRU cache so subsequent identical queries hit.
    */
   async search(
     query: string,
@@ -328,6 +408,7 @@ export class VectorStore {
       tables?: string[];        // e.g., ['facts', 'knowledge'] — omit for all
       limit?: number;           // default 10
       maxDistance?: number;      // filter out results beyond this distance
+      precomputedEmbedding?: Float32Array;
     }
   ): Promise<VectorSearchResult[]> {
     const limit = opts?.limit || 10;
@@ -338,8 +419,16 @@ export class VectorStore {
       this.validateSourceTable(table);
     }
 
-    // Generate query embedding
-    const [queryEmbedding] = await generateEmbeddings([query], this.config);
+    // Use precomputed embedding if provided, otherwise call Ollama
+    let queryEmbedding: Float32Array;
+    if (opts?.precomputedEmbedding) {
+      queryEmbedding = opts.precomputedEmbedding;
+      // Populate LRU cache so subsequent queries for the same text hit
+      const maxSize = this.config.cacheSize ?? 128;
+      cachePut(simpleHash(query), queryEmbedding, maxSize);
+    } else {
+      [queryEmbedding] = await generateEmbeddings([query], this.config);
+    }
     const queryBytes = vecToBytes(queryEmbedding);
 
     const results: VectorSearchResult[] = [];
