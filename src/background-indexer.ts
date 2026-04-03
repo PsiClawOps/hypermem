@@ -118,10 +118,9 @@ function extractFactCandidates(content: string): FactCandidate[] {
       pattern.lastIndex = 0;
       while ((match = pattern.exec(content)) !== null) {
         const candidate = match[1].trim();
-        // Filter out noise
-        if (candidate.length > 10 && !candidate.startsWith('```') && !candidate.startsWith('http')) {
-          facts.push({ content: candidate, confidence });
-        }
+        // Quality gate: reject noise that matched patterns but isn't a real fact
+        if (!isQualityFact(candidate)) continue;
+        facts.push({ content: candidate, confidence });
       }
     }
   }
@@ -130,18 +129,102 @@ function extractFactCandidates(content: string): FactCandidate[] {
 }
 
 /**
+ * TUNE-011: Quality gate for fact extraction.
+ * Rejects pattern matches that are code, table fragments, questions,
+ * or too short to be meaningful facts.
+ */
+function isQualityFact(content: string): boolean {
+  // Too short — sentence fragments
+  if (content.length < 40) return false;
+
+  // Too long — likely captured a paragraph, not a fact
+  if (content.length > 300) return false;
+
+  // Fewer than 5 words — fragment
+  const wordCount = content.split(/\s+/).filter(w => w.length > 0).length;
+  if (wordCount < 5) return false;
+
+  // Questions — not assertions of fact
+  if (content.trimEnd().endsWith('?')) return false;
+
+  // Code indicators: braces, arrows, imports, variable declarations
+  if (/^[\s{}\[\]|`]/.test(content)) return false;  // starts with structural char
+  if (/[{}].*[{}]/.test(content)) return false;       // contains paired braces (code blocks)
+  if (/^\s*(import|export|const|let|var|function|class|interface|type|return|if|for|while|switch)\s/i.test(content)) return false;
+  if (/=>\s*[{(]/.test(content)) return false;        // arrow functions
+  if (/SELECT\s|INSERT\s|UPDATE\s|DELETE\s|CREATE\s/i.test(content)) return false;  // SQL
+
+  // Table cell fragments: contains pipe-delimited cells
+  if (/\|.*\|.*\|/.test(content)) return false;
+
+  // Regex patterns leaked from source
+  if (/\/[^/]+\/[gimsuvy]*[,;]/.test(content)) return false;
+
+  // Raw file paths without context (tool output, not facts)
+  if (/^\/[\w/.-]+$/.test(content.trim())) return false;
+
+  // Markdown formatting artifacts
+  if (content.startsWith('```') || content.startsWith('---') || content.startsWith('===')) return false;
+
+  // Git output
+  if (/^[a-f0-9]{7,40}\s/.test(content) || /^\+\+\+|^---\s[ab]\//.test(content)) return false;
+  if (/^\d+ files? changed/.test(content)) return false;
+
+  // Stack traces
+  if (/^\s*at\s+\S+\s+\(/.test(content) || /node:internal/.test(content)) return false;
+
+  // High non-alpha ratio indicates code/data, not natural language
+  const alphaChars = (content.match(/[a-zA-Z]/g) || []).length;
+  if (alphaChars / content.length < 0.5) return false;
+
+  return true;
+}
+
+/**
  * Classify a message for episode significance.
  * Returns episode type and significance score, or null if not significant.
  */
 function classifyEpisode(msg: StoredMessage): { type: EpisodeType; significance: number; summary: string } | null {
   const content = msg.textContent || '';
-  if (!content || content.length < 30) return null;
+  if (!content || content.length < 50) return null;  // Raised from 30
+
+  // Skip heartbeats
+  if (msg.isHeartbeat) return null;
+
+  // Skip messages that are primarily code/data output (tool results, logs)
+  const alphaRatio = (content.match(/[a-zA-Z]/g) || []).length / content.length;
+  if (alphaRatio < 0.4) return null;
+
+  // Skip messages that start with structural output indicators
+  if (/^[\s]*[{[\d|#=+\-]/.test(content) && content.length < 200) return null;
+
   const lower = content.toLowerCase();
+
+  // ── Negation-aware incident detection ──────────────────────
+  // Only trigger on actual incidents, not "zero failures" or "no crashes"
+  const incidentTerms = ['outage', 'incident', 'failure', 'crash', 'broke', 'broken', 'emergency'];
+  const negationPrefixes = ['no ', 'zero ', 'without ', '0 ', 'never ', 'fixed ', 'resolved '];
+
+  const hasIncidentTerm = incidentTerms.some(term => lower.includes(term));
+  const isNegated = hasIncidentTerm && incidentTerms.some(term => {
+    const idx = lower.indexOf(term);
+    if (idx < 0) return false;
+    const prefix = lower.substring(Math.max(0, idx - 15), idx).toLowerCase();
+    return negationPrefixes.some(neg => prefix.includes(neg.trimEnd()));
+  });
+
+  if (hasIncidentTerm && !isNegated && content.length > 100) {
+    // Genuine incident — verify it's describing a problem, not analyzing code
+    if (!/^\s*(\/\/|#|\*|\/\*|```|import|const|function)/.test(content)) {
+      const summary = content.slice(0, 200);
+      return { type: 'incident', significance: 0.9, summary };
+    }
+  }
 
   // Deployment events (high significance)
   if (
     /(?:deployed|shipped|released|went live|now live|go live)/i.test(content) &&
-    !msg.isHeartbeat
+    content.length > 60
   ) {
     const summary = content.slice(0, 200);
     return { type: 'deployment', significance: 0.8, summary };
@@ -150,35 +233,33 @@ function classifyEpisode(msg: StoredMessage): { type: EpisodeType; significance:
   // Architecture decisions (high significance)
   if (
     /(?:decided on|chose|committed to|architecture|design decision)/i.test(content) &&
-    content.length > 50
+    content.length > 80
   ) {
     const summary = content.slice(0, 200);
     return { type: 'decision', significance: 0.7, summary };
   }
 
-  // Incident/outage (high significance)
-  if (/(?:outage|incident|failure|crash|broke|broken|emergency)/i.test(content)) {
-    const summary = content.slice(0, 200);
-    return { type: 'incident', significance: 0.9, summary };
-  }
-
   // Discovery/insight (medium significance)
-  if (/(?:discovered|found|realized|root cause|turns out)/i.test(content) && content.length > 50) {
+  if (/(?:discovered|found|realized|root cause|turns out)/i.test(content) && content.length > 80) {
     const summary = content.slice(0, 200);
     return { type: 'discovery', significance: 0.5, summary };
   }
 
-  // Config changes (medium significance)
-  if (/(?:changed|updated|migrated|switched|model.*(?:→|->|to))/i.test(content) && content.length > 40) {
+  // Config changes (medium significance) — TUNE-004: raised to 0.5
+  if (/(?:changed|updated|migrated|switched|model.*(?:→|->|to))/i.test(content) && content.length > 60) {
+    // Skip if it's just a tool output confirmation
+    if (/^Successfully replaced|^\[main [a-f0-9]|^ok \d+ -/.test(content)) return null;
     const summary = content.slice(0, 200);
-    return { type: 'config_change', significance: 0.5, summary }; // TUNE-004: raised from 0.4 to meet default threshold
+    return { type: 'config_change', significance: 0.5, summary };
   }
 
   // Milestone/completion (medium significance)
   if (
     /(?:completed|finished|done|milestone|all tests pass|all green)/i.test(content) &&
-    !msg.isHeartbeat
+    content.length > 60
   ) {
+    // Skip tool output that happens to contain "done"
+    if (/^Successfully|^\[main|^ok \d+/.test(content)) return null;
     const summary = content.slice(0, 200);
     return { type: 'milestone', significance: 0.5, summary };
   }
@@ -636,16 +717,16 @@ export class BackgroundIndexer {
       SET decay_score = MIN(1.0, decay_score + ?)
       WHERE superseded_by IS NULL
         AND decay_score < 1.0
-        AND updated_at < datetime('now', '-7 days')
+        AND updated_at < datetime('now', '-1 day')
     `).run(rate);
 
-    // Decay episodes older than 30 days
+    // Decay episodes older than 7 days
     libraryDb.prepare(`
       UPDATE episodes
       SET decay_score = MIN(1.0, decay_score + ?)
       WHERE decay_score < 1.0
-        AND created_at < datetime('now', '-30 days')
-    `).run(rate * 0.5); // Episodes decay slower
+        AND created_at < datetime('now', '-7 days')
+    `).run(rate * 0.5);
 
     // Mark dormant topics
     const dormantThreshold = this.parseDuration(this.config.topicDormantAfter);

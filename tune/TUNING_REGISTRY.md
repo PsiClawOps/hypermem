@@ -128,3 +128,14 @@ Each entry records the change, rationale, and date — so we can track drift ove
 - **Rationale:** TUNE-008's 65k was a band-aid before the tool-loop guard landed. With the guard in place (assemble() returns pass-through on toolResult messages), tool turns don't re-compose. The real constraint is the runtime's overflow ceiling at contextWindow*0.9 (~108k for 120k). 90k assembly + ~15k tool overhead = ~105k, safely under 108k. The freed budget goes to higher-value slots: more facts, more cross-session context, room for keystone history (T2.1, planned).
 - **Date:** 2026-04-02
 - **Status:** active
+
+### TUNE-011 — Indexer Quality: fact filtering, episode classification, decay timing
+- **File:** `src/background-indexer.ts`
+- **Parameters:**
+  - Fact extraction: added `isQualityFact()` gate — min 40 chars, max 300 chars, min 5 words, rejects code/tables/questions/regex/git output/stack traces, requires >50% alpha chars
+  - Episode classification: added negation awareness (zero/no/without + incident term → skip), raised min content length (50→100 for incidents, 50→80 for decisions/discoveries, 50→60 for others), filters tool output confirmations, checks alpha ratio
+  - Decay timing: facts decay after 24h (was 7d), episodes after 7d (was 30d)
+- **Before:** 2,527 facts with ~26% noise rate (code, tables, questions, fragments). 72% of episodes classified as high-significance. Zero decay on any entry.
+- **After:** Estimated ~1,858 clean facts would survive filter. Episode false positives (negated incidents like "zero failures") eliminated. Decay begins within 24h.
+- **Date:** 2026-04-02
+- **Status:** active
