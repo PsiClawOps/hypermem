@@ -489,6 +489,24 @@ function createHyperMemEngine(): ContextEngine {
       const effectiveBudget = tokenBudget ?? 100000;
       const historyDepth = Math.min(150, Math.max(50, Math.floor((effectiveBudget * 0.6) / 500)));
 
+      // ── Redis guardrail: trim history to token budget ────────────────────
+      // Prevents model-switch bloat: if an agent previously ran on a larger
+      // context window, Redis history may exceed the current model's budget.
+      // Trimming here (before compose) ensures the compositor never sees a
+      // history window it can't fit. Uses 80% of budget as the trim ceiling
+      // to leave room for system prompt, facts, and identity slots.
+      try {
+        const trimBudget = Math.floor(effectiveBudget * 0.8);
+        const trimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, trimBudget);
+        if (trimmed > 0) {
+          // Invalidate window cache since history changed
+          await hm.redis.invalidateWindow(agentId, sk);
+        }
+      } catch (trimErr) {
+        // Non-fatal — compositor's budget-fit walk is the second line of defense
+        console.warn('[hypermem-plugin] assemble: Redis trim failed (non-fatal):', (trimErr as Error).message);
+      }
+
       const request: ComposeRequest = {
         agentId,
         sessionKey: sk,

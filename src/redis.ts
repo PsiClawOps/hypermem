@@ -273,6 +273,67 @@ export class RedisLayer {
     return exists === 1;
   }
 
+  /**
+   * Trim Redis history to fit within a token budget.
+   *
+   * Walks the history newest→oldest, accumulating estimated tokens.
+   * When the budget is exceeded, trims everything older via LTRIM.
+   * This is the guardrail against model switches: if an agent ran on a
+   * 1M-context model and accumulated a huge history, then switched to a
+   * 120K model, the first assemble() call trims the excess.
+   *
+   * Token estimation: text at length/4, tool JSON at length/2 (dense).
+   *
+   * @returns Number of messages trimmed, or 0 if already within budget.
+   */
+  async trimHistoryToTokenBudget(
+    agentId: string,
+    sessionKey: string,
+    tokenBudget: number
+  ): Promise<number> {
+    if (!this.isConnected || tokenBudget <= 0) return 0;
+    const key = this.sessionKey(agentId, sessionKey, 'history');
+
+    // Get total length first — avoid fetching everything if small
+    const totalLen = await this.client!.llen(key);
+    if (totalLen <= 10) return 0; // tiny history, skip
+
+    // Fetch all messages to estimate tokens
+    const items = await this.client!.lrange(key, 0, -1);
+    if (items.length === 0) return 0;
+
+    // Walk newest→oldest, find the cut point
+    let tokenSum = 0;
+    let keepFrom = 0; // index (0-based) of the oldest message to keep
+    for (let i = items.length - 1; i >= 0; i--) {
+      try {
+        const msg: StoredMessage = JSON.parse(items[i]);
+        let msgTokens = Math.ceil((msg.textContent?.length ?? 0) / 4);
+        if (msg.toolCalls) msgTokens += Math.ceil(JSON.stringify(msg.toolCalls).length / 2);
+        if (msg.toolResults) msgTokens += Math.ceil(JSON.stringify(msg.toolResults).length / 2);
+        tokenSum += msgTokens;
+        if (tokenSum > tokenBudget) {
+          keepFrom = i + 1;
+          break;
+        }
+      } catch {
+        // Unparseable message — count as 500 tokens
+        tokenSum += 500;
+        if (tokenSum > tokenBudget) {
+          keepFrom = i + 1;
+          break;
+        }
+      }
+    }
+
+    if (keepFrom <= 0) return 0; // everything fits
+
+    // LTRIM keeps [keepFrom, -1] — drops everything before keepFrom
+    await this.client!.ltrim(key, keepFrom, -1);
+    console.log(`[hypermem-redis] trimHistoryToTokenBudget: trimmed ${keepFrom} messages from ${agentId}/${sessionKey} (budget=${tokenBudget}, had=${items.length}, kept=${items.length - keepFrom})`);
+    return keepFrom;
+  }
+
   // ─── Window Cache Operations ───────────────────────────────
 
   /**
