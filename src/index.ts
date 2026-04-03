@@ -90,7 +90,7 @@ export {
 } from './cross-agent.js';
 export type { OrgRegistry } from './cross-agent.js';
 
-export { BackgroundIndexer, createIndexer } from './background-indexer.js';
+export { BackgroundIndexer, createIndexer, type CursorFetcher } from './background-indexer.js';
 export type { IndexerStats, WatermarkState } from './background-indexer.js';
 
 export type {

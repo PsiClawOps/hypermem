@@ -18,7 +18,7 @@
  */
 
 import type { DatabaseSync } from 'node:sqlite';
-import type { StoredMessage, IndexerConfig, EpisodeType } from './types.js';
+import type { StoredMessage, IndexerConfig, EpisodeType, SessionCursor } from './types.js';
 import { MessageStore } from './message-store.js';
 import { FactStore } from './fact-store.js';
 import { EpisodeStore } from './episode-store.js';
@@ -36,7 +36,16 @@ export interface IndexerStats {
   topicsUpdated: number;
   knowledgeUpserted: number;
   elapsedMs: number;
+  /** Number of messages that were post-cursor (unseen by model, high-signal priority). */
+  postCursorMessages: number;
 }
+
+/**
+ * Optional callback to fetch the session cursor for an agent+session.
+ * When provided, the indexer uses the cursor to prioritize unseen messages.
+ * The cursor boundary separates "model has seen this" from "new since last compose".
+ */
+export type CursorFetcher = (agentId: string, sessionKey: string) => Promise<SessionCursor | null>;
 
 export interface WatermarkState {
   agentId: string;
@@ -273,7 +282,8 @@ export class BackgroundIndexer {
     config?: Partial<IndexerConfig>,
     private getMessageDb?: (agentId: string) => DatabaseSync,
     private getLibraryDb?: () => DatabaseSync,
-    private listAgents?: () => string[]
+    private listAgents?: () => string[],
+    private getCursor?: CursorFetcher
   ) {
     this.config = {
       enabled: config?.enabled ?? true,
@@ -341,7 +351,7 @@ export class BackgroundIndexer {
 
       for (const agentId of agents) {
         try {
-          const stats = this.processAgent(agentId, libraryDb);
+          const stats = await this.processAgent(agentId, libraryDb);
           if (stats.messagesProcessed > 0) {
             results.push(stats);
           }
@@ -372,8 +382,15 @@ export class BackgroundIndexer {
 
   /**
    * Process a single agent's unindexed messages.
+   *
+   * When a cursor fetcher is available, messages are split into two tiers:
+   *   - Post-cursor (id > cursor.lastSentId): "unseen" by the model, high-signal priority
+   *   - Pre-cursor (id <= cursor.lastSentId): already in the model's context window, lower priority
+   * Post-cursor messages are processed first. This ensures the indexer prioritizes
+   * content the model hasn't seen yet — decisions, incidents, and discoveries that
+   * happened between context windows.
    */
-  private processAgent(agentId: string, libraryDb: DatabaseSync): IndexerStats {
+  private async processAgent(agentId: string, libraryDb: DatabaseSync): Promise<IndexerStats> {
     const start = Date.now();
     const messageDb = this.getMessageDb!(agentId);
 
@@ -398,9 +415,36 @@ export class BackgroundIndexer {
         episodesRecorded: 0,
         topicsUpdated: 0,
         knowledgeUpserted: 0,
+        postCursorMessages: 0,
         elapsedMs: Date.now() - start,
       };
     }
+
+    // ── Cursor-aware prioritization ──────────────────────────────
+    // Fetch the cursor boundary to split messages into post-cursor (unseen)
+    // and pre-cursor (already in context). Post-cursor messages are processed
+    // first — they're the highest signal for fact/episode extraction.
+    let cursorBoundary = 0;
+    if (this.getCursor) {
+      try {
+        // Get session key from the first message's conversation
+        const sessionKey = this.getSessionKeyForMessage(messageDb, messages[0].conversationId);
+        if (sessionKey) {
+          const cursor = await this.getCursor(agentId, sessionKey);
+          if (cursor) {
+            cursorBoundary = cursor.lastSentId;
+          }
+        }
+      } catch {
+        // Cursor fetch is best-effort — fall through to default ordering
+      }
+    }
+
+    // Sort: post-cursor messages first (highest signal), then pre-cursor.
+    // Within each tier, maintain original (ascending) order.
+    const postCursor = messages.filter(m => m.id > cursorBoundary);
+    const preCursor = messages.filter(m => m.id <= cursorBoundary);
+    const ordered = [...postCursor, ...preCursor];
 
     let factsExtracted = 0;
     let episodesRecorded = 0;
@@ -408,7 +452,7 @@ export class BackgroundIndexer {
     let knowledgeUpserted = 0;
     let maxMessageId = lastProcessedId;
 
-    for (const msg of messages) {
+    for (const msg of ordered) {
       const content = msg.textContent || '';
       if (msg.id > maxMessageId) maxMessageId = msg.id;
 
@@ -493,6 +537,7 @@ export class BackgroundIndexer {
       episodesRecorded,
       topicsUpdated,
       knowledgeUpserted,
+      postCursorMessages: postCursor.length,
       elapsedMs: Date.now() - start,
     };
   }
@@ -671,7 +716,8 @@ export function createIndexer(
   getMessageDb: (agentId: string) => DatabaseSync,
   getLibraryDb: () => DatabaseSync,
   listAgents: () => string[],
-  config?: Partial<IndexerConfig>
+  config?: Partial<IndexerConfig>,
+  getCursor?: CursorFetcher
 ): BackgroundIndexer {
-  return new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents);
+  return new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor);
 }

@@ -467,6 +467,33 @@ export class Compositor {
       messages.push(...includedHistory);
       slots.history = historyTokens;
       remaining -= historyTokens;
+
+      // T1.3: Ghost message suppression.
+      // If the last message in the included history is a warm-seeded user message
+      // AND there's a subsequent message in SQLite that wasn't included (meaning
+      // the assistant already responded), drop it. This prevents the model from
+      // re-answering a question that was already handled in a prior session.
+      // Only triggers when: (1) message has _warmed flag, (2) it's role=user,
+      // (3) SQLite has messages after it (the response exists but wasn't included).
+      const lastIncluded = messages[messages.length - 1];
+      if (lastIncluded?.role === 'user') {
+        const sm = lastIncluded as import('./types.js').StoredMessage;
+        const meta = sm.metadata as Record<string, unknown> | undefined;
+        if (meta?._warmed && sm.id != null) {
+          // Check if there are any messages after this one in SQLite
+          try {
+            const hasMore = db.prepare(
+              'SELECT 1 FROM messages WHERE conversation_id = (SELECT conversation_id FROM messages WHERE id = ?) AND id > ? LIMIT 1'
+            ).get(sm.id, sm.id);
+            if (hasMore) {
+              messages.pop();
+              warnings.push('Dropped trailing warm-seeded user message with existing response (ghost suppression)');
+            }
+          } catch {
+            // Ghost check is best-effort — don't block compose
+          }
+        }
+      }
     }
 
     // ─── Injected Context Block ────────────────────────────────
@@ -777,6 +804,18 @@ export class Compositor {
       ? messages as unknown as ProviderMessage[]
       : toProviderFormat(messages, request.provider ?? request.model ?? null);
 
+    // T1.3: Strip warm-replay provenance flags before output.
+    // _warmed is an internal tag added by warmSession() to mark messages
+    // seeded from SQLite into Redis. It must not leak into provider submissions
+    // or be visible to the runtime (which might misinterpret it).
+    for (const msg of outputMessages) {
+      const m = msg as unknown as NeutralMessage;
+      if (m.metadata && (m.metadata as Record<string, unknown>)._warmed) {
+        const { _warmed, ...cleanMeta } = m.metadata as Record<string, unknown>;
+        (m as { metadata?: Record<string, unknown> }).metadata = Object.keys(cleanMeta).length > 0 ? cleanMeta : undefined;
+      }
+    }
+
     const totalTokens = budget - remaining;
 
     // ─── Write Window Cache ───────────────────────────────────
@@ -921,7 +960,13 @@ export class Compositor {
     for (let i = transformedForWarm.length - 1; i >= 0; i--) {
       const cost = estimateMessageTokens(transformedForWarm[i]);
       if (warmTokens + cost > warmBudget) break;
-      history.unshift(transformedForWarm[i] as typeof rawHistory[0]);
+      // T1.3 Provenance flag: tag warm-seeded messages so they can be identified
+      // downstream. The flag is stripped before provider submission in compose().
+      // This prevents the runtime from treating warm-replayed user messages as
+      // new inbound queries (ghost message bug).
+      const tagged = { ...transformedForWarm[i] } as typeof rawHistory[0];
+      tagged.metadata = { ...(tagged.metadata || {}), _warmed: true };
+      history.unshift(tagged);
       warmTokens += cost;
     }
 

@@ -86,13 +86,42 @@ async function getHyperMem(): Promise<HyperMemInstance> {
     // Wire up fleet store and background indexer from dynamic module
     const { FleetStore: FleetStoreClass, createIndexer } = mod as {
       FleetStore: new (db: ReturnType<typeof instance.dbManager.getLibraryDb>) => FleetStore;
-      createIndexer: (opts: { dataDir: string }) => BackgroundIndexer;
+      createIndexer: (
+        getMessageDb: (agentId: string) => any,
+        getLibraryDb: () => any,
+        listAgents: () => string[],
+        config?: Partial<{ enabled: boolean; periodicInterval: number }>,
+        getCursor?: (agentId: string, sessionKey: string) => Promise<unknown>
+      ) => BackgroundIndexer;
     };
     const libraryDb = instance.dbManager.getLibraryDb();
     _fleetStore = new FleetStoreClass(libraryDb as Parameters<InstanceType<typeof FleetStoreClass>['listAgents']>[0] extends never ? never : never) as unknown as FleetStore;
 
     try {
-      _indexer = createIndexer({ dataDir: path.join(os.homedir(), '.openclaw/hypermem') });
+      // T1.2: Wire indexer with proper DB accessors and cursor fetcher.
+      // The cursor fetcher enables priority-based indexing: messages the model
+      // hasn't seen yet (post-cursor) are processed first.
+      _indexer = createIndexer(
+        (agentId: string) => instance.dbManager.getMessageDb(agentId),
+        () => instance.dbManager.getLibraryDb(),
+        () => {
+          // List agents from fleet_agents table (active only)
+          try {
+            const rows = instance.dbManager.getLibraryDb()
+              .prepare("SELECT id FROM fleet_agents WHERE status = 'active'")
+              .all() as Array<{ id: string }>;
+            return rows.map(r => r.id);
+          } catch {
+            return [];
+          }
+        },
+        { enabled: true, periodicInterval: 300000 },  // 5-minute interval
+        // Cursor fetcher: reads from Redis → SQLite fallback
+        async (agentId: string, sessionKey: string) => {
+          return instance.getSessionCursor(agentId, sessionKey);
+        }
+      );
+      _indexer.start();
     } catch {
       // Non-fatal — indexer wiring can fail without breaking context assembly
     }
