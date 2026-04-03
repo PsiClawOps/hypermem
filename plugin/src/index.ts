@@ -244,9 +244,16 @@ function estimateTokens(text: string | null | undefined): number {
  */
 async function estimateWindowTokens(hm: HyperMemInstance, agentId: string, sessionKey: string): Promise<number> {
   try {
-    const window = await hm.redis.getWindow(agentId, sessionKey);
+    // Prefer the hot window cache (set after compaction trims the history).
+    // Fall back to the actual history list — the window cache is only populated
+    // after compact() calls setWindow(), so a fresh or never-compacted session
+    // has no window cache entry. Without this fallback, getWindow returns null
+    // → estimateWindowTokens returns 0 → compact() always says within_budget
+    // → overflow loop.
+    const window = await hm.redis.getWindow(agentId, sessionKey)
+      ?? await hm.redis.getHistory(agentId, sessionKey);
     if (!window || window.length === 0) return 0;
-    return window.reduce((sum, msg) => {
+    return window.reduce((sum: number, msg: any) => {
       let t = estimateTokens(msg.textContent);
       // Tool payloads are dense JSON — use /2 not /4 to avoid systematic undercount
       if (msg.toolCalls) t += Math.ceil(JSON.stringify(msg.toolCalls).length / 2);
