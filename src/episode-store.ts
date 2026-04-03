@@ -44,6 +44,7 @@ export class EpisodeStore {
       visibility?: string;
       participants?: string[];
       sessionKey?: string;
+      sourceMessageId?: number;
     }
   ): Episode {
     const now = nowIso();
@@ -58,8 +59,8 @@ export class EpisodeStore {
 
     const result = this.db.prepare(`
       INSERT INTO episodes (agent_id, event_type, summary, significance,
-        visibility, participants, session_key, created_at, decay_score)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0)
+        visibility, participants, session_key, source_message_id, created_at, decay_score)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0)
     `).run(
       agentId,
       eventType,
@@ -68,6 +69,7 @@ export class EpisodeStore {
       resolvedVisibility,
       opts?.participants ? JSON.stringify(opts.participants) : null,
       opts?.sessionKey || null,
+      opts?.sourceMessageId ?? null,
       now
     );
 

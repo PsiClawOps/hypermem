@@ -366,6 +366,23 @@ export interface CompositorConfig {
    * Default: 0.4 (40% of defaultTokenBudget)
    */
   warmHistoryBudgetFraction: number;
+  /**
+   * Fraction of history token budget to allocate for keystone (recalled older) messages.
+   * Range: 0.0–0.5. Default: 0.2 (20% of history budget).
+   * Set to 0 to disable keystone injection.
+   */
+  keystoneHistoryFraction?: number;
+  /**
+   * Maximum number of keystone messages to inject.
+   * Default: 15
+   */
+  keystoneMaxMessages?: number;
+  /**
+   * Minimum episode significance for a message to be considered as a keystone.
+   * Only applies when episode significance is available (not null).
+   * Default: 0.5
+   */
+  keystoneMinSignificance?: number;
   // Note: assembly order is fixed in compose() — system, identity, history,
   // facts, knowledge, preferences, semanticRecall, cross-session, library.
   //

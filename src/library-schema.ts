@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LIBRARY_SCHEMA_VERSION = 7;
+export const LIBRARY_SCHEMA_VERSION = 8;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -717,6 +717,18 @@ function applyV7KnowledgeVersioning(db: DatabaseSync): void {
   `);
 }
 
+// ── V8: Add source_message_id to episodes ───────────────────
+
+function applyV8EpisodeSourceMessageId(db: DatabaseSync): void {
+  // ALTER TABLE ADD COLUMN is safe — existing rows get NULL for new column
+  const cols = (db.prepare('PRAGMA table_info(episodes)').all() as Array<{ name: string }>)
+    .map(r => r.name);
+  if (!cols.includes('source_message_id')) {
+    db.exec('ALTER TABLE episodes ADD COLUMN source_message_id INTEGER');
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_source_msg ON episodes(agent_id, source_message_id)');
+}
+
 // ── Migration runner ──────────────────────────────────────────
 
 export function migrateLibrary(db: DatabaseSync): void {
@@ -780,5 +792,11 @@ export function migrateLibrary(db: DatabaseSync): void {
     applyV7KnowledgeVersioning(db);
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(7, nowIso());
+  }
+
+  if (currentVersion < 8) {
+    applyV8EpisodeSourceMessageId(db);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(8, nowIso());
   }
 }

@@ -647,6 +647,7 @@ export class BackgroundIndexer {
             significance: episode.significance,
             visibility: episodeVisibility,
             sessionKey: this.getSessionKeyForMessage(messageDb, msg.conversationId),
+            sourceMessageId: msg.id,
           });
           episodesRecorded++;
           // Embed high-significance episodes (decisions, incidents, deployments)

@@ -30,6 +30,7 @@ import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
 import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction-fence.js';
+import { rankKeystones, type KeystoneCandidate } from './keystone-scorer.js';
 
 const DEFAULT_CONFIG: CompositorConfig = {
   defaultTokenBudget: 90000,
@@ -39,6 +40,9 @@ const DEFAULT_CONFIG: CompositorConfig = {
   maxRecentToolPairs: 3,
   maxProseToolPairs: 10,
   warmHistoryBudgetFraction: 0.4,
+  keystoneHistoryFraction: 0.2,
+  keystoneMaxMessages: 15,
+  keystoneMinSignificance: 0.5,
 };
 
 // ─── Trigger Registry ────────────────────────────────────────────
@@ -472,9 +476,67 @@ export class Compositor {
         historyTokens += msgTokens;
       }
 
-      messages.push(...includedHistory);
-      slots.history = historyTokens;
-      remaining -= historyTokens;
+      // ── Keystone History Slot (P2.1) ──────────────────────────────────
+      // For long conversations (≥30 messages), inject high-signal older messages
+      // from before the recent window as recalled context. This lets the model
+      // see key decisions and specs that happened earlier in the conversation
+      // without them consuming the full recent history budget.
+      const keystoneFraction = this.config.keystoneHistoryFraction ?? 0.2;
+      const keystoneMaxMsgs = this.config.keystoneMaxMessages ?? 15;
+
+      let keystoneMessages: NeutralMessage[] = [];
+      let keystoneTokens = 0;
+
+      if (includedHistory.length >= 30 && keystoneFraction > 0) {
+        const keystoneResult = await this.buildKeystones(
+          db,
+          request.agentId,
+          includedHistory,
+          historyTokens,
+          keystoneFraction,
+          keystoneMaxMsgs,
+          request.prompt,
+          libDb || undefined
+        );
+        if (keystoneResult) {
+          keystoneMessages = keystoneResult.keystoneMessages;
+          keystoneTokens = keystoneResult.keystoneTokens;
+          // Replace includedHistory and historyTokens with the trimmed versions
+          // (keystoneResult reflects the trimming done inside buildKeystones)
+          includedHistory.splice(0, includedHistory.length, ...keystoneResult.trimmedHistory);
+          historyTokens = keystoneResult.trimmedHistoryTokens;
+          warnings.push(`Keystone: injected ${keystoneMessages.length} recalled messages`);
+        }
+      }
+
+      // Push history with keystone separators if we have keystones.
+      if (keystoneMessages.length > 0) {
+        // Separator before recalled context
+        messages.push({
+          role: 'system',
+          textContent: '## Recalled Context (high-signal older messages)',
+          toolCalls: null,
+          toolResults: null,
+        });
+        messages.push(...keystoneMessages);
+        // Separator before recent conversation
+        messages.push({
+          role: 'system',
+          textContent: '## Recent Conversation',
+          toolCalls: null,
+          toolResults: null,
+        });
+        messages.push(...includedHistory);
+        // Account for separator tokens in history slot
+        const sepTokens = estimateTokens('## Recalled Context (high-signal older messages)') +
+          estimateTokens('## Recent Conversation');
+        slots.history = historyTokens + keystoneTokens + sepTokens;
+        remaining -= (historyTokens + keystoneTokens + sepTokens);
+      } else {
+        messages.push(...includedHistory);
+        slots.history = historyTokens;
+        remaining -= historyTokens;
+      }
 
       // T1.3: Ghost message suppression.
       // If the last message in the included history is a warm-seeded user message
@@ -1382,5 +1444,228 @@ export class Compositor {
     }
 
     return truncated + '…';
+  }
+
+  // ─── Keystone History Builder ─────────────────────────────────────
+
+  /**
+   * Query and score keystone candidates from before the current history window.
+   *
+   * Trims the oldest messages from includedHistory to free a keystone budget,
+   * then queries the DB for older messages scored by episode significance,
+   * FTS5 relevance, and recency.
+   *
+   * Returns null if keystones cannot be injected (no cutoff ID found,
+   * no candidates, or all errors).
+   */
+  private async buildKeystones(
+    db: DatabaseSync,
+    agentId: string,
+    includedHistory: NeutralMessage[],
+    historyTokens: number,
+    keystoneFraction: number,
+    keystoneMaxMsgs: number,
+    prompt?: string,
+    libraryDb?: DatabaseSync
+  ): Promise<{
+    keystoneMessages: NeutralMessage[];
+    keystoneTokens: number;
+    trimmedHistory: NeutralMessage[];
+    trimmedHistoryTokens: number;
+  } | null> {
+    const keystoneBudget = Math.floor(historyTokens * keystoneFraction);
+    if (keystoneBudget <= 0) return null;
+
+    // Trim oldest messages from includedHistory to free keystone budget.
+    const trimmedHistory = [...includedHistory];
+    let trimmedHistoryTokens = historyTokens;
+    let freed = 0;
+    while (trimmedHistory.length > 1 && freed < keystoneBudget) {
+      const oldest = trimmedHistory.shift()!;
+      const oldestTokens = estimateMessageTokens(oldest);
+      freed += oldestTokens;
+      trimmedHistoryTokens -= oldestTokens;
+    }
+
+    // Find the oldest message ID in the trimmed recent window (cutoff point).
+    const oldestRecentMsg = trimmedHistory[0] as StoredMessage;
+    const cutoffId = (oldestRecentMsg as StoredMessage)?.id ?? null;
+    if (cutoffId == null) return null;
+
+    // Find the current user prompt for FTS matching.
+    const promptForFts = prompt?.trim() ||
+      (() => {
+        for (let i = trimmedHistory.length - 1; i >= 0; i--) {
+          if (trimmedHistory[i].role === 'user' && trimmedHistory[i].textContent) {
+            return trimmedHistory[i].textContent!;
+          }
+        }
+        return null;
+      })();
+
+    try {
+      // Get the conversation ID from the oldest recent message.
+      const convRow = db.prepare(
+        'SELECT conversation_id FROM messages WHERE id = ?'
+      ).get(cutoffId) as { conversation_id: number } | undefined;
+
+      if (!convRow) return null;
+
+      const conversationId = convRow.conversation_id;
+      const maxAgeHours = 720; // 30 days for recency scoring
+      const nowMs = Date.now();
+
+      // Build episode significance map from libraryDb (episodes live there, not in messages.db).
+      // Key: source_message_id, Value: max significance for that message.
+      const sigMap = new Map<number, number>();
+      if (libraryDb) {
+        try {
+          const episodeRows = libraryDb.prepare(`
+            SELECT source_message_id, MAX(significance) AS significance
+            FROM episodes
+            WHERE agent_id = ? AND source_message_id IS NOT NULL
+            GROUP BY source_message_id
+          `).all(agentId) as Array<{ source_message_id: number; significance: number }>;
+          for (const row of episodeRows) {
+            sigMap.set(row.source_message_id, row.significance);
+          }
+        } catch {
+          // Episodes query is best-effort
+        }
+      }
+
+      type CandidateRow = {
+        id: number;
+        message_index: number;
+        role: string;
+        text_content: string | null;
+        created_at: string;
+      };
+
+      const baseQuery = `
+        SELECT
+          m.id,
+          m.message_index,
+          m.role,
+          m.text_content,
+          m.created_at
+        FROM messages m
+        WHERE m.conversation_id = ?
+          AND m.id < ?
+          AND m.text_content IS NOT NULL
+          AND m.is_heartbeat = 0
+          AND m.text_content != ''
+        LIMIT 200
+      `;
+
+      let candidateRows: CandidateRow[];
+
+      if (promptForFts && promptForFts.length >= 3) {
+        // Build a safe FTS5 query: extract words ≥3 chars, up to 8, OR with prefix.
+        const ftsTerms = (promptForFts.match(/\b\w{3,}\b/g) || [])
+          .slice(0, 8)
+          .map(w => `"${w.replace(/"/g, '')}"*`)
+          .join(' OR ');
+
+        if (ftsTerms) {
+          try {
+            candidateRows = db.prepare(`
+              SELECT
+                m.id,
+                m.message_index,
+                m.role,
+                m.text_content,
+                m.created_at
+              FROM messages m
+              WHERE m.conversation_id = ?
+                AND m.id < ?
+                AND m.text_content IS NOT NULL
+                AND m.is_heartbeat = 0
+                AND m.text_content != ''
+                AND m.id IN (
+                  SELECT rowid FROM messages_fts
+                  WHERE messages_fts MATCH ?
+                  LIMIT 100
+                )
+              LIMIT 200
+            `).all(conversationId, cutoffId, ftsTerms) as CandidateRow[];
+          } catch {
+            // FTS query may fail on special characters — fall back to base query
+            candidateRows = db.prepare(baseQuery).all(conversationId, cutoffId) as CandidateRow[];
+          }
+        } else {
+          candidateRows = db.prepare(baseQuery).all(conversationId, cutoffId) as CandidateRow[];
+        }
+      } else {
+        candidateRows = db.prepare(baseQuery).all(conversationId, cutoffId) as CandidateRow[];
+      }
+
+      if (candidateRows.length === 0) return null;
+
+      // Build KeystoneCandidate objects with computed ftsRank and ageHours.
+      const totalCandidates = candidateRows.length;
+      const candidates: KeystoneCandidate[] = candidateRows.map((row, idx) => {
+        const createdMs = new Date(row.created_at).getTime();
+        const ageHours = (nowMs - createdMs) / (1000 * 60 * 60);
+        // Normalize FTS rank by position (best match = 1.0, worst = 0.1)
+        const ftsRank = totalCandidates > 1
+          ? 1.0 - (idx / totalCandidates) * 0.9
+          : 1.0;
+
+        return {
+          messageId: row.id,
+          messageIndex: row.message_index,
+          role: row.role,
+          content: row.text_content || '',
+          timestamp: row.created_at,
+          episodeSignificance: sigMap.get(row.id) ?? null,
+          ftsRank,
+          ageHours,
+        };
+      });
+
+      // Score and rank candidates.
+      const ranked = rankKeystones(candidates, maxAgeHours);
+
+      // Budget-fit: take top-scored candidates until keystoneBudget exhausted.
+      let kTokens = 0;
+      const selectedKeystones: KeystoneCandidate[] = [];
+
+      for (const candidate of ranked) {
+        if (selectedKeystones.length >= keystoneMaxMsgs) break;
+        const msg: NeutralMessage = {
+          role: candidate.role as NeutralMessage['role'],
+          textContent: candidate.content,
+          toolCalls: null,
+          toolResults: null,
+        };
+        const msgTokens = estimateMessageTokens(msg);
+        if (kTokens + msgTokens > keystoneBudget) continue; // skip oversized; keep trying
+        selectedKeystones.push(candidate);
+        kTokens += msgTokens;
+      }
+
+      if (selectedKeystones.length === 0) return null;
+
+      // Sort selected keystones chronologically for injection.
+      selectedKeystones.sort((a, b) => a.messageIndex - b.messageIndex);
+
+      const keystoneMessages: NeutralMessage[] = selectedKeystones.map(c => ({
+        role: c.role as NeutralMessage['role'],
+        textContent: c.content,
+        toolCalls: null,
+        toolResults: null,
+      }));
+
+      return {
+        keystoneMessages,
+        keystoneTokens: kTokens,
+        trimmedHistory,
+        trimmedHistoryTokens,
+      };
+    } catch {
+      // Keystone injection is best-effort — never fail compose
+      return null;
+    }
   }
 }
