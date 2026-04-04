@@ -40,6 +40,14 @@ export { RedisLayer } from './redis.js';
 export { Compositor, type CompositorDeps } from './compositor.js';
 
 export {
+  type CollectionTrigger,
+  TRIGGER_REGISTRY,
+  TRIGGER_REGISTRY_VERSION,
+  TRIGGER_REGISTRY_HASH,
+  matchTriggers,
+} from './trigger-registry.js';
+
+export {
   ensureCompactionFenceSchema,
   updateCompactionFence,
   getCompactionFence,

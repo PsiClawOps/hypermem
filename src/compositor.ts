@@ -25,6 +25,14 @@ import type {
   SessionCursor,
 } from './types.js';
 import { filterByScope } from './retrieval-policy.js';
+import {
+  CollectionTrigger,
+  DEFAULT_TRIGGERS,
+  matchTriggers,
+  logRegistryStartup,
+  TRIGGER_REGISTRY_VERSION,
+  TRIGGER_REGISTRY_HASH,
+} from './trigger-registry.js';
 import { RedisLayer } from './redis.js';
 import { MessageStore } from './message-store.js';
 import { toProviderFormat } from './provider-translator.js';
@@ -48,114 +56,10 @@ const DEFAULT_CONFIG: CompositorConfig = {
 };
 
 // ─── Trigger Registry ────────────────────────────────────────────
-
-/**
- * A trigger definition maps a collection to the conversation signals that
- * indicate it should be queried. When any keyword matches the user's latest
- * message, the compositor fetches relevant chunks from that collection.
- *
- * Centralizing trigger logic here (not in workspace stubs) means:
- * - One update propagates to all agents
- * - Stubs become documentation, not code
- * - Trigger logic can be tested independently
- */
-export interface CollectionTrigger {
-  /** Collection path: governance/policy, identity/job, etc. */
-  collection: string;
-  /** Keywords that trigger this collection (case-insensitive) */
-  keywords: string[];
-  /** Max tokens to inject from this collection */
-  maxTokens?: number;
-  /** Max chunks to retrieve */
-  maxChunks?: number;
-}
-
-/**
- * Default trigger registry for standard ACA collections.
- * Covers the core ACA offload use case from Anvil's spec.
- */
-export const DEFAULT_TRIGGERS: CollectionTrigger[] = [
-  {
-    collection: 'governance/policy',
-    keywords: [
-      'escalat', 'policy', 'decision state', 'green', 'yellow', 'red',
-      'council procedure', 'naming', 'mandate', 'compliance', 'governance',
-      'override', 'human review', 'irreversible',
-    ],
-    maxTokens: 1500,
-    maxChunks: 3,
-  },
-  {
-    collection: 'governance/charter',
-    keywords: [
-      'charter', 'mission', 'director', 'org', 'reporting', 'boundary',
-      'delegation', 'authority', 'jurisdiction',
-    ],
-    maxTokens: 1000,
-    maxChunks: 2,
-  },
-  {
-    collection: 'governance/comms',
-    keywords: [
-      'message', 'send', 'tier 1', 'tier 2', 'tier 3', 'async', 'dispatch',
-      'sessions_send', 'inter-agent', 'protocol', 'comms', 'ping', 'notify',
-    ],
-    maxTokens: 800,
-    maxChunks: 2,
-  },
-  {
-    collection: 'operations/agents',
-    keywords: [
-      'boot', 'startup', 'bootstrap', 'heartbeat', 'workqueue', 'checkpoint',
-      'session start', 'roll call', 'memory recall', 'dispatch inbox',
-    ],
-    maxTokens: 800,
-    maxChunks: 2,
-  },
-  {
-    collection: 'identity/job',
-    keywords: [
-      'deliberat', 'council round', 'vote', 'response contract', 'rating',
-      'first response', 'second response', 'handoff', 'floor open',
-      'performance', 'output discipline', 'assessment',
-    ],
-    maxTokens: 1200,
-    maxChunks: 3,
-  },
-  {
-    collection: 'identity/motivations',
-    keywords: [
-      'motivation', 'fear', 'tension', 'why do you', 'how do you feel',
-      'drives', 'values',
-    ],
-    maxTokens: 600,
-    maxChunks: 1,
-  },
-  {
-    collection: 'memory/decisions',
-    keywords: [
-      'remember', 'decision', 'we decided', 'previously', 'last time',
-      'history', 'past', 'earlier', 'recall', 'context',
-    ],
-    maxTokens: 1500,
-    maxChunks: 4,
-  },
-];
-
-/**
- * Match a user message against the trigger registry.
- * Returns triggered collections (deduplicated, ordered by trigger specificity).
- */
-function matchTriggers(
-  userMessage: string,
-  triggers: CollectionTrigger[]
-): CollectionTrigger[] {
-  if (!userMessage) return [];
-  const lower = userMessage.toLowerCase();
-  return triggers.filter(t =>
-    t.keywords.some(kw => lower.includes(kw.toLowerCase()))
-  );
-}
+// Moved to src/trigger-registry.ts (W5).
+// CollectionTrigger, DEFAULT_TRIGGERS, matchTriggers imported above.
+// Re-exported below for backward compatibility with existing consumers.
+export { CollectionTrigger, DEFAULT_TRIGGERS, matchTriggers } from './trigger-registry.js';
 
 /**
  * Rough token estimation: ~4 chars per token for English text.
@@ -321,6 +225,9 @@ export interface CompositorDeps {
   triggerRegistry?: CollectionTrigger[];
 }
 
+/** Guard: logRegistryStartup() fires only once per process, not per instance. */
+let _registryLogged = false;
+
 export class Compositor {
   private readonly config: CompositorConfig;
   private readonly redis: RedisLayer;
@@ -346,6 +253,10 @@ export class Compositor {
       this.triggerRegistry = deps.triggerRegistry || DEFAULT_TRIGGERS;
     }
     this.config = { ...DEFAULT_CONFIG, ...config };
+    if (!_registryLogged) {
+      logRegistryStartup();
+      _registryLogged = true;
+    }
   }
 
   /**
