@@ -751,6 +751,39 @@ export class Compositor {
       }
     }
 
+    // ── Session-Scoped Doc Chunks (spawn context inheritance) ────
+    // When parentSessionKey is set, retrieve ephemeral doc chunks indexed
+    // by buildSpawnContext() for this spawn session.
+    if (request.parentSessionKey && remaining > 200 && libDb) {
+      try {
+        const spawnChunkStore = new DocChunkStore(libDb);
+        const spawnQueryMsg = request.prompt?.trim() || this.getLastUserMessage(messages) || '';
+        const spawnChunks = spawnChunkStore.queryDocChunks(
+          request.agentId,
+          spawnQueryMsg,
+          { sessionKey: request.parentSessionKey, limit: 8 }
+        );
+        if (spawnChunks.length > 0) {
+          const spawnLines: string[] = [];
+          let spawnTokens = 0;
+          const maxSpawnTokens = Math.floor(remaining * 0.15);
+          for (const chunk of spawnChunks) {
+            if (spawnTokens + chunk.tokenEstimate > maxSpawnTokens) break;
+            spawnLines.push(chunk.content);
+            spawnTokens += chunk.tokenEstimate;
+          }
+          if (spawnLines.length > 0) {
+            contextParts.push(`## Spawn Context Documents\n${spawnLines.join('\n\n')}`);
+            contextTokens += spawnTokens;
+            remaining -= spawnTokens;
+            slots.library += spawnTokens;
+          }
+        }
+      } catch {
+        // Session-scoped chunk retrieval is best-effort
+      }
+    }
+
     // ── Cross-Session Context (L2: Messages) ─────────────────
     if (request.includeContext !== false && remaining > 500) {
       const crossSessionContent = this.buildCrossSessionContext(

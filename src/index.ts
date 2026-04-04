@@ -101,6 +101,9 @@ export type { OrgRegistry } from './cross-agent.js';
 export { BackgroundIndexer, createIndexer, type CursorFetcher } from './background-indexer.js';
 export type { IndexerStats, WatermarkState } from './background-indexer.js';
 
+export { buildSpawnContext } from './spawn-context.js';
+export type { SpawnContextOptions, SpawnContext } from './spawn-context.js';
+
 export { runNoiseSweep, runToolDecay, type NoiseSweepResult, type ToolDecayResult } from './proactive-pass.js';
 
 export type {
@@ -134,6 +137,7 @@ export type {
   CrossAgentQuery,
   AgentIdentity,
   SessionCursor,
+  RecentTurn,
 } from './types.js';
 
 export type { ProviderType } from './provider-translator.js';
