@@ -234,6 +234,33 @@ export interface SlotTokenCounts {
   library: number;
 }
 
+/**
+ * Compose-level diagnostics — emitted on every compose() call.
+ * Useful for observability, tuning, and debugging retrieval quality.
+ */
+export interface ComposeDiagnostics {
+  /** Number of doc chunk trigger collections that matched the user message */
+  triggerHits: number;
+  /** True when trigger-miss fallback semantic retrieval was used */
+  triggerFallbackUsed: boolean;
+  /** Number of facts included after scope filtering */
+  factsIncluded: number;
+  /** Approximate number of lines returned by semantic recall */
+  semanticResultsIncluded: number;
+  /** Number of doc chunk collections that returned at least one chunk */
+  docChunksCollections: number;
+  /** Number of items rejected by scope policy during retrieval */
+  scopeFiltered: number;
+  /**
+   * Why contextParts was empty (only set when no context was assembled).
+   * Helps distinguish between "no triggers + no fallback", "empty corpus",
+   * "budget exhausted", and "all items filtered by scope".
+   */
+  zeroResultReason?: 'no_trigger_no_fallback' | 'empty_corpus' | 'budget_exhausted' | 'scope_filtered_all';
+  /** The retrieval path that was used for doc chunks */
+  retrievalMode: 'triggered' | 'fallback_knn' | 'fallback_fts' | 'none';
+}
+
 export interface ComposeResult {
   messages: ProviderMessage[];
   tokenCount: number;
@@ -249,6 +276,8 @@ export interface ComposeResult {
    * Omitted when no context was assembled.
    */
   contextBlock?: string;
+  /** Compose-level diagnostics for observability and tuning. */
+  diagnostics?: ComposeDiagnostics;
 }
 
 /**

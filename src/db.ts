@@ -291,7 +291,9 @@ export class DatabaseManager {
   listAgents(): string[] {
     const agentsDir = path.join(this.dataDir, 'agents');
     if (!fs.existsSync(agentsDir)) return [];
+    const VALID_AGENT_ID = /^[a-z0-9][a-z0-9-]*$/;
     return fs.readdirSync(agentsDir).filter(f => {
+      if (!VALID_AGENT_ID.test(f)) return false;
       const stat = fs.statSync(path.join(agentsDir, f));
       return stat.isDirectory();
     });

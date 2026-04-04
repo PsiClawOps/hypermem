@@ -109,6 +109,7 @@ export type {
   Episode,
   ComposeRequest,
   ComposeResult,
+  ComposeDiagnostics,
   SlotTokenCounts,
   SessionSlots,
   SessionMeta,
@@ -182,8 +183,8 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     // tool results on a 120k window. Budget is better spent on context quality.
     defaultTokenBudget: 90000,
     maxHistoryMessages: 250,
-    maxFacts: 40,
-    maxCrossSessionContext: 8000,
+    maxFacts: 28,
+    maxCrossSessionContext: 6000,
     maxRecentToolPairs: 3,
     maxProseToolPairs: 10,
     warmHistoryBudgetFraction: 0.4,

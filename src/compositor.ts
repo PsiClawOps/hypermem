@@ -15,6 +15,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type {
   ComposeRequest,
   ComposeResult,
+  ComposeDiagnostics,
   SlotTokenCounts,
   NeutralMessage,
   ProviderMessage,
@@ -23,6 +24,7 @@ import type {
   SessionMeta,
   SessionCursor,
 } from './types.js';
+import { filterByScope } from './retrieval-policy.js';
 import { RedisLayer } from './redis.js';
 import { MessageStore } from './message-store.js';
 import { toProviderFormat } from './provider-translator.js';
@@ -35,8 +37,8 @@ import { rankKeystones, type KeystoneCandidate } from './keystone-scorer.js';
 const DEFAULT_CONFIG: CompositorConfig = {
   defaultTokenBudget: 90000,
   maxHistoryMessages: 250,
-  maxFacts: 40,
-  maxCrossSessionContext: 8000,
+  maxFacts: 28,
+  maxCrossSessionContext: 6000,
   maxRecentToolPairs: 3,
   maxProseToolPairs: 10,
   warmHistoryBudgetFraction: 0.4,
@@ -573,30 +575,46 @@ export class Compositor {
     const contextParts: string[] = [];
     let contextTokens = 0;
 
+    // ── Compose-level diagnostics tracking vars ──────────────
+    let diagTriggerHits = 0;
+    let diagTriggerFallbackUsed = false;
+    let diagFactsIncluded = 0;
+    let diagSemanticResults = 0;
+    let diagDocChunkCollections = 0;
+    let diagScopeFiltered = 0;
+    let diagRetrievalMode: ComposeDiagnostics['retrievalMode'] = 'none';
+
     // ── Facts (L4: Library) ──────────────────────────────────
+    // scope: agent — filtered by agentId via filterByScope after fetch
     if (request.includeFacts !== false && remaining > 500) {
-      const factsContent = this.buildFactsFromDb(request.agentId, libDb || db);
-      if (factsContent) {
-        const tokens = estimateTokens(factsContent);
-        if (tokens <= remaining * 0.3) { // Cap facts at 30% of remaining
-          contextParts.push(`## Active Facts\n${factsContent}`);
-          contextTokens += tokens;
-          remaining -= tokens;
-          slots.facts = tokens;
-        } else {
-          // Truncate to budget
-          const truncated = this.truncateToTokens(factsContent, Math.floor(remaining * 0.3));
-          const truncTokens = estimateTokens(truncated);
-          contextParts.push(`## Active Facts (truncated)\n${truncated}`);
-          contextTokens += truncTokens;
-          remaining -= truncTokens;
-          slots.facts = truncTokens;
-          warnings.push('Facts truncated to fit budget');
+      const factsContent = this.buildFactsFromDb(request.agentId, request.sessionKey, libDb || db);
+      if (factsContent !== null) {
+        const [content, factCount, scopeFiltered] = factsContent;
+        diagFactsIncluded += factCount;
+        diagScopeFiltered += scopeFiltered;
+        if (content) {
+          const tokens = estimateTokens(content);
+          if (tokens <= remaining * 0.25) { // Cap facts at 25% of remaining (W4: was 0.3)
+            contextParts.push(`## Active Facts\n${content}`);
+            contextTokens += tokens;
+            remaining -= tokens;
+            slots.facts = tokens;
+          } else {
+            // Truncate to budget
+            const truncated = this.truncateToTokens(content, Math.floor(remaining * 0.25));
+            const truncTokens = estimateTokens(truncated);
+            contextParts.push(`## Active Facts (truncated)\n${truncated}`);
+            contextTokens += truncTokens;
+            remaining -= truncTokens;
+            slots.facts = truncTokens;
+            warnings.push('Facts truncated to fit budget');
+          }
         }
       }
     }
 
     // ── Knowledge (L4: Library) ──────────────────────────────
+    // scope: agent — filtered by agent_id in the SQL query (existing behavior)
     if (request.includeLibrary !== false && remaining > 500 && libDb) {
       const knowledgeContent = this.buildKnowledgeFromDb(request.agentId, libDb);
       if (knowledgeContent) {
@@ -619,6 +637,7 @@ export class Compositor {
     }
 
     // ── Preferences (L4: Library) ────────────────────────────
+    // scope: agent — filtered by agent_id OR NULL in the SQL query (existing behavior)
     if (request.includeLibrary !== false && remaining > 300 && libDb) {
       const prefsContent = this.buildPreferencesFromDb(request.agentId, libDb);
       if (prefsContent) {
@@ -633,6 +652,7 @@ export class Compositor {
     }
 
     // ── Semantic Recall (L3: Hybrid FTS5+KNN) ───────────────
+    // scope: agent — buildSemanticRecall filters by agentId internally
     // Fires when either vector store or library DB is available.
     // FTS5-only (no embeddings) still returns keyword matches.
     // KNN-only (no FTS terms) still returns semantic matches.
@@ -656,7 +676,7 @@ export class Compositor {
           const semanticContent = await this.buildSemanticRecall(
             lastUserMsg,
             request.agentId,
-            Math.floor(remaining * 0.15), // Cap at 15% of remaining
+            Math.floor(remaining * 0.12), // Cap at 12% of remaining (W4: was 0.15)
             libDb || undefined,
             precomputedEmbedding
           );
@@ -667,6 +687,8 @@ export class Compositor {
             remaining -= tokens;
             // Semantic recall draws from multiple sources, attribute to context
             slots.context += tokens;
+            // W3 diagnostics: count non-empty lines as rough results count
+            diagSemanticResults = semanticContent.split('\n').filter(l => l.trim().length > 0).length;
           }
         } catch (err) {
           // Semantic search is best-effort — don't fail composition
@@ -676,15 +698,19 @@ export class Compositor {
     }
 
     // ── Doc Chunks (L4: Trigger-based retrieval) ─────────────
+    // scope: per-tier/per-agent — queryChunks filters by agentId and tier
     // Demand-load governance, identity, and memory chunks based on
     // conversation context. Replaces full ACA file injection for
     // the files that have been seeded into the doc chunk index.
+    let triggerFallbackUsed = false;
     if (request.includeDocChunks !== false && remaining > 400 && libDb) {
       // Use request.prompt when available (current-turn text, not stale history)
       const lastMsg = request.prompt?.trim() || this.getLastUserMessage(messages) || '';
       const triggered = matchTriggers(lastMsg, this.triggerRegistry);
 
       if (triggered.length > 0) {
+        diagTriggerHits = triggered.length;
+        diagRetrievalMode = 'triggered';
         const docChunkStore = new DocChunkStore(libDb);
         const docParts: string[] = [];
 
@@ -693,7 +719,7 @@ export class Compositor {
 
           const maxTokens = Math.min(
             trigger.maxTokens || 1000,
-            Math.floor(remaining * 0.15) // No single collection takes > 15% of remaining
+            Math.floor(remaining * 0.12) // No single collection takes > 12% of remaining (W4: was 0.15)
           );
 
           try {
@@ -771,6 +797,7 @@ export class Compositor {
               contextTokens += chunkTokens;
               remaining -= chunkTokens;
               slots.library += chunkTokens;
+              diagDocChunkCollections++;
             }
           } catch {
             // Doc chunk retrieval is best-effort — don't fail composition
@@ -779,6 +806,29 @@ export class Compositor {
 
         if (docParts.length > 0) {
           contextParts.push(docParts.join('\n\n'));
+        }
+      } else if (remaining > 400 && (this.vectorStore || libDb)) {
+        // Trigger-miss fallback: no trigger fired — attempt bounded semantic retrieval
+        // so there is never a silent zero-memory path on doc chunks.
+        try {
+          const fallbackContent = await this.buildSemanticRecall(
+            lastMsg,
+            request.agentId,
+            Math.floor(remaining * 0.10),
+            libDb || undefined,
+          );
+          if (fallbackContent) {
+            contextParts.push(`## Related Memory\n${fallbackContent}`);
+            const fallbackTokens = estimateTokens(fallbackContent);
+            contextTokens += fallbackTokens;
+            remaining -= fallbackTokens;
+            slots.context += fallbackTokens;
+            triggerFallbackUsed = true;
+            diagTriggerFallbackUsed = true;
+            diagRetrievalMode = 'fallback_knn';
+          }
+        } catch {
+          // Fallback is best-effort — never fail composition
         }
       }
     }
@@ -990,6 +1040,33 @@ export class Compositor {
       }
     }
 
+    // W3: Build compose diagnostics
+    let zeroResultReason: import('./types.js').ComposeDiagnostics['zeroResultReason'];
+    if (contextParts.length === 0) {
+      if (diagScopeFiltered > 0 && diagFactsIncluded === 0 && diagSemanticResults === 0) {
+        zeroResultReason = 'scope_filtered_all';
+      } else if (remaining <= 0) {
+        zeroResultReason = 'budget_exhausted';
+      } else if (diagTriggerHits === 0 && !diagTriggerFallbackUsed) {
+        zeroResultReason = 'no_trigger_no_fallback';
+      } else {
+        zeroResultReason = 'empty_corpus';
+      }
+    }
+
+    const diagnostics: import('./types.js').ComposeDiagnostics = {
+      triggerHits: diagTriggerHits,
+      triggerFallbackUsed: diagTriggerFallbackUsed,
+      factsIncluded: diagFactsIncluded,
+      semanticResultsIncluded: diagSemanticResults,
+      docChunksCollections: diagDocChunkCollections,
+      scopeFiltered: diagScopeFiltered,
+      zeroResultReason,
+      retrievalMode: diagRetrievalMode,
+    };
+
+    console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode}`);
+
     return {
       messages: outputMessages,
       tokenCount: totalTokens,
@@ -998,6 +1075,7 @@ export class Compositor {
       hasWarnings: warnings.length > 0,
       warnings,
       contextBlock: assembledContextBlock,
+      diagnostics,
     };
   }
 
@@ -1090,8 +1168,10 @@ export class Compositor {
     if (cached) return cached;
 
     switch (slot) {
-      case 'facts':
-        return this.buildFactsFromDb(agentId, libraryDb || this.libraryDb || db);
+      case 'facts': {
+        const result = this.buildFactsFromDb(agentId, sessionKey, libraryDb || this.libraryDb || db);
+        return result ? result[0] : null;
+      }
       case 'context':
         return this.buildCrossSessionContext(agentId, sessionKey, db, libraryDb || this.libraryDb);
       default:
@@ -1125,7 +1205,16 @@ export class Compositor {
   /**
    * Build facts content from library DB.
    */
-  private buildFactsFromDb(agentId: string, db: DatabaseSync | null): string | null {
+  /**
+   * Build facts content from library DB.
+   * Applies filterByScope (W1) to enforce retrieval access control.
+   * Returns [content, factCount, scopeFilteredCount] or null if DB unavailable.
+   */
+  private buildFactsFromDb(
+    agentId: string,
+    sessionKey: string,
+    db: DatabaseSync | null,
+  ): [string | null, number, number] | null {
     if (!db) return null;
 
     const tableExists = db.prepare(
@@ -1134,8 +1223,8 @@ export class Compositor {
 
     if (!tableExists || tableExists.cnt === 0) return null;
 
-    const rows = db.prepare(`
-      SELECT content, domain, confidence FROM facts
+    const rawRows = db.prepare(`
+      SELECT content, domain, confidence, agent_id, source_session_key AS session_key, scope FROM facts
       WHERE agent_id = ?
       AND superseded_by IS NULL
       AND (expires_at IS NULL OR expires_at > datetime('now'))
@@ -1147,13 +1236,31 @@ export class Compositor {
       content: string;
       domain: string | null;
       confidence: number;
+      agent_id: string | null;
+      session_key: string | null;
+      scope: string | null;
     }>;
 
-    if (rows.length === 0) return null;
+    if (rawRows.length === 0) return [null, 0, 0];
 
-    return rows
+    // W1: Apply scope filter — enforce retrieval access control
+    const ctx = { agentId, sessionKey };
+    const { allowed, filteredCount } = filterByScope(
+      rawRows.map(r => ({
+        ...r,
+        agentId: r.agent_id,
+        sessionKey: r.session_key,
+      })),
+      ctx,
+    );
+
+    if (allowed.length === 0) return [null, 0, filteredCount];
+
+    const content = allowed
       .map(r => `- [${r.domain || 'general'}] ${r.content}`)
       .join('\n');
+
+    return [content, allowed.length, filteredCount];
   }
 
   /**

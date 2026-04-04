@@ -633,6 +633,36 @@ Every council response includes:
   assert(fallbackCursor !== null, 'Fallback cursor from SQLite works after Redis eviction');
   assert(fallbackCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Fallback cursor data matches SQLite');
 
+  // ── W3: Diagnostics on ComposeResult ──
+  console.log('\n── W3: Diagnostics present on ComposeResult ──');
+
+  const diagResult = await compositor.compose({
+    agentId,
+    sessionKey,
+    tokenBudget: 50000,
+    provider: 'anthropic',
+    model: 'claude-opus-4-6',
+    includeFacts: true,
+    includeLibrary: true,
+    includeContext: true,
+  }, msgDb, libDb);
+
+  assert(diagResult.diagnostics !== undefined, 'W3: diagnostics object present on ComposeResult');
+  if (diagResult.diagnostics) {
+    assert(typeof diagResult.diagnostics.triggerHits === 'number',
+      `W3: triggerHits is a number (got ${diagResult.diagnostics.triggerHits})`);
+    assert(typeof diagResult.diagnostics.retrievalMode === 'string',
+      `W3: retrievalMode is a string (got ${diagResult.diagnostics.retrievalMode})`);
+    assert(typeof diagResult.diagnostics.factsIncluded === 'number',
+      `W3: factsIncluded is a number (got ${diagResult.diagnostics.factsIncluded})`);
+    assert(typeof diagResult.diagnostics.scopeFiltered === 'number',
+      `W3: scopeFiltered is a number (got ${diagResult.diagnostics.scopeFiltered})`);
+    assert(typeof diagResult.diagnostics.triggerFallbackUsed === 'boolean',
+      `W3: triggerFallbackUsed is a boolean (got ${diagResult.diagnostics.triggerFallbackUsed})`);
+    assert(['triggered', 'fallback_knn', 'fallback_fts', 'none'].includes(diagResult.diagnostics.retrievalMode),
+      `W3: retrievalMode is a valid enum value (got ${diagResult.diagnostics.retrievalMode})`);
+  }
+
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
   await hm.redis.flushPrefix();

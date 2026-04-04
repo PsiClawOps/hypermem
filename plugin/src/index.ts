@@ -528,7 +528,7 @@ function createHyperMemEngine(): ContextEngine {
       // by token count post-assembly, but limiting depth up front avoids
       // feeding the compactor a window it can't reduce.
       const effectiveBudget = tokenBudget ?? 90000;
-      const historyDepth = Math.min(200, Math.max(50, Math.floor((effectiveBudget * 0.5) / 500)));
+      const historyDepth = Math.min(250, Math.max(50, Math.floor((effectiveBudget * 0.65) / 500)));
 
       // ── Redis guardrail: trim history to token budget ────────────────────
       // Prevents model-switch bloat: if an agent previously ran on a larger
