@@ -721,13 +721,20 @@ export class Compositor {
       } else if (remaining > 400 && (this.vectorStore || libDb)) {
         // Trigger-miss fallback: no trigger fired — attempt bounded semantic retrieval
         // so there is never a silent zero-memory path on doc chunks.
+        // INVARIANT: this block is mutually exclusive with triggered-retrieval above.
+        // If refactored to run both paths, cap combined semantic budget to avoid double-recall.
         try {
-          const fallbackContent = await this.buildSemanticRecall(
-            lastMsg,
-            request.agentId,
-            Math.floor(remaining * 0.10),
-            libDb || undefined,
-          );
+          const fallbackContent = await Promise.race([
+            this.buildSemanticRecall(
+              lastMsg,
+              request.agentId,
+              Math.floor(remaining * 0.10),
+              libDb || undefined,
+            ),
+            new Promise<null>((_, reject) =>
+              setTimeout(() => reject(new Error('fallback_knn_timeout')), 500)
+            ),
+          ]);
           if (fallbackContent) {
             contextParts.push(`## Related Memory\n${fallbackContent}`);
             const fallbackTokens = estimateTokens(fallbackContent);
@@ -739,7 +746,7 @@ export class Compositor {
             diagRetrievalMode = 'fallback_knn';
           }
         } catch {
-          // Fallback is best-effort — never fail composition
+          // Fallback is best-effort — never fail composition (includes timeout)
         }
       }
     }
@@ -960,6 +967,10 @@ export class Compositor {
         zeroResultReason = 'budget_exhausted';
       } else if (diagTriggerHits === 0 && !diagTriggerFallbackUsed) {
         zeroResultReason = 'no_trigger_no_fallback';
+      } else if (diagFactsIncluded === 0 && diagSemanticResults === 0 && diagDocChunkCollections === 0) {
+        // Facts exist or retrieval was attempted but returned nothing — likely a retrieval bug
+        // rather than a genuinely empty corpus. Distinguish from 'empty_corpus' for observability.
+        zeroResultReason = 'unknown';
       } else {
         zeroResultReason = 'empty_corpus';
       }

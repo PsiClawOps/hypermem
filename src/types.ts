@@ -256,7 +256,7 @@ export interface ComposeDiagnostics {
    * Helps distinguish between "no triggers + no fallback", "empty corpus",
    * "budget exhausted", and "all items filtered by scope".
    */
-  zeroResultReason?: 'no_trigger_no_fallback' | 'empty_corpus' | 'budget_exhausted' | 'scope_filtered_all';
+  zeroResultReason?: 'no_trigger_no_fallback' | 'empty_corpus' | 'budget_exhausted' | 'scope_filtered_all' | 'unknown';
   /** The retrieval path that was used for doc chunks */
   retrievalMode: 'triggered' | 'fallback_knn' | 'fallback_fts' | 'none';
 }
