@@ -39,7 +39,9 @@ async function run() {
   try {
     hm = await HyperMem.create({
       dataDir: tmpDir,
+      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm-xagent:', sessionTTL: 60 },
     });
+    await hm.redis.flushPrefix();
 
     // ── Set up agents ──
     console.log('── Setting up agents ──');
@@ -184,8 +186,8 @@ async function run() {
 
     // ── Cleanup ──
     console.log('\n── Cleanup ──');
-    // Cleanup handled by tmpdir removal
-    assert(true, 'Cleaned up');
+    await hm.redis.flushPrefix();
+    assert(true, 'Redis cleaned');
 
   } catch (err) {
     console.error('\n💥 Test error:', err);

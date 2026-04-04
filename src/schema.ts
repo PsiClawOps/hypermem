@@ -1,5 +1,5 @@
 /**
- * hypermem Agent Message Schema
+ * HyperMem Agent Message Schema
  *
  * Per-agent database: ~/.openclaw/hypermem/agents/{agentId}/messages.db
  * Write-heavy, temporal, rotatable.
@@ -8,7 +8,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LATEST_SCHEMA_VERSION = 6;
+export const LATEST_SCHEMA_VERSION = 5;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -217,35 +217,6 @@ export function migrate(db: DatabaseSync): void {
     }
     db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(5, nowIso());
-  }
-
-  // v5 → v6: add topic_id to messages, add per-session topics table
-  if (currentVersion < 6) {
-    // Add topic_id column to messages (nullable TEXT)
-    const msgCols = (db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>)
-      .map(r => r.name);
-    if (!msgCols.includes('topic_id')) {
-      db.exec('ALTER TABLE messages ADD COLUMN topic_id TEXT');
-    }
-    // Add index on messages.topic_id
-    db.exec('CREATE INDEX IF NOT EXISTS idx_messages_topic_id ON messages(topic_id)');
-
-    // Add per-session topics table (in messages.db for session-scoped topic tracking)
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS topics (
-        id TEXT PRIMARY KEY,
-        session_key TEXT NOT NULL,
-        name TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        last_active_at INTEGER NOT NULL,
-        message_count INTEGER DEFAULT 0,
-        metadata TEXT
-      )
-    `);
-    db.exec('CREATE INDEX IF NOT EXISTS idx_topics_session_key ON topics(session_key)');
-
-    db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
-      .run(6, nowIso());
   }
 }
 

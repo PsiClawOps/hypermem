@@ -1,4 +1,4 @@
-# hypermem Architecture
+# HyperMem Architecture
 
 _Agent-centric memory that outlives sessions._
 
@@ -164,7 +164,7 @@ This means:
 `plugin/src/index.ts` — OpenClaw context engine plugin (replaces basic hook integration):
 
 ```
-gateway:startup     → Init hypermem, auto-rotate DBs, hydrate fleet cache
+gateway:startup     → Init HyperMem, auto-rotate DBs, hydrate fleet cache
 agent:bootstrap     → Warm session (history, facts, profile → Redis)
 context:assemble    → Full four-layer prompt assembly within token budget
 agent:afterTurn     → Ingest new messages to SQLite + Redis, trigger background indexer
@@ -227,13 +227,12 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 | Cross-session context boundary markers | WQ-20260402-001 | 🟡 OPEN | `buildCrossSessionContext()` renders flat previews, no per-message boundaries or sender identity. Incident 6. |
 | Cursor durability (SQLite dual-write) | — | 🟡 DEFERRED | Cursor TTL = 24h. Dual-write to SQLite required before background indexer reads cursor. Gate 2. |
 | Plugin type unification | — | 🟡 DEFERRED | Plugin uses dynamic imports; can't use TS types from core. Shims are intentional. Structural change needed. |
-| Strict topic mode: legacy NULL backfill | — | 🟡 DEFERRED | After ≥2 weeks of topic detection in production, run backfill to assign `topic_id` to legacy NULL messages, then narrow `getRecentMessagesByTopic()` to exclude NULL. Gate: topic detection must be stable and coverage >80% of new messages before narrowing. Tracked in `specs/DEFERRED.md`. |
 | ACA Step 4 — retrieval stubs replace static files | — | 🔲 PENDING | `systemPromptAddition` carries governance doc chunks instead of embedding full workspace files. Blocked on Step 3 ✅ |
 | ACA Step 5 — governance context assembly | — | 🔲 PENDING | Full on-demand assembly replaces static prompt injection. Requires Step 4. |
 
 ### Runtime Contract
 
-**Exclusive dispatch:** The OpenClaw runtime calls either `afterTurn()` OR `ingest()`/`ingestBatch()`, never both. Since hypermem implements `afterTurn`, it must handle message ingestion there. `ingest()` exists for API compatibility but is never called by the runtime in practice.
+**Exclusive dispatch:** The OpenClaw runtime calls either `afterTurn()` OR `ingest()`/`ingestBatch()`, never both. Since HyperMem implements `afterTurn`, it must handle message ingestion there. `ingest()` exists for API compatibility but is never called by the runtime in practice.
 
 **Provider translation:** The plugin sets `skipProviderTranslation: true` on compose requests. The compositor returns NeutralMessages; the plugin converts to AgentMessages. The runtime handles provider-specific translation. Two-stage translation (compositor → provider format → plugin → agent format) was the root cause of Incident 1 (silent tool call drops).
 

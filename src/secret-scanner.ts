@@ -1,5 +1,5 @@
 /**
- * hypermem Secret Scanner
+ * HyperMem Secret Scanner
  *
  * Lightweight regex-based gate to prevent secrets from leaking into
  * shared memory (visibility >= 'org'). Runs before any write that

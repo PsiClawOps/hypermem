@@ -1,5 +1,5 @@
 /**
- * hypermem System Registry Store
+ * HyperMem System Registry Store
  *
  * Server config, service states, operational flags.
  * Lives in the central library DB.

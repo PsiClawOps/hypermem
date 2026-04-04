@@ -1,5 +1,5 @@
 /**
- * hypermem Compositor
+ * HyperMem Compositor
  *
  * Assembles context for LLM calls by orchestrating all four memory layers:
  *   L1 Redis    — hot session working memory (system, identity, recent msgs)
@@ -33,140 +33,14 @@ import {
   TRIGGER_REGISTRY_VERSION,
   TRIGGER_REGISTRY_HASH,
 } from './trigger-registry.js';
-import { CacheLayer } from './cache.js';
-type AnyCache = CacheLayer;
+import { RedisLayer } from './redis.js';
 import { MessageStore } from './message-store.js';
-import { SessionTopicMap } from './session-topic-map.js';
 import { toProviderFormat } from './provider-translator.js';
 import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
 import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction-fence.js';
-import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
-import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
-import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderLightFOS, resolveOutputTier, buildActionVerificationSummary } from './fos-mod.js';
-import { KnowledgeStore } from './knowledge-store.js';
-import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
-import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
-
-/**
- * Model context window sizes by provider/model string (or partial match).
- * Used as fallback when tokenBudget is not passed by the runtime.
- * Order matters: first match wins. Partial substring match on the model string.
- */
-const MODEL_CONTEXT_WINDOWS: Array<{ pattern: string; tokens: number }> = [
-  // Anthropic
-  { pattern: 'claude-opus-4',    tokens: 200_000 },
-  { pattern: 'claude-sonnet-4',  tokens: 200_000 },
-  { pattern: 'claude-3-5',       tokens: 200_000 },
-  { pattern: 'claude-3-7',       tokens: 200_000 },
-  { pattern: 'claude',           tokens: 200_000 },
-  // OpenAI
-  { pattern: 'gpt-5',            tokens: 128_000 },
-  { pattern: 'gpt-4o',           tokens: 128_000 },
-  { pattern: 'gpt-4',            tokens: 128_000 },
-  { pattern: 'o3',               tokens: 128_000 },
-  { pattern: 'o4',               tokens: 128_000 },
-  // Google
-  { pattern: 'gemini-3.1-pro',   tokens: 1_000_000 },
-  { pattern: 'gemini-3.1-flash', tokens: 1_000_000 },
-  { pattern: 'gemini-2.5-pro',   tokens: 1_000_000 },
-  { pattern: 'gemini-2',        tokens: 1_000_000 },
-  { pattern: 'gemini',           tokens: 1_000_000 },
-  // Zhipu / GLM
-  { pattern: 'glm-5',            tokens: 131_072 },
-  { pattern: 'glm-4',            tokens: 131_072 },
-  // Alibaba / Qwen
-  { pattern: 'qwen3',            tokens: 262_144 },
-  { pattern: 'qwen',             tokens: 131_072 },
-  // DeepSeek
-  { pattern: 'deepseek-v3',      tokens: 131_072 },
-  { pattern: 'deepseek',         tokens: 131_072 },
-];
-
-/**
- * Resolve effective token budget from model string.
- * Returns the context window for the model, minus the configured reserve fraction
- * for output tokens and hypermem operational overhead.
- * Default reserve: 25% (leaves 75% for input context).
- * Falls back to defaultTokenBudget if no model match.
- */
-function resolveModelBudget(model: string | undefined, defaultBudget: number, reserve = 0.15): number {
-  if (!model) return defaultBudget;
-  const normalized = model.toLowerCase();
-  for (const entry of MODEL_CONTEXT_WINDOWS) {
-    if (normalized.includes(entry.pattern)) {
-      return Math.floor(entry.tokens * (1 - reserve));
-    }
-  }
-  return defaultBudget;
-}
-
-/**
- * Resolve the raw context window size for a model (no reserve applied).
- * Used as totalWindow for dynamic reserve calculation.
- * Falls back to defaultBudget / 0.85 (reverse of 15% reserve default) if no match.
- */
-function resolveModelWindow(model: string | undefined, defaultBudget: number): number {
-  if (!model) return Math.floor(defaultBudget / 0.85);
-  const normalized = model.toLowerCase();
-  for (const entry of MODEL_CONTEXT_WINDOWS) {
-    if (normalized.includes(entry.pattern)) {
-      return entry.tokens;
-    }
-  }
-  return Math.floor(defaultBudget / 0.85);
-}
-
-/**
- * Compute dynamic context window reserve based on recent turn cost.
- *
- * Reserve = clamp(avg_turn_cost × horizon / totalWindow, base, max)
- *
- * Returns the reserve fraction and diagnostics. When dynamic reserve
- * is clamped at max, sessionPressureHigh is set true so callers can
- * emit a warning or trigger checkpointing.
- */
-function computeDynamicReserve(
-  recentMessages: NeutralMessage[],
-  totalWindow: number,
-  config: CompositorConfig,
-): { reserve: number; avgTurnCost: number; dynamic: boolean; pressureHigh: boolean } {
-  const base = config.contextWindowReserve ?? 0.15;
-  const horizon = config.dynamicReserveTurnHorizon ?? 5;
-  const max = config.dynamicReserveMax ?? 0.50;
-  const enabled = config.dynamicReserveEnabled ?? true;
-
-  if (!enabled || recentMessages.length === 0 || totalWindow <= 0) {
-    return { reserve: base, avgTurnCost: 0, dynamic: false, pressureHigh: false };
-  }
-
-  // Sample the last 20 user+assistant messages for turn cost estimation.
-  // Tool messages are excluded — they're already compressed by the gradient
-  // and don't represent per-turn user intent cost.
-  const sample = recentMessages
-    .filter(m => m.role === 'user' || m.role === 'assistant')
-    .slice(-20);
-
-  if (sample.length === 0) {
-    return { reserve: base, avgTurnCost: 0, dynamic: false, pressureHigh: false };
-  }
-
-  const totalCost = sample.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
-  const avgTurnCost = Math.floor(totalCost / sample.length);
-  const safetyTokens = avgTurnCost * horizon;
-  const dynamicFrac = safetyTokens / totalWindow;
-
-  if (dynamicFrac <= base) {
-    return { reserve: base, avgTurnCost, dynamic: false, pressureHigh: false };
-  }
-
-  if (dynamicFrac >= max) {
-    return { reserve: max, avgTurnCost, dynamic: true, pressureHigh: true };
-  }
-
-  return { reserve: dynamicFrac, avgTurnCost, dynamic: true, pressureHigh: false };
-}
+import { rankKeystones, type KeystoneCandidate } from './keystone-scorer.js';
 
 const DEFAULT_CONFIG: CompositorConfig = {
   defaultTokenBudget: 90000,
@@ -179,136 +53,13 @@ const DEFAULT_CONFIG: CompositorConfig = {
   keystoneHistoryFraction: 0.2,
   keystoneMaxMessages: 15,
   keystoneMinSignificance: 0.5,
-  contextWindowReserve: 0.15,
-  dynamicReserveTurnHorizon: 5,
-  dynamicReserveMax: 0.50,
-  dynamicReserveEnabled: true,
 };
-
-// Tool gradient thresholds — controls how aggressively tool results are
-// truncated as they age out of the recent window.
-// Recent-turn policy (2026-04-07): protect turn 0 + turn 1, budget against a
-// conservative 120k planning window, and only head+tail trim large (>40k)
-// recent results when projected occupancy crosses the orange zone.
-const TOOL_GRADIENT_T0_TURNS = 2;   // current + 2 prior completed turns: full fidelity (matches OpenClaw keepLastAssistants: 3)
-const TOOL_GRADIENT_T1_TURNS = 4;   // turns 2-4: moderate truncation (was 3)
-const TOOL_GRADIENT_T2_TURNS = 7;   // turns 4-7: aggressive truncation (was 12)
-// T3 = turns 8+: one-liner stub
-const TOOL_GRADIENT_T1_CHAR_CAP = 6_000;   // per-message cap (was 8k)
-const TOOL_GRADIENT_T1_TURN_CAP = 12_000;  // per-turn-pair cap (was 16k)
-const TOOL_GRADIENT_T2_CHAR_CAP = 800;     // per-message cap (was 1k)
-const TOOL_GRADIENT_T2_TURN_CAP = 3_000;   // per-turn-pair cap (was 4k)
-const TOOL_GRADIENT_T3_CHAR_CAP = 150;     // oldest tier: stub only (was 200)
-const TOOL_GRADIENT_T3_TURN_CAP = 800;     // per-turn-pair cap (was 1k)
-const TOOL_GRADIENT_MAX_TAIL_CHARS = 3_000; // tail preserve budget for T1+
-const TOOL_GRADIENT_MIDDLE_MARKER = '\n[... tool output truncated ...]\n';
-const TOOL_PLANNING_BASELINE_WINDOW = 120_000;
-const TOOL_PLANNING_MIN_RESERVE_TOKENS = 24_000;
-const TOOL_PRESSURE_YELLOW = 0.75;
-const TOOL_PRESSURE_ORANGE = 0.80;
-const TOOL_PRESSURE_RED = 0.85;
-const TOOL_RECENT_OVERSIZE_CHAR_THRESHOLD = 40_000;
-const TOOL_RECENT_OVERSIZE_TARGET_CHARS = 40_000;
-const TOOL_RECENT_OVERSIZE_MAX_TAIL_CHARS = 12_000;
-const TOOL_TRIM_NOTE_PREFIX = '[hypermem_tool_result_trim';
 
 // ─── Trigger Registry ────────────────────────────────────────────
 // Moved to src/trigger-registry.ts (W5).
 // CollectionTrigger, DEFAULT_TRIGGERS, matchTriggers imported above.
 // Re-exported below for backward compatibility with existing consumers.
 export { CollectionTrigger, DEFAULT_TRIGGERS, matchTriggers } from './trigger-registry.js';
-
-// ─── Test-only exports (not part of public API) ───────────────────────────
-// These are exported solely for unit testing. Do not use in production code.
-export { getTurnAge, applyToolGradient, appendToolSummary, truncateWithHeadTail, applyTierPayloadCap, evictLargeToolResults };
-
-
-interface NeutralMessageCluster<T extends NeutralMessage> {
-  messages: T[];
-  tokenCost: number;
-}
-
-function clusterNeutralMessages<T extends NeutralMessage>(messages: T[]): NeutralMessageCluster<T>[] {
-  const clusters: NeutralMessageCluster<T>[] = [];
-
-  for (let i = 0; i < messages.length; i++) {
-    const current = messages[i];
-    const cluster: T[] = [current];
-
-    if (current.toolCalls && current.toolCalls.length > 0) {
-      const callIds = new Set(current.toolCalls.map(tc => tc.id).filter(Boolean));
-      let j = i + 1;
-      while (j < messages.length) {
-        const candidate = messages[j];
-        if (!candidate.toolResults || candidate.toolResults.length === 0) break;
-        const resultIds = candidate.toolResults.map(tr => tr.callId).filter(Boolean);
-        if (callIds.size > 0 && resultIds.length > 0 && !resultIds.some(id => callIds.has(id))) break;
-        cluster.push(candidate);
-        j++;
-      }
-      i = j - 1;
-    } else if (current.toolResults && current.toolResults.length > 0) {
-      let j = i + 1;
-      while (j < messages.length) {
-        const candidate = messages[j];
-        if (!candidate.toolResults || candidate.toolResults.length === 0 || (candidate.toolCalls && candidate.toolCalls.length > 0)) break;
-        cluster.push(candidate);
-        j++;
-      }
-      i = j - 1;
-    }
-
-    clusters.push({
-      messages: cluster,
-      tokenCost: cluster.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0),
-    });
-  }
-
-  return clusters;
-}
-
-
-/**
- * Public reshape helper: apply tool gradient then trim to fit within a token budget.
- *
- * Used by the plugin's budget-downshift pass to pre-process a Redis history window
- * after a model switch to a smaller context window, before the full compose pipeline
- * runs. Trims from oldest to newest until estimated token cost fits within
- * tokenBudget * 0.65 (using the standard char/4 heuristic).
- *
- * @param messages     NeutralMessage array from the Redis hot window
- * @param tokenBudget  Effective token budget for this session
- * @returns            Trimmed message array ready for setWindow()
- */
-export function applyToolGradientToWindow(
-  messages: NeutralMessage[],
-  tokenBudget: number,
-  totalWindowTokens?: number,
-): NeutralMessage[] {
-  const reshaped = applyToolGradient(messages, { totalWindowTokens });
-  const targetTokens = Math.floor(tokenBudget * 0.65);
-  const clusters = clusterNeutralMessages(reshaped);
-  let totalTokens = clusters.reduce((sum, cluster) => sum + cluster.tokenCost, 0);
-  let start = 0;
-  // walk oldest to newest, drop until we fit
-  while (totalTokens > targetTokens && start < clusters.length - 1) {
-    totalTokens -= clusters[start].tokenCost;
-    start++;
-  }
-  return clusters.slice(start).flatMap(cluster => cluster.messages);
-}
-
-/**
- * Canonical history must remain lossless for tool turns.
- *
- * If a window contains any structured tool calls or tool results, the caller
- * should treat applyToolGradientToWindow() as a view-only transform for the
- * current compose pass and avoid writing the reshaped messages back into the
- * canonical cache/history store.
- */
-export function canPersistReshapedHistory(messages: NeutralMessage[]): boolean {
-  return !messages.some(msg => hasToolContent(msg));
-}
 
 /**
  * Rough token estimation: ~4 chars per token for English text.
@@ -341,493 +92,133 @@ function estimateMessageTokens(msg: NeutralMessage): number {
   return tokens;
 }
 
-function parseToolArgs(argumentsJson: string): Record<string, unknown> {
-  try {
-    return JSON.parse(argumentsJson) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
-}
-
-function toolLabelFromCall(name: string, args: Record<string, unknown>): string {
-  switch (name) {
-    case 'read':
-      return `read ${(args.path ?? args.file_path ?? args.filePath ?? 'file') as string}`;
-    case 'write':
-      return `write ${(args.path ?? args.file ?? args.filePath ?? 'file') as string}`;
-    case 'edit':
-      return `edit ${(args.path ?? args.file ?? args.filePath ?? 'file') as string}`;
-    case 'exec':
-      return `exec ${String(args.command ?? '').slice(0, 80) || 'command'}`;
-    case 'web_search':
-      return `web_search ${String(args.query ?? '').slice(0, 80) || 'query'}`;
-    case 'web_fetch':
-      return `web_fetch ${String(args.url ?? '').slice(0, 80) || 'url'}`;
-    case 'sessions_send':
-      return `sessions_send ${String(args.sessionKey ?? args.label ?? '').slice(0, 80) || 'target'}`;
-    case 'memory_search':
-      return `memory_search ${String(args.query ?? '').slice(0, 80) || 'query'}`;
-    default:
-      return name;
-  }
-}
-
-/**
- * Strip OpenClaw's external-content security wrapper from tool results before truncation.
- * web_fetch results are wrapped in <<<BEGIN_EXTERNAL_UNTRUSTED_CONTENT ... >>> blocks.
- * That preamble consumes the entire head budget in truncateWithHeadTail, leaving only
- * the security notice + last sentence visible — the actual body becomes the middle marker.
- * Strip the wrapper first so truncation operates on the real content.
- */
-function stripSecurityPreamble(content: string): string {
-  // Match: <<<BEGIN_EXTERNAL_UNTRUSTED_CONTENT id="...">\n...\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id="...">>>
-  // Strip opening tag line and closing tag line; keep the content between.
-  const stripped = content.replace(
-    /^[\s\S]*?<<<BEGIN_EXTERNAL_UNTRUSTED_CONTENT[^\n]*>>>?\n?/,
-    ''
-  ).replace(
-    /\n?<<<END_EXTERNAL_UNTRUSTED_CONTENT[^\n]*>>>?[\s\S]*$/,
-    ''
-  );
-  // If stripping removed everything or nearly everything, return original.
-  return stripped.trim().length > 20 ? stripped.trim() : content;
-}
-
-// Minimum floor: if trimming would leave less than 30% of original content, return a
-// stripped sentinel instead of a misleading fragment. A partial result that looks
-// complete is worse than a clear signal that the result was dropped.
-// Applied only in applyTierPayloadCap (pressure-driven trimming), not in structural
-// truncation paths where head+tail is always semantically useful.
-const TOOL_GRADIENT_MIN_USEFUL_FRACTION = 0.30;
-
-function truncateWithHeadTail(content: string, maxChars: number, maxTailChars = TOOL_GRADIENT_MAX_TAIL_CHARS): string {
-  if (content.length <= maxChars) return content;
-  const tailBudget = Math.min(Math.floor(maxChars * 0.30), maxTailChars);
-  const headBudget = Math.max(0, maxChars - tailBudget - TOOL_GRADIENT_MIDDLE_MARKER.length);
-  return content.slice(0, headBudget) + TOOL_GRADIENT_MIDDLE_MARKER + content.slice(-tailBudget);
-}
-
-function truncateHead(content: string, maxChars: number): string {
-  if (content.length <= maxChars) return content;
-  const marker = '…';
-  const keep = Math.max(0, maxChars - marker.length);
-  return content.slice(0, keep) + marker;
-}
-
-function firstNonEmptyLine(content: string): string {
-  const line = content.split('\n').find(l => l.trim().length > 0) ?? '';
-  return line.trim();
-}
-
-function normalizeInline(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-function hostFromUrl(raw: string): string {
-  try {
-    return new URL(raw).hostname;
-  } catch {
-    return raw;
-  }
-}
-
-function extractTopHeading(content: string): string {
-  const heading = content.split('\n').find(line => /^#{1,3}\s+/.test(line.trim()));
-  return heading ? heading.replace(/^#{1,3}\s+/, '').trim() : '';
-}
-
-function extractExitCode(content: string): string | null {
-  const match = content.match(/(?:exit code|exit|code)\s*[:=]?\s*(\d+)/i);
-  return match ? match[1] : null;
-}
-
-function estimateSearchResultCount(content: string): number | null {
-  const jsonMatch = content.match(/"results"\s*:\s*\[/);
-  if (jsonMatch) {
-    const titles = content.match(/"title"\s*:/g);
-    if (titles?.length) return titles.length;
-  }
-  const resultLines = content.match(/\bSource:\b|\bsiteName\b|\btitle\b/gi);
-  return resultLines?.length ? Math.min(resultLines.length, 20) : null;
-}
-
-function summarizeOutcome(label: string, content: string, maxChars: number): string {
-  const firstLine = firstNonEmptyLine(content);
-  const base = firstLine ? `${label} — ${firstLine}` : `${label} — ${content.length} chars`;
-  return truncateHead(base, maxChars);
-}
-
-function summarizeToolInteraction(name: string, args: Record<string, unknown>, content: string, maxChars: number, compact = false): string {
-  const line = normalizeInline(firstNonEmptyLine(content));
-  switch (name) {
-    case 'read': {
-      const path = String(args.path ?? args.file_path ?? args.filePath ?? 'file');
-      const heading = extractTopHeading(content);
-      const detail = heading || line || `${content.length} chars`;
-      return truncateHead(`Read ${path} — ${detail}`, maxChars);
-    }
-    case 'exec': {
-      const cmd = String(args.command ?? 'command').slice(0, compact ? 40 : 80);
-      const exitCode = extractExitCode(content);
-      const status = exitCode ? `exit ${exitCode}` : (/(error|failed|timeout|timed out)/i.test(content) ? 'failed' : 'completed');
-      const detail = line && !/^exit\s+\d+$/i.test(line) ? `, ${line}` : '';
-      return truncateHead(`Ran ${cmd} — ${status}${detail}`, maxChars);
-    }
-    case 'web_search': {
-      const query = String(args.query ?? 'query').slice(0, compact ? 40 : 80);
-      const count = estimateSearchResultCount(content);
-      const heading = extractTopHeading(content);
-      const detail = heading || line;
-      const countText = count ? ` — ${count} results` : '';
-      const summary = compact
-        ? `Searched '${query}'${countText}`
-        : `Searched '${query}'${countText}${detail ? `, top: ${detail}` : ''}`;
-      return truncateHead(summary, maxChars);
-    }
-    case 'web_fetch': {
-      const url = String(args.url ?? 'url');
-      const host = hostFromUrl(url);
-      const heading = extractTopHeading(content);
-      const detail = heading || line || `${content.length} chars`;
-      return truncateHead(`Fetched ${host} — ${detail}`, maxChars);
-    }
-    case 'memory_search': {
-      const query = String(args.query ?? 'query').slice(0, compact ? 40 : 80);
-      const count = estimateSearchResultCount(content);
-      return truncateHead(`Searched memory for '${query}'${count ? ` — ${count} hits` : ''}${line ? `, top: ${line}` : ''}`, maxChars);
-    }
-    default: {
-      const label = toolLabelFromCall(name, args);
-      return compact
-        ? truncateHead(`${label} — ${line || `${content.length} chars`}`, maxChars)
-        : (() => {
-            const prefix = `[${label}] `;
-            const available = Math.max(40, maxChars - prefix.length);
-            return prefix + truncateWithHeadTail(content, available);
-          })();
-    }
-  }
-}
-
-function buildTier2Envelope(label: string, content: string, maxChars: number, name?: string, args?: Record<string, unknown>): string {
-  if (name && args) return summarizeToolInteraction(name, args, content, maxChars, false);
-  const prefix = `[${label}] `;
-  const available = Math.max(40, maxChars - prefix.length);
-  return prefix + truncateWithHeadTail(content, available);
-}
-
-function buildTier3Envelope(label: string, content: string, maxChars: number, name?: string, args?: Record<string, unknown>): string {
-  if (name && args) return `[${summarizeToolInteraction(name, args, content, maxChars - 2, true)}]`;
-  return `[${summarizeOutcome(label, content, maxChars - 2)}]`;
-}
-
 /**
  * Extract a heuristic prose summary from a tool call/result pair.
- * Used when tool payloads are removed but continuity should remain.
+ * Returns a natural-language sentence (~15-30 tokens) instead of raw payloads.
+ * Used for Tier 2 tool treatment in applyToolGradient().
  */
-function extractToolProseSummary(msg: NeutralMessage, perResultCap: number, compact: boolean = false): string {
+function extractToolProseSummary(msg: NeutralMessage): string {
   const parts: string[] = [];
 
   if (msg.toolCalls && msg.toolCalls.length > 0) {
     for (const tc of msg.toolCalls) {
-      const args = parseToolArgs(tc.arguments);
-      const label = toolLabelFromCall(tc.name, args);
+      let args: Record<string, unknown> = {};
+      try { args = JSON.parse(tc.arguments); } catch { /* best-effort */ }
+
       const resultContent = msg.toolResults?.find(r => r.callId === tc.id)?.content ?? '';
-      if (resultContent) {
-        parts.push(compact
-          ? buildTier3Envelope(label, resultContent, perResultCap, tc.name, args)
-          : buildTier2Envelope(label, resultContent, perResultCap, tc.name, args));
-      } else {
-        parts.push(compact ? `[${truncateHead(label, perResultCap - 2)}]` : label);
+      const resultKB = resultContent ? `${(resultContent.length / 1024).toFixed(1)}KB` : '';
+
+      switch (tc.name) {
+        case 'read': {
+          const p = (args.path ?? args.file_path ?? args.filePath ?? '') as string;
+          parts.push(p ? `Read ${p}${resultKB ? ` (${resultKB})` : ''}` : 'Read a file');
+          break;
+        }
+        case 'write': {
+          const p = (args.path ?? args.file ?? args.filePath ?? '') as string;
+          parts.push(p ? `Wrote ${p}${resultKB ? ` (${resultKB})` : ''}` : 'Wrote a file');
+          break;
+        }
+        case 'edit': {
+          const p = (args.path ?? args.file ?? args.filePath ?? '') as string;
+          parts.push(p ? `Edited ${p}` : 'Edited a file');
+          break;
+        }
+        case 'exec': {
+          const cmd = ((args.command ?? '') as string).slice(0, 60);
+          const firstLine = resultContent.split('\n')[0]?.slice(0, 80) ?? '';
+          parts.push(cmd ? `Ran ${cmd}${firstLine ? ` — ${firstLine}` : ''}` : 'Ran a command');
+          break;
+        }
+        case 'web_search': {
+          const q = (args.query ?? '') as string;
+          parts.push(q ? `Searched '${q.slice(0, 60)}'` : 'Searched the web');
+          break;
+        }
+        case 'web_fetch': {
+          const u = (args.url ?? '') as string;
+          parts.push(u ? `Fetched ${u.slice(0, 80)}` : 'Fetched a URL');
+          break;
+        }
+        case 'sessions_send': {
+          const target = (args.sessionKey ?? args.label ?? '') as string;
+          parts.push(target ? `Sent message to ${target}` : 'Sent an inter-session message');
+          break;
+        }
+        case 'memory_search': {
+          const q = (args.query ?? '') as string;
+          parts.push(q ? `Searched memory for '${q.slice(0, 60)}'` : 'Searched memory');
+          break;
+        }
+        default:
+          parts.push(`Used ${tc.name}`);
       }
     }
   } else if (msg.toolResults && msg.toolResults.length > 0) {
-    for (const tr of msg.toolResults) {
-      const label = tr.name || 'tool_result';
-      const args: Record<string, unknown> = {};
-      parts.push(compact
-        ? buildTier3Envelope(label, tr.content ?? '', perResultCap, tr.name || 'tool_result', args)
-        : buildTier2Envelope(label, tr.content ?? '', perResultCap, tr.name || 'tool_result', args));
-    }
+    // Result-only message (no matching call visible)
+    const content = msg.toolResults[0].content?.slice(0, 100) ?? '';
+    parts.push(content ? `Tool result: ${content}` : 'Tool result received');
   }
 
-  return truncateHead(parts.join('; '), Math.max(perResultCap, 120));
-}
-
-function appendToolSummary(textContent: string | null, summary: string): string {
-  const existing = textContent ?? '';
-  if (!summary) return existing;
-  return existing ? `${existing}\n[Tools: ${summary}]` : summary;
-}
-
-function getTurnAge(messages: NeutralMessage[], index: number): number {
-  let turnAge = 0;
-  for (let i = messages.length - 1; i > index; i--) {
-    const candidate = messages[i];
-    if (candidate?.role === 'user' && (!candidate.toolResults || candidate.toolResults.length === 0)) {
-      turnAge++;
-    }
-  }
-  return turnAge;
-}
-
-function hasToolContent(msg: NeutralMessage): boolean {
-  return Boolean((msg.toolCalls && msg.toolCalls.length > 0) || (msg.toolResults && msg.toolResults.length > 0));
-}
-
-type ToolPressureZone = 'green' | 'yellow' | 'orange' | 'red';
-
-interface ToolPressureState {
-  planningWindowTokens: number;
-  reserveTokens: number;
-  projectedTokens: number;
-  occupancy: number;
-  zone: ToolPressureZone;
-}
-
-function resolveToolPlanningWindow(totalWindowTokens?: number): number {
-  const actualWindow = totalWindowTokens && totalWindowTokens > 0
-    ? totalWindowTokens
-    : TOOL_PLANNING_BASELINE_WINDOW;
-  return Math.min(actualWindow, TOOL_PLANNING_BASELINE_WINDOW);
-}
-
-function computeToolPressureState(messages: NeutralMessage[], totalWindowTokens?: number): ToolPressureState {
-  const planningWindowTokens = resolveToolPlanningWindow(totalWindowTokens);
-  const reserveTokens = Math.max(
-    TOOL_PLANNING_MIN_RESERVE_TOKENS,
-    Math.floor(planningWindowTokens * 0.10),
-  );
-  const usedTokens = messages.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
-  const projectedTokens = usedTokens + reserveTokens;
-  const occupancy = planningWindowTokens > 0 ? projectedTokens / planningWindowTokens : 1;
-
-  let zone: ToolPressureZone = 'green';
-  if (occupancy > TOOL_PRESSURE_RED) zone = 'red';
-  else if (occupancy > TOOL_PRESSURE_ORANGE) zone = 'orange';
-  else if (occupancy > TOOL_PRESSURE_YELLOW) zone = 'yellow';
-
-  return {
-    planningWindowTokens,
-    reserveTokens,
-    projectedTokens,
-    occupancy,
-    zone,
-  };
-}
-
-function isStructuredTrimNote(content: string): boolean {
-  return content.startsWith(TOOL_TRIM_NOTE_PREFIX);
-}
-
-function buildRecentTrimNote(
-  originalChars: number,
-  keptHeadChars: number,
-  keptTailChars: number,
-  pressure: ToolPressureState,
-  resultId?: string,
-): string {
-  const parts = [
-    TOOL_TRIM_NOTE_PREFIX,
-    'partial_result=true',
-    'reason=oversize_turn0_trim',
-    `original_chars=${originalChars}`,
-    `kept_head_chars=${keptHeadChars}`,
-    `kept_tail_chars=${keptTailChars}`,
-    `projected_occupancy_pct=${Math.round(pressure.occupancy * 100)}`,
-    `planning_window_tokens=${pressure.planningWindowTokens}`,
-    `reserve_tokens=${pressure.reserveTokens}`,
-    'retry_recommended=true',
-  ];
-  if (resultId) parts.push(`result_id=${resultId}`);
-  parts.push(']');
-  return parts.join(' ');
-}
-
-function countHeadTailChars(content: string): { headChars: number; tailChars: number } {
-  const markerIdx = content.indexOf(TOOL_GRADIENT_MIDDLE_MARKER);
-  if (markerIdx === -1) {
-    return { headChars: content.length, tailChars: 0 };
-  }
-  return {
-    headChars: markerIdx,
-    tailChars: content.length - markerIdx - TOOL_GRADIENT_MIDDLE_MARKER.length,
-  };
-}
-
-function trimRecentToolResult(
-  content: string,
-  pressure: ToolPressureState,
-  resultId?: string,
-): string {
-  if (isStructuredTrimNote(content)) return content;
-
-  const stripped = stripSecurityPreamble(content);
-  const baseOriginal = stripped.length > 0 ? stripped : content;
-  const noteSkeleton = buildRecentTrimNote(baseOriginal.length, 0, 0, pressure, resultId);
-  const availableChars = Math.max(
-    2_000,
-    TOOL_RECENT_OVERSIZE_TARGET_CHARS - noteSkeleton.length - 1,
-  );
-  const truncated = truncateWithHeadTail(baseOriginal, availableChars, TOOL_RECENT_OVERSIZE_MAX_TAIL_CHARS);
-  const { headChars, tailChars } = countHeadTailChars(truncated);
-  const note = buildRecentTrimNote(baseOriginal.length, headChars, tailChars, pressure, resultId);
-  return `${note}
-${truncated}`;
-}
-
-function protectRecentToolContent<T extends NeutralMessage>(msg: T, pressure: ToolPressureState): T {
-  if (!msg.toolResults || msg.toolResults.length === 0) return msg;
-
-  const shouldEmergencyTrim = pressure.zone === 'orange' || pressure.zone === 'red';
-  const toolResults = msg.toolResults.map(result => {
-    const content = result.content ?? '';
-    if (!content) return result;
-    if (!shouldEmergencyTrim) return result;
-    if (content.length <= TOOL_RECENT_OVERSIZE_CHAR_THRESHOLD) return result;
-    return {
-      ...result,
-      content: trimRecentToolResult(content, pressure, result.callId || result.name || undefined),
-    };
-  });
-
-  return { ...msg, toolResults } as T;
-}
-
-function applyTierPayloadCap(msg: NeutralMessage, perResultCap: number, perTurnCap?: number, usedSoFar: number = 0, maxTailChars = TOOL_GRADIENT_MAX_TAIL_CHARS): { msg: NeutralMessage; usedChars: number } {
-  const toolResults = msg.toolResults?.map(result => {
-    let content = result.content ?? '';
-    if (content.length > perResultCap) {
-      // Strip security preamble before truncation so it doesn't consume the head budget.
-      // web_fetch results wrapped in <<<EXTERNAL_UNTRUSTED_CONTENT>>> blocks would otherwise
-      // render the truncated result as: [security notice] + [middle marker] + [last line].
-      const stripped = stripSecurityPreamble(content);
-      // Floor check (TUNE-015): if the cap would leave less than 30% of the stripped content
-      // AND less than 2000 chars absolute, return a sentinel instead of a misleading fragment.
-      // Partial results that look complete are worse than a clear dropped-result signal.
-      // The absolute floor prevents the sentinel from firing on large natural truncations
-      // (e.g., 110k → 16k is a meaningful slice, not a misleading fragment).
-      if (perResultCap < stripped.length * TOOL_GRADIENT_MIN_USEFUL_FRACTION && perResultCap < 2_000) {
-        content = `[result too large for current context budget \u2014 ${stripped.length} chars stripped]`;
-      } else {
-        // Reserve space for the \n[trimmed] marker within the cap so the total
-        // content length stays within perResultCap and doesn't overflow the
-        // per-turn aggregate cap when multiple results are truncated.
-        const TRIMMED_MARKER = '\n[trimmed]';
-        content = truncateWithHeadTail(stripped, perResultCap - TRIMMED_MARKER.length, maxTailChars) + TRIMMED_MARKER;
-      }
-    }
-    return { ...result, content };
-  }) ?? null;
-
-  let usedChars = usedSoFar + (toolResults?.reduce((sum, r) => sum + (r.content?.length ?? 0), 0) ?? 0);
-  if (perTurnCap != null && usedChars > perTurnCap) {
-    const downgradeSummary = extractToolProseSummary(msg, TOOL_GRADIENT_T2_CHAR_CAP, false);
-    return {
-      msg: {
-        ...msg,
-        textContent: appendToolSummary(msg.textContent, downgradeSummary),
-        toolCalls: null,
-        toolResults: null,
-      },
-      usedChars: usedSoFar + downgradeSummary.length,
-    };
-  }
-
-  return {
-    msg: { ...msg, toolResults },
-    usedChars,
-  };
-}
-
-/**
- * Evict tool results exceeding 800 tokens (~3200 chars) before the history
- * budget-fit loop. Large stale results waste budget; replace them with a
- * stub so consumers know the result existed and can re-run if needed.
- *
- * Applied to the already-gradient-processed history before window selection.
- * Does NOT affect turn 0 or turn 1.
- */
-const TOOL_RESULT_EVICTION_CHAR_THRESHOLD = 3_200; // ~800 tokens at 4 chars/token
-
-function evictLargeToolResults<T extends NeutralMessage>(messages: T[]): T[] {
-  return messages.map((msg, idx) => {
-    // Never evict from the protected recent-turn window.
-    const turnAge = getTurnAge(messages, idx);
-    if (turnAge <= TOOL_GRADIENT_T0_TURNS) return msg;
-    if (!msg.toolResults || msg.toolResults.length === 0) return msg;
-
-    const evicted = msg.toolResults.map(result => {
-      const content = result.content ?? '';
-      if (content.length <= TOOL_RESULT_EVICTION_CHAR_THRESHOLD) return result;
-      const approxKTokens = Math.round(content.length / 4 / 1000);
-      return {
-        ...result,
-        content: `[tool result evicted: ~${approxKTokens}k tokens \u2014 use memory_search or re-run if needed]`,
-      };
-    });
-    return { ...msg, toolResults: evicted };
-  }) as T[];
+  return parts.join('; ');
 }
 
 /**
  * Apply gradient tool treatment to a message array.
  *
- * Tiers are based on turn age, where turn age is the number of newer user
- * messages after the current message.
+ * Tiers (newest-to-oldest):
+ *   Tier 1 — last maxRecentToolPairs: verbatim (untouched)
+ *   Tier 2 — next maxProseToolPairs:  heuristic prose stub replaces tool payloads
+ *   Tier 3 — beyond:                 tool payloads nulled, text content preserved
+ *
+ * Message text (assistant reasoning, user text) is NEVER modified.
+ * This pass runs before the budget loop so estimateMessageTokens() measures
+ * the actual cost that will be submitted, not the pre-transform cost.
  */
-function applyToolGradient<T extends NeutralMessage>(messages: T[], opts?: { totalWindowTokens?: number }): T[] {
-  const result = [...messages] as T[];
-  const pressure = computeToolPressureState(messages, opts?.totalWindowTokens);
-  const perTurnUsage = new Map<number, { t0: number; t1: number; t2: number; t3: number }>();
+function applyToolGradient(
+  messages: NeutralMessage[],
+  maxRecentToolPairs: number,
+  maxProseToolPairs: number,
+): NeutralMessage[] {
+  let toolPairsSeen = 0;
 
+  // Walk newest→oldest to assign tiers, transform in place (new objects)
+  const result = [...messages];
   for (let i = result.length - 1; i >= 0; i--) {
     const msg = result[i];
-    if (!hasToolContent(msg)) continue;
+    const hasToolContent = (msg.toolCalls && msg.toolCalls.length > 0) ||
+                           (msg.toolResults && msg.toolResults.length > 0);
+    if (!hasToolContent) continue;
 
-    const turnAge = getTurnAge(result, i);
-    const usage = perTurnUsage.get(turnAge) ?? { t0: 0, t1: 0, t2: 0, t3: 0 };
+    toolPairsSeen++;
 
-    if (turnAge <= TOOL_GRADIENT_T0_TURNS) {
-      // T0/T1: preserve full recent tool results unless we hit the conservative
-      // orange/red pressure zones and the payload itself is oversized (>40k).
-      result[i] = protectRecentToolContent(msg, pressure) as T;
-    } else if (turnAge <= TOOL_GRADIENT_T1_TURNS) {
-      const capped = applyTierPayloadCap(msg, TOOL_GRADIENT_T1_CHAR_CAP, TOOL_GRADIENT_T1_TURN_CAP, usage.t1);
-      usage.t1 = capped.usedChars;
-      result[i] = capped.msg as T;
-    } else if (turnAge <= TOOL_GRADIENT_T2_TURNS) {
-      const summary = extractToolProseSummary(msg, TOOL_GRADIENT_T2_CHAR_CAP, false);
-      const allowed = Math.max(0, TOOL_GRADIENT_T2_TURN_CAP - usage.t2);
-      const boundedSummary = truncateHead(summary, Math.min(TOOL_GRADIENT_T2_CHAR_CAP, allowed || TOOL_GRADIENT_T3_CHAR_CAP));
-      usage.t2 += boundedSummary.length;
+    if (toolPairsSeen <= maxRecentToolPairs) {
+      // Tier 1: verbatim — no change
+      continue;
+    } else if (toolPairsSeen <= maxRecentToolPairs + maxProseToolPairs) {
+      // Tier 2: prose stub
+      const prose = extractToolProseSummary(msg);
       result[i] = {
         ...msg,
-        textContent: appendToolSummary(msg.textContent, boundedSummary),
+        textContent: prose || msg.textContent,  // prose replaces payload; fallback to existing text
         toolCalls: null,
         toolResults: null,
-      } as T;
+      };
     } else {
-      const summary = extractToolProseSummary(msg, TOOL_GRADIENT_T3_CHAR_CAP, true);
-      const allowed = Math.max(0, TOOL_GRADIENT_T3_TURN_CAP - usage.t3);
-      const boundedSummary = truncateHead(summary, Math.min(TOOL_GRADIENT_T3_CHAR_CAP, allowed || TOOL_GRADIENT_T3_CHAR_CAP));
-      usage.t3 += boundedSummary.length;
+      // Tier 3: drop tool payload entirely, preserve text
       result[i] = {
         ...msg,
-        textContent: appendToolSummary(msg.textContent, boundedSummary),
         toolCalls: null,
         toolResults: null,
-      } as T;
+      };
     }
-
-    perTurnUsage.set(turnAge, usage);
   }
 
   return result;
 }
 
 export interface CompositorDeps {
-  cache: AnyCache;
+  redis: RedisLayer;
   vectorStore?: VectorStore | null;
   libraryDb?: DatabaseSync | null;
   /** Custom trigger registry; defaults to DEFAULT_TRIGGERS if not provided */
@@ -839,25 +230,28 @@ let _registryLogged = false;
 
 export class Compositor {
   private readonly config: CompositorConfig;
-  private readonly cache: AnyCache;
+  private readonly redis: RedisLayer;
   private vectorStore: VectorStore | null;
   private readonly libraryDb: DatabaseSync | null;
   private readonly triggerRegistry: CollectionTrigger[];
-  /** Cached org registry loaded from fleet_agents at construction time. */
-  private _orgRegistry: OrgRegistry;
 
   constructor(
-    deps: CompositorDeps,
+    deps: CompositorDeps | RedisLayer,
     config?: Partial<CompositorConfig>
   ) {
-    this.cache = deps.cache;
-    this.vectorStore = deps.vectorStore || null;
-    this.libraryDb = deps.libraryDb || null;
-    this.triggerRegistry = deps.triggerRegistry || DEFAULT_TRIGGERS;
-    // Load org registry from DB on init; fall back to hardcoded if DB empty.
-    this._orgRegistry = this.libraryDb
-      ? buildOrgRegistryFromDb(this.libraryDb)
-      : defaultOrgRegistry();
+    // Accept either old-style (RedisLayer) or new-style (CompositorDeps)
+    if (deps instanceof RedisLayer) {
+      console.warn('[compositor] DEPRECATED: Compositor(RedisLayer) constructor is deprecated. Pass CompositorDeps instead. Vector search and library DB are disabled in legacy mode.');
+      this.redis = deps;
+      this.vectorStore = null;
+      this.libraryDb = null;
+      this.triggerRegistry = DEFAULT_TRIGGERS;
+    } else {
+      this.redis = deps.redis;
+      this.vectorStore = deps.vectorStore || null;
+      this.libraryDb = deps.libraryDb || null;
+      this.triggerRegistry = deps.triggerRegistry || DEFAULT_TRIGGERS;
+    }
     this.config = { ...DEFAULT_CONFIG, ...config };
     if (!_registryLogged) {
       logRegistryStartup();
@@ -867,30 +261,10 @@ export class Compositor {
 
   /**
    * Set or replace the vector store after construction.
-   * Called by hypermem.create() once sqlite-vec is confirmed available.
+   * Called by HyperMem.create() once sqlite-vec is confirmed available.
    */
   setVectorStore(vs: VectorStore): void {
     this.vectorStore = vs;
-  }
-
-  /**
-   * Hot-reload the org registry from the fleet_agents table.
-   * Call after fleet membership changes (new agent, org restructure)
-   * to pick up the latest without a full restart.
-   * Falls back to the current cached registry if the DB is unavailable.
-   */
-  refreshOrgRegistry(): OrgRegistry {
-    if (this.libraryDb) {
-      this._orgRegistry = buildOrgRegistryFromDb(this.libraryDb);
-    }
-    return this._orgRegistry;
-  }
-
-  /**
-   * Return the currently cached org registry.
-   */
-  get orgRegistry(): OrgRegistry {
-    return this._orgRegistry;
   }
 
   /**
@@ -910,19 +284,7 @@ export class Compositor {
   async compose(request: ComposeRequest, db: DatabaseSync, libraryDb?: DatabaseSync): Promise<ComposeResult> {
     const store = new MessageStore(db);
     const libDb = libraryDb || this.libraryDb;
-
-    // Dynamic reserve: use a lightweight SQLite sample to estimate avg turn cost
-    // BEFORE assembling the full context. This gives us the reserve fraction we
-    // need to compute the effective token budget at the start of compose.
-    // Full history assembly happens later in the pipeline.
-    const totalWindow = resolveModelWindow(request.model, this.config.defaultTokenBudget);
-    const sampleConv = store.getConversation(request.sessionKey);
-    const sampleMessages: NeutralMessage[] = sampleConv
-      ? (store.getRecentMessages(sampleConv.id, 40) as NeutralMessage[])
-      : [];
-    const { reserve: dynamicReserve, avgTurnCost, dynamic: isDynamic, pressureHigh } =
-      computeDynamicReserve(sampleMessages, totalWindow, this.config);
-    const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget, dynamicReserve);
+    const budget = request.tokenBudget || this.config.defaultTokenBudget;
     let remaining = budget;
     const warnings: string[] = [];
     const slots: SlotTokenCounts = {
@@ -976,96 +338,13 @@ export class Compositor {
       remaining -= tokens;
     }
 
-    // ─── Stable Output Profile Prefix ──────────────────────────
-    // Keep deterministic output instructions on the static side of the cache
-    // boundary so Anthropic and OpenAI warm-prefix caching can reuse them.
-    if (remaining > 100 && request.includeLibrary !== false) {
-      const fosEnabled = this.config?.enableFOS !== false;
-      const modEnabled = this.config?.enableMOD !== false;
-      const outputTier = resolveOutputTier(
-        (this.config?.outputProfile ?? this.config?.outputStandard) as any,
-        fosEnabled,
-        modEnabled
-      );
-
-      const stableOutputParts: string[] = [];
-
-      if (outputTier.tier === 'light') {
-        stableOutputParts.push(renderLightFOS().join('\n'));
-      } else if (libDb) {
-        if (outputTier.fos) {
-          const fos = getActiveFOS(libDb);
-          if (fos) {
-            const fosContent = renderFOS(fos).join('\n');
-            if (fosContent.trim()) stableOutputParts.push(fosContent);
-          }
-        }
-
-        if (outputTier.mod) {
-          const mod = matchMOD(request.model, libDb);
-          if (mod) {
-            const modContent = renderMOD(mod, null, request.model || '').join('\n');
-            if (modContent.trim()) stableOutputParts.push(modContent);
-          }
-        }
-      }
-
-      if (stableOutputParts.length > 0) {
-        const stableOutputContent = stableOutputParts.join('\n\n');
-        const stableOutputTokens = estimateTokens(stableOutputContent);
-        if (stableOutputTokens <= remaining) {
-          messages.push({
-            role: 'system',
-            textContent: stableOutputContent,
-            toolCalls: null,
-            toolResults: null,
-          });
-          slots.system += stableOutputTokens;
-          remaining -= stableOutputTokens;
-        }
-      }
-    }
-
     // ─── Conversation History ──────────────────────────────────
-    let diagCrossTopicKeystones = 0;
-    // Hoisted: activeTopicId/name resolved inside history block, used for window dual-write (VS-1) and wiki page injection
-    let composedActiveTopicId: string | undefined;
-    let composedActiveTopicName: string | undefined;
     if (request.includeHistory !== false) {
-      // P3.4: Look up the active topic for this session (non-fatal)
-      let activeTopicId: string | undefined;
-      let activeTopic: { id: string; name: string } | undefined;
-      if (!request.topicId) {
-        try {
-          const topicMap = new SessionTopicMap(db);
-          activeTopic = topicMap.getActiveTopic(request.sessionKey) || undefined;
-          if (activeTopic) activeTopicId = activeTopic.id;
-        } catch {
-          // Topic lookup is best-effort — fall back to full history
-        }
-      } else {
-        activeTopicId = request.topicId;
-        try {
-          activeTopic = db.prepare(`
-            SELECT id, name
-            FROM topics
-            WHERE session_key = ? AND id = ?
-            LIMIT 1
-          `).get(request.sessionKey, request.topicId) as { id: string; name: string } | undefined;
-        } catch {
-          // Topic lookup is best-effort — fall back to ID-only history fetch
-        }
-      }
-      // Hoist resolved topic id+name so the window dual-write and wiki injection sections can access them
-      composedActiveTopicId = activeTopicId;
-      composedActiveTopicName = activeTopic?.name;
-
       const rawHistoryMessages = await this.getHistory(
         request.agentId,
         request.sessionKey,
         request.historyDepth || this.config.maxHistoryMessages,
-        store,
-        activeTopicId
+        store
       );
 
       // Deduplicate history by StoredMessage.id (second line of defense after
@@ -1086,34 +365,29 @@ export class Compositor {
       // This ensures estimateMessageTokens() measures actual submission cost,
       // not pre-transform cost (which caused overflow: dense tool JSON was
       // undercounted at length/4 when it should be measured post-stub).
-      const transformedHistory = applyToolGradient(historyMessages, { totalWindowTokens: totalWindow });
+      const transformedHistory = applyToolGradient(
+        historyMessages,
+        this.config.maxRecentToolPairs ?? 3,
+        this.config.maxProseToolPairs ?? 10,
+      );
 
-      // ── Evict large tool results (>800 tokens) before window selection ─────
-      // Replace oversized stale results with stubs so they don't burn budget.
-      // Current-turn results (turn age 0) are never evicted.
-      const evictedHistory = evictLargeToolResults(transformedHistory);
-
-      // ── Budget-fit: walk newest→oldest, drop whole clusters ─────────────
-      // Group tool_use + tool_result messages into clusters so they are kept
-      // or dropped as a unit. Breaking mid-cluster creates orphaned tool
-      // pairs that repairToolPairs has to strip downstream — wasting budget
-      // and leaving gaps in conversation continuity.
-      const budgetClusters = clusterNeutralMessages(evictedHistory);
+      // ── Budget-fit: walk newest→oldest, drop until it fits ──────────────
+      // No transformation happens here — only include/exclude decisions.
       let historyTokens = 0;
-      const includedClusters: NeutralMessageCluster<NeutralMessage>[] = [];
+      const includedHistory: NeutralMessage[] = [];
 
-      for (let i = budgetClusters.length - 1; i >= 0; i--) {
-        const cluster = budgetClusters[i];
-        if (historyTokens + cluster.tokenCost > remaining && includedClusters.length > 0) {
-          const droppedMsgCount = budgetClusters.slice(0, i + 1).reduce((s, c) => s + c.messages.length, 0);
-          warnings.push(`History truncated at cluster ${i + 1}/${budgetClusters.length} (${droppedMsgCount} messages dropped)`);
+      for (let i = transformedHistory.length - 1; i >= 0; i--) {
+        const msg = transformedHistory[i];
+        const msgTokens = estimateMessageTokens(msg);
+
+        if (historyTokens + msgTokens > remaining) {
+          warnings.push(`History truncated at message ${i + 1}/${historyMessages.length}`);
           break;
         }
-        includedClusters.unshift(cluster);
-        historyTokens += cluster.tokenCost;
-      }
 
-      const includedHistory: NeutralMessage[] = includedClusters.flatMap(c => c.messages);
+        includedHistory.unshift(msg);
+        historyTokens += msgTokens;
+      }
 
       // ── Keystone History Slot (P2.1) ──────────────────────────────────
       // For long conversations (≥30 messages), inject high-signal older messages
@@ -1148,70 +422,16 @@ export class Compositor {
         }
       }
 
-      // ── Cross-Topic Keystones (P3.5) ──────────────────────────────────
-      // Pull high-signal messages from OTHER topics in this session when their
-      // content is semantically relevant to the current topic. Non-fatal.
-      let crossTopicMessages: NeutralMessage[] = [];
-      let crossTopicTokens = 0;
-
-      if (activeTopic && this.vectorStore) {
-        try {
-          const rawCrossTopicKeystones = await this.getKeystonesByTopic(
-            request.agentId,
-            request.sessionKey,
-            activeTopic,
-            includedHistory,
-            db,
-            3
-          );
-          if (rawCrossTopicKeystones.length > 0) {
-            // Token budget: cap the full cross-topic block at 15% of remaining,
-            // including the header line.
-            const crossTopicHeaderTokens = estimateTokens('## Cross-Topic Context');
-            const crossTopicBudget = Math.max(0, Math.floor(remaining * 0.15) - crossTopicHeaderTokens);
-            let used = 0;
-            for (const candidate of rawCrossTopicKeystones) {
-              const msg: NeutralMessage = {
-                role: candidate.role as NeutralMessage['role'],
-                textContent: candidate.content,
-                toolCalls: null,
-                toolResults: null,
-              };
-              const msgTokens = estimateMessageTokens(msg);
-              if (used + msgTokens > crossTopicBudget) continue;
-              crossTopicMessages.push(msg);
-              used += msgTokens;
-            }
-            crossTopicTokens = used;
-            diagCrossTopicKeystones = crossTopicMessages.length;
-          }
-        } catch {
-          // Cross-topic retrieval is non-fatal — never block compose
-        }
-      }
-
       // Push history with keystone separators if we have keystones.
-      if (keystoneMessages.length > 0 || crossTopicMessages.length > 0) {
-        // Cross-topic context (from other topics) — prepended before within-session keystones
-        if (crossTopicMessages.length > 0) {
-          messages.push({
-            role: 'system',
-            textContent: '## Cross-Topic Context',
-            toolCalls: null,
-            toolResults: null,
-          });
-          messages.push(...crossTopicMessages);
-        }
-        // Separator before recalled context (within-session keystones)
-        if (keystoneMessages.length > 0) {
-          messages.push({
-            role: 'system',
-            textContent: '## Recalled Context (high-signal older messages)',
-            toolCalls: null,
-            toolResults: null,
-          });
-          messages.push(...keystoneMessages);
-        }
+      if (keystoneMessages.length > 0) {
+        // Separator before recalled context
+        messages.push({
+          role: 'system',
+          textContent: '## Recalled Context (high-signal older messages)',
+          toolCalls: null,
+          toolResults: null,
+        });
+        messages.push(...keystoneMessages);
         // Separator before recent conversation
         messages.push({
           role: 'system',
@@ -1221,29 +441,14 @@ export class Compositor {
         });
         messages.push(...includedHistory);
         // Account for separator tokens in history slot
-        const crossTopicSepTokens = crossTopicMessages.length > 0
-          ? estimateTokens('## Cross-Topic Context')
-          : 0;
-        const keystoneSepTokens = keystoneMessages.length > 0
-          ? estimateTokens('## Recalled Context (high-signal older messages)')
-          : 0;
-        const recentSepTokens = estimateTokens('## Recent Conversation');
-        const sepTokens = crossTopicSepTokens + keystoneSepTokens + recentSepTokens;
-        slots.history = historyTokens + keystoneTokens + crossTopicTokens + sepTokens;
-        remaining -= (historyTokens + keystoneTokens + crossTopicTokens + sepTokens);
+        const sepTokens = estimateTokens('## Recalled Context (high-signal older messages)') +
+          estimateTokens('## Recent Conversation');
+        slots.history = historyTokens + keystoneTokens + sepTokens;
+        remaining -= (historyTokens + keystoneTokens + sepTokens);
       } else {
         messages.push(...includedHistory);
         slots.history = historyTokens;
         remaining -= historyTokens;
-      }
-
-      // targetBudgetFraction cap: limit total context slots to a fraction of the
-      // effective budget. This gives operators a single knob to make the system
-      // lighter without tuning individual slot fractions.
-      const targetFraction = this.config.targetBudgetFraction ?? 0.65;
-      const contextCap = Math.floor(budget * targetFraction);
-      if (remaining > contextCap) {
-        remaining = contextCap;
       }
 
       // T1.3: Ghost message suppression.
@@ -1290,30 +495,6 @@ export class Compositor {
     let diagScopeFiltered = 0;
     let diagRetrievalMode: ComposeDiagnostics['retrievalMode'] = 'none';
 
-    // ── Wiki Page (L4: Library — active topic synthesis) ──────
-    // Inject synthesized wiki page for the active topic before general knowledge.
-    // Token budget: capped at 15% of remaining.
-    if (request.includeLibrary !== false && remaining > 300 && libDb && composedActiveTopicName) {
-      const wikiContent = this.buildWikiPageContext(request.agentId, composedActiveTopicName, libDb);
-      if (wikiContent) {
-        const tokens = estimateTokens(wikiContent);
-        const cap = Math.floor(remaining * 0.15);
-        if (tokens <= cap) {
-          contextParts.push(wikiContent);
-          contextTokens += tokens;
-          remaining -= tokens;
-          slots.library += tokens;
-        } else {
-          const truncated = this.truncateToTokens(wikiContent, cap);
-          const truncTokens = estimateTokens(truncated);
-          contextParts.push(truncated);
-          contextTokens += truncTokens;
-          remaining -= truncTokens;
-          slots.library += truncTokens;
-        }
-      }
-    }
-
     // ── Facts (L4: Library) ──────────────────────────────────
     // scope: agent — filtered by agentId via filterByScope after fetch
     if (request.includeFacts !== false && remaining > 500) {
@@ -1339,107 +520,6 @@ export class Compositor {
             slots.facts = truncTokens;
             warnings.push('Facts truncated to fit budget');
           }
-        }
-      }
-
-      // ── Temporal retrieval (L4: Library) ─────────────────────
-      // Fires when the query has temporal signals (before/after/when/last etc).
-      // Returns facts in time order from temporal_index. Deduplicates against
-      // facts already included above. Uses ingest_at as occurred_at proxy (v1).
-      const queryText = request.prompt ?? '';
-
-      if (queryText && hasTemporalSignals(queryText) && libDb && remaining > 300) {
-        try {
-          const temporalStore = new TemporalStore(libDb);
-          const temporalFacts = temporalStore.timeRangeQuery({
-            agentId: request.agentId,
-            limit: 15,
-            order: 'DESC',
-          });
-
-          if (temporalFacts.length > 0) {
-            // Deduplicate against facts already in context
-            const existingContent = contextParts.join('\n');
-            const novel = temporalFacts.filter(
-              f => !existingContent.includes(f.content.slice(0, 60))
-            );
-
-            if (novel.length > 0) {
-              const temporalBlock = novel
-                .map(f => {
-                  const ts = new Date(f.occurredAt).toISOString().slice(0, 10);
-                  return `[${ts}] ${f.content}`;
-                })
-                .join('\n');
-
-              const temporalSection = `## Temporal Context\n${temporalBlock}`;
-              const tempTokens = estimateTokens(temporalSection);
-              const tempBudget = Math.floor(remaining * 0.20); // Cap at 20% of remaining
-
-              if (tempTokens <= tempBudget) {
-                contextParts.push(temporalSection);
-                contextTokens += tempTokens;
-                remaining -= tempTokens;
-                slots.facts = (slots.facts ?? 0) + tempTokens;
-              } else {
-                const truncated = this.truncateToTokens(temporalSection, tempBudget);
-                const truncTokens = estimateTokens(truncated);
-                contextParts.push(truncated);
-                contextTokens += truncTokens;
-                remaining -= truncTokens;
-                slots.facts = (slots.facts ?? 0) + truncTokens;
-              }
-            }
-          }
-        } catch {
-          // Temporal index not yet available (migration pending) — skip silently
-        }
-      }
-
-      // ── Open-domain FTS retrieval (L4: Library) ──────────────────
-      // Fires when the query looks broad/exploratory with no topical anchor.
-      // Searches raw messages_fts — bypasses isQualityFact() quality gate so
-      // content filtered from library.db is still reachable for open-domain
-      // questions. Primary fix for LoCoMo open-domain F1 gap (0.133 baseline).
-      if (queryText && isOpenDomainQuery(queryText) && db && remaining > 300) {
-        try {
-          const existingContent = contextParts.join('\n');
-          const odResults = searchOpenDomain(db, queryText, existingContent, 10);
-
-          if (odResults.length > 0) {
-            const odBlock = odResults
-              .map(r => {
-                const ts = r.createdAt
-                  ? new Date(r.createdAt).toISOString().slice(0, 10)
-                  : '';
-                const prefix = ts ? `[${ts}] ` : '';
-                const snippet = r.content.length > 300
-                  ? r.content.slice(0, 300) + '…'
-                  : r.content;
-                return `${prefix}${snippet}`;
-              })
-              .join('\n');
-
-            const odSection = `## Open Domain Context\n${odBlock}`;
-            const odTokens = estimateTokens(odSection);
-            const odBudget = Math.floor(remaining * 0.20); // Cap at 20% of remaining
-
-            if (odTokens <= odBudget) {
-              contextParts.push(odSection);
-              contextTokens += odTokens;
-              remaining -= odTokens;
-              slots.facts = (slots.facts ?? 0) + odTokens;
-            } else {
-              const truncated = this.truncateToTokens(odSection, odBudget);
-              const truncTokens = estimateTokens(truncated);
-              contextParts.push(truncated);
-              contextTokens += truncTokens;
-              remaining -= truncTokens;
-              slots.facts = (slots.facts ?? 0) + truncTokens;
-            }
-          }
-        } catch {
-          // Open-domain FTS unavailable — skip silently
         }
       }
     }
@@ -1498,7 +578,7 @@ export class Compositor {
           // Check Redis for a pre-computed embedding from afterTurn()
           let precomputedEmbedding: Float32Array | undefined;
           try {
-            const cached = await this.cache.getQueryEmbedding(request.agentId, request.sessionKey);
+            const cached = await this.redis.getQueryEmbedding(request.agentId, request.sessionKey);
             if (cached) precomputedEmbedding = cached;
           } catch {
             // Redis lookup is best-effort — fall through to Ollama
@@ -1544,24 +624,13 @@ export class Compositor {
         diagRetrievalMode = 'triggered';
         const docChunkStore = new DocChunkStore(libDb);
         const docParts: string[] = [];
-        const maxTotalTriggerTokens = Math.min(
-          remaining,
-          this.config.maxTotalTriggerTokens && this.config.maxTotalTriggerTokens > 0
-            ? this.config.maxTotalTriggerTokens
-            : Math.floor(remaining * 0.40)
-        );
-        let totalTriggerTokens = 0;
 
         for (const trigger of triggered) {
           if (remaining < 200) break;
 
-          const triggerBudgetRemaining = maxTotalTriggerTokens - totalTriggerTokens;
-          if (triggerBudgetRemaining < 200) break;
-
           const maxTokens = Math.min(
             trigger.maxTokens || 1000,
-            Math.floor(remaining * 0.12), // No single collection takes > 12% of remaining (W4: was 0.15)
-            triggerBudgetRemaining
+            Math.floor(remaining * 0.12) // No single collection takes > 12% of remaining (W4: was 0.15)
           );
 
           try {
@@ -1636,7 +705,6 @@ export class Compositor {
             if (chunkLines.length > 0) {
               const collectionLabel = trigger.collection.split('/').pop() || trigger.collection;
               docParts.push(`## ${collectionLabel} (retrieved)\n${chunkLines.join('\n\n')}`);
-              totalTriggerTokens += chunkTokens;
               contextTokens += chunkTokens;
               remaining -= chunkTokens;
               slots.library += chunkTokens;
@@ -1664,7 +732,7 @@ export class Compositor {
               libDb || undefined,
             ),
             new Promise<null>((_, reject) =>
-              setTimeout(() => reject(new Error('fallback_knn_timeout')), 3000)
+              setTimeout(() => reject(new Error('fallback_knn_timeout')), 500)
             ),
           ]);
           if (fallbackContent) {
@@ -1680,39 +748,6 @@ export class Compositor {
         } catch {
           // Fallback is best-effort — never fail composition (includes timeout)
         }
-      }
-    }
-
-    // ── Session-Scoped Doc Chunks (spawn context inheritance) ────
-    // When parentSessionKey is set, retrieve ephemeral doc chunks indexed
-    // by buildSpawnContext() for this spawn session.
-    if (request.parentSessionKey && remaining > 200 && libDb) {
-      try {
-        const spawnChunkStore = new DocChunkStore(libDb);
-        const spawnQueryMsg = request.prompt?.trim() || this.getLastUserMessage(messages) || '';
-        const spawnChunks = spawnChunkStore.queryDocChunks(
-          request.agentId,
-          spawnQueryMsg,
-          { sessionKey: request.parentSessionKey, limit: 8 }
-        );
-        if (spawnChunks.length > 0) {
-          const spawnLines: string[] = [];
-          let spawnTokens = 0;
-          const maxSpawnTokens = Math.floor(remaining * 0.15);
-          for (const chunk of spawnChunks) {
-            if (spawnTokens + chunk.tokenEstimate > maxSpawnTokens) break;
-            spawnLines.push(chunk.content);
-            spawnTokens += chunk.tokenEstimate;
-          }
-          if (spawnLines.length > 0) {
-            contextParts.push(`## Spawn Context Documents\n${spawnLines.join('\n\n')}`);
-            contextTokens += spawnTokens;
-            remaining -= spawnTokens;
-            slots.library += spawnTokens;
-          }
-        }
-      } catch {
-        // Session-scoped chunk retrieval is best-effort
       }
     }
 
@@ -1745,22 +780,6 @@ export class Compositor {
           remaining -= truncTokens;
           slots.context += truncTokens;
           warnings.push('Cross-session context truncated');
-        }
-      }
-    }
-
-    // ── Action Verification Summary ─────────────────────────
-    // Keep recent action history on the dynamic side of the cache boundary.
-    if (remaining > 50 && request.includeLibrary !== false) {
-      const pressurePct = budget > 0 ? Math.round(((budget - remaining) / budget) * 100) : 0;
-      const actionSummary = buildActionVerificationSummary(messages, pressurePct);
-      if (actionSummary) {
-        const actionTokens = Math.ceil(actionSummary.length / 4);
-        if (actionTokens <= remaining) {
-          contextParts.push(actionSummary);
-          contextTokens += actionTokens;
-          remaining -= actionTokens;
-          slots.context += actionTokens;
         }
       }
     }
@@ -1847,42 +866,14 @@ export class Compositor {
 
     const totalTokens = budget - remaining;
 
-    // ─── Slot reconciliation ─────────────────────────────────────────────────
-    // totalTokens = budget - remaining is the authoritative spend figure.
-    // The slot accounting can drift from this due to history trim (which
-    // reduces slots.history but adds back to remaining after the budget
-    // was already committed) and FOS/MOD token rounding.
-    // Reconcile: assign any unaccounted tokens to slots.history so that
-    // sum(slots) === totalTokens always holds.
-    {
-      const slotSum = (slots.system ?? 0) + (slots.identity ?? 0) +
-        (slots.history ?? 0) + (slots.facts ?? 0) +
-        (slots.context ?? 0) + (slots.library ?? 0);
-      const delta = totalTokens - slotSum;
-      if (delta !== 0) {
-        slots.history = (slots.history ?? 0) + delta;
-      }
-    }
-
-    // ─── Write Window Cache ─────────────────────────────
+    // ─── Write Window Cache ───────────────────────────────────
     // Cache the composed message array so the plugin can serve it directly
     // on the next assemble() call without re-running the full compose pipeline.
     // Short TTL (120s) — invalidated by afterTurn when new messages arrive.
-    //
-    // VS-1: Dual-write — session-scoped key for backwards compat;
-    // topic-scoped key for per-topic window retrieval when activeTopicId is set.
     try {
-      await this.cache.setWindow(request.agentId, request.sessionKey, messages, 120);
+      await this.redis.setWindow(request.agentId, request.sessionKey, messages, 120);
     } catch {
       // Window cache write is best-effort
-    }
-    // VS-1: Topic-scoped window dual-write
-    if (composedActiveTopicId) {
-      try {
-        await this.cache.setTopicWindow(request.agentId, request.sessionKey, composedActiveTopicId, messages, 120);
-      } catch {
-        // Topic window write is best-effort
-      }
     }
 
     // ─── Write Session Cursor ─────────────────────────────────
@@ -1902,7 +893,7 @@ export class Compositor {
               windowSize: historyMsgs.length,
               tokenCount: totalTokens,
             };
-            await this.cache.setCursor(request.agentId, request.sessionKey, cursor);
+            await this.redis.setCursor(request.agentId, request.sessionKey, cursor);
 
             // Dual-write cursor to SQLite for durability across Redis eviction (P1.3)
             try {
@@ -1976,8 +967,8 @@ export class Compositor {
         zeroResultReason = 'budget_exhausted';
       } else if (diagTriggerHits === 0 && !diagTriggerFallbackUsed) {
         zeroResultReason = 'no_trigger_no_fallback';
-      } else if ((diagTriggerHits > 0 || diagTriggerFallbackUsed) && diagFactsIncluded === 0 && diagSemanticResults === 0 && diagDocChunkCollections === 0) {
-        // Retrieval was attempted (trigger fired or fallback ran) but returned nothing — likely a retrieval bug
+      } else if (diagFactsIncluded === 0 && diagSemanticResults === 0 && diagDocChunkCollections === 0) {
+        // Facts exist or retrieval was attempted but returned nothing — likely a retrieval bug
         // rather than a genuinely empty corpus. Distinguish from 'empty_corpus' for observability.
         zeroResultReason = 'unknown';
       } else {
@@ -1994,20 +985,10 @@ export class Compositor {
       scopeFiltered: diagScopeFiltered,
       zeroResultReason,
       retrievalMode: diagRetrievalMode,
-      crossTopicKeystones: diagCrossTopicKeystones,
-      reserveFraction: dynamicReserve,
-      avgTurnCostTokens: avgTurnCost,
-      dynamicReserveActive: isDynamic,
-      sessionPressureHigh: pressureHigh,
     };
 
-    if (pressureHigh) {
-      warnings.push(`SESSION_PRESSURE_HIGH: avg_turn_cost=${avgTurnCost} tokens, dynamic reserve capped at ${Math.round(dynamicReserve * 100)}%`);
-    } else if (dynamicReserve > 0.40) {
-      console.info(`[hypermem:compositor] dynamic_reserve=${Math.round(dynamicReserve * 100)}% avg_turn_cost=${Math.round(avgTurnCost / 1000)}k horizon=${this.config.dynamicReserveTurnHorizon ?? 5}`);
-    }
+    console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode}`);
 
-    console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode} crossTopicKeystones=${diagCrossTopicKeystones}`);
     return {
       messages: outputMessages,
       tokenCount: totalTokens,
@@ -2032,8 +1013,6 @@ export class Compositor {
       systemPrompt?: string;
       identity?: string;
       libraryDb?: DatabaseSync;
-      /** Model string for budget resolution. If omitted, falls back to defaultTokenBudget. */
-      model?: string;
     }
   ): Promise<void> {
     const store = new MessageStore(db);
@@ -2045,17 +1024,15 @@ export class Compositor {
     // token-budget-cap the warm set. This replaces the old WARM_BOOTSTRAP_CAP
     // message-count constant which was a blunt instrument — 100 messages of
     // large tool results can massively exceed the history budget allocation.
-    // Warm budget uses the same reserve fraction as compose() so warm history
-    // never pre-fills more than compose() would actually allow.
-    const reserve = this.config.contextWindowReserve ?? 0.15;
-    const effectiveBudget = resolveModelBudget(opts?.model, this.config.defaultTokenBudget, reserve);
     const warmBudget = Math.floor(
-      effectiveBudget * (this.config.warmHistoryBudgetFraction ?? 0.4)
+      (this.config.defaultTokenBudget) * (this.config.warmHistoryBudgetFraction ?? 0.4)
     );
     const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
-    const transformedForWarm = applyToolGradient(rawHistory, {
-      totalWindowTokens: resolveModelWindow(opts?.model, this.config.defaultTokenBudget),
-    });
+    const transformedForWarm = applyToolGradient(
+      rawHistory,
+      this.config.maxRecentToolPairs ?? 3,
+      this.config.maxProseToolPairs ?? 10,
+    );
 
     // Walk newest→oldest, accumulate transformed token cost, stop when budget exhausted
     let warmTokens = 0;
@@ -2080,7 +1057,7 @@ export class Compositor {
     // from SQLite on every turn (~0.3ms each) — faster than a Redis GET round-trip.
     // Caching them here would create stale entries that compose() ignores anyway.
 
-    await this.cache.warmSession(agentId, sessionKey, {
+    await this.redis.warmSession(agentId, sessionKey, {
       system: opts?.systemPrompt,
       identity: opts?.identity,
       history,
@@ -2097,53 +1074,6 @@ export class Compositor {
     });
   }
 
-  async refreshRedisGradient(
-    agentId: string,
-    sessionKey: string,
-    db: DatabaseSync,
-    tokenBudget?: number,
-  ): Promise<void> {
-    const store = new MessageStore(db);
-    const conversation = store.getConversation(sessionKey);
-    if (!conversation) return;
-
-    const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
-    const transformedHistory = applyToolGradient(rawHistory, {
-      totalWindowTokens: tokenBudget && tokenBudget > 0
-        ? Math.max(tokenBudget, Math.floor(tokenBudget / 0.80))
-        : TOOL_PLANNING_BASELINE_WINDOW,
-    });
-
-    // If a token budget is provided, trim the gradient-compressed window to fit
-    // before writing to Redis. Without this, up to maxHistoryMessages messages
-    // land in Redis regardless of size, and trimHistoryToTokenBudget fires
-    // on every subsequent assemble() causing per-turn churn.
-    let historyToWrite: NeutralMessage[] = transformedHistory;
-    if (tokenBudget && tokenBudget > 0) {
-      const budgetCap = Math.floor(tokenBudget * 0.8);
-      let runningTokens = 0;
-      const clusters = clusterNeutralMessages(transformedHistory);
-      const cappedClusters: NeutralMessageCluster<NeutralMessage>[] = [];
-      // Walk newest-first, keep whole clusters so tool-call/result pairs survive together.
-      for (let i = clusters.length - 1; i >= 0; i--) {
-        const cluster = clusters[i];
-        if (runningTokens + cluster.tokenCost > budgetCap && cappedClusters.length > 0) break;
-        cappedClusters.unshift(cluster);
-        runningTokens += cluster.tokenCost;
-        if (runningTokens >= budgetCap) break;
-      }
-      historyToWrite = cappedClusters.flatMap(cluster => cluster.messages);
-      if (historyToWrite.length < transformedHistory.length) {
-        console.log(
-          `[hypermem] refreshRedisGradient: cluster-capped ${transformedHistory.length}→${historyToWrite.length} messages ` +
-          `for ${agentId}/${sessionKey} (budgetCap=${budgetCap}, tokenCost=${runningTokens})`
-        );
-      }
-    }
-
-    await this.cache.replaceHistory(agentId, sessionKey, historyToWrite, this.config.maxHistoryMessages);
-  }
-
   // ─── Slot Content Resolution ─────────────────────────────────
 
   /**
@@ -2156,7 +1086,7 @@ export class Compositor {
     db: DatabaseSync,
     libraryDb?: DatabaseSync
   ): Promise<string | null> {
-    const cached = await this.cache.getSlot(agentId, sessionKey, slot);
+    const cached = await this.redis.getSlot(agentId, sessionKey, slot);
     if (cached) return cached;
 
     switch (slot) {
@@ -2173,32 +1103,22 @@ export class Compositor {
 
   /**
    * Get conversation history: try Redis first, fall back to SQLite.
-   *
-   * When topicId is provided (P3.4), the SQLite path filters to messages
-   * matching that topic OR with topic_id IS NULL (Option B transition safety).
-   * The Redis path is unaffected — Redis doesn't index by topic, so topic
-   * filtering only applies to the SQLite fallback.
    */
   private async getHistory(
     agentId: string,
     sessionKey: string,
     limit: number,
-    store: MessageStore,
-    topicId?: string
+    store: MessageStore
   ): Promise<NeutralMessage[]> {
     // Pass limit through to Redis — this is the correct enforcement point.
     // Previously getHistory() ignored the limit on the Redis path (LRANGE 0 -1),
     // meaning historyDepth in the compose request had no effect on hot sessions.
-    const cached = await this.cache.getHistory(agentId, sessionKey, limit);
+    const cached = await this.redis.getHistory(agentId, sessionKey, limit);
     if (cached.length > 0) return cached;
 
     const conversation = store.getConversation(sessionKey);
     if (!conversation) return [];
 
-    if (topicId) {
-      // P3.4: Option B — active topic messages + legacy NULL messages
-      return store.getRecentMessagesByTopic(conversation.id, topicId, limit);
-    }
     return store.getRecentMessages(conversation.id, limit);
   }
 
@@ -2259,16 +1179,7 @@ export class Compositor {
     if (allowed.length === 0) return [null, 0, filteredCount];
 
     const content = allowed
-      .map(r => {
-        // Session attribution: label facts from a different session so the model
-        // can distinguish current-session context from cross-session facts.
-        // Shows last 8 chars of session key as a stable short identifier.
-        const fromOtherSession = r.sessionKey && r.sessionKey !== sessionKey;
-        const sessionSuffix = fromOtherSession
-          ? `, session:${r.sessionKey!.slice(-8)}`
-          : '';
-        return `- [${r.domain || 'general'}${sessionSuffix}] ${r.content}`;
-      })
+      .map(r => `- [${r.domain || 'general'}] ${r.content}`)
       .join('\n');
 
     return [content, allowed.length, filteredCount];
@@ -2317,20 +1228,6 @@ export class Compositor {
     }
 
     return lines.join('\n');
-  }
-
-  /**
-   * Build wiki page context for the active topic.
-   * Queries the knowledge table for a synthesized topic page and returns it
-   * wrapped with a header. Capped at 600 tokens.
-   */
-  private buildWikiPageContext(agentId: string, topicName: string, db: DatabaseSync): string | null {
-    const knowledgeStore = new KnowledgeStore(db);
-    const knowledge = knowledgeStore.get(agentId, 'topic-synthesis', topicName);
-    if (!knowledge) return null;
-
-    const wrapped = `## Active Topic: ${topicName}\n${knowledge.content}`;
-    return this.truncateToTokens(wrapped, 600);
   }
 
   /**
@@ -2416,46 +1313,9 @@ export class Compositor {
       const lines: string[] = [];
       let tokens = 0;
 
-      // TUNE-015: apply recency decay to recall scores.
-      // Messages and episodes from distant past score down even if semantically relevant.
-      // A 5-day-old task-request should not compete equally with today's messages.
-      //   - Episodes: exponential decay, half-life 7 days
-      //   - Facts/knowledge: step-function penalty for items older than 48h
-      //     (prevents completed/stale tasks from outranking recent ones)
-      //       48-72h: multiply by 0.7
-      //       >72h:   multiply by 0.5
-      const now = Date.now();
-      const decayedResults = results.map(result => {
-        if (!result.createdAt) return result;
-        const ageMs = now - new Date(result.createdAt).getTime();
-        const ageDays = ageMs / 86_400_000;
-        if (result.sourceTable === 'episodes') {
-          // Exponential half-life decay for episodes
-          const decayFactor = Math.pow(0.5, ageDays / 7);
-          return { ...result, score: result.score * decayFactor };
-        }
-        // Step-function recency penalty for facts and knowledge
-        const ageHours = ageMs / 3_600_000;
-        if (ageHours > 72) {
-          return { ...result, score: result.score * 0.5 };
-        }
-        if (ageHours > 48) {
-          return { ...result, score: result.score * 0.7 };
-        }
-        return result;
-      });
-      // Re-sort after decay adjustment
-      decayedResults.sort((a, b) => b.score - a.score);
-
-      for (const result of decayedResults) {
+      for (const result of results) {
         // TUNE-001: drop very-low-relevance results (RRF scores below 0.008 are noise)
         if (result.score < 0.008) continue;
-        // TUNE-016: FTS-only results require higher floor — low-score FTS hits are noise
-        if (result.sources.length === 1 && result.sources[0] === 'fts' && result.score < 0.05) continue;
-        // TUNE-014: episodes require higher confidence — score:2 episodes bleed adjacent
-        // session context and contaminate current session. Require fts+knn agreement
-        // (score >= 0.04) for episodes to make it into assembled context.
-        if (result.sourceTable === 'episodes' && result.score < 0.04) continue;
         const label = this.formatHybridResult(result);
         const lineTokens = estimateTokens(label);
         if (tokens + lineTokens > maxTokens) break;
@@ -2681,7 +1541,7 @@ export class Compositor {
       if (!convRow) return null;
 
       const conversationId = convRow.conversation_id;
-      const maxAgeHours = 168; // 7 days — tighter window gives recency real scoring weight
+      const maxAgeHours = 720; // 30 days for recency scoring
       const nowMs = Date.now();
 
       // Build episode significance map from libraryDb (episodes live there, not in messages.db).
@@ -2836,170 +1696,5 @@ export class Compositor {
       // Keystone injection is best-effort — never fail compose
       return null;
     }
-  }
-
-  // ─── Cross-Topic Keystone Retrieval (P3.5) ───────────────────────
-
-  /**
-   * Pull high-signal messages from OTHER topics in this session when their
-   * content is semantically relevant to the current active topic.
-   *
-   * Heuristic-only: no model calls. Token overlap between the current topic
-   * name + last 3 user messages and candidate message content.
-   *
-   * @param agentId      - The agent's ID
-   * @param sessionKey   - Current session key
-   * @param activeTopic  - The current active topic (id + name)
-   * @param currentMessages - Recently included history messages for query extraction
-   * @param db           - The messages database
-   * @param maxKeystones - Max cross-topic keystones to return (default 3)
-   * @returns Scored keystones sorted by score DESC, deduplicated by message id
-   */
-  private async getKeystonesByTopic(
-    agentId: string,
-    sessionKey: string,
-    activeTopic: { id: string; name: string },
-    currentMessages: NeutralMessage[],
-    db: DatabaseSync,
-    maxKeystones: number = 3
-  ): Promise<ScoredKeystone[]> {
-    // Fetch all topics for this session except the active one (max 5, most recent first)
-    type TopicRow = { id: string; name: string };
-    const otherTopics = db.prepare(`
-      SELECT id, name
-      FROM topics
-      WHERE session_key = ? AND id != ?
-      ORDER BY last_active_at DESC
-      LIMIT 5
-    `).all(sessionKey, activeTopic.id) as TopicRow[];
-
-    if (otherTopics.length === 0) return [];
-
-    // Extract key terms from active topic name + last 3 user messages
-    const queryTerms = this.extractQueryTerms(activeTopic.name, currentMessages);
-    if (queryTerms.size === 0) return [];
-
-    const nowMs = Date.now();
-    const maxAgeHours = 168; // 7 days, same as within-session keystones
-    const seenIds = new Set<number>();
-    const allCandidates: ScoredKeystone[] = [];
-
-    for (const topic of otherTopics) {
-      // Fetch a bounded pool, then select the topic's top keystones before
-      // semantic filtering so cross-topic retrieval competes on the same scale.
-      type MsgRow = {
-        id: number;
-        message_index: number;
-        role: string;
-        text_content: string;
-        created_at: string;
-      };
-
-      let topicMessages: MsgRow[];
-      try {
-        topicMessages = db.prepare(`
-          SELECT m.id, m.message_index, m.role, m.text_content, m.created_at
-          FROM messages m
-          JOIN conversations c ON m.conversation_id = c.id
-          WHERE c.session_key = ?
-            AND c.agent_id = ?
-            AND m.topic_id = ?
-            AND m.text_content IS NOT NULL
-            AND m.text_content != ''
-            AND m.is_heartbeat = 0
-          ORDER BY m.message_index DESC
-          LIMIT 50
-        `).all(sessionKey, agentId, topic.id) as MsgRow[];
-      } catch {
-        // Corrupt topic data — skip this topic, never throw
-        continue;
-      }
-
-      if (topicMessages.length === 0) continue;
-
-      const topicCandidates: KeystoneCandidate[] = topicMessages.map((msg, idx) => {
-        const createdMs = new Date(msg.created_at).getTime();
-        const ageHours = (nowMs - createdMs) / (1000 * 60 * 60);
-        const ftsRank = topicMessages.length > 1
-          ? 1.0 - (idx / topicMessages.length) * 0.9
-          : 1.0;
-
-        return {
-          messageId: msg.id,
-          messageIndex: msg.message_index,
-          role: msg.role,
-          content: msg.text_content,
-          timestamp: msg.created_at,
-          episodeSignificance: null,
-          ftsRank,
-          ageHours,
-        };
-      });
-
-      const topTopicKeystones = rankKeystones(topicCandidates, maxAgeHours).slice(0, 10);
-
-      // Filter to messages with semantic overlap (≥2 matching terms)
-      const relevant = topTopicKeystones.filter(candidate => {
-        const contentLower = candidate.content.toLowerCase();
-        let matches = 0;
-        for (const term of queryTerms) {
-          if (contentLower.includes(term)) {
-            matches++;
-            if (matches >= 2) return true;
-          }
-        }
-        return false;
-      });
-
-      if (relevant.length === 0) continue;
-
-      // Re-score filtered candidates so they compete on the same final scale
-      for (const candidate of relevant) {
-        if (seenIds.has(candidate.messageId)) continue;
-        seenIds.add(candidate.messageId);
-
-        const score = scoreKeystone(candidate, maxAgeHours);
-        allCandidates.push({ ...candidate, score });
-      }
-    }
-
-    if (allCandidates.length === 0) return [];
-
-    // Sort by score DESC and return top maxKeystones
-    return allCandidates
-      .sort((a, b) => b.score - a.score)
-      .slice(0, maxKeystones);
-  }
-
-  /**
-   * Extract lowercase key terms from a topic name and the last 3 user messages.
-   * Terms are: tokens with ≥4 characters (skip short stop words).
-   * Returns a Set for O(1) lookup.
-   */
-  private extractQueryTerms(
-    topicName: string,
-    messages: NeutralMessage[]
-  ): Set<string> {
-    const terms = new Set<string>();
-    const MIN_TERM_LEN = 4;
-
-    // From topic name
-    const topicTokens = topicName.toLowerCase().match(/\b[a-z0-9]{4,}\b/g) ?? [];
-    for (const t of topicTokens) terms.add(t);
-
-    // From last 3 user messages
-    let userCount = 0;
-    for (let i = messages.length - 1; i >= 0 && userCount < 3; i--) {
-      const msg = messages[i];
-      if (msg.role === 'user' && msg.textContent) {
-        const tokens = msg.textContent.toLowerCase().match(/\b[a-z0-9]{4,}\b/g) ?? [];
-        for (const t of tokens) {
-          if (t.length >= MIN_TERM_LEN) terms.add(t);
-        }
-        userCount++;
-      }
-    }
-
-    return terms;
   }
 }

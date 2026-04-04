@@ -1,5 +1,5 @@
 /**
- * hypermem Knowledge Store
+ * HyperMem Knowledge Store
  *
  * Long-term structured knowledge — replaces MEMORY.md.
  * Lives in the central library DB.
@@ -9,7 +9,6 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { Knowledge } from './types.js';
-import { isSafeForSharedVisibility, requiresScan } from './secret-scanner.js';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -66,13 +65,7 @@ export class KnowledgeStore {
     const now = nowIso();
     const sourceType = opts?.sourceType || 'manual';
     const confidence = opts?.confidence ?? 1.0;
-
-    // Secret gate: if requested visibility is shared, verify content is clean.
-    // Downgrade to 'private' rather than reject — matches episode-store pattern.
-    let visibility = opts?.visibility ?? 'private';
-    if (requiresScan(visibility) && !isSafeForSharedVisibility(content)) {
-      visibility = 'private';
-    }
+    const visibility = opts?.visibility ?? 'private';
 
     // Find current active entry (not superseded, not expired)
     const existing = this.db.prepare(`

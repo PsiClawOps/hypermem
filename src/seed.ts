@@ -1,8 +1,8 @@
 /**
- * hypermem Workspace Seeder
+ * HyperMem Workspace Seeder
  *
  * Reads ACA workspace files, chunks them by logical section, and indexes
- * into hypermem for demand-loaded retrieval (ACA offload).
+ * into HyperMem for demand-loaded retrieval (ACA offload).
  *
  * Usage:
  *   const seeder = new WorkspaceSeeder(hypermem);

@@ -41,7 +41,9 @@ async function run() {
   try {
     hm = await HyperMem.create({
       dataDir: tmpDir,
+      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm-graph:', sessionTTL: 60 },
     });
+    await hm.redis.flushPrefix();
   } catch (err) {
     console.log(`  ❌ Failed to create HyperMem: ${err.message}`);
     process.exit(1);
@@ -194,6 +196,7 @@ async function run() {
 
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
+  await hm.redis.flushPrefix();
   await hm.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
   assert(true, 'Cleaned up');

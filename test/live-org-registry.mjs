@@ -34,6 +34,7 @@ async function run() {
   try {
     hm = await HyperMem.create({
       dataDir: tmpDir,
+      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm-livereg:', sessionTTL: 60 },
     });
 
     const libDb = hm.dbManager.getLibraryDb();
@@ -111,33 +112,6 @@ async function run() {
     const newAgentFilterForPylon = visibilityFilter(newAgentIdentity, 'pylon', liveReg);
     assert(!newAgentFilterForPylon.canReadOrg, 'newagent cannot read pylon org-visible (different org)');
     assert(!newAgentFilterForPylon.canReadCouncil, 'newagent cannot read pylon council-visible');
-
-    // ── Compositor wiring: orgRegistry cached at init ──────────────────────
-    console.log('\n  Compositor.orgRegistry (cached on init):');
-    const { Compositor } = await import('../dist/compositor.js');
-
-    const compositor = new Compositor({ cache: hm.cache, libraryDb: libDb });
-
-    // Registry should be live (has the seeded agents)
-    const cached = compositor.orgRegistry;
-    assert('forge' in cached.agents, 'compositor: forge in cached registry');
-    assert('newagent' in cached.agents, 'compositor: newagent from DB in cached registry');
-
-    // refreshOrgRegistry() should return the live registry
-    const refreshed = compositor.refreshOrgRegistry();
-    assert('forge' in refreshed.agents, 'compositor.refreshOrgRegistry returns forge');
-    assert('newagent' in refreshed.agents, 'compositor.refreshOrgRegistry returns newagent');
-    assert(compositor.orgRegistry === refreshed, 'compositor._orgRegistry updated after refresh');
-
-    // Minimal constructor falls back to hardcoded registry
-    const minimalCompositor = new Compositor({ cache: hm.cache });
-    const minimalReg = minimalCompositor.orgRegistry;
-    assert('forge' in minimalReg.agents, 'minimal compositor: forge in fallback registry');
-    // Fallback registry is hardcoded, not DB-loaded (no newagent)
-    assert(!('newagent' in minimalReg.agents), 'minimal compositor: newagent NOT in hardcoded registry');
-    // refreshOrgRegistry on minimal (no libraryDb) returns existing registry unchanged
-    const minimalRefreshed = minimalCompositor.refreshOrgRegistry();
-    assert(minimalRefreshed === minimalReg, 'minimal refreshOrgRegistry no-ops without libraryDb');
 
   } finally {
     if (hm) {

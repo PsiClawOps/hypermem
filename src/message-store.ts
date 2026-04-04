@@ -1,5 +1,5 @@
 /**
- * hypermem Message Store
+ * HyperMem Message Store
  *
  * CRUD operations for conversations and messages in SQLite.
  * All messages are stored in provider-neutral format.
@@ -13,7 +13,6 @@ import type {
   Conversation,
   ChannelType,
   ConversationStatus,
-  RecentTurn,
 } from './types.js';
 
 function nowIso(): string {
@@ -296,24 +295,6 @@ export class MessageStore {
   }
 
   /**
-   * Get recent messages scoped to a topic (P3.4, Option B).
-   * Returns messages matching the topic_id OR with topic_id IS NULL
-   * (legacy messages created before topic tracking was introduced).
-   * This is transition-safe: no legacy messages are silently dropped.
-   */
-  getRecentMessagesByTopic(conversationId: number, topicId: string, limit: number = 50): StoredMessage[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM messages
-      WHERE conversation_id = ? AND (topic_id = ? OR topic_id IS NULL)
-      ORDER BY message_index DESC
-      LIMIT ?
-    `).all(conversationId, topicId, limit) as Record<string, unknown>[];
-
-    // Reverse to get chronological order
-    return rows.reverse().map(parseMessageRow);
-  }
-
-  /**
    * Get messages across all conversations for an agent (cross-session query).
    */
   getAgentMessages(
@@ -366,42 +347,6 @@ export class MessageStore {
     `).all(query, limit) as Record<string, unknown>[];
 
     return rows.map(parseMessageRow);
-  }
-
-  /**
-   * Get recent turns for a session, in chronological order, with tool calls stripped.
-   * Joins messages through conversations to find by session_key.
-   * Returns up to `n` turns (capped at 50).
-   */
-  getRecentTurns(sessionKey: string, n: number): RecentTurn[] {
-    const limit = Math.min(n, 50);
-    try {
-      const rows = this.db.prepare(`
-        SELECT m.role, m.text_content, m.created_at, m.message_index
-        FROM messages m
-        JOIN conversations c ON m.conversation_id = c.id
-        WHERE c.session_key = ?
-          AND m.role IN ('user', 'assistant')
-        ORDER BY m.message_index DESC
-        LIMIT ?
-      `).all(sessionKey, limit) as Array<Record<string, unknown>>;
-
-      // Reverse to chronological order
-      rows.reverse();
-
-      return rows.map(row => ({
-        role: row.role as 'user' | 'assistant',
-        // text_content only — tool calls are stored separately and excluded here
-        content: (row.text_content as string | null) ?? '',
-        timestamp: row.created_at
-          ? new Date(row.created_at as string).getTime()
-          : Date.now(),
-        seq: row.message_index as number,
-      }));
-    } catch (err) {
-      console.warn('[hypermem:message-store] getRecentTurns failed:', (err as Error).message);
-      return [];
-    }
   }
 
   /**

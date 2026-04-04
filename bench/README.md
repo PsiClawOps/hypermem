@@ -1,4 +1,4 @@
-# hypermem Benchmark Suite
+# HyperMem Benchmark Suite
 
 **Architecture-neutral memory system benchmark for OpenClaw agents.**
 
@@ -17,7 +17,7 @@ Sequential A/B testing on identical OpenClaw stacks. The ONLY variable between r
 | System | Type | Hook adapter |
 |---|---|---|
 | noop (baseline) | No memory | Passes through raw context, no retrieval |
-| hypermem | SQLite + Redis compositor | Native Node.js hook |
+| HyperMem | SQLite + Redis compositor | Native Node.js hook |
 | Mem0 | Vector + graph memory | Python subprocess adapter |
 | Letta (MemGPT) | Self-editing memory | REST API adapter |
 

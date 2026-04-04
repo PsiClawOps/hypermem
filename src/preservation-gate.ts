@@ -1,5 +1,5 @@
 /**
- * hypermem Preservation Gate
+ * HyperMem Preservation Gate
  *
  * Verifies that a proposed compaction summary preserves the semantic
  * content of its source messages by measuring geometric fidelity in

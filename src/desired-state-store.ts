@@ -1,5 +1,5 @@
 /**
- * hypermem Agent Desired State Store
+ * HyperMem Agent Desired State Store
  *
  * Stores intended configuration for each agent and tracks drift.
  * Enables fleet-wide config visibility and enforcement.
@@ -47,22 +47,12 @@ export interface ConfigEvent {
   createdAt: string;
 }
 
-function tryParseJson(val: string): unknown {
-  try {
-    return JSON.parse(val);
-  } catch {
-    // Value is a bare string (e.g. model names like "copilot-local/claude-sonnet-4.6")
-    // stored without JSON quoting — return as-is.
-    return val;
-  }
-}
-
 function parseEntry(row: Record<string, unknown>): DesiredStateEntry {
   return {
     agentId: row.agent_id as string,
     configKey: row.config_key as string,
-    desiredValue: row.desired_value ? tryParseJson(row.desired_value as string) : null,
-    actualValue: row.actual_value ? tryParseJson(row.actual_value as string) : null,
+    desiredValue: row.desired_value ? JSON.parse(row.desired_value as string) : null,
+    actualValue: row.actual_value ? JSON.parse(row.actual_value as string) : null,
     source: row.source as string,
     setBy: (row.set_by as string) || null,
     driftStatus: (row.drift_status as DriftStatus) || 'unknown',
@@ -79,8 +69,8 @@ function parseEvent(row: Record<string, unknown>): ConfigEvent {
     agentId: row.agent_id as string,
     configKey: row.config_key as string,
     eventType: row.event_type as string,
-    oldValue: row.old_value ? tryParseJson(row.old_value as string) : null,
-    newValue: row.new_value ? tryParseJson(row.new_value as string) : null,
+    oldValue: row.old_value ? JSON.parse(row.old_value as string) : null,
+    newValue: row.new_value ? JSON.parse(row.new_value as string) : null,
     changedBy: (row.changed_by as string) || null,
     createdAt: row.created_at as string,
   };
