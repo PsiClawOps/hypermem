@@ -346,6 +346,145 @@ export class DocChunkStore {
   }
 
   /**
+   * Index simple string chunks with an optional session key (for ephemeral spawn context).
+   *
+   * Unlike indexChunks() which works with DocChunk objects and hash-based dedup,
+   * this method is designed for ad-hoc session-scoped content: it always inserts fresh
+   * rows tagged with the sessionKey, without hash-based skip logic.
+   *
+   * Chunks stored with a sessionKey are ephemeral — use clearSessionChunks() to remove them.
+   */
+  indexDocChunks(
+    agentId: string,
+    source: string,
+    chunks: string[],
+    options?: { sessionKey?: string }
+  ): void {
+    if (chunks.length === 0) return;
+    const now = new Date().toISOString();
+    const sessionKey = options?.sessionKey ?? null;
+    // Use a stable collection name derived from source path
+    const collection = `spawn/${agentId}`;
+
+    try {
+      this.db.exec('BEGIN');
+      const insert = this.db.prepare(`
+        INSERT INTO doc_chunks
+          (id, collection, section_path, depth, content, token_estimate,
+           source_hash, source_path, scope, tier, agent_id, parent_path,
+           session_key, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      chunks.forEach((chunkContent, idx) => {
+        const id = `spawn:${agentId}:${sessionKey ?? 'none'}:${source}:${idx}:${Date.now()}`;
+        const tokenEstimate = Math.ceil(chunkContent.length / 4);
+        insert.run(
+          id,
+          collection,
+          `${source}#chunk-${idx}`,
+          2,
+          chunkContent,
+          tokenEstimate,
+          `spawn-${Date.now()}-${idx}`, // non-deduped hash
+          source,
+          'per-agent',
+          null,
+          agentId,
+          null,
+          sessionKey,
+          now,
+          now
+        );
+      });
+      this.db.exec('COMMIT');
+    } catch (err) {
+      try { this.db.exec('ROLLBACK'); } catch { /* ignore */ }
+      console.warn('[hypermem:doc-chunk-store] indexDocChunks failed:', (err as Error).message);
+    }
+  }
+
+  /**
+   * Query doc chunks by agentId+query string, with optional session key scoping.
+   * When sessionKey is provided, only chunks tagged with that session key are returned.
+   */
+  queryDocChunks(
+    agentId: string,
+    query: string,
+    options?: { sessionKey?: string; limit?: number }
+  ): DocChunkRow[] {
+    const limit = options?.limit ?? 10;
+    const sessionKey = options?.sessionKey;
+    const collection = `spawn/${agentId}`;
+
+    try {
+      if (query.trim() && query.trim().length >= 3) {
+        // FTS5 keyword search
+        let sql = `
+          SELECT c.id, c.collection, c.section_path, c.depth, c.content, c.token_estimate,
+                 c.source_hash, c.source_path, c.scope, c.tier, c.agent_id, c.parent_path,
+                 c.created_at, c.updated_at
+          FROM (
+            SELECT rowid, rank FROM doc_chunks_fts WHERE doc_chunks_fts MATCH ? ORDER BY rank LIMIT ?
+          ) sub
+          JOIN doc_chunks c ON c.rowid = sub.rowid
+          WHERE c.collection = ?
+        `;
+        const params: (string | number | null)[] = [query, limit * 3, collection];
+
+        if (sessionKey !== undefined) {
+          sql += ' AND c.session_key = ?';
+          params.push(sessionKey);
+        }
+        sql += ' ORDER BY sub.rank LIMIT ?';
+        params.push(limit);
+
+        const rows = this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+        return rows.map(this.mapRow);
+      } else {
+        // Fallback: return most recent chunks for this session
+        let sql = `
+          SELECT id, collection, section_path, depth, content, token_estimate,
+                 source_hash, source_path, scope, tier, agent_id, parent_path,
+                 created_at, updated_at
+          FROM doc_chunks
+          WHERE collection = ?
+        `;
+        const params: (string | number | null)[] = [collection];
+
+        if (sessionKey !== undefined) {
+          sql += ' AND session_key = ?';
+          params.push(sessionKey);
+        }
+        sql += ' ORDER BY created_at DESC LIMIT ?';
+        params.push(limit);
+
+        const rows = this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+        return rows.map(this.mapRow);
+      }
+    } catch (err) {
+      console.warn('[hypermem:doc-chunk-store] queryDocChunks failed:', (err as Error).message);
+      return [];
+    }
+  }
+
+  /**
+   * Delete all doc chunks associated with a specific session key.
+   * Call this when a spawn session is complete to release ephemeral storage.
+   */
+  clearSessionChunks(sessionKey: string): number {
+    try {
+      const result = this.db
+        .prepare('DELETE FROM doc_chunks WHERE session_key = ?')
+        .run(sessionKey);
+      return result.changes as number;
+    } catch (err) {
+      console.warn('[hypermem:doc-chunk-store] clearSessionChunks failed:', (err as Error).message);
+      return 0;
+    }
+  }
+
+  /**
    * Get chunk stats: count per collection.
    */
   getStats(): Array<{ collection: string; count: number; sources: number; totalTokens: number }> {

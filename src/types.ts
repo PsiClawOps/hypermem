@@ -193,6 +193,17 @@ export interface Episode {
 
 // ─── Compositor Types ────────────────────────────────────────────
 
+/**
+ * A single turn from a parent session, stripped of tool call content.
+ * Used to build spawn context for subagents.
+ */
+export interface RecentTurn {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: number;
+  seq: number;
+}
+
 export interface ComposeRequest {
   agentId: string;
   sessionKey: string;
@@ -217,6 +228,14 @@ export interface ComposeRequest {
    * meaning first-turn retrieval is blind and all retrieval lags by one turn.
    */
   prompt?: string;
+  /**
+   * When set, session-scoped doc chunks stored under this spawn session key
+   * are included in doc chunk retrieval at compose time.
+   * Used for subagent context inheritance: the parent buildSpawnContext() stores
+   * document chunks under a spawn sessionKey, and passes that key here so the
+   * compositor can surface them during composition.
+   */
+  parentSessionKey?: string;
   /**
    * When true, skip provider-specific translation and return NeutralMessage[]
    * instead of ProviderMessage[]. Used by the context engine plugin, which

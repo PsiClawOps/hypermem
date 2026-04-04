@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LIBRARY_SCHEMA_VERSION = 8;
+export const LIBRARY_SCHEMA_VERSION = 9;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -717,6 +717,19 @@ function applyV7KnowledgeVersioning(db: DatabaseSync): void {
   `);
 }
 
+// ── V9: Add session_key to doc_chunks ───────────────────────
+// Enables ephemeral session-scoped doc chunks for subagent context inheritance.
+// Chunks stored with a session_key are transient — clearSessionChunks() removes them.
+
+function applyV9DocChunkSessionKey(db: DatabaseSync): void {
+  const cols = (db.prepare('PRAGMA table_info(doc_chunks)').all() as Array<{ name: string }>)
+    .map(r => r.name);
+  if (!cols.includes('session_key')) {
+    db.exec('ALTER TABLE doc_chunks ADD COLUMN session_key TEXT');
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_doc_chunks_session ON doc_chunks(session_key) WHERE session_key IS NOT NULL');
+}
+
 // ── V8: Add source_message_id to episodes ───────────────────
 
 function applyV8EpisodeSourceMessageId(db: DatabaseSync): void {
@@ -798,5 +811,11 @@ export function migrateLibrary(db: DatabaseSync): void {
     applyV8EpisodeSourceMessageId(db);
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(8, nowIso());
+  }
+
+  if (currentVersion < 9) {
+    applyV9DocChunkSessionKey(db);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(9, nowIso());
   }
 }
