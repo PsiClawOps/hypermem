@@ -1,10 +1,10 @@
 # Virtual Sessions — Topic-Scoped Context Switching
 
 **Author:** Forge
-**Status:** Spec (Clarity review integrated)
+**Status:** Spec (Clarity + Anvil reviews integrated)
 **Date:** 2026-04-05
 **Prerequisite:** P3.1-P3.5 (topic detection, topic compositor, cross-topic keystone), P4.1-P4.2 (synthesis, lint)
-**Reviewer:** Clarity (2026-04-05)
+**Reviewers:** Clarity (2026-04-05), Anvil (2026-04-05)
 
 ---
 
@@ -46,6 +46,22 @@ On topic switch:
 
 TTL for topic-scoped slots: `sessionTTL` (4h). Inactive topic caches naturally expire.
 Active topic cache is refreshed on every compose.
+
+**Minimum message threshold (Anvil):** Topics with fewer than 3 messages use
+session-scoped cache only. Topic-scoped Redis namespace is allocated only after
+a topic reaches 3 messages. This caps the blast radius of noisy detection: a
+false-positive topic creates a SQLite row but doesn't pollute Redis.
+
+**Bulk cleanup (Anvil):** Add `clearAllTopicSlots(agentId, sessionKey)` that reads
+topic IDs from SQLite (`listTopics`) and deletes all 5 known slot keys per topic in
+a single Redis pipeline. Deterministic, O(topics x 5), no SCAN. Used on session
+teardown and topic garbage collection.
+
+**Old-key migration:** On first compose post-VS-1 deployment, session-scoped keys for
+topic-sensitive slots (`history`, `window`, `cursor`, `context`, `facts`) are
+invalidated. The compositor detects the migration state (no topic-scoped keys exist
+yet) and forces a re-warm from SQLite into the new topic-scoped namespace. This is
+a one-time cold start per session, equivalent to existing cold-compose latency (~250ms).
 
 #### VS-2: Wiki synthesis as warming content
 
@@ -94,12 +110,17 @@ Implementation:
 - `ComposeResult.metadata.topicShift?: { from: string; to: string; confidence: number }`
 - Plugin reads this in afterTurn and sets a `pending_confirmation` flag on the topic
 - If the next user message is a correction ("no", "same topic", "still on X"), revert:
-  1. Re-tag all messages assigned to the spurious topic back to the previous topic_id
-  2. Increment the previous topic's message_count by the re-tagged count
-  3. Delete the spurious topic row
-  4. Invalidate the spurious topic's Redis cache slots
-  5. Restore the previous topic as active
+  1. `db.exec('BEGIN IMMEDIATE')` — wrap steps 1-3 in a single SQLite transaction
+  2. Re-tag all messages assigned to the spurious topic back to the previous topic_id
+  3. Increment the previous topic's message_count by the re-tagged count
+  4. Delete the spurious topic row
+  5. `db.exec('COMMIT')` — atomic: all three succeed or none do. Rollback on failure.
+  6. Invalidate the spurious topic's Redis cache slots (fire-and-forget, TTL is backstop)
+  7. Restore the previous topic as active (idempotent `activateTopic` call)
   No message orphaning: every message tagged during the optimistic window is accounted for.
+  **Orphan guard (Anvil):** If the warm path returns data for a topicId that doesn't
+  exist in SQLite, discard the data and delete the orphan Redis keys. Handles the edge
+  case of process crash between step 5 (topic deleted) and step 6 (Redis invalidation).
 - If the next message isn't a correction, clear the flag — switch is confirmed
 
 #### VS-4: Cross-agent topic search
@@ -183,6 +204,11 @@ Normalization runs in `SessionTopicMap.createTopic()` and `searchTopics()` query
 path. This ensures "HyperMem Indexer" and "hypermem-indexer" resolve to the same
 topic for matching and deduplication.
 
+**Dedup on create (Anvil):** `createTopic` checks for an existing topic with the same
+normalized name in the same session before inserting. If found, activates the existing
+topic instead of creating a duplicate. Check-then-insert runs inside the same SQLite
+transaction to prevent TOCTOU races.
+
 ### What this does NOT do
 
 - **Multi-session routing.** This is virtual sessions inside one real session. The
@@ -222,6 +248,11 @@ topic for matching and deduplication.
   or topic explosion). Check via `redis-cli DBSIZE` or Prometheus redis_db_keys gauge.
 - **False topic switches:** The soft confirmation path mitigates this. Worst case: agent
   announces a switch, user corrects, context reverts. One turn of friction.
+- **Topic explosion from gradual drift (Anvil):** Long conversations with subtle topic
+  drift could create 15+ topics in an hour, each with 2-3 messages. The minimum message
+  threshold (3 messages before Redis allocation) caps Redis impact. The 0.7 confidence
+  threshold needs production calibration: track false positive rate for 2 weeks post-ship,
+  then adjust. Consider raising to 0.8 if rate exceeds 20%.
 - **Wiki cold start:** New topics won't have synthesis pages for 30+ minutes (stale threshold).
   The warming path gracefully degrades — no wiki, just recent messages. Same as today.
 - **Topic cache TTL expiry mid-conversation:** If a topic cache expires (4h TTL) while the
