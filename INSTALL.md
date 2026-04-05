@@ -51,7 +51,7 @@ One agent, one machine. This is the common case for personal assistants and sing
         └── vectors.db      ← semantic search index
 ```
 
-**Redis:** One namespace. All keys prefixed `hm:`. Redis is optional — HyperMem degrades to SQLite-only if Redis is unavailable. Cold starts take slightly longer without Redis (SQLite warm instead of cache hit), but nothing breaks.
+**Redis:** One namespace. All keys prefixed `hm:`. Redis is required — it is the L1 hot layer for session history, identity slots, and the compositor window cache.
 
 **Library DB:** Used by your agent only. No cross-agent scope enforcement matters in practice.
 
@@ -95,13 +95,11 @@ Multiple named agents sharing one OpenClaw gateway. Council setups, director/spe
 |---|---|---|
 | Node.js 22+ | **Yes** | Uses built-in `node:sqlite` — no native module needed |
 | OpenClaw | **Yes** | Any version that supports context engine plugins |
-| Redis 7+ | No | Degrades gracefully without it; recommended for production |
-| Ollama | No | Required for semantic search (vector embeddings). Install: https://ollama.ai |
-| nomic-embed-text | No | Required if using Ollama. Pull with: `ollama pull nomic-embed-text` |
+| Redis 7+ | **Yes** | L1 hot layer — session history, identity slots, fleet cache |
+| Ollama | **Yes** | L3 vector layer — semantic search and recall. Install: https://ollama.ai |
+| nomic-embed-text | **Yes** | The embedding model HyperMem uses. Pull with: `ollama pull nomic-embed-text` |
 
-**Without Redis:** History warms from SQLite on every bootstrap. Slightly slower cold start, no other impact.
-
-**Without Ollama:** Vector search is disabled. Retrieval falls back to FTS5 keyword search only. Most use cases work fine — you lose semantic "find related things I haven't searched for by name" retrieval.
+Redis and Ollama are not optional. Redis is the hot session layer — without it, every bootstrap re-reads from SQLite and the fleet cache doesn't exist. Ollama with `nomic-embed-text` is the vector layer — without it, semantic recall is completely disabled and retrieval degrades to keyword-only FTS5 matching. HyperMem will start without them but it will not be working correctly.
 
 ---
 
@@ -179,22 +177,26 @@ openclaw status
 
 ---
 
-## Optional: enable Ollama semantic search
+## Verify Redis and Ollama before proceeding
 
-If Ollama is running and you've pulled `nomic-embed-text`:
+Before wiring the plugin, confirm both services are up:
 
+```bash
+# Redis
+redis-cli ping
+# Expected: PONG
+
+# Ollama
+curl -s http://localhost:11434/api/tags | grep nomic
+# Expected: a line containing nomic-embed-text
+```
+
+If `nomic-embed-text` is not pulled yet:
 ```bash
 ollama pull nomic-embed-text
 ```
 
-HyperMem auto-detects Ollama at `http://localhost:11434` on startup. No config needed — it will enable vector search automatically if the service is reachable.
-
-To verify embeddings are running:
-```bash
-openclaw logs --limit 100 | grep "vector\|embed\|ollama"
-```
-
-You should see embedding activity in the background indexer after a few messages have been sent.
+Do not proceed until both return the expected output. A gateway restart with either service missing will leave HyperMem in a degraded state that is easy to confuse with a misconfiguration.
 
 ---
 
@@ -233,10 +235,10 @@ Your data in `~/.openclaw/hypermem/` is untouched. You can re-enable HyperMem at
 ## Troubleshooting
 
 **Agent is not resuming context after restart**
-Check Redis is running: `redis-cli ping` should return `PONG`. If Redis is down, HyperMem falls back to SQLite warm — this works but is slower. If SQLite warm is also failing, check that `~/.openclaw/hypermem/agents/{agentId}/messages.db` exists and is readable.
+Redis must be running: `redis-cli ping` should return `PONG`. If Redis is down, start it before restarting the gateway. Check that `~/.openclaw/hypermem/agents/{agentId}/messages.db` exists — if missing, the agent hasn't bootstrapped yet and will create it on first session.
 
 **Semantic search not working / no vector results**
-Ollama is either not running or `nomic-embed-text` is not pulled. Run `ollama list` to check. Pull with `ollama pull nomic-embed-text`. The background indexer runs on a 5-minute interval — wait one interval after pulling before expecting vector results.
+Ollama must be running with `nomic-embed-text` pulled. Run `ollama list` to confirm. If missing, `ollama pull nomic-embed-text` and restart the gateway. The background indexer runs on a 5-minute interval — after the first interval you should see embedding activity in `openclaw logs | grep embed`.
 
 **`[hypermem:compose]` shows `facts=0 semantic=0` every turn**
 Your library DB is empty — this is expected on a fresh install. Facts and episodes accumulate over real conversations. After a few sessions you'll see these numbers grow. You can also seed workspace files manually using the seeder API.

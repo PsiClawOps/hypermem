@@ -103,8 +103,8 @@ Verify: `openclaw logs --limit 50 | grep hypermem` — you should see `[hypermem
 **Requirements:**
 - Node.js 22+ (uses built-in `node:sqlite`)
 - OpenClaw (any version supporting context engine plugins)
-- Redis 7+ (optional — degrades gracefully to SQLite-only)
-- Ollama + `nomic-embed-text` (optional — enables vector/semantic search)
+- Redis 7+ (required — L1 hot session layer)
+- Ollama + `nomic-embed-text` (required — L3 vector/semantic search layer)
 
 ---
 
