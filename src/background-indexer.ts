@@ -19,6 +19,40 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { StoredMessage, IndexerConfig, EpisodeType, SessionCursor } from './types.js';
+
+// ─── Agent-to-Domain Map ────────────────────────────────────────
+// Maps well-known agent IDs to their primary domain.
+// Used to populate the `domain` column on extracted facts so that
+// domain-scoped retrieval (e.g. getActiveFacts({ domain: 'infrastructure' }))
+// returns results. New agents default to 'general'.
+const AGENT_DOMAIN_MAP: Record<string, string> = {
+  forge:        'infrastructure',
+  vigil:        'infrastructure',
+  pylon:        'infrastructure',
+  plane:        'infrastructure',
+  compass:      'product',
+  helm:         'product',
+  chisel:       'product',
+  facet:        'product',
+  sentinel:     'security',
+  bastion:      'security',
+  gauge:        'security',
+  clarity:      'ux',
+  anvil:        'governance',
+  vanguard:     'strategy',
+  crucible:     'development',
+  relay:        'communications',
+  main:         'general',
+  'channel-mini': 'general',
+};
+
+/**
+ * Derive a domain label for a fact based on agent ID.
+ * Falls back to 'general' for unknown agents.
+ */
+function domainForAgent(agentId: string): string {
+  return AGENT_DOMAIN_MAP[agentId] ?? 'general';
+}
 import { MessageStore } from './message-store.js';
 import { runNoiseSweep, runToolDecay } from './proactive-pass.js';
 import { FactStore } from './fact-store.js';
@@ -435,6 +469,13 @@ export class BackgroundIndexer {
       console.error('[indexer] Initial tick failed:', err);
     });
 
+    // Run episode vector backfill once at startup (no-op if already done)
+    if (this.vectorStore && this.getLibraryDb) {
+      this.backfillEpisodeVectors().catch(err => {
+        console.error('[indexer] Episode backfill failed:', err);
+      });
+    }
+
     // Then periodically
     this.intervalHandle = setInterval(() => {
       this.tick().catch(err => {
@@ -630,6 +671,7 @@ export class BackgroundIndexer {
         try {
           const fact = factStore.addFact(agentId, factContent, {
             scope: 'agent',
+            domain: domainForAgent(agentId),
             confidence: factConfidence,
             sourceType: 'indexer',
             sourceSessionKey: this.getSessionKeyForMessage(messageDb, msg.conversationId),
@@ -679,8 +721,9 @@ export class BackgroundIndexer {
             sourceMessageId: msg.id,
           });
           episodesRecorded++;
-          // Embed high-significance episodes (decisions, incidents, deployments)
-          if (this.vectorStore && recorded?.id && episode.significance >= 0.7) {
+          // Embed episodes at sig>=0.5 (lowered from 0.7 — discovery/config_change events
+          // at sig=0.5 are real operational events, not noise).
+          if (this.vectorStore && recorded?.id && episode.significance >= 0.5) {
             this.vectorStore.indexItem('episodes', recorded.id, episode.summary, episode.type)
               .catch(() => { /* embedding failure is non-fatal */ });
           }
@@ -887,6 +930,94 @@ export class BackgroundIndexer {
       case 'd': return val * 86400;
       default: return 0;
     }
+  }
+
+  /**
+   * One-time backfill: embed episodes with sig>=0.5 that were missed by the
+   * old >=0.7 vectorization threshold.
+   *
+   * Gated by a system_state flag 'indexer:episode_backfill_v1' so it runs
+   * exactly once even across gateway restarts. Safe to re-run manually
+   * (delete the flag row first) if re-backfill is ever needed.
+   */
+  async backfillEpisodeVectors(): Promise<void> {
+    if (!this.vectorStore || !this.getLibraryDb) return;
+
+    const libraryDb = this.getLibraryDb();
+    const BACKFILL_FLAG = 'episode_backfill_v1';
+
+    // Ensure system_state table exists (schema may not have been applied yet)
+    try {
+      libraryDb.prepare(`
+        CREATE TABLE IF NOT EXISTS system_state (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          category TEXT NOT NULL,
+          key TEXT NOT NULL,
+          value TEXT,
+          updated_at TEXT NOT NULL,
+          updated_by TEXT,
+          ttl TEXT,
+          UNIQUE(category, key)
+        )
+      `).run();
+    } catch {
+      // Table already exists — safe to ignore
+    }
+
+    // Check if backfill already completed
+    const existing = libraryDb.prepare(
+      "SELECT value FROM system_state WHERE category = 'indexer' AND key = ?"
+    ).get(BACKFILL_FLAG) as { value: string } | undefined;
+
+    if (existing) {
+      // Already done
+      return;
+    }
+
+    console.log('[indexer] Starting episode vector backfill (sig>=0.5, not yet vectorized)...');
+
+    // Find episodes with sig>=0.5 that have no vec_index_map entry.
+    // We join against vec_index_map using a fallback: if the table is in a
+    // separate DB (vectors.db), we query it directly via the VectorStore.
+    let episodes: Array<{ id: number; summary: string; event_type: string }>;
+    try {
+      episodes = libraryDb.prepare(`
+        SELECT id, summary, event_type
+        FROM episodes
+        WHERE significance >= 0.5
+        ORDER BY created_at DESC
+      `).all() as Array<{ id: number; summary: string; event_type: string }>;
+    } catch {
+      console.warn('[indexer] Backfill: could not query episodes table');
+      return;
+    }
+
+    let queued = 0;
+    let skipped = 0;
+
+    for (const ep of episodes) {
+      // Check if already vectorized
+      if (this.vectorStore.hasItem('episodes', ep.id)) {
+        skipped++;
+        continue;
+      }
+      try {
+        await this.vectorStore.indexItem('episodes', ep.id, ep.summary, ep.event_type);
+        queued++;
+      } catch {
+        // Non-fatal — keep going
+      }
+    }
+
+    // Mark backfill complete
+    const now = new Date().toISOString();
+    libraryDb.prepare(`
+      INSERT INTO system_state (category, key, value, updated_at, updated_by)
+      VALUES ('indexer', ?, ?, ?, 'indexer')
+      ON CONFLICT(category, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(BACKFILL_FLAG, JSON.stringify({ completedAt: now, queued, skipped }), now);
+
+    console.log(`[indexer] Episode backfill complete: ${queued} queued, ${skipped} already vectorized`);
   }
 
   /**
