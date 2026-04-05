@@ -184,7 +184,7 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     port: 6379,
     keyPrefix: 'hm:',
     sessionTTL: 14400,      // 4 hours — system/identity/meta slots
-    historyTTL: 86400,      // 24 hours — history list outlives other slots
+    historyTTL: 604800,     // 7 days — extended for ClawCanvas Redis-first display
     flushInterval: 1000,
   },
   compositor: {
@@ -194,7 +194,7 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     // re-run composition, so 90k is safe — leaves ~30k headroom for in-flight
     // tool results on a 120k window. Budget is better spent on context quality.
     defaultTokenBudget: 90000,
-    maxHistoryMessages: 250,
+    maxHistoryMessages: 1000,
     maxFacts: 28,
     maxCrossSessionContext: 6000,
     maxRecentToolPairs: 3,
@@ -402,6 +402,14 @@ export class HyperMem {
     const db = this.dbManager.getMessageDb(agentId);
     const libraryDb = this.dbManager.getLibraryDb();
     await this.compositor.warmSession(agentId, sessionKey, db, { ...opts, libraryDb });
+  }
+
+  /**
+   * Recompute the Redis hot history view from SQLite and re-apply tool gradient.
+   */
+  async refreshRedisGradient(agentId: string, sessionKey: string): Promise<void> {
+    const db = this.dbManager.getMessageDb(agentId);
+    await this.compositor.refreshRedisGradient(agentId, sessionKey, db);
   }
 
   /**

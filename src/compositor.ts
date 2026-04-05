@@ -55,6 +55,19 @@ const DEFAULT_CONFIG: CompositorConfig = {
   keystoneMinSignificance: 0.5,
 };
 
+const TOOL_GRADIENT_T0_TURNS = 4;
+const TOOL_GRADIENT_T1_TURNS = 10;
+const TOOL_GRADIENT_T2_TURNS = 15;
+const TOOL_GRADIENT_T0_CHAR_CAP = 32_000;
+const TOOL_GRADIENT_T1_CHAR_CAP = 12_000;
+const TOOL_GRADIENT_T1_TURN_CAP = 24_000;
+const TOOL_GRADIENT_T2_CHAR_CAP = 1_500;
+const TOOL_GRADIENT_T2_TURN_CAP = 6_000;
+const TOOL_GRADIENT_T3_CHAR_CAP = 300;
+const TOOL_GRADIENT_T3_TURN_CAP = 2_000;
+const TOOL_GRADIENT_MAX_TAIL_CHARS = 4_000;
+const TOOL_GRADIENT_MIDDLE_MARKER = '\n[... tool output truncated ...]\n';
+
 // ─── Trigger Registry ────────────────────────────────────────────
 // Moved to src/trigger-registry.ts (W5).
 // CollectionTrigger, DEFAULT_TRIGGERS, matchTriggers imported above.
@@ -92,126 +105,200 @@ function estimateMessageTokens(msg: NeutralMessage): number {
   return tokens;
 }
 
+function parseToolArgs(argumentsJson: string): Record<string, unknown> {
+  try {
+    return JSON.parse(argumentsJson) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function toolLabelFromCall(name: string, args: Record<string, unknown>): string {
+  switch (name) {
+    case 'read':
+      return `read ${(args.path ?? args.file_path ?? args.filePath ?? 'file') as string}`;
+    case 'write':
+      return `write ${(args.path ?? args.file ?? args.filePath ?? 'file') as string}`;
+    case 'edit':
+      return `edit ${(args.path ?? args.file ?? args.filePath ?? 'file') as string}`;
+    case 'exec':
+      return `exec ${String(args.command ?? '').slice(0, 80) || 'command'}`;
+    case 'web_search':
+      return `web_search ${String(args.query ?? '').slice(0, 80) || 'query'}`;
+    case 'web_fetch':
+      return `web_fetch ${String(args.url ?? '').slice(0, 80) || 'url'}`;
+    case 'sessions_send':
+      return `sessions_send ${String(args.sessionKey ?? args.label ?? '').slice(0, 80) || 'target'}`;
+    case 'memory_search':
+      return `memory_search ${String(args.query ?? '').slice(0, 80) || 'query'}`;
+    default:
+      return name;
+  }
+}
+
+function truncateWithHeadTail(content: string, maxChars: number): string {
+  if (content.length <= maxChars) return content;
+  const tailBudget = Math.min(Math.floor(maxChars * 0.30), TOOL_GRADIENT_MAX_TAIL_CHARS);
+  const headBudget = Math.max(0, maxChars - tailBudget - TOOL_GRADIENT_MIDDLE_MARKER.length);
+  return content.slice(0, headBudget) + TOOL_GRADIENT_MIDDLE_MARKER + content.slice(-tailBudget);
+}
+
+function truncateHead(content: string, maxChars: number): string {
+  if (content.length <= maxChars) return content;
+  const marker = '…';
+  const keep = Math.max(0, maxChars - marker.length);
+  return content.slice(0, keep) + marker;
+}
+
+function firstNonEmptyLine(content: string): string {
+  const line = content.split('\n').find(l => l.trim().length > 0) ?? '';
+  return line.trim();
+}
+
+function summarizeOutcome(label: string, content: string, maxChars: number): string {
+  const firstLine = firstNonEmptyLine(content);
+  const base = firstLine ? `${label} — ${firstLine}` : `${label} — ${content.length} chars`;
+  return truncateHead(base, maxChars);
+}
+
+function buildTier2Envelope(label: string, content: string, maxChars: number): string {
+  const prefix = `[${label}] `;
+  const available = Math.max(40, maxChars - prefix.length);
+  return prefix + truncateWithHeadTail(content, available);
+}
+
+function buildTier3Envelope(label: string, content: string, maxChars: number): string {
+  return `[${summarizeOutcome(label, content, maxChars - 2)}]`;
+}
+
 /**
  * Extract a heuristic prose summary from a tool call/result pair.
- * Returns a natural-language sentence (~15-30 tokens) instead of raw payloads.
- * Used for Tier 2 tool treatment in applyToolGradient().
+ * Used when tool payloads are removed but continuity should remain.
  */
-function extractToolProseSummary(msg: NeutralMessage): string {
+function extractToolProseSummary(msg: NeutralMessage, perResultCap: number, compact: boolean = false): string {
   const parts: string[] = [];
 
   if (msg.toolCalls && msg.toolCalls.length > 0) {
     for (const tc of msg.toolCalls) {
-      let args: Record<string, unknown> = {};
-      try { args = JSON.parse(tc.arguments); } catch { /* best-effort */ }
-
+      const args = parseToolArgs(tc.arguments);
+      const label = toolLabelFromCall(tc.name, args);
       const resultContent = msg.toolResults?.find(r => r.callId === tc.id)?.content ?? '';
-      const resultKB = resultContent ? `${(resultContent.length / 1024).toFixed(1)}KB` : '';
-
-      switch (tc.name) {
-        case 'read': {
-          const p = (args.path ?? args.file_path ?? args.filePath ?? '') as string;
-          parts.push(p ? `Read ${p}${resultKB ? ` (${resultKB})` : ''}` : 'Read a file');
-          break;
-        }
-        case 'write': {
-          const p = (args.path ?? args.file ?? args.filePath ?? '') as string;
-          parts.push(p ? `Wrote ${p}${resultKB ? ` (${resultKB})` : ''}` : 'Wrote a file');
-          break;
-        }
-        case 'edit': {
-          const p = (args.path ?? args.file ?? args.filePath ?? '') as string;
-          parts.push(p ? `Edited ${p}` : 'Edited a file');
-          break;
-        }
-        case 'exec': {
-          const cmd = ((args.command ?? '') as string).slice(0, 60);
-          const firstLine = resultContent.split('\n')[0]?.slice(0, 80) ?? '';
-          parts.push(cmd ? `Ran ${cmd}${firstLine ? ` — ${firstLine}` : ''}` : 'Ran a command');
-          break;
-        }
-        case 'web_search': {
-          const q = (args.query ?? '') as string;
-          parts.push(q ? `Searched '${q.slice(0, 60)}'` : 'Searched the web');
-          break;
-        }
-        case 'web_fetch': {
-          const u = (args.url ?? '') as string;
-          parts.push(u ? `Fetched ${u.slice(0, 80)}` : 'Fetched a URL');
-          break;
-        }
-        case 'sessions_send': {
-          const target = (args.sessionKey ?? args.label ?? '') as string;
-          parts.push(target ? `Sent message to ${target}` : 'Sent an inter-session message');
-          break;
-        }
-        case 'memory_search': {
-          const q = (args.query ?? '') as string;
-          parts.push(q ? `Searched memory for '${q.slice(0, 60)}'` : 'Searched memory');
-          break;
-        }
-        default:
-          parts.push(`Used ${tc.name}`);
+      if (resultContent) {
+        parts.push(compact
+          ? buildTier3Envelope(label, resultContent, perResultCap)
+          : buildTier2Envelope(label, resultContent, perResultCap));
+      } else {
+        parts.push(compact ? `[${truncateHead(label, perResultCap - 2)}]` : label);
       }
     }
   } else if (msg.toolResults && msg.toolResults.length > 0) {
-    // Result-only message (no matching call visible)
-    const content = msg.toolResults[0].content?.slice(0, 100) ?? '';
-    parts.push(content ? `Tool result: ${content}` : 'Tool result received');
+    for (const tr of msg.toolResults) {
+      const label = tr.name || 'tool_result';
+      parts.push(compact
+        ? buildTier3Envelope(label, tr.content ?? '', perResultCap)
+        : buildTier2Envelope(label, tr.content ?? '', perResultCap));
+    }
   }
 
-  return parts.join('; ');
+  return truncateHead(parts.join('; '), Math.max(perResultCap, 120));
+}
+
+function appendToolSummary(textContent: string | null, summary: string): string {
+  const existing = textContent ?? '';
+  if (!summary) return existing;
+  return existing ? `${existing}\n[Tools: ${summary}]` : summary;
+}
+
+function getTurnAge(messages: NeutralMessage[], index: number): number {
+  let turnAge = 0;
+  for (let i = messages.length - 1; i > index; i--) {
+    if (messages[i]?.role === 'user') turnAge++;
+  }
+  return turnAge;
+}
+
+function hasToolContent(msg: NeutralMessage): boolean {
+  return Boolean((msg.toolCalls && msg.toolCalls.length > 0) || (msg.toolResults && msg.toolResults.length > 0));
+}
+
+function applyTierPayloadCap(msg: NeutralMessage, perResultCap: number, perTurnCap?: number, usedSoFar: number = 0): { msg: NeutralMessage; usedChars: number } {
+  const toolResults = msg.toolResults?.map(result => {
+    let content = result.content ?? '';
+    if (content.length > perResultCap) {
+      content = truncateWithHeadTail(content, perResultCap);
+    }
+    return { ...result, content };
+  }) ?? null;
+
+  let usedChars = usedSoFar + (toolResults?.reduce((sum, r) => sum + (r.content?.length ?? 0), 0) ?? 0);
+  if (perTurnCap != null && usedChars > perTurnCap) {
+    const downgradeSummary = extractToolProseSummary(msg, TOOL_GRADIENT_T2_CHAR_CAP, false);
+    return {
+      msg: {
+        ...msg,
+        textContent: appendToolSummary(msg.textContent, downgradeSummary),
+        toolCalls: null,
+        toolResults: null,
+      },
+      usedChars: usedSoFar + downgradeSummary.length,
+    };
+  }
+
+  return {
+    msg: { ...msg, toolResults },
+    usedChars,
+  };
 }
 
 /**
  * Apply gradient tool treatment to a message array.
  *
- * Tiers (newest-to-oldest):
- *   Tier 1 — last maxRecentToolPairs: verbatim (untouched)
- *   Tier 2 — next maxProseToolPairs:  heuristic prose stub replaces tool payloads
- *   Tier 3 — beyond:                 tool payloads nulled, text content preserved
- *
- * Message text (assistant reasoning, user text) is NEVER modified.
- * This pass runs before the budget loop so estimateMessageTokens() measures
- * the actual cost that will be submitted, not the pre-transform cost.
+ * Tiers are based on turn age, where turn age is the number of newer user
+ * messages after the current message.
  */
-function applyToolGradient(
-  messages: NeutralMessage[],
-  maxRecentToolPairs: number,
-  maxProseToolPairs: number,
-): NeutralMessage[] {
-  let toolPairsSeen = 0;
+function applyToolGradient<T extends NeutralMessage>(messages: T[]): T[] {
+  const result = [...messages] as T[];
+  const perTurnUsage = new Map<number, { t1: number; t2: number; t3: number }>();
 
-  // Walk newest→oldest to assign tiers, transform in place (new objects)
-  const result = [...messages];
   for (let i = result.length - 1; i >= 0; i--) {
     const msg = result[i];
-    const hasToolContent = (msg.toolCalls && msg.toolCalls.length > 0) ||
-                           (msg.toolResults && msg.toolResults.length > 0);
-    if (!hasToolContent) continue;
+    if (!hasToolContent(msg)) continue;
 
-    toolPairsSeen++;
+    const turnAge = getTurnAge(result, i);
+    const usage = perTurnUsage.get(turnAge) ?? { t1: 0, t2: 0, t3: 0 };
 
-    if (toolPairsSeen <= maxRecentToolPairs) {
-      // Tier 1: verbatim — no change
-      continue;
-    } else if (toolPairsSeen <= maxRecentToolPairs + maxProseToolPairs) {
-      // Tier 2: prose stub
-      const prose = extractToolProseSummary(msg);
+    if (turnAge <= TOOL_GRADIENT_T0_TURNS) {
+      const capped = applyTierPayloadCap(msg, TOOL_GRADIENT_T0_CHAR_CAP);
+      result[i] = capped.msg as T;
+    } else if (turnAge <= TOOL_GRADIENT_T1_TURNS) {
+      const capped = applyTierPayloadCap(msg, TOOL_GRADIENT_T1_CHAR_CAP, TOOL_GRADIENT_T1_TURN_CAP, usage.t1);
+      usage.t1 = capped.usedChars;
+      result[i] = capped.msg as T;
+    } else if (turnAge <= TOOL_GRADIENT_T2_TURNS) {
+      const summary = extractToolProseSummary(msg, TOOL_GRADIENT_T2_CHAR_CAP, false);
+      const allowed = Math.max(0, TOOL_GRADIENT_T2_TURN_CAP - usage.t2);
+      const boundedSummary = truncateHead(summary, Math.min(TOOL_GRADIENT_T2_CHAR_CAP, allowed || TOOL_GRADIENT_T3_CHAR_CAP));
+      usage.t2 += boundedSummary.length;
       result[i] = {
         ...msg,
-        textContent: prose || msg.textContent,  // prose replaces payload; fallback to existing text
+        textContent: appendToolSummary(msg.textContent, boundedSummary),
         toolCalls: null,
         toolResults: null,
-      };
+      } as T;
     } else {
-      // Tier 3: drop tool payload entirely, preserve text
+      const summary = extractToolProseSummary(msg, TOOL_GRADIENT_T3_CHAR_CAP, true);
+      const allowed = Math.max(0, TOOL_GRADIENT_T3_TURN_CAP - usage.t3);
+      const boundedSummary = truncateHead(summary, Math.min(TOOL_GRADIENT_T3_CHAR_CAP, allowed || TOOL_GRADIENT_T3_CHAR_CAP));
+      usage.t3 += boundedSummary.length;
       result[i] = {
         ...msg,
+        textContent: appendToolSummary(msg.textContent, boundedSummary),
         toolCalls: null,
         toolResults: null,
-      };
+      } as T;
     }
+
+    perTurnUsage.set(turnAge, usage);
   }
 
   return result;
@@ -365,11 +452,7 @@ export class Compositor {
       // This ensures estimateMessageTokens() measures actual submission cost,
       // not pre-transform cost (which caused overflow: dense tool JSON was
       // undercounted at length/4 when it should be measured post-stub).
-      const transformedHistory = applyToolGradient(
-        historyMessages,
-        this.config.maxRecentToolPairs ?? 3,
-        this.config.maxProseToolPairs ?? 10,
-      );
+      const transformedHistory = applyToolGradient(historyMessages);
 
       // ── Budget-fit: walk newest→oldest, drop until it fits ──────────────
       // No transformation happens here — only include/exclude decisions.
@@ -1061,11 +1144,7 @@ export class Compositor {
       (this.config.defaultTokenBudget) * (this.config.warmHistoryBudgetFraction ?? 0.4)
     );
     const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
-    const transformedForWarm = applyToolGradient(
-      rawHistory,
-      this.config.maxRecentToolPairs ?? 3,
-      this.config.maxProseToolPairs ?? 10,
-    );
+    const transformedForWarm = applyToolGradient(rawHistory);
 
     // Walk newest→oldest, accumulate transformed token cost, stop when budget exhausted
     let warmTokens = 0;
@@ -1105,6 +1184,20 @@ export class Compositor {
         status: conversation.status,
       },
     });
+  }
+
+  async refreshRedisGradient(
+    agentId: string,
+    sessionKey: string,
+    db: DatabaseSync,
+  ): Promise<void> {
+    const store = new MessageStore(db);
+    const conversation = store.getConversation(sessionKey);
+    if (!conversation) return;
+
+    const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
+    const transformedHistory = applyToolGradient(rawHistory);
+    await this.redis.replaceHistory(agentId, sessionKey, transformedHistory, this.config.maxHistoryMessages);
   }
 
   // ─── Slot Content Resolution ─────────────────────────────────

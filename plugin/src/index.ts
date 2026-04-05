@@ -705,12 +705,24 @@ function createHyperMemEngine(): ContextEngine {
           if (m.role === 'system') continue;
           const neutral = toNeutralMessage(m);
           if (neutral.role === 'user') {
-            // recordUserMessage expects (agentId, sessionKey, content: string, opts?)
-            // NOT a NeutralMessage object — pass the text content string
-            await hm.recordUserMessage(agentId, sk, neutral.textContent ?? '');
+            // SKIP: user messages are recorded by onMessageReceived() via message:received hook
+            // (bare text, before LLM call). Recording here produces a second ENVELOPE version
+            // with "Sender (untrusted metadata): {...}" prepended — halving effective history
+            // depth and leaking metadata into conversation context.
+            // Fix: Anvil bug report 2026-04-05 (dual recording path).
+            continue;
           } else {
             await hm.recordAssistantMessage(agentId, sk, neutral);
           }
+        }
+
+        // Recompute the Redis hot history from SQLite so turn-age gradient is
+        // materialized after every turn. This prevents warm-compressed history
+        // from drifting back to raw payloads during live sessions.
+        try {
+          await hm.refreshRedisGradient(agentId, sk);
+        } catch (refreshErr) {
+          console.warn('[hypermem-plugin] afterTurn: refreshRedisGradient failed (non-fatal):', (refreshErr as Error).message);
         }
 
         // Invalidate the window cache after ingesting new messages.

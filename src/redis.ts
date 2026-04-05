@@ -243,6 +243,27 @@ export class RedisLayer {
   }
 
   /**
+   * Atomically replace the Redis history list with a recomputed gradient view.
+   * Source of truth remains SQLite; Redis is the hot lossy working set.
+   */
+  async replaceHistory(
+    agentId: string,
+    sessionKey: string,
+    messages: NeutralMessage[],
+    maxMessages: number = 250
+  ): Promise<void> {
+    if (!this.isConnected) return;
+    const key = this.sessionKey(agentId, sessionKey, 'history');
+    const pipeline = this.client!.pipeline();
+    pipeline.del(key);
+    for (const msg of messages.slice(-maxMessages)) {
+      pipeline.rpush(key, JSON.stringify(msg));
+    }
+    pipeline.expire(key, this.config.historyTTL);
+    await pipeline.exec();
+  }
+
+  /**
    * Get session history from Redis.
    *
    * @param limit - When provided, return only the last N messages using
