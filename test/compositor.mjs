@@ -663,6 +663,333 @@ Every council response includes:
       `W3: retrievalMode is a valid enum value (got ${diagResult.diagnostics.retrievalMode})`);
   }
 
+  // ── Tool Gradient ──
+  console.log('\n── Tool Gradient ──');
+
+  // Import test-only helpers from the compiled build
+  const {
+    getTurnAge,
+    applyToolGradient,
+    appendToolSummary,
+    truncateWithHeadTail,
+    applyTierPayloadCap,
+  } = await import('../dist/compositor.js');
+
+  // Helper: build a synthetic NeutralMessage with tool content
+  function toolMsg(role, toolResultContent, textContent = null) {
+    return {
+      role,
+      textContent,
+      toolCalls: role === 'assistant' ? [
+        { id: 'tc_001', name: 'read', arguments: JSON.stringify({ path: '/test/file.md' }) },
+      ] : null,
+      toolResults: role === 'user' ? [
+        { callId: 'tc_001', name: 'read', content: toolResultContent, isError: false },
+      ] : null,
+    };
+  }
+
+  // Helper: plain user/assistant messages (no tool content)
+  function textMsg(role, text) {
+    return { role, textContent: text, toolCalls: null, toolResults: null };
+  }
+
+  // Helper: build a conversation where the message at position 0 has a given number
+  // of user messages after it (i.e., turn age = userCount).
+  // Returns messages array: [toolMsg, ...userCount user messages]
+  function buildConvoWithTurnAge(toolRole, toolResultContent, userCount, textContent = null) {
+    const msgs = [toolMsg(toolRole, toolResultContent, textContent)];
+    for (let i = 0; i < userCount; i++) {
+      msgs.push(textMsg('user', `follow-up question ${i + 1}`));
+    }
+    return msgs;
+  }
+
+  // ── getTurnAge: basic counting ──
+  {
+    const msgs = [
+      textMsg('user', 'q1'),
+      textMsg('assistant', 'a1'),
+      textMsg('user', 'q2'),
+      textMsg('assistant', 'a2'),
+      textMsg('user', 'q3'),
+    ];
+    // msg at index 0: 2 user messages after it (q2 at idx 2, q3 at idx 4)
+    assert(getTurnAge(msgs, 0) === 2, 'getTurnAge: 2 user msgs after index 0');
+    // msg at index 2: 1 user message after it (q3 at idx 4)
+    assert(getTurnAge(msgs, 2) === 1, 'getTurnAge: 1 user msg after index 2');
+    // last msg: 0 user messages after it
+    assert(getTurnAge(msgs, 4) === 0, 'getTurnAge: 0 user msgs after last message');
+    // index 1 (assistant): 2 user messages after (q2, q3)
+    assert(getTurnAge(msgs, 1) === 2, 'getTurnAge: counts only user messages, not assistant');
+  }
+
+  // ── T0: turn age 0-4 — payload kept verbatim (no tool payload stripping) ──
+  {
+    const shortPayload = 'tool result here';
+    const msgs = buildConvoWithTurnAge('user', shortPayload, 2); // turn age = 2 (T0)
+    const out = applyToolGradient(msgs);
+    const firstMsg = out[0];
+    // T0: toolResults preserved
+    assert(firstMsg.toolResults !== null, 'T0: toolResults NOT stripped at turn age 2');
+    assert(firstMsg.toolResults[0].content === shortPayload, 'T0: payload preserved verbatim at turn age 2');
+    assert(firstMsg.toolCalls === null, 'T0: only toolResults message here (user role)');
+
+    // Turn age 4 is still T0 boundary
+    const msgs4 = buildConvoWithTurnAge('user', shortPayload, 4); // turn age = 4
+    const out4 = applyToolGradient(msgs4);
+    assert(out4[0].toolResults !== null, 'T0: toolResults preserved at turn age 4 (boundary)');
+  }
+
+  // ── T0: 32K cap applied when payload exceeds limit ──
+  {
+    const bigPayload = 'X'.repeat(40_000); // > 32K
+    const msgs = buildConvoWithTurnAge('user', bigPayload, 3); // turn age = 3, T0
+    const out = applyToolGradient(msgs);
+    const content = out[0].toolResults[0].content;
+    assert(content.length < bigPayload.length, 'T0: oversized payload is capped (truncated)');
+    assert(content.length <= 32_000 + 100, 'T0: payload capped at ~32K');
+    assert(content.includes('[... tool output truncated ...]'), 'T0: truncation marker present');
+  }
+
+  // ── T1: turn age 5-10 — payload capped at 12K/result ──
+  {
+    const payload12k = 'Y'.repeat(15_000); // > 12K, < 24K
+    const msgs = buildConvoWithTurnAge('user', payload12k, 5); // turn age = 5 (T1)
+    const out = applyToolGradient(msgs);
+    const content = out[0].toolResults[0].content;
+    assert(out[0].toolResults !== null, 'T1: toolResults present at turn age 5');
+    assert(content.length < payload12k.length, 'T1: per-result cap applied at turn age 5');
+    assert(content.length <= 12_000 + 100, 'T1: result capped at ~12K');
+
+    // Turn age 10 is still T1 boundary
+    const msgs10 = buildConvoWithTurnAge('user', 'short payload', 10);
+    const out10 = applyToolGradient(msgs10);
+    assert(out10[0].toolResults !== null, 'T1: toolResults preserved at turn age 10 (boundary)');
+  }
+
+  // ── T1 → T2 downgrade: per-turn aggregate cap (24K) exceeded ──
+  {
+    // Build a conversation where TWO tool-call messages (role: assistant) are in the
+    // same logical turn (same turn age = same number of user messages after them).
+    // Assistant messages don't count toward turn age, so both have the same turn age.
+    // Each has 12K+ content; together they exceed the 24K aggregate cap.
+    // gradient processes newest→oldest: index 1 fits within cap, index 0 overflows → T2 downgrade.
+    //
+    // Layout:
+    //   index 0: assistantToolCall (older) — turn age = 5 (T1)
+    //   index 1: assistantToolCall (newer) — turn age = 5 (T1)
+    //   index 2..6: 5 user messages
+    const payload13k = 'Z'.repeat(13_000);
+
+    const asstToolMsg = (content) => ({
+      role: 'assistant',
+      textContent: 'Let me check that.',
+      toolCalls: [{ id: 'tc_agg', name: 'read', arguments: JSON.stringify({ path: '/file.md' }) }],
+      toolResults: [{ callId: 'tc_agg', name: 'read', content, isError: false }],
+    });
+
+    const msgs = [
+      asstToolMsg(payload13k),  // index 0: turn age = 5 (T1, older)
+      asstToolMsg(payload13k),  // index 1: turn age = 5 (T1, newer)
+      textMsg('user', 'q1'),
+      textMsg('user', 'q2'),
+      textMsg('user', 'q3'),
+      textMsg('user', 'q4'),
+      textMsg('user', 'q5'),
+    ];
+    // Both assistant tool messages have the same turn age (5 user messages after each)
+    const age0 = getTurnAge(msgs, 0);
+    const age1 = getTurnAge(msgs, 1);
+    assert(age0 === 5, `T1 downgrade setup: index 0 has turn age 5 (got ${age0})`);
+    assert(age1 === 5, `T1 downgrade setup: index 1 has turn age 5 (got ${age1})`);
+
+    const out = applyToolGradient(msgs);
+    // index 1 processed first (newest→oldest): 13K capped to 12K → usage.t1 = 12K
+    // index 0 processed next: 12K + 12K = 24K − no, let’s check the exact arithmetic:
+    //   applyTierPayloadCap(msg, 12000, 24000, 12000): usedChars = 12000 + 12000 = 24000
+    //   24000 > 24000 is FALSE, so no downgrade at exactly the limit.
+    //   Use 13K each: after T1 cap, result[1] = 12K. usage.t1 = 0 + 12K = 12K.
+    //   result[0]: usedSoFar=12K, content capped to 12K, usedChars = 12K + 12K = 24K → NOT > 24K.
+    //   So we need slightly more: use two 13K payloads where T1 cap results in 12K each,
+    //   and the turn cap check is 12K + 12K = 24K which is NOT > 24K (strict greater-than).
+    //   We need to exceed 24K. Use payload of 13K so cap doesn’t truncate, but sum > 24K:
+    //   Actually with T1_CHAR_CAP=12000 and payload=13000:
+    //     after truncation: content.length becomes 12000 (approximately, due to head/tail)
+    //     usedChars = usedSoFar(12000) + 12000 = 24000, NOT > 24000 → no downgrade
+    //   So we need payload where even after 12K cap, sum of two caps > 24K.
+    //   That’s not possible with two 12K-capped results summing to exactly 24K (= boundary).
+    //   Use three messages, or use a payload that results in different cap behavior.
+    //
+    // Correction: use per-result content of 13K and verify T1 per-result cap applies,
+    // then for aggregate downgrade use a larger dataset.
+    // The aggregate downgrade requires usedChars > 24K. With T1 cap at 12K per result:
+    //   message1 truncated to 12K. usage=12K.
+    //   message2: usedSoFar=12K, truncated to 12K, total=24K. 24K > 24K? NO.
+    // To trigger downgrade: need total > 24K. E.g., three 13K messages:
+    //   msg3: usage=0, after cap 12K, total=12K (no downgrade)
+    //   msg2: usage=12K, after cap 12K, total=24K (no downgrade — 24000 is NOT > 24000)
+    //   msg1: usage=24K, payload capped to 12K, total=36K > 24K → DOWNGRADE
+
+    // Rebuild with 3 assistant tool messages at same turn age
+    const msgs3 = [
+      asstToolMsg(payload13k),  // index 0: turn age = 5, processed last
+      asstToolMsg(payload13k),  // index 1: turn age = 5, processed 2nd
+      asstToolMsg(payload13k),  // index 2: turn age = 5, processed 1st
+      textMsg('user', 'q1'),
+      textMsg('user', 'q2'),
+      textMsg('user', 'q3'),
+      textMsg('user', 'q4'),
+      textMsg('user', 'q5'),
+    ];
+    const age0b = getTurnAge(msgs3, 0);
+    assert(age0b === 5, `T1 downgrade (3msg) setup: index 0 has turn age 5 (got ${age0b})`);
+
+    const out3 = applyToolGradient(msgs3);
+    const newest = out3[2]; // processed first, 12K fits (usage: 0→12K)
+    const middle = out3[1]; // processed second, 12K more (usage: 12K→24K), 24K NOT > 24K → no downgrade
+    const oldest = out3[0]; // processed last, usedSoFar=24K, total=36K > 24K → DOWNGRADE
+
+    assert(newest.toolResults !== null, 'T1 downgrade: newest message keeps toolResults');
+    assert(middle.toolResults !== null, 'T1 downgrade: middle message keeps toolResults (at boundary)');
+    assert(oldest.toolResults === null, 'T1 downgrade: oldest message downgraded to T2 envelope (toolResults null)');
+    assert(oldest.toolCalls === null, 'T1 downgrade: oldest message toolCalls stripped');
+    assert(oldest.textContent !== null && oldest.textContent.length > 0,
+      'T1 downgrade: oldest message has prose summary in textContent');
+  }
+
+  // ── T2: turn age 11-15 — payload replaced with prose envelope ──
+  {
+    const payload = 'function doThing() { return 42; } // some code here';
+    const msgs = buildConvoWithTurnAge('user', payload, 11); // turn age = 11 (T2)
+    const out = applyToolGradient(msgs);
+    const msg = out[0];
+    assert(msg.toolResults === null, 'T2: toolResults stripped at turn age 11');
+    assert(msg.toolCalls === null, 'T2: toolCalls stripped at turn age 11');
+    assert(msg.textContent !== null && msg.textContent.length > 0, 'T2: prose envelope in textContent');
+    // T2 envelope contains the tool label from the read call
+    assert(msg.textContent.includes('read') || msg.textContent.includes('['), 'T2: textContent contains tool label');
+
+    // Turn age 15 is still T2 boundary
+    const msgs15 = buildConvoWithTurnAge('user', payload, 15);
+    const out15 = applyToolGradient(msgs15);
+    assert(out15[0].toolResults === null, 'T2: toolResults stripped at turn age 15 (boundary)');
+    assert(out15[0].textContent !== null, 'T2: prose envelope present at turn age 15');
+  }
+
+  // ── T3: turn age 16+ — payload replaced with compact outcome stub ──
+  {
+    const payload = 'The quick brown fox jumps over the lazy dog. Some important content here.';
+    const msgs = buildConvoWithTurnAge('user', payload, 16); // turn age = 16 (T3)
+    const out = applyToolGradient(msgs);
+    const msg = out[0];
+    assert(msg.toolResults === null, 'T3: toolResults stripped at turn age 16');
+    assert(msg.toolCalls === null, 'T3: toolCalls stripped at turn age 16');
+    assert(msg.textContent !== null && msg.textContent.length > 0, 'T3: compact stub in textContent');
+    // T3 stub should be short — capped at 300 chars per result
+    assert(msg.textContent.length <= 350, `T3: stub is compact (got ${msg.textContent.length} chars)`);
+    // T3 envelope uses square bracket wrapping
+    assert(msg.textContent.startsWith('[') || msg.textContent.includes('['), 'T3: stub uses compact bracket format');
+
+    // Turn age 20 is well into T3
+    const msgs20 = buildConvoWithTurnAge('user', payload, 20);
+    const out20 = applyToolGradient(msgs20);
+    assert(out20[0].toolResults === null, 'T3: toolResults stripped at turn age 20');
+    assert(out20[0].textContent.length <= 350, 'T3: stub remains compact at turn age 20');
+  }
+
+  // ── Turn-age counts USER messages only, not total messages ──
+  {
+    // 5 assistant messages between the tool result and the "boundary" — shouldn't count
+    const msgs = [
+      toolMsg('user', 'payload content'),  // index 0
+      textMsg('assistant', 'a1'),
+      textMsg('assistant', 'a2'),
+      textMsg('assistant', 'a3'),
+      textMsg('assistant', 'a4'),
+      textMsg('assistant', 'a5'),
+      // Only 2 user messages follow — turn age should be 2, not 6
+      textMsg('user', 'q1'),
+      textMsg('user', 'q2'),
+    ];
+    const age = getTurnAge(msgs, 0);
+    assert(age === 2, `Turn-age counts only user messages (expected 2, got ${age})`);
+
+    const out = applyToolGradient(msgs);
+    // Turn age 2 → T0 → payload preserved
+    assert(out[0].toolResults !== null,
+      'Turn-age user-only: T0 tier applied despite many assistant messages between');
+  }
+
+  // ── appendToolSummary: preserves existing textContent, does not overwrite ──
+  {
+    const existing = 'I already said something important.';
+    const summary = 'read /foo/bar — first line of file';
+
+    const result = appendToolSummary(existing, summary);
+    assert(result.includes(existing), 'appendToolSummary: existing textContent preserved');
+    assert(result.includes(summary), 'appendToolSummary: summary appended');
+    assert(result.startsWith(existing), 'appendToolSummary: existing text comes first');
+
+    // Null textContent: summary becomes the whole string
+    const fromNull = appendToolSummary(null, summary);
+    assert(fromNull === summary, 'appendToolSummary: null textContent yields summary as full string');
+
+    // Empty string: summary becomes the whole string
+    const fromEmpty = appendToolSummary('', summary);
+    assert(fromEmpty === summary, 'appendToolSummary: empty textContent yields summary as full string');
+
+    // Existing textContent in T2 message should not be overwritten by gradient
+    const payloadT2 = 'some tool output text';
+    const priorText = 'I analyzed the situation.';
+    const msgsT2 = buildConvoWithTurnAge('user', payloadT2, 12, priorText); // textContent set
+    const outT2 = applyToolGradient(msgsT2);
+    const msgT2 = outT2[0];
+    assert(msgT2.textContent.includes(priorText),
+      'T2: existing textContent preserved (not overwritten) when gradient strips tool payload');
+  }
+
+  // ── truncateWithHeadTail: head+tail structure ──
+  {
+    const content = 'AABBCC'.repeat(10_000); // 60K chars
+    const truncated = truncateWithHeadTail(content, 1_000);
+    assert(truncated.length <= 1_100, `truncateWithHeadTail: result within cap (got ${truncated.length})`);
+    assert(truncated.includes('[... tool output truncated ...]'), 'truncateWithHeadTail: marker present');
+    // Head should start with original content
+    assert(truncated.startsWith('AA'), 'truncateWithHeadTail: head preserved from original start');
+    // Should not truncate short content
+    const short = 'hello world';
+    assert(truncateWithHeadTail(short, 1_000) === short, 'truncateWithHeadTail: short content unchanged');
+  }
+
+  // ── T0 boundary: assistant tool call message at turn age 4 (exact boundary) ──
+  {
+    // Build: [assistantTool, user, user, user, user] — assistant at index 0, 4 user msgs after
+    const msgs = [
+      {
+        role: 'assistant',
+        textContent: 'Let me read that.',
+        toolCalls: [{ id: 'tc_bnd', name: 'read', arguments: JSON.stringify({ path: '/f' }) }],
+        toolResults: null,
+      },
+      textMsg('user', 'q1'),
+      textMsg('user', 'q2'),
+      textMsg('user', 'q3'),
+      textMsg('user', 'q4'), // 4 user msgs → turn age 4, still T0
+    ];
+    const age = getTurnAge(msgs, 0);
+    assert(age === 4, `T0 boundary: turn age at index 0 is 4 (got ${age})`);
+
+    const out = applyToolGradient(msgs);
+    // toolCalls preserved at T0
+    assert(out[0].toolCalls !== null, 'T0 boundary: toolCalls preserved at turn age 4');
+
+    // One more user message → turn age 5, T1 boundary
+    msgs.push(textMsg('user', 'q5'));
+    const age5 = getTurnAge(msgs, 0);
+    assert(age5 === 5, `T1 boundary: turn age at index 0 is 5 (got ${age5})`);
+  }
+
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
   await hm.redis.flushPrefix();

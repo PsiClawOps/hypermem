@@ -74,6 +74,10 @@ const TOOL_GRADIENT_MIDDLE_MARKER = '\n[... tool output truncated ...]\n';
 // Re-exported below for backward compatibility with existing consumers.
 export { CollectionTrigger, DEFAULT_TRIGGERS, matchTriggers } from './trigger-registry.js';
 
+// ─── Test-only exports (not part of public API) ───────────────────────────
+// These are exported solely for unit testing. Do not use in production code.
+export { getTurnAge, applyToolGradient, appendToolSummary, truncateWithHeadTail, applyTierPayloadCap };
+
 /**
  * Rough token estimation: ~4 chars per token for English text.
  * This is a heuristic — actual tokenization varies by model.

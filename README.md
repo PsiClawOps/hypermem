@@ -41,10 +41,11 @@ The retrieval path is fast because the hot layer is fast. Benchmarked against a 
 | Redis history LRANGE (100 messages) | 0.16ms | 0.13ms | 0.22ms |
 | L4 facts query (top-28 by confidence×decay) | 0.29ms | 0.28ms | 0.31ms |
 | L4 FTS5 keyword search | 0.08ms | 0.076ms | 0.11ms |
-| Hybrid retrieval (FTS5 + KNN fused) | 30ms | 26ms | 61ms |
-| Full 4-layer compose, warm session | 59ms | 54ms | 94ms |
+| Full 4-layer compose, warm session | 59ms | 58ms | 65ms |
+| Full 4-layer compose, cold session (first turn) | 343ms | 57ms | 1488ms |
+| Async pre-embed cost (background, not user-facing) | 302ms | 146ms | 725ms |
 
-L1 and L4 structured retrieval are sub-millisecond. The 30ms hybrid retrieval figure is dominated by the Ollama embedding round-trip to generate the query vector — the sqlite-vec ANN search itself is low single-digit milliseconds. Full end-to-end composition of a warm session comes in under 60ms average. That is fast enough that retrieval is not a constraint on turn latency.
+L1 and L4 structured retrieval are sub-millisecond. On warm sessions — every turn after the first — the query embedding is pre-computed in the background after the assistant replies, so compose hits Redis cache instead of calling Ollama inline. Warm compose averages 59ms with a p95 of 65ms. The first turn of a new session pays the Ollama round-trip (343ms avg), then every turn after is warm. The 302ms async pre-embed cost is paid by Ollama after the assistant replies — the user never waits for it. That is fast enough that retrieval is not a constraint on turn latency.
 
 ### Context that does not bloat or collapse
 
@@ -56,7 +57,7 @@ HyperMem's compositor does not accumulate a transcript. It assembles context fre
 
 Long agentic sessions produce a lot of tool output. File reads, search results, test runs — each one eats tokens. Left unmanaged, old tool results crowd out recent reasoning and current context.
 
-Tool Gradient v2 compresses by turn age. The last four turns stay verbatim. Turns five through ten become prose stubs: `Read /src/foo.ts (1.2KB)`, `Ran npm test — exit 0`. Older turns drop tool payloads entirely, keeping message text. Large results use head-and-tail truncation with a middle marker. Redis hot history is recomputed from SQLite after each turn so the live cache stays aligned with the stored source of truth.
+The Tool Context Tuning feature compresses tool history by turn age. Recent turns stay verbatim. Older turns become prose stubs: `Read /src/foo.ts (1.2KB)`, `Ran npm test — exit 0`. The oldest turns drop tool payloads entirely, keeping message text. Large results use head-and-tail truncation with a middle marker. Redis hot history is recomputed from SQLite after each turn so the live cache stays aligned with the stored source of truth.
 
 ### Subagents that inherit context
 
@@ -103,7 +104,7 @@ HyperMem plugs into OpenClaw as a context engine via the plugin interface. It ow
 
 The compositor is the engine that makes the four layers useful together.
 
-On each turn it reads the incoming prompt, queries all four layers in parallel, applies per-slot token caps (history 65%, facts 15%, knowledge 10%, cross-session 10%), runs the Tool Gradient v2 transform on history, and assembles a provider-format context block. A safety valve runs post-assembly to catch estimation drift and trim if the total exceeds budget.
+On each turn it reads the incoming prompt, queries all four layers in parallel, applies per-slot token caps (history 65%, facts 15%, knowledge 10%, cross-session 10%), runs Tool Context Tuning on history, and assembles a provider-format context block. A safety valve runs post-assembly to catch estimation drift and trim if the total exceeds budget.
 
 Because the budget is computed from the model's actual context window at compose time, a mid-session model swap — or a platform change to the model's limits — is absorbed on the next turn. The compositor adjusts. There is no accumulated state that needs to be re-summarized.
 
