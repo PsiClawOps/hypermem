@@ -235,6 +235,139 @@ openclaw config set sessions.maxAgeHours 168 --strict-json
 
 ---
 
+---
+
+## Token budget tuning
+
+HyperMem actively loads context: recent history, facts, semantic recall, doc chunks, and library data all get tokens each turn. For most users on subscription models this is the point — richer context, better responses. But if you want to reduce token burn, every major context slot has a knob.
+
+These settings live in `~/.openclaw/hypermem/config.json`. Create the file if it doesn't exist — HyperMem loads it at startup and merges it over the defaults. A gateway restart is required after changes.
+
+**An installing agent should discuss these tradeoffs with you before setting them.** Cutting the budget too aggressively produces an agent that forgets things mid-conversation. Cutting individual slots (facts, history depth) is lower-risk than cutting the total budget.
+
+### The config file
+
+```json
+{
+  "compositor": {
+    "defaultTokenBudget": 90000,
+    "maxHistoryMessages": 250,
+    "maxFacts": 28,
+    "maxCrossSessionContext": 6000,
+    "maxRecentToolPairs": 3,
+    "maxProseToolPairs": 10,
+    "warmHistoryBudgetFraction": 0.4,
+    "keystoneHistoryFraction": 0.2,
+    "keystoneMaxMessages": 15
+  }
+}
+```
+
+All fields are optional — omit any you don't want to change.
+
+---
+
+### What each knob does
+
+#### `defaultTokenBudget` — total context ceiling
+**Default:** `90000`
+
+The hard cap on tokens HyperMem will assemble per turn. Everything else is a fraction of this. Reducing it compresses all slots proportionally — history gets fewer messages, fewer facts surface, semantic recall shrinks.
+
+**Tradeoff:** Reduces token spend directly but degrades recall quality across the board. Don't go below `40000` without testing — below that, history depth drops to the point where the agent loses conversational thread mid-session.
+
+**Conservative savings target:** `60000` — roughly 30% reduction, acceptable recall for simple single-task agents.
+
+---
+
+#### `maxHistoryMessages` — how many past messages to consider
+**Default:** `250`
+
+The maximum messages pulled from SQLite/Redis before budget trimming. Budget trimming then cuts this down further based on `defaultTokenBudget`. This knob is the ceiling before budget math runs — lowering it reduces the pool HyperMem picks from.
+
+**Tradeoff:** Low values cause the agent to lose older context even when the token budget has room. `100` is a reasonable reduction for lightweight use.
+
+---
+
+#### `maxFacts` — how many facts to inject
+**Default:** `28`
+
+Facts are high-signal structured memory (decisions, config, incidents). Each fact is typically 50–150 tokens. At 28 facts that's up to ~4200 tokens in the facts slot.
+
+**Tradeoff:** Reducing this is low-risk for fresh installs (few facts stored yet), higher-risk for established agents where facts carry important context. `10–15` is a reasonable reduction.
+
+---
+
+#### `maxCrossSessionContext` — cross-session context tokens
+**Default:** `6000`
+
+Tokens allocated for context imported from related sessions (subagent inheritance, sibling session summaries). Solo agents with no subagent use can set this to `0` with no impact.
+
+**Tradeoff:** Zero cost for solo agents. For fleet use, reducing this degrades subagent handoff quality.
+
+---
+
+#### `maxRecentToolPairs` — verbatim tool turns kept
+**Default:** `3`
+
+The last N tool call/result pairs are kept verbatim (full content). Older pairs are compressed by the Tool Gradient. Reducing this to `1` or `2` compresses tool history more aggressively — useful for tool-heavy agents that run many file reads or searches per turn.
+
+**Tradeoff:** Very recent tool results that are still relevant may get prose-stubbed instead of shown in full. The agent can still see what tool ran and a summary; it just loses the raw output detail.
+
+---
+
+#### `maxProseToolPairs` — compressed tool turns before full drop
+**Default:** `10`
+
+Beyond the verbatim window, this many tool pairs get prose stubs (e.g. `Read /src/foo.ts (1.2KB)`) before being dropped entirely. Reducing to `5` means older tool history drops sooner.
+
+**Tradeoff:** Low-risk. Prose stubs are cheap (20–40 tokens each vs 500–5000 for full tool output). The main cost is losing the detail of what a tool returned several turns ago.
+
+---
+
+#### `warmHistoryBudgetFraction` — history share of token budget
+**Default:** `0.4` (40%)
+
+The fraction of `defaultTokenBudget` allocated to conversation history. At the default, a 90K budget gives history ~36K tokens — roughly 70–90 recent messages depending on message length. Reducing this fraction shrinks history and leaves more budget for facts and recall.
+
+**Tradeoff:** Shorter effective conversation memory. Going below `0.3` noticeably reduces how far back the agent can see in the current session.
+
+---
+
+#### `keystoneHistoryFraction` — older recalled messages
+**Default:** `0.2` (20% of history budget)
+
+HyperMem injects "keystone" messages — older significant turns from earlier in the session — into the history slot to maintain long-range continuity. This fraction controls how many history tokens go to keystones vs. recent messages. Set to `0` to disable keystones entirely.
+
+**Tradeoff:** Disabling keystones saves tokens but the agent loses long-range session continuity. For short-session or task-focused agents this is fine. For persistent agents running multi-hour sessions it degrades noticeably.
+
+---
+
+### Recommended lean profile
+
+For users who want meaningful token savings without breaking core functionality:
+
+```json
+{
+  "compositor": {
+    "defaultTokenBudget": 60000,
+    "maxHistoryMessages": 100,
+    "maxFacts": 15,
+    "maxCrossSessionContext": 2000,
+    "maxRecentToolPairs": 2,
+    "maxProseToolPairs": 6,
+    "warmHistoryBudgetFraction": 0.35,
+    "keystoneHistoryFraction": 0.1
+  }
+}
+```
+
+Expected reduction: ~35–45% fewer tokens per turn compared to defaults, depending on conversation style and tool use density. Test with your actual workload — a research-heavy agent pulling lots of web content will see different numbers than a pure chat agent.
+
+Save this file to `~/.openclaw/hypermem/config.json` and restart the gateway.
+
+---
+
 ### Step 4 — Restart the gateway
 
 ```bash

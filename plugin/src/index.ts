@@ -65,6 +65,39 @@ let _generateEmbeddings: ((texts: string[]) => Promise<Float32Array[]>) | null =
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _taskFlowRuntime: any | null = null;
 
+/**
+ * Load optional user config from ~/.openclaw/hypermem/config.json.
+ * Supports overriding compositor tuning knobs without editing plugin source.
+ * Unknown keys are ignored. Missing file is silently skipped.
+ */
+async function loadUserConfig(): Promise<{
+  compositor?: Partial<{
+    defaultTokenBudget: number;
+    maxHistoryMessages: number;
+    maxFacts: number;
+    maxCrossSessionContext: number;
+    maxRecentToolPairs: number;
+    maxProseToolPairs: number;
+    warmHistoryBudgetFraction: number;
+    keystoneHistoryFraction: number;
+    keystoneMaxMessages: number;
+    keystoneMinSignificance: number;
+  }>;
+}> {
+  const configPath = path.join(os.homedir(), '.openclaw/hypermem/config.json');
+  try {
+    const raw = await fs.readFile(configPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    console.log(`[hypermem-plugin] Loaded user config from ${configPath}`);
+    return parsed as ReturnType<typeof loadUserConfig> extends Promise<infer T> ? T : never;
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn(`[hypermem-plugin] Failed to parse config.json (using defaults):`, (err as Error).message);
+    }
+    return {};
+  }
+}
+
 async function getHyperMem(): Promise<HyperMemInstance> {
   if (_hm) return _hm;
   if (_hmInitPromise) return _hmInitPromise;
@@ -79,6 +112,9 @@ async function getHyperMem(): Promise<HyperMemInstance> {
       _generateEmbeddings = mod.generateEmbeddings as (texts: string[]) => Promise<Float32Array[]>;
     }
 
+    // Load optional user config — compositor tuning overrides
+    const userConfig = await loadUserConfig();
+
     const instance = await HyperMem.create({
       dataDir: path.join(os.homedir(), '.openclaw/hypermem'),
       redis: {
@@ -88,6 +124,7 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         sessionTTL: 14400,     // 4h for system/identity/meta slots
         historyTTL: 86400,     // 24h for history — ages out, not count-trimmed
       },
+      ...(userConfig.compositor ? { compositor: userConfig.compositor } : {}),
     });
 
     _hm = instance;
