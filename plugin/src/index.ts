@@ -770,26 +770,35 @@ function createHyperMemEngine(): ContextEngine {
           // Window invalidation is best-effort
         }
 
-        // Pre-compute embedding for the last user message so the next compose()
-        // can skip the ~341ms Ollama call entirely (fire-and-forget).
-        // Wrapped in try/catch — non-fatal if Ollama is unavailable or slow.
+        // Pre-compute embedding for the CURRENT user message so the next compose()
+        // can skip the Ollama round-trip entirely (fire-and-forget).
+        //
+        // Why messages[0..prePromptMessageCount-1], not newMessages:
+        // newMessages = messages.slice(prePromptMessageCount) — that's only the
+        // assistant reply produced this turn. The user message that triggered
+        // this turn landed BEFORE the LLM call, so it's always in the pre-prompt
+        // slice. The old code searched newMessages and always got a cache miss.
+        //
+        // We walk backwards from prePromptMessageCount-1 to find the most recent
+        // user turn, embed it, and store it under the qembed key. The next
+        // compose() call checks Redis for this key before calling Ollama.
         try {
-          // Find the last user message text from the newly ingested messages
-          let lastUserText: string | null = null;
-          for (let i = newMessages.length - 1; i >= 0; i--) {
-            const m = newMessages[i] as unknown as InboundMessage;
+          let currentUserText: string | null = null;
+          const prePromptEnd = prePromptMessageCount ?? messages.length;
+          for (let i = prePromptEnd - 1; i >= 0; i--) {
+            const m = messages[i] as unknown as InboundMessage;
             if (m.role === 'user') {
               const neutral = toNeutralMessage(m);
               if (neutral.textContent) {
-                lastUserText = neutral.textContent;
+                currentUserText = neutral.textContent;
                 break;
               }
             }
           }
 
-          if (lastUserText && _generateEmbeddings) {
+          if (currentUserText && _generateEmbeddings) {
             // Fire-and-forget: don't await, don't block afterTurn
-            _generateEmbeddings([lastUserText]).then(async ([embedding]) => {
+            _generateEmbeddings([currentUserText]).then(async ([embedding]) => {
               if (embedding) {
                 await hm.redis.setQueryEmbedding(agentId, sk, embedding);
               }
