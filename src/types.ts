@@ -242,6 +242,13 @@ export interface ComposeRequest {
    * returns messages to the OpenClaw runtime for its own provider translation.
    */
   skipProviderTranslation?: boolean;
+  /**
+   * When set, history fetching is scoped to this topic (Option B: also includes
+   * legacy messages with topic_id IS NULL for transition safety).
+   * If not provided, full session history is returned (no behavior change).
+   * P3.4: topic-aware compositor.
+   */
+  topicId?: string;
 }
 
 export interface SlotTokenCounts {

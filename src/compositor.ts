@@ -35,6 +35,7 @@ import {
 } from './trigger-registry.js';
 import { RedisLayer } from './redis.js';
 import { MessageStore } from './message-store.js';
+import { SessionTopicMap } from './session-topic-map.js';
 import { toProviderFormat } from './provider-translator.js';
 import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
@@ -431,11 +432,26 @@ export class Compositor {
 
     // ─── Conversation History ──────────────────────────────────
     if (request.includeHistory !== false) {
+      // P3.4: Look up the active topic for this session (non-fatal)
+      let activeTopicId: string | undefined;
+      if (!request.topicId) {
+        try {
+          const topicMap = new SessionTopicMap(db);
+          const activeTopic = topicMap.getActiveTopic(request.sessionKey);
+          if (activeTopic) activeTopicId = activeTopic.id;
+        } catch {
+          // Topic lookup is best-effort — fall back to full history
+        }
+      } else {
+        activeTopicId = request.topicId;
+      }
+
       const rawHistoryMessages = await this.getHistory(
         request.agentId,
         request.sessionKey,
         request.historyDepth || this.config.maxHistoryMessages,
-        store
+        store,
+        activeTopicId
       );
 
       // Deduplicate history by StoredMessage.id (second line of defense after
@@ -1233,12 +1249,18 @@ export class Compositor {
 
   /**
    * Get conversation history: try Redis first, fall back to SQLite.
+   *
+   * When topicId is provided (P3.4), the SQLite path filters to messages
+   * matching that topic OR with topic_id IS NULL (Option B transition safety).
+   * The Redis path is unaffected — Redis doesn't index by topic, so topic
+   * filtering only applies to the SQLite fallback.
    */
   private async getHistory(
     agentId: string,
     sessionKey: string,
     limit: number,
-    store: MessageStore
+    store: MessageStore,
+    topicId?: string
   ): Promise<NeutralMessage[]> {
     // Pass limit through to Redis — this is the correct enforcement point.
     // Previously getHistory() ignored the limit on the Redis path (LRANGE 0 -1),
@@ -1249,6 +1271,10 @@ export class Compositor {
     const conversation = store.getConversation(sessionKey);
     if (!conversation) return [];
 
+    if (topicId) {
+      // P3.4: Option B — active topic messages + legacy NULL messages
+      return store.getRecentMessagesByTopic(conversation.id, topicId, limit);
+    }
     return store.getRecentMessages(conversation.id, limit);
   }
 

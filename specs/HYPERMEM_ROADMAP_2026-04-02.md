@@ -128,6 +128,7 @@ _Real work, but not blocking stability or the phased roadmap. Revisit after Phas
 | Live-load defaultOrgRegistry from library.db | Follow-on to P1.4 audit. Replace hardcoded registry with query. Gate 3 patch is the right first step. |
 | Cursor indexer integration | Cursor currently written but not consumed by background indexer as high-signal boundary. P1.3 (durability) is prerequisite. |
 | Plugin CI for all agents | Expand false-green fix (P1.1) to cover all agent plugin builds, not just hypermem-core. |
+| P3.4 strict-mode backfill | Option B (NULL fallback) is live during transition. When topic assignment is stable, run backfill utility to assign topic_id to legacy NULL messages, then flip getHistory() to strict mode (remove `OR topic_id IS NULL`). Prerequisite: topic detection running for ≥2 weeks in production. |
 
 ---
 
