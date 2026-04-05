@@ -66,6 +66,28 @@ let _generateEmbeddings: ((texts: string[]) => Promise<Float32Array[]>) | null =
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _taskFlowRuntime: any | null = null;
 
+// ─── System overhead cache ────────────────────────────────────
+// Caches the non-history token cost (contextBlock + runtime system prompt)
+// from the last full compose per session key. Used in tool-loop turns to
+// return an honest estimatedTokens without re-running the full compose
+// pipeline. Map key = resolved session key.
+const _overheadCache = new Map<string, number>();
+
+// Tier-aware conservative fallback when no cached value exists (cold session,
+// first turn after restart). Over-estimates are safer than under-estimates:
+// a false-positive compact is cheaper than letting context blow past budget.
+const OVERHEAD_FALLBACK: Record<string, number> = {
+  council:    28_000,
+  director:   28_000,
+  specialist: 18_000,
+};
+const OVERHEAD_FALLBACK_DEFAULT = 15_000;
+
+function getOverheadFallback(tier?: string): number {
+  if (!tier) return OVERHEAD_FALLBACK_DEFAULT;
+  return OVERHEAD_FALLBACK[tier] ?? OVERHEAD_FALLBACK_DEFAULT;
+}
+
 /**
  * Load optional user config from ~/.openclaw/hypermem/config.json.
  * Supports overriding compositor tuning knobs without editing plugin source.
@@ -536,13 +558,35 @@ function createHyperMemEngine(): ContextEngine {
       const lastMsg = messages[messages.length - 1] as unknown as InboundMessage | undefined;
       const isToolLoop = lastMsg?.role === 'toolResult' || lastMsg?.role === 'tool';
       if (isToolLoop) {
-        // Return the runtime-provided messages unchanged.
-        // estimatedTokens=0 signals no HyperMem token budget was consumed;
-        // the runtime uses its own estimate for the overflow check.
-        return {
-          messages: messages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
-          estimatedTokens: 0,
-        };
+        // Tool-loop turns: pass messages through unchanged but still:
+        //   1. Run the trim guardrail — tool loops accumulate history as fast
+        //      as regular turns, and the old path skipped trim entirely, leaving
+        //      the compaction guard blind (received estimatedTokens=0).
+        //   2. Return a real estimatedTokens = windowTokens + cached overhead,
+        //      so the guard has accurate signal and can fire when needed.
+        const effectiveBudget = tokenBudget ?? 90_000;
+        try {
+          const hm = await getHyperMem();
+          const sk = resolveSessionKey(sessionId, sessionKey);
+          const agentId = extractAgentId(sk);
+          const trimBudget = Math.floor(effectiveBudget * 0.8);
+          const trimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, trimBudget);
+          if (trimmed > 0) {
+            await hm.redis.invalidateWindow(agentId, sk);
+          }
+          const windowTokens = await estimateWindowTokens(hm, agentId, sk);
+          const overhead = _overheadCache.get(sk) ?? getOverheadFallback();
+          return {
+            messages: messages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
+            estimatedTokens: windowTokens + overhead,
+          };
+        } catch {
+          // Non-fatal: return conservative estimate so guard doesn't go blind
+          return {
+            messages: messages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
+            estimatedTokens: Math.floor(effectiveBudget * 0.8),
+          };
+        }
       }
 
       try {
@@ -615,6 +659,13 @@ function createHyperMemEngine(): ContextEngine {
         // This is the facts/recall/episodes block assembled by the compositor.
         systemPromptAddition: result.contextBlock || undefined,
       };
+
+      // Cache overhead for tool-loop turns: contextBlock tokens (chars/4) +
+      // tier-aware estimate for runtime system prompt (SOUL.md, identity,
+      // workspace files — not visible from inside the plugin).
+      const contextBlockTokens = Math.ceil((result.contextBlock?.length ?? 0) / 4);
+      const runtimeSystemTokens = getOverheadFallback(tier);
+      _overheadCache.set(sk, contextBlockTokens + runtimeSystemTokens);
       } catch (err) {
         console.error('[hypermem-plugin] assemble error (stack):', (err as Error).stack ?? err);
         throw err; // Re-throw so the runtime falls back to legacy pipeline
