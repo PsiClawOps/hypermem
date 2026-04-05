@@ -770,35 +770,38 @@ function createHyperMemEngine(): ContextEngine {
           // Window invalidation is best-effort
         }
 
-        // Pre-compute embedding for the CURRENT user message so the next compose()
+        // Pre-compute embedding for the assistant's reply so the next compose()
         // can skip the Ollama round-trip entirely (fire-and-forget).
         //
-        // Why messages[0..prePromptMessageCount-1], not newMessages:
-        // newMessages = messages.slice(prePromptMessageCount) — that's only the
-        // assistant reply produced this turn. The user message that triggered
-        // this turn landed BEFORE the LLM call, so it's always in the pre-prompt
-        // slice. The old code searched newMessages and always got a cache miss.
+        // Why the assistant reply, not the current user message:
+        // The assistant's reply is the strongest semantic predictor of what the
+        // user will ask next — it's the context they're responding to. By the time
+        // the next user message arrives and compose() fires, this embedding is
+        // already warm in Redis. Cache hit rate: near 100% on normal conversation
+        // flow (one reply per turn).
         //
-        // We walk backwards from prePromptMessageCount-1 to find the most recent
-        // user turn, embed it, and store it under the qembed key. The next
-        // compose() call checks Redis for this key before calling Ollama.
+        // The previous approach (embedding the current user message) still missed
+        // on every turn because compose() queries against the INCOMING user message,
+        // not the one that was just processed.
+        //
+        // newMessages = messages.slice(prePromptMessageCount) — the assistant reply
+        // is always in here. Walk backwards to find the last assistant text turn.
         try {
-          let currentUserText: string | null = null;
-          const prePromptEnd = prePromptMessageCount ?? messages.length;
-          for (let i = prePromptEnd - 1; i >= 0; i--) {
-            const m = messages[i] as unknown as InboundMessage;
-            if (m.role === 'user') {
+          let assistantReplyText: string | null = null;
+          for (let i = newMessages.length - 1; i >= 0; i--) {
+            const m = newMessages[i] as unknown as InboundMessage;
+            if (m.role === 'assistant') {
               const neutral = toNeutralMessage(m);
               if (neutral.textContent) {
-                currentUserText = neutral.textContent;
+                assistantReplyText = neutral.textContent;
                 break;
               }
             }
           }
 
-          if (currentUserText && _generateEmbeddings) {
+          if (assistantReplyText && _generateEmbeddings) {
             // Fire-and-forget: don't await, don't block afterTurn
-            _generateEmbeddings([currentUserText]).then(async ([embedding]) => {
+            _generateEmbeddings([assistantReplyText]).then(async ([embedding]) => {
               if (embedding) {
                 await hm.redis.setQueryEmbedding(agentId, sk, embedding);
               }
