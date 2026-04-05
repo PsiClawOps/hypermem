@@ -381,6 +381,7 @@ async function estimateWindowTokens(hm: HyperMemInstance, agentId: string, sessi
 async function truncateJsonlIfNeeded(
   sessionFile: string | undefined,
   targetDepth: number,
+  force = false,
 ): Promise<boolean> {
   if (!sessionFile || typeof sessionFile !== 'string') return false;
   try {
@@ -408,8 +409,8 @@ async function truncateJsonlIfNeeded(
       }
     }
 
-    // Only rewrite if meaningfully over target
-    if (messageEntries.length <= targetDepth * 1.5) return false;
+    // Only rewrite if meaningfully over target — unless force=true (over-budget path)
+    if (!force && messageEntries.length <= targetDepth * 1.5) return false;
 
     const keptMessages = messageEntries.slice(-targetDepth);
     const keptSet = new Set(keptMessages.map(e => e.line));
@@ -756,10 +757,12 @@ function createHyperMemEngine(): ContextEngine {
         const agentId = extractAgentId(sk);
 
         // Skip if a reshape pass just ran (within last 30s) — avoid double-processing
+        // Cache modelState here for reuse in density-aware JSONL truncation below.
+        let cachedModelState: Awaited<ReturnType<typeof hm.redis.getModelState>> | null = null;
         try {
-          const modelState = await hm.redis.getModelState(agentId, sk);
-          if (modelState?.reshapedAt) {
-            const reshapeAge = Date.now() - new Date(modelState.reshapedAt).getTime();
+          cachedModelState = await hm.redis.getModelState(agentId, sk);
+          if (cachedModelState?.reshapedAt) {
+            const reshapeAge = Date.now() - new Date(cachedModelState.reshapedAt).getTime();
             if (reshapeAge < 30_000) {
               console.log(`[hypermem-plugin] compact: skipping — reshape pass ran ${reshapeAge}ms ago`);
               return { ok: true, compacted: false, reason: 'reshape-recently-ran' };
@@ -853,8 +856,16 @@ function createHyperMemEngine(): ContextEngine {
         const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
         console.log(`[hypermem-plugin] compact: trimmed ${tokensBefore} → ${tokensAfter} tokens (budget: ${effectiveBudget})`);
 
-        // Truncate the JSONL to match the Redis window depth
-        await truncateJsonlIfNeeded(sessionFile, targetDepth);
+        // Density-aware JSONL truncation: derive target depth from actual avg tokens/message
+        // rather than assuming a fixed 500 tokens/message. This prevents a large-message
+        // session (e.g. 145 msgs × 882 tok = 128k) from bypassing the 1.5x guard and
+        // leaving the JSONL untouched while Redis is correctly trimmed.
+        // force=true bypasses the 1.5x early-exit — over-budget always rewrites.
+        const histDepth = cachedModelState?.historyDepth ?? targetDepth;
+        const avgTokPerMsg = histDepth > 0 && tokensBefore > 0 ? tokensBefore / histDepth : 500;
+        const densityTargetDepth = Math.max(10, Math.floor(trimBudget / avgTokPerMsg));
+        await truncateJsonlIfNeeded(sessionFile, densityTargetDepth, true);
+        console.log(`[hypermem-plugin] compact: JSONL density-trim targetDepth=${densityTargetDepth} (histDepth=${histDepth}, avg=${Math.round(avgTokPerMsg)} tok/msg)`);
 
         return {
           ok: true,
