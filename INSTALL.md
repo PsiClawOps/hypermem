@@ -144,13 +144,104 @@ openclaw config get plugins.allow
 openclaw config get plugins.load.paths
 ```
 
-### Step 3 — Restart the gateway
+### Step 3 — Review and apply OpenClaw setting changes
+
+HyperMem takes over context assembly from OpenClaw's default pipeline. Several OpenClaw defaults that existed to manage the JSONL transcript or control summarization compaction become either irrelevant or counterproductive once HyperMem is active.
+
+**Why it matters:** OpenClaw's built-in engine reads the JSONL transcript and summarizes it when it gets long. HyperMem replaces that entire pipeline — context is assembled from SQLite and Redis, never from a growing transcript. A bloated JSONL is now just overhead: it causes the runtime to estimate high token counts, trigger unnecessary compaction checks, and add latency on every turn.
+
+**An installing agent should discuss each of these changes with you before applying them.** The tradeoffs differ depending on your setup.
+
+---
+
+#### Change 1 — Lower OpenClaw's compaction threshold
+
+OpenClaw's default compaction fires LLM-powered summarization when the context approaches `contextWindow - reserveTokens`. HyperMem already owns compaction (`ownsCompaction: true`) and trims the JSONL and Redis window itself. If OpenClaw's compaction fires alongside HyperMem's, it attempts to summarize context HyperMem has already managed, producing double-compaction artifacts and unnecessary model calls.
+
+```bash
+openclaw config set agents.defaults.compaction.reserveTokens 1000 --strict-json
+```
+
+**OpenClaw default:** `reserveTokensFloor: 24000`. At 24K reserved, compaction fires much earlier than needed and races HyperMem's own budget management.
+
+**Tradeoff to discuss:** Setting this to 1000 means OpenClaw's compaction is effectively a last-resort safety net that never fires in normal operation. HyperMem is the sole backstop. That is the correct design — but your agent should confirm you understand HyperMem is now responsible for keeping context in budget.
+
+---
+
+#### Change 2 — Trim the JSONL session store
+
+OpenClaw retains JSONL transcript files and `sessions.json` metadata for 30 days by default, with up to 500 sessions tracked. For agents with frequent sessions, this accumulates quickly. With HyperMem active, the JSONL is not your agent's memory — SQLite and Redis are. Retaining large JSONLs provides no memory benefit and slows session store lookups.
+
+```bash
+# Prune session store entries after 14 days instead of 30
+openclaw config set sessions.maintenance.pruneAfter "14d"
+
+# Cap sessions.json at 200 entries instead of 500
+openclaw config set sessions.maintenance.maxEntries 200 --strict-json
+```
+
+**OpenClaw defaults:** `pruneAfter: 30d`, `maxEntries: 500`.
+
+**Tradeoff to discuss:** If you use ClawDash or `sessions_list` to browse conversation history older than 14 days, you still need those entries in `sessions.json`. HyperMem's SQLite store is the durable record — session metadata in `sessions.json` is just an index. Ask your agent: "Does anything I use depend on sessions older than 14 days being in the session store?"
+
+---
+
+#### Change 3 — Reduce cron run log retention
+
+OpenClaw writes per-job run logs to `~/.openclaw/cron/runs/<jobId>.jsonl`, defaulting to 2MB per file and 2000 lines retained. For fleets running heartbeat jobs every few minutes, these fill fast and are rarely read beyond the most recent cycle.
+
+```bash
+openclaw config set cron.runLog.maxBytes 524288 --strict-json   # 512KB instead of 2MB
+openclaw config set cron.runLog.keepLines 500 --strict-json     # 500 lines instead of 2000
+```
+
+**OpenClaw defaults:** `maxBytes: 2_000_000`, `keepLines: 2000`.
+
+**Tradeoff to discuss:** 500 lines covers several full heartbeat cycles for most agents. If you debug cron issues frequently and need deeper history, keep `keepLines` higher. This is the lowest-stakes change on the list.
+
+---
+
+#### Change 4 — Session max-age (fleet installs only)
+
+Without a max-age, sessions accumulate indefinitely in `sessions.json`. For multi-agent fleets, this means idle sessions from renamed or replaced agents accumulate forever and slow `sessions_list` queries.
+
+```bash
+openclaw config set sessions.maxAgeHours 168 --strict-json  # 7 days
+```
+
+**OpenClaw default:** `0` (disabled — sessions never expire by age).
+
+**Tradeoff to discuss:** Named persistent sessions (your main agent, council seats, any agent you expect to resume days later) should not be pruned. If `maxAgeHours: 168` would prune sessions you actively use, either raise it or skip this change and prune manually. Solo installs can skip this entirely.
+
+---
+
+#### Summary — commands to apply after discussion
+
+```bash
+# Required: lower compaction threshold
+openclaw config set agents.defaults.compaction.reserveTokens 1000 --strict-json
+
+# Recommended: tighter session store retention
+openclaw config set sessions.maintenance.pruneAfter "14d"
+openclaw config set sessions.maintenance.maxEntries 200 --strict-json
+
+# Recommended: smaller cron run logs
+openclaw config set cron.runLog.maxBytes 524288 --strict-json
+openclaw config set cron.runLog.keepLines 500 --strict-json
+
+# Fleet only: session max-age
+openclaw config set sessions.maxAgeHours 168 --strict-json
+```
+
+---
+
+### Step 4 — Restart the gateway
 
 ```bash
 openclaw gateway restart
 ```
 
-### Step 4 — Verify
+### Step 5 — Verify
 
 Send any message to your agent. Then check gateway logs:
 
