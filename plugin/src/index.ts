@@ -565,15 +565,46 @@ function createHyperMemEngine(): ContextEngine {
         //      the compaction guard blind (received estimatedTokens=0).
         //   2. Return a real estimatedTokens = windowTokens + cached overhead,
         //      so the guard has accurate signal and can fire when needed.
+        //
+        // Fix (ingestion-wave): use pressure-tiered trim instead of fixed 80%.
+        // At 91% with 5 parallel web_search calls incoming (~20-30% of budget),
+        // a fixed 80% trim only frees 11% headroom — the wave overflows anyway
+        // and results strip silently. Tier the trim target based on pre-trim
+        // pressure so high-pressure sessions get real headroom before results land.
         const effectiveBudget = tokenBudget ?? 90_000;
         try {
           const hm = await getHyperMem();
           const sk = resolveSessionKey(sessionId, sessionKey);
           const agentId = extractAgentId(sk);
-          const trimBudget = Math.floor(effectiveBudget * 0.8);
+
+          // Measure pressure BEFORE trim to pick the right tier
+          const preTrimTokens = await estimateWindowTokens(hm, agentId, sk);
+          const pressure = preTrimTokens / effectiveBudget;
+
+          // Pressure-tiered trim targets:
+          //   >85% (critical) → trim to 50%: blast 50% headroom for incoming wave
+          //   >80% (high)     → trim to 60%: 40% headroom
+          //   >75% (elevated) → trim to 65%: 35% headroom
+          //   ≤75% (normal)   → trim to 80%: existing behaviour
+          let trimTarget: number;
+          if (pressure > 0.85) {
+            trimTarget = 0.50;
+          } else if (pressure > 0.80) {
+            trimTarget = 0.60;
+          } else if (pressure > 0.75) {
+            trimTarget = 0.65;
+          } else {
+            trimTarget = 0.80;
+          }
+
+          const trimBudget = Math.floor(effectiveBudget * trimTarget);
           const trimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, trimBudget);
           if (trimmed > 0) {
             await hm.redis.invalidateWindow(agentId, sk);
+            console.log(
+              `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}% → ` +
+              `target=${(trimTarget * 100).toFixed(0)}% (trimmed ${trimmed} msgs)`
+            );
           }
           const windowTokens = await estimateWindowTokens(hm, agentId, sk);
           const overhead = _overheadCache.get(sk) ?? getOverheadFallback();
@@ -1018,6 +1049,38 @@ function createHyperMemEngine(): ContextEngine {
           await hm.redis.invalidateWindow(agentId, sk);
         } catch {
           // Window invalidation is best-effort
+        }
+
+        // Pre-emptive secondary trim when session exits a turn hot.
+        // If a session just finished a turn at >80% pressure, the NEXT turn's
+        // incoming tool results (parallel web searches, large exec output, etc.)
+        // will hit a window with no headroom — the ingestion wave failure mode
+        // (reported by Helm, 2026-04-05). Pre-trim here so the tool-loop
+        // assemble() path starts the next turn with meaningful space.
+        //
+        // Uses modelState.tokenBudget if cached; skips if unavailable (non-fatal).
+        try {
+          const modelState = await hm.redis.getModelState(agentId, sk);
+          if (modelState?.tokenBudget) {
+            const postTurnTokens = await estimateWindowTokens(hm, agentId, sk);
+            const postTurnPressure = postTurnTokens / modelState.tokenBudget;
+            if (postTurnPressure > 0.80) {
+              // Trim to 70% so next turn has 30% headroom for incoming content.
+              // This is lighter than the tool-loop tiers — afterTurn runs every
+              // turn, so we don't want to over-trim on sessions that are just
+              // naturally deep. Only fires when actually hot.
+              const headroomBudget = Math.floor(modelState.tokenBudget * 0.70);
+              const secondaryTrimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, headroomBudget);
+              if (secondaryTrimmed > 0) {
+                console.log(
+                  `[hypermem-plugin] afterTurn: pre-emptive trim — session exiting at ` +
+                  `${(postTurnPressure * 100).toFixed(1)}%, trimmed ${secondaryTrimmed} msgs to create headroom`
+                );
+              }
+            }
+          }
+        } catch {
+          // Non-fatal — next turn's tool-loop trim is the fallback
         }
 
         // Pre-compute embedding for the assistant's reply so the next compose()
