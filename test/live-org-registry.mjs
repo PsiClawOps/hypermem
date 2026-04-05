@@ -113,6 +113,37 @@ async function run() {
     assert(!newAgentFilterForPylon.canReadOrg, 'newagent cannot read pylon org-visible (different org)');
     assert(!newAgentFilterForPylon.canReadCouncil, 'newagent cannot read pylon council-visible');
 
+    // ── Compositor wiring: orgRegistry cached at init ──────────────────────
+    console.log('\n  Compositor.orgRegistry (cached on init):');
+    const { Compositor } = await import('../dist/compositor.js');
+    const { RedisLayer } = await import('../dist/redis.js');
+    const redis = new RedisLayer({ host: 'localhost', port: 6379, keyPrefix: 'hm-livereg-comp:', sessionTTL: 60 });
+
+    const compositor = new Compositor({ redis, libraryDb: libDb });
+
+    // Registry should be live (has the seeded agents)
+    const cached = compositor.orgRegistry;
+    assert('forge' in cached.agents, 'compositor: forge in cached registry');
+    assert('newagent' in cached.agents, 'compositor: newagent from DB in cached registry');
+
+    // refreshOrgRegistry() should return the live registry
+    const refreshed = compositor.refreshOrgRegistry();
+    assert('forge' in refreshed.agents, 'compositor.refreshOrgRegistry returns forge');
+    assert('newagent' in refreshed.agents, 'compositor.refreshOrgRegistry returns newagent');
+    assert(compositor.orgRegistry === refreshed, 'compositor._orgRegistry updated after refresh');
+
+    // Legacy constructor (RedisLayer only) falls back to hardcoded registry
+    const legacyCompositor = new Compositor(redis);
+    const legacyReg = legacyCompositor.orgRegistry;
+    assert('forge' in legacyReg.agents, 'legacy compositor: forge in fallback registry');
+    // Legacy registry is hardcoded, not DB-loaded (no newagent)
+    assert(!('newagent' in legacyReg.agents), 'legacy compositor: newagent NOT in hardcoded registry');
+    // refreshOrgRegistry on legacy (no libraryDb) returns existing registry unchanged
+    const legacyRefreshed = legacyCompositor.refreshOrgRegistry();
+    assert(legacyRefreshed === legacyReg, 'legacy refreshOrgRegistry no-ops without libraryDb');
+
+    await redis.disconnect();
+
   } finally {
     if (hm) {
       try { await hm.close(); } catch { /* ignore */ }

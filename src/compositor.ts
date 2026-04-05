@@ -42,6 +42,7 @@ import { DocChunkStore } from './doc-chunk-store.js';
 import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction-fence.js';
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
+import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
 
 const DEFAULT_CONFIG: CompositorConfig = {
   defaultTokenBudget: 90000,
@@ -326,6 +327,8 @@ export class Compositor {
   private vectorStore: VectorStore | null;
   private readonly libraryDb: DatabaseSync | null;
   private readonly triggerRegistry: CollectionTrigger[];
+  /** Cached org registry loaded from fleet_agents at construction time. */
+  private _orgRegistry: OrgRegistry;
 
   constructor(
     deps: CompositorDeps | RedisLayer,
@@ -338,11 +341,16 @@ export class Compositor {
       this.vectorStore = null;
       this.libraryDb = null;
       this.triggerRegistry = DEFAULT_TRIGGERS;
+      this._orgRegistry = defaultOrgRegistry();
     } else {
       this.redis = deps.redis;
       this.vectorStore = deps.vectorStore || null;
       this.libraryDb = deps.libraryDb || null;
       this.triggerRegistry = deps.triggerRegistry || DEFAULT_TRIGGERS;
+      // Load org registry from DB on init; fall back to hardcoded if DB empty.
+      this._orgRegistry = this.libraryDb
+        ? buildOrgRegistryFromDb(this.libraryDb)
+        : defaultOrgRegistry();
     }
     this.config = { ...DEFAULT_CONFIG, ...config };
     if (!_registryLogged) {
@@ -357,6 +365,26 @@ export class Compositor {
    */
   setVectorStore(vs: VectorStore): void {
     this.vectorStore = vs;
+  }
+
+  /**
+   * Hot-reload the org registry from the fleet_agents table.
+   * Call after fleet membership changes (new agent, org restructure)
+   * to pick up the latest without a full restart.
+   * Falls back to the current cached registry if the DB is unavailable.
+   */
+  refreshOrgRegistry(): OrgRegistry {
+    if (this.libraryDb) {
+      this._orgRegistry = buildOrgRegistryFromDb(this.libraryDb);
+    }
+    return this._orgRegistry;
+  }
+
+  /**
+   * Return the currently cached org registry.
+   */
+  get orgRegistry(): OrgRegistry {
+    return this._orgRegistry;
   }
 
   /**

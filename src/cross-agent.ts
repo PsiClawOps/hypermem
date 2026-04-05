@@ -195,6 +195,12 @@ export function buildOrgRegistryFromDb(libraryDb: DatabaseSync): OrgRegistry {
   }
 }
 
+/**
+ * Alias for buildOrgRegistryFromDb — preferred name per P1.4 spec.
+ * Both names are exported for backward compatibility.
+ */
+export const loadOrgRegistryFromDb = buildOrgRegistryFromDb;
+
 // ─── Cross-Agent Query Engine ────────────────────────────────────
 
 /**

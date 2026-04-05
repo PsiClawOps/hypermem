@@ -95,6 +95,7 @@ export {
   visibilityFilter,
   defaultOrgRegistry,
   buildOrgRegistryFromDb,
+  loadOrgRegistryFromDb,
 } from './cross-agent.js';
 export type { OrgRegistry } from './cross-agent.js';
 
@@ -177,7 +178,7 @@ import type {
   Conversation,
   ChannelType,
 } from './types.js';
-import { crossAgentQuery, defaultOrgRegistry, buildOrgRegistryFromDb, type OrgRegistry } from './cross-agent.js';
+import { crossAgentQuery, defaultOrgRegistry, buildOrgRegistryFromDb, loadOrgRegistryFromDb, type OrgRegistry } from './cross-agent.js';
 import path from 'node:path';
 import os from 'node:os';
 
