@@ -460,6 +460,8 @@ export class Compositor {
 
     // ─── Conversation History ──────────────────────────────────
     let diagCrossTopicKeystones = 0;
+    // Hoisted: activeTopicId resolved inside history block, used for window dual-write (VS-1)
+    let composedActiveTopicId: string | undefined;
     if (request.includeHistory !== false) {
       // P3.4: Look up the active topic for this session (non-fatal)
       let activeTopicId: string | undefined;
@@ -485,6 +487,8 @@ export class Compositor {
           // Topic lookup is best-effort — fall back to ID-only history fetch
         }
       }
+      // Hoist resolved topic id so the window dual-write section can access it
+      composedActiveTopicId = activeTopicId;
 
       const rawHistoryMessages = await this.getHistory(
         request.agentId,
@@ -1102,14 +1106,25 @@ export class Compositor {
 
     const totalTokens = budget - remaining;
 
-    // ─── Write Window Cache ───────────────────────────────────
+    // ─── Write Window Cache ─────────────────────────────
     // Cache the composed message array so the plugin can serve it directly
     // on the next assemble() call without re-running the full compose pipeline.
     // Short TTL (120s) — invalidated by afterTurn when new messages arrive.
+    //
+    // VS-1: Dual-write — session-scoped key for backwards compat;
+    // topic-scoped key for per-topic window retrieval when activeTopicId is set.
     try {
       await this.redis.setWindow(request.agentId, request.sessionKey, messages, 120);
     } catch {
       // Window cache write is best-effort
+    }
+    // VS-1: Topic-scoped window dual-write
+    if (composedActiveTopicId) {
+      try {
+        await this.redis.setTopicWindow(request.agentId, request.sessionKey, composedActiveTopicId, messages, 120);
+      } catch {
+        // Topic window write is best-effort
+      }
     }
 
     // ─── Write Session Cursor ─────────────────────────────────

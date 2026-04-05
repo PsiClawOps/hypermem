@@ -151,7 +151,7 @@ export type { ProviderType } from './provider-translator.js';
 export { classifyContentType, signalWeight, isSignalBearing, SIGNAL_WEIGHT } from './content-type-classifier.js';
 export type { ContentType, ContentTypeResult } from './content-type-classifier.js';
 
-export { detectTopicShift } from './topic-detector.js';
+export { detectTopicShift, stripMessageMetadata } from './topic-detector.js';
 export type { TopicSignal } from './topic-detector.js';
 
 export { SessionTopicMap } from './session-topic-map.js';

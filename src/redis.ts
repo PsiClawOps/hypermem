@@ -88,6 +88,10 @@ export class RedisLayer {
     return `${this.config.keyPrefix}${agentId}:s:${sessionKey}:${slot}`;
   }
 
+  private topicSessionKey(agentId: string, sessionKey: string, topicId: string, slot: string): string {
+    return `${this.config.keyPrefix}${agentId}:s:${sessionKey}:t:${topicId}:${slot}`;
+  }
+
   // ─── Agent-Level Operations ──────────────────────────────────
 
   /**
@@ -642,6 +646,122 @@ export class RedisLayer {
     }
   }
 
+
+  // ─── Topic-Scoped Session Operations ─────────────────────────────────────
+
+  /**
+   * Set a topic-scoped session slot value.
+   * Like setSlot but keyed under the topic namespace (`:t:<topicId>:`).
+   */
+  async setTopicSlot(agentId: string, sessionKey: string, topicId: string, slot: string, value: string): Promise<void> {
+    if (!this.isConnected) return;
+    const key = this.topicSessionKey(agentId, sessionKey, topicId, slot);
+    await this.client!.set(key, value, 'EX', this.config.sessionTTL);
+  }
+
+  /**
+   * Get a topic-scoped session slot value.
+   */
+  async getTopicSlot(agentId: string, sessionKey: string, topicId: string, slot: string): Promise<string | null> {
+    if (!this.isConnected) return null;
+    const key = this.topicSessionKey(agentId, sessionKey, topicId, slot);
+    return this.client!.get(key);
+  }
+
+  /**
+   * Cache the compositor's assembled window for a specific topic.
+   *
+   * Stored alongside the session-scoped window (setWindow) for backwards compat.
+   * Used by compose() when activeTopicId is set to serve topic-specific context
+   * on subsequent turns within the same topic.
+   *
+   * TTL defaults to 120s (same as the session-scoped window).
+   */
+  async setTopicWindow(
+    agentId: string,
+    sessionKey: string,
+    topicId: string,
+    messages: NeutralMessage[],
+    ttl: number = 120
+  ): Promise<void> {
+    if (!this.isConnected) return;
+    const key = this.topicSessionKey(agentId, sessionKey, topicId, 'window');
+    await this.client!.set(key, JSON.stringify(messages), 'EX', ttl);
+  }
+
+  /**
+   * Get the cached submission window for a specific topic.
+   * Returns null on cache miss.
+   */
+  async getTopicWindow(agentId: string, sessionKey: string, topicId: string): Promise<NeutralMessage[] | null> {
+    if (!this.isConnected) return null;
+    const key = this.topicSessionKey(agentId, sessionKey, topicId, 'window');
+    const val = await this.client!.get(key);
+    return val ? JSON.parse(val) : null;
+  }
+
+  /**
+   * Invalidate the submission window cache for a specific topic.
+   */
+  async invalidateTopicWindow(agentId: string, sessionKey: string, topicId: string): Promise<void> {
+    if (!this.isConnected) return;
+    const key = this.topicSessionKey(agentId, sessionKey, topicId, 'window');
+    await this.client!.del(key);
+  }
+
+  /**
+   * Warm topic-scoped slots in a single pipeline.
+   *
+   * Topic warming is scoped to the five slots most relevant to per-topic
+   * context isolation: history, window, context, facts, cursor.
+   * System/identity slots are session-wide and not duplicated per topic.
+   */
+  async warmTopicSession(
+    agentId: string,
+    sessionKey: string,
+    topicId: string,
+    slots: {
+      history?: StoredMessage[];
+      window?: NeutralMessage[];
+      context?: string;
+      facts?: string;
+      cursor?: string;
+    }
+  ): Promise<void> {
+    if (!this.isConnected) return;
+
+    const pipeline = this.client!.pipeline();
+
+    if (slots.context) {
+      const key = this.topicSessionKey(agentId, sessionKey, topicId, 'context');
+      pipeline.set(key, slots.context, 'EX', this.config.sessionTTL);
+    }
+    if (slots.facts) {
+      const key = this.topicSessionKey(agentId, sessionKey, topicId, 'facts');
+      pipeline.set(key, slots.facts, 'EX', this.config.sessionTTL);
+    }
+    if (slots.cursor) {
+      const key = this.topicSessionKey(agentId, sessionKey, topicId, 'cursor');
+      pipeline.set(key, slots.cursor, 'EX', this.config.historyTTL);
+    }
+    if (slots.window) {
+      const key = this.topicSessionKey(agentId, sessionKey, topicId, 'window');
+      pipeline.set(key, JSON.stringify(slots.window), 'EX', 120);
+    }
+
+    await pipeline.exec();
+
+    if (slots.history && slots.history.length > 0) {
+      const key = this.topicSessionKey(agentId, sessionKey, topicId, 'history');
+      const histPipeline = this.client!.pipeline();
+      for (const msg of slots.history) {
+        histPipeline.rpush(key, JSON.stringify(msg));
+      }
+      histPipeline.ltrim(key, -250, -1);
+      histPipeline.expire(key, this.config.historyTTL);
+      await histPipeline.exec();
+    }
+  }
 
   // ─── Lifecycle ───────────────────────────────────────────────
 

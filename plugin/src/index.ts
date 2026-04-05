@@ -776,6 +776,8 @@ function createHyperMemEngine(): ContextEngine {
 
               if (signal.isNewTopic && signal.topicName) {
                 const newTopicId = topicMap.createTopic(sk, signal.topicName);
+                // New topic starts with count 1 (the message that triggered the shift)
+                topicMap.incrementMessageCount(newTopicId);
                 // Write topic_id onto the stored user message (best-effort)
                 try {
                   const stored = db.prepare(`
