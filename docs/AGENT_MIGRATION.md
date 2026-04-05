@@ -185,29 +185,126 @@ If the operator has a custom MEMORY.md format (not the standard bullet-point dai
 
 ---
 
-### Mem0-style systems
+### Mem0
 
-Mem0 and similar OSS memory systems typically look like:
+Mem0 stores memories as structured JSON, typically via a REST API or local SQLite/Postgres backend. The export format looks like:
 
 ```json
 {
+  "id": "mem_abc123",
   "memory": "User prefers Python over JavaScript for scripting tasks",
   "user_id": "ragesaq",
   "agent_id": "main",
-  "metadata": { "category": "preference", "created_at": "2026-01-15T10:00:00Z" }
+  "metadata": { "category": "preference" },
+  "created_at": "2026-01-15T10:00:00Z",
+  "updated_at": "2026-01-15T10:00:00Z"
 }
 ```
 
 Maps to:
 ```
-memory          → facts.content
-user_id         → (confirm with operator — usually ignore, use agent_id)
-agent_id        → facts.agent_id
-metadata.category → facts.domain
-metadata.created_at → facts.created_at
+memory              → facts.content
+agent_id            → facts.agent_id  (use this; ignore user_id unless agent_id is absent)
+metadata.category   → facts.domain    ("preference", "fact", "decision" map directly)
+created_at          → facts.created_at
+id                  → facts.source_ref  (dedup key)
 ```
 
+To export: `python -c "from mem0 import Memory; import json; m = Memory(); print(json.dumps(m.get_all(agent_id='main')))"` or query the backing store directly if self-hosted.
+
 No script exists for this format. Write a short import script following the pattern in `scripts/migrate-memory-db.mjs`. The core loop is under 30 lines.
+
+---
+
+### Honcho
+
+Honcho (Plastic Labs) uses a Workspace/Peer/Session/Messages model with a separate Reasoning Layer that produces two artifacts you can migrate:
+
+**peer_card** — a list of semantic facts extracted about a user by Honcho's Deriver process. These are the most valuable migration target.
+
+```python
+# Export via Honcho SDK
+from honcho import Honcho
+client = Honcho(api_key="...", app_id="my-app")
+peer = client.apps.users.get(app_id="my-app", user_id="ragesaq")
+ctx = peer.sessions[0].context(tokens=4000)
+# ctx.peer_card is a list of fact strings
+# ctx.peer_representation is a prose summary string
+```
+
+```
+peer_card items          → facts.content (one fact per row)
+                           domain='user-profile', confidence=0.85
+                           source_type='migration', source_ref='honcho:{peer_id}:{index}'
+
+peer_representation      → knowledge table
+                           domain='user-profile', key=peer_id
+                           value=prose summary text
+
+Collections/Documents    → DocChunkStore (if they're reference docs)
+                           or knowledge table (if they're structured entries)
+
+Sessions/Messages        → L2 messages DB (role + content map directly)
+                           Use 'user' and 'assistant' roles
+                           session_key: 'migrated:honcho:{honcho_session_id}'
+```
+
+Honcho's Deriver runs LLM calls to extract observations — the `peer_card` output is already processed, higher-quality signal than raw messages. Migrate peer_card first; add message history only if the operator needs full recall of past conversations.
+
+No script exists for this format. Query the Honcho API or PostgreSQL backing store (`honcho` database, `messages` and `metamessages` tables for observations) and import via the programmatic path.
+
+---
+
+### QMD session exports
+
+QMD is OpenClaw's local search sidecar. Its memory data lives in the standard MEMORY.md + daily file format — already covered by `scripts/migrate-memory-md.mjs`.
+
+The additional migration target is QMD *session exports*: sanitized conversation transcripts written to `~/.openclaw/agents/{agentId}/qmd/sessions/` when `memory.qmd.sessions.enabled = true`. These are markdown files with labeled User/Assistant turns.
+
+```
+# Example session export file format:
+# ~/.openclaw/agents/forge/qmd/sessions/2026-03-15-abc123.md
+
+User: How does the compositor handle tool-loop turns?
+Assistant: Tool-loop turns get the trim guardrail but skip full compose...
+```
+
+Maps to L2:
+```
+User: lines    → messages with role='user'
+Assistant: lines → messages with role='assistant'
+filename date  → conversation created_at
+agent dir name → agent_id
+session_key: 'migrated:qmd-session:{filename_stem}'
+```
+
+Filter before importing: QMD session exports include heartbeat turns, compaction summaries, and tool-loop fragments that don't carry semantic value. Skip lines shorter than 30 characters and turns where the assistant response is `NO_REPLY` or a compaction summary.
+
+No script exists for this format. Write a short parser targeting the `~/.openclaw/agents/` directory tree; the file format is consistent.
+
+---
+
+### Engram
+
+Engram (openclaw-engram) is an OpenClaw memory plugin that uses LLM-powered extraction to write memories as markdown to `~/.openclaw/workspace/memory/local/`. The directory layout:
+
+```
+~/.openclaw/workspace/memory/local/
+  ├── facts.md          # extracted factual statements
+  ├── preferences.md    # operator behavioral patterns  
+  ├── decisions.md      # logged decisions
+  └── {custom}.md       # any additional files the LLM created
+```
+
+The content is already agent-curated markdown — Engram's LLM extraction is higher-quality signal than raw daily files. Parse exactly like MEMORY.md content:
+
+```
+bullet items  → facts.content
+file name     → facts.domain  ('facts', 'preferences', 'decisions' map directly)
+created_at    → file mtime or today's date
+```
+
+Use `scripts/migrate-memory-md.mjs` with `--workspace-root ~/.openclaw/workspace/memory/local` to pull these in. The bullet-line parser handles the format correctly. If Engram used headings to organize within a single file (e.g., `## Decisions` in `facts.md`), the script will import the content but won't split by section — review the dry-run output and split files manually first if domain accuracy matters.
 
 ---
 

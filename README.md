@@ -234,17 +234,15 @@ const spawn = await buildSpawnContext(
 
 ## Migration
 
-HyperMem doesn't touch your existing memory data. Install it, switch the context engine, and migrate historical data on your own timeline.
+HyperMem doesn't touch your existing memory data. Install it, switch the context engine, and migrate historical data on your own timeline — before or after switching.
 
-| Existing setup | Script |
-|---|---|
-| OpenClaw built-in `memory.db` | `scripts/migrate-memory-db.mjs` |
-| ClawText conversation history | `scripts/migrate-clawtext.mjs` |
-| MEMORY.md + daily checkpoint files | `scripts/migrate-memory-md.mjs` |
+Migrations are supported from any memory platform. Worked examples are included in the migration documentation for: **OpenClaw built-in memory, ClawText, Mem0, Honcho, QMD session exports, and Engram**.
 
-All scripts are dry-run by default. Add `--apply` to write. Full walkthrough: [docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)
+All migration scripts default to dry-run. Nothing is written until you add `--apply`.
 
-> **For agents:** If you're handling migration for your operator — or they're asking whether they'll lose their history — see [docs/AGENT_MIGRATION.md](./docs/AGENT_MIGRATION.md). It covers HyperMem's data model, field semantics, and how to map common memory formats. The scripts are helpers; the doc gives you enough to handle any format without them.
+Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
+
+> **For agents:** See [docs/AGENT_MIGRATION.md](./docs/AGENT_MIGRATION.md) for HyperMem's data model, field-level semantics, and mapping examples for each platform. The scripts are helpers — the doc gives you enough to handle any format, including ones without a script.
 
 ---
 
