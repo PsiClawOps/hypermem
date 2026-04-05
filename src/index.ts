@@ -36,8 +36,9 @@ export type { RateLimiterConfig, Priority } from './rate-limiter.js';
 export type { DesiredStateEntry, ConfigEvent, DriftStatus } from './desired-state-store.js';
 
 export { RedisLayer } from './redis.js';
+export type { ModelState } from './redis.js';
 
-export { Compositor, type CompositorDeps } from './compositor.js';
+export { Compositor, type CompositorDeps, applyToolGradientToWindow } from './compositor.js';
 
 export {
   type CollectionTrigger,

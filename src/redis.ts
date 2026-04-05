@@ -10,6 +10,18 @@ import { Redis as RedisClient } from 'ioredis';
 type RedisInstance = RedisClient;
 import type { RedisConfig, SessionMeta, SessionCursor, StoredMessage, NeutralMessage } from './types.js';
 
+/**
+ * Model state stored per-session for budget downshift detection.
+ * Written after each compose; read at assemble() time to detect model switches.
+ */
+export interface ModelState {
+  model: string;
+  tokenBudget: number;
+  composedAt: string;     // ISO timestamp
+  historyDepth: number;
+  reshapedAt?: string;    // ISO, set when a reshape pass ran this session
+}
+
 const DEFAULT_CONFIG: RedisConfig = {
   host: 'localhost',
   port: 6379,
@@ -761,6 +773,33 @@ export class RedisLayer {
       histPipeline.expire(key, this.config.historyTTL);
       await histPipeline.exec();
     }
+  }
+
+  // ─── Model State (Budget Downshift Detection) ─────────────────────────────
+
+  /**
+   * Get model state for a session — used to detect budget downshifts on model switch.
+   * Returns null on miss or parse error.
+   */
+  async getModelState(agentId: string, sessionKey: string): Promise<ModelState | null> {
+    if (!this.isConnected) return null;
+    const key = this.sessionKey(agentId, sessionKey, 'model_state');
+    try {
+      const val = await this.client!.get(key);
+      return val ? (JSON.parse(val) as ModelState) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Set model state for a session.
+   * TTL = 7 days so it survives Redis eviction between long gaps.
+   */
+  async setModelState(agentId: string, sessionKey: string, state: ModelState): Promise<void> {
+    if (!this.isConnected) return;
+    const key = this.sessionKey(agentId, sessionKey, 'model_state');
+    await this.client!.set(key, JSON.stringify(state), 'EX', 604800);
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────

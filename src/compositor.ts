@@ -81,6 +81,35 @@ export { CollectionTrigger, DEFAULT_TRIGGERS, matchTriggers } from './trigger-re
 export { getTurnAge, applyToolGradient, appendToolSummary, truncateWithHeadTail, applyTierPayloadCap };
 
 /**
+ * Public reshape helper: apply tool gradient then trim to fit within a token budget.
+ *
+ * Used by the plugin's budget-downshift pass to pre-process a Redis history window
+ * after a model switch to a smaller context window, before the full compose pipeline
+ * runs. Trims from oldest to newest until estimated token cost fits within
+ * tokenBudget * 0.65 (using the standard char/4 heuristic).
+ *
+ * @param messages     NeutralMessage array from the Redis hot window
+ * @param tokenBudget  Effective token budget for this session
+ * @returns            Trimmed message array ready for setWindow()
+ */
+export function applyToolGradientToWindow(
+  messages: NeutralMessage[],
+  tokenBudget: number
+): NeutralMessage[] {
+  const reshaped = applyToolGradient(messages);
+  const targetChars = Math.floor(tokenBudget * 0.65) * 4;
+  // estimate: sum of (msg.textContent?.length ?? 0) for each message
+  let totalChars = reshaped.reduce((sum, m) => sum + (m.textContent?.length ?? 0), 0);
+  let start = 0;
+  // walk oldest to newest, drop until we fit
+  while (totalChars > targetChars && start < reshaped.length - 1) {
+    totalChars -= reshaped[start].textContent?.length ?? 0;
+    start++;
+  }
+  return reshaped.slice(start);
+}
+
+/**
  * Rough token estimation: ~4 chars per token for English text.
  * This is a heuristic — actual tokenization varies by model.
  * Good enough for budget management; exact count comes from the provider.

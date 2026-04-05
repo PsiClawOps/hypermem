@@ -32,7 +32,7 @@ import type {
   BackgroundIndexer,
   FleetStore,
 } from '@psiclawops/hypermem';
-import { detectTopicShift, SessionTopicMap } from '@psiclawops/hypermem';
+import { detectTopicShift, SessionTopicMap, applyToolGradientToWindow } from '@psiclawops/hypermem';
 import os from 'os';
 import path from 'path';
 import fs from 'fs/promises';
@@ -630,6 +630,47 @@ function createHyperMemEngine(): ContextEngine {
         console.warn('[hypermem-plugin] assemble: Redis trim failed (non-fatal):', (trimErr as Error).message);
       }
 
+      // ── Budget downshift: proactive reshape pass ───────────────────────────────────────
+      // If this session previously composed at a higher token budget (e.g. gpt-5.4
+      // → claude-sonnet model switch), the Redis window is still sized for the old
+      // budget. trimHistoryToTokenBudget above trims by count but skips tool
+      // gradient logic. A downshift >10% triggers a full reshape: apply tool
+      // gradient at the new budget + trim, then write back before compose runs.
+      // This prevents several turns of compaction churn after a model switch.
+      try {
+        const lastState = await hm.redis.getModelState(agentId, sk);
+        const DOWNSHIFT_THRESHOLD = 0.10;
+        const isDownshift = lastState &&
+          (lastState.tokenBudget - effectiveBudget) / lastState.tokenBudget > DOWNSHIFT_THRESHOLD;
+
+        if (isDownshift) {
+          const currentWindow = await hm.redis.getWindow(agentId, sk);
+          if (currentWindow && currentWindow.length > 0) {
+            const reshaped = applyToolGradientToWindow(currentWindow, effectiveBudget);
+            if (reshaped.length < currentWindow.length) {
+              await hm.redis.setWindow(agentId, sk, reshaped);
+              await hm.redis.invalidateWindow(agentId, sk);
+              const reshapedAt = new Date().toISOString();
+              await hm.redis.setModelState(agentId, sk, {
+                model: model ?? 'unknown',
+                tokenBudget: effectiveBudget,
+                composedAt: new Date().toISOString(),
+                historyDepth,
+                reshapedAt,
+              });
+              console.log(
+                `[hypermem-plugin] budget-downshift: ${agentId}/${sk} ` +
+                `${lastState.tokenBudget}→${effectiveBudget} tokens, ` +
+                `reshaped ${currentWindow.length}→${reshaped.length} messages, tool-gradient-applied`
+              );
+            }
+          }
+        }
+      } catch (reshapeErr) {
+        // Non-fatal — compositor safety valve is still the last defense
+        console.warn('[hypermem-plugin] assemble: reshape pass failed (non-fatal):', (reshapeErr as Error).message);
+      }
+
       const request: ComposeRequest = {
         agentId,
         sessionKey: sk,
@@ -652,6 +693,25 @@ function createHyperMemEngine(): ContextEngine {
         .filter(m => m.role != null)
         .flatMap(m => neutralToAgentMessage(m as unknown as NeutralMessage)) as unknown as any[];
 
+      // Cache overhead for tool-loop turns: contextBlock tokens (chars/4) +
+      // tier-aware estimate for runtime system prompt (SOUL.md, identity,
+      // workspace files — not visible from inside the plugin).
+      const contextBlockTokens = Math.ceil((result.contextBlock?.length ?? 0) / 4);
+      const runtimeSystemTokens = getOverheadFallback(tier);
+      _overheadCache.set(sk, contextBlockTokens + runtimeSystemTokens);
+
+      // Update model state for downshift detection on next turn
+      try {
+        await hm.redis.setModelState(agentId, sk, {
+          model: model ?? 'unknown',
+          tokenBudget: effectiveBudget,
+          composedAt: new Date().toISOString(),
+          historyDepth,
+        });
+      } catch {
+        // Non-fatal
+      }
+
       return {
         messages: outputMessages,
         estimatedTokens: result.tokenCount ?? 0,
@@ -659,13 +719,6 @@ function createHyperMemEngine(): ContextEngine {
         // This is the facts/recall/episodes block assembled by the compositor.
         systemPromptAddition: result.contextBlock || undefined,
       };
-
-      // Cache overhead for tool-loop turns: contextBlock tokens (chars/4) +
-      // tier-aware estimate for runtime system prompt (SOUL.md, identity,
-      // workspace files — not visible from inside the plugin).
-      const contextBlockTokens = Math.ceil((result.contextBlock?.length ?? 0) / 4);
-      const runtimeSystemTokens = getOverheadFallback(tier);
-      _overheadCache.set(sk, contextBlockTokens + runtimeSystemTokens);
       } catch (err) {
         console.error('[hypermem-plugin] assemble error (stack):', (err as Error).stack ?? err);
         throw err; // Re-throw so the runtime falls back to legacy pipeline
@@ -692,6 +745,20 @@ function createHyperMemEngine(): ContextEngine {
         const hm = await getHyperMem();
         const sk = resolveSessionKey(sessionId, sessionKey);
         const agentId = extractAgentId(sk);
+
+        // Skip if a reshape pass just ran (within last 30s) — avoid double-processing
+        try {
+          const modelState = await hm.redis.getModelState(agentId, sk);
+          if (modelState?.reshapedAt) {
+            const reshapeAge = Date.now() - new Date(modelState.reshapedAt).getTime();
+            if (reshapeAge < 30_000) {
+              console.log(`[hypermem-plugin] compact: skipping — reshape pass ran ${reshapeAge}ms ago`);
+              return { ok: true, compacted: false, reason: 'reshape-recently-ran' };
+            }
+          }
+        } catch {
+          // Non-fatal — proceed with compaction
+        }
 
         // Always re-estimate from the actual Redis window rather than trusting
         // the caller's currentTokenCount. The runtime's estimate is what triggered
