@@ -763,7 +763,11 @@ function createHyperMemEngine(): ContextEngine {
           cachedModelState = await hm.redis.getModelState(agentId, sk);
           if (cachedModelState?.reshapedAt) {
             const reshapeAge = Date.now() - new Date(cachedModelState.reshapedAt).getTime();
-            if (reshapeAge < 30_000) {
+            // Only skip if session is NOT critically full — nuclear path must bypass this guard.
+            // If currentTokenCount > 85% budget, fall through to nuclear compaction below.
+            const isCriticallyFull = currentTokenCount != null &&
+              currentTokenCount > ((tokenBudget ?? 90_000) * 0.85);
+            if (reshapeAge < 30_000 && !isCriticallyFull) {
               console.log(`[hypermem-plugin] compact: skipping — reshape pass ran ${reshapeAge}ms ago`);
               return { ok: true, compacted: false, reason: 'reshape-recently-ran' };
             }
@@ -783,6 +787,35 @@ function createHyperMemEngine(): ContextEngine {
         // Target depth for both Redis trimming and JSONL truncation.
         // Target 50% of budget capacity, assume ~500 tokens/message average.
         const targetDepth = Math.max(20, Math.floor((effectiveBudget * 0.5) / 500));
+
+        // ── NUCLEAR COMPACTION ────────────────────────────────────────────────
+        // When the runtime reports the session is ≥85% full, trust that signal
+        // over our Redis estimate. The JSONL accumulates full tool results that
+        // the gradient never sees, so Redis can look fine while the transcript
+        // is genuinely saturated. Normal compact() returns compacted=false in
+        // this scenario ("within_budget"), which gives the runtime zero relief.
+        //
+        // Also triggered when reshape ran recently but the session is still
+        // critically full — bypass the reshape guard in that case.
+        const NUCLEAR_THRESHOLD = 0.85;
+        const isNuclear = currentTokenCount != null && currentTokenCount > effectiveBudget * NUCLEAR_THRESHOLD;
+        if (isNuclear) {
+          // Cut deep: target 20% of normal depth = ~25 messages for a 128k session.
+          // Keeps very recent context, clears the long tool-heavy tail.
+          const nuclearDepth = Math.max(10, Math.floor(targetDepth * 0.20));
+          const nuclearBudget = Math.floor(effectiveBudget * 0.25);
+          await hm.redis.trimHistoryToTokenBudget(agentId, sk, nuclearBudget);
+          await hm.redis.invalidateWindow(agentId, sk).catch(() => {});
+          await truncateJsonlIfNeeded(sessionFile, nuclearDepth, true);
+          const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
+          console.log(
+            `[hypermem-plugin] compact: NUCLEAR — session at ${currentTokenCount}/${effectiveBudget} tokens ` +
+            `(${Math.round((currentTokenCount / effectiveBudget) * 100)}% full), ` +
+            `deep-trimmed JSONL to ${nuclearDepth} messages, Redis ${tokensBefore}→${tokensAfter} tokens`
+          );
+          return { ok: true, compacted: true, result: { tokensBefore, tokensAfter } };
+        }
+        // ── END NUCLEAR ───────────────────────────────────────────────────────
 
         // Detect large-inbound-content scenario: runtime total significantly exceeds
         // our history estimate. The gap is the inbound message + system prompt overhead.
