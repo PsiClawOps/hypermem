@@ -815,7 +815,7 @@ export class Compositor {
               libDb || undefined,
             ),
             new Promise<null>((_, reject) =>
-              setTimeout(() => reject(new Error('fallback_knn_timeout')), 500)
+              setTimeout(() => reject(new Error('fallback_knn_timeout')), 3000)
             ),
           ]);
           if (fallbackContent) {
@@ -1083,8 +1083,8 @@ export class Compositor {
         zeroResultReason = 'budget_exhausted';
       } else if (diagTriggerHits === 0 && !diagTriggerFallbackUsed) {
         zeroResultReason = 'no_trigger_no_fallback';
-      } else if (diagFactsIncluded === 0 && diagSemanticResults === 0 && diagDocChunkCollections === 0) {
-        // Facts exist or retrieval was attempted but returned nothing — likely a retrieval bug
+      } else if ((diagTriggerHits > 0 || diagTriggerFallbackUsed) && diagFactsIncluded === 0 && diagSemanticResults === 0 && diagDocChunkCollections === 0) {
+        // Retrieval was attempted (trigger fired or fallback ran) but returned nothing — likely a retrieval bug
         // rather than a genuinely empty corpus. Distinguish from 'empty_corpus' for observability.
         zeroResultReason = 'unknown';
       } else {
