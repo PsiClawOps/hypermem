@@ -102,6 +102,12 @@ export type { OrgRegistry } from './cross-agent.js';
 export { BackgroundIndexer, createIndexer, type CursorFetcher } from './background-indexer.js';
 export type { IndexerStats, WatermarkState } from './background-indexer.js';
 
+export { TopicSynthesizer } from './topic-synthesizer.js';
+export type { SynthesisResult, SynthesisConfig } from './topic-synthesizer.js';
+
+export { lintKnowledge } from './knowledge-lint.js';
+export type { LintResult } from './knowledge-lint.js';
+
 export { buildSpawnContext } from './spawn-context.js';
 export type { SpawnContextOptions, SpawnContext } from './spawn-context.js';
 

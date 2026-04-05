@@ -55,6 +55,8 @@ function domainForAgent(agentId: string): string {
 }
 import { MessageStore } from './message-store.js';
 import { runNoiseSweep, runToolDecay } from './proactive-pass.js';
+import { TopicSynthesizer } from './topic-synthesizer.js';
+import { lintKnowledge } from './knowledge-lint.js';
 import { FactStore } from './fact-store.js';
 import { EpisodeStore } from './episode-store.js';
 import { TopicStore } from './topic-store.js';
@@ -430,6 +432,8 @@ export class BackgroundIndexer {
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private vectorStore: VectorStore | null = null;
+  private synthesizer: TopicSynthesizer | null = null;
+  private tickCount: number = 0;
 
   constructor(
     config?: Partial<IndexerConfig>,
@@ -438,6 +442,20 @@ export class BackgroundIndexer {
     private listAgents?: () => string[],
     private getCursor?: CursorFetcher
   ) {
+    // Initialize synthesizer if libraryDb accessor is available
+    if (getLibraryDb) {
+      const libDb = getLibraryDb();
+      if (libDb) {
+        this.synthesizer = new TopicSynthesizer(
+          libDb,
+          (agentId: string) => {
+            if (!getMessageDb) return null;
+            try { return getMessageDb(agentId); } catch { return null; }
+          }
+        );
+      }
+    }
+
     this.config = {
       enabled: config?.enabled ?? true,
       factExtractionMode: config?.factExtractionMode ?? 'tiered',
@@ -542,6 +560,36 @@ export class BackgroundIndexer {
 
       // Run decay on every tick
       this.applyDecay(libraryDb);
+
+      // Topic synthesis — run for each agent after main indexer tick
+      if (this.synthesizer) {
+        for (const agentId of agents) {
+          try {
+            const synthResult = this.synthesizer.tick(agentId);
+            if (synthResult.topicsSynthesized > 0) {
+              console.log(`[indexer] Synthesized ${synthResult.topicsSynthesized} topics for ${agentId}, ${synthResult.knowledgeEntriesWritten} knowledge entries`);
+            }
+          } catch {
+            // Non-fatal
+          }
+        }
+      }
+
+      // Knowledge lint — every LINT_FREQUENCY ticks
+      this.tickCount++;
+      if (this.tickCount % 10 === 0 && this.getLibraryDb) {
+        try {
+          const libDb = this.getLibraryDb();
+          if (libDb) {
+            const lint = lintKnowledge(libDb);
+            if (lint.staleDecayed > 0 || lint.coverageGaps.length > 0) {
+              console.log(`[indexer] Lint: ${lint.staleDecayed} stale decayed, ${lint.orphansFound} orphans, ${lint.coverageGaps.length} coverage gaps`);
+            }
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
 
       // Run proactive passes on each agent's message DB
       for (const agentId of agents) {
