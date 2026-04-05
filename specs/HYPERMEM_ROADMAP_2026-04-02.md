@@ -111,6 +111,7 @@ _The architecturally significant work. Turns sessions into conversation topics. 
 **Dependency:** P3.2, P3.3
 
 ### P3.5 — Cross-topic keystone retrieval
+**Status:** Done (2026-04-05)  
 **What:** Keystone slot (P2.1) extended to pull high-value messages from OTHER topics when their content is referenced in the current topic. A decision made in the "HyperMem stabilization" topic that's relevant to the current "sessionless architecture" topic surfaces automatically.  
 **Owner:** Forge  
 **Effort:** Medium  
@@ -138,7 +139,7 @@ _Real work, but not blocking stability or the phased roadmap. Revisit after Phas
 |---|---|---|
 | **Phase 1 — Stabilization** | P1.1 CI, P1.2 type unif, P1.3 cursor durability, P1.4 org registry, P1.5 JOB/MOTIVATIONS, P1.6 supersedes | 🔴 In progress |
 | **Phase 2 — Context Quality** | Keystone slot, content classifier port, proactive passes port | ⬜ Not started |
-| **Phase 3 — Sessionless** | Topic detection, schema v4, topic map/anchors, topic compositor, cross-topic keystone | ⬜ Not started |
+| **Phase 3 — Sessionless** | Topic detection, schema v4, topic map/anchors, topic compositor, cross-topic keystone | 🟡 In progress (P3.5 done) |
 | **Deferred** | Model capability, archive council round, live org registry, cursor indexer | ⬜ Deferred |
 
 ---

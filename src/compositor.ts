@@ -41,7 +41,7 @@ import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
 import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction-fence.js';
-import { rankKeystones, type KeystoneCandidate } from './keystone-scorer.js';
+import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
 
 const DEFAULT_CONFIG: CompositorConfig = {
   defaultTokenBudget: 90000,
@@ -431,19 +431,31 @@ export class Compositor {
     }
 
     // ─── Conversation History ──────────────────────────────────
+    let diagCrossTopicKeystones = 0;
     if (request.includeHistory !== false) {
       // P3.4: Look up the active topic for this session (non-fatal)
       let activeTopicId: string | undefined;
+      let activeTopic: { id: string; name: string } | undefined;
       if (!request.topicId) {
         try {
           const topicMap = new SessionTopicMap(db);
-          const activeTopic = topicMap.getActiveTopic(request.sessionKey);
+          activeTopic = topicMap.getActiveTopic(request.sessionKey) || undefined;
           if (activeTopic) activeTopicId = activeTopic.id;
         } catch {
           // Topic lookup is best-effort — fall back to full history
         }
       } else {
         activeTopicId = request.topicId;
+        try {
+          activeTopic = db.prepare(`
+            SELECT id, name
+            FROM topics
+            WHERE session_key = ? AND id = ?
+            LIMIT 1
+          `).get(request.sessionKey, request.topicId) as { id: string; name: string } | undefined;
+        } catch {
+          // Topic lookup is best-effort — fall back to ID-only history fetch
+        }
       }
 
       const rawHistoryMessages = await this.getHistory(
@@ -525,16 +537,70 @@ export class Compositor {
         }
       }
 
+      // ── Cross-Topic Keystones (P3.5) ──────────────────────────────────
+      // Pull high-signal messages from OTHER topics in this session when their
+      // content is semantically relevant to the current topic. Non-fatal.
+      let crossTopicMessages: NeutralMessage[] = [];
+      let crossTopicTokens = 0;
+
+      if (activeTopic && this.vectorStore) {
+        try {
+          const rawCrossTopicKeystones = await this.getKeystonesByTopic(
+            request.agentId,
+            request.sessionKey,
+            activeTopic,
+            includedHistory,
+            db,
+            3
+          );
+          if (rawCrossTopicKeystones.length > 0) {
+            // Token budget: cap the full cross-topic block at 15% of remaining,
+            // including the header line.
+            const crossTopicHeaderTokens = estimateTokens('## Cross-Topic Context');
+            const crossTopicBudget = Math.max(0, Math.floor(remaining * 0.15) - crossTopicHeaderTokens);
+            let used = 0;
+            for (const candidate of rawCrossTopicKeystones) {
+              const msg: NeutralMessage = {
+                role: candidate.role as NeutralMessage['role'],
+                textContent: candidate.content,
+                toolCalls: null,
+                toolResults: null,
+              };
+              const msgTokens = estimateMessageTokens(msg);
+              if (used + msgTokens > crossTopicBudget) continue;
+              crossTopicMessages.push(msg);
+              used += msgTokens;
+            }
+            crossTopicTokens = used;
+            diagCrossTopicKeystones = crossTopicMessages.length;
+          }
+        } catch {
+          // Cross-topic retrieval is non-fatal — never block compose
+        }
+      }
+
       // Push history with keystone separators if we have keystones.
-      if (keystoneMessages.length > 0) {
-        // Separator before recalled context
-        messages.push({
-          role: 'system',
-          textContent: '## Recalled Context (high-signal older messages)',
-          toolCalls: null,
-          toolResults: null,
-        });
-        messages.push(...keystoneMessages);
+      if (keystoneMessages.length > 0 || crossTopicMessages.length > 0) {
+        // Cross-topic context (from other topics) — prepended before within-session keystones
+        if (crossTopicMessages.length > 0) {
+          messages.push({
+            role: 'system',
+            textContent: '## Cross-Topic Context',
+            toolCalls: null,
+            toolResults: null,
+          });
+          messages.push(...crossTopicMessages);
+        }
+        // Separator before recalled context (within-session keystones)
+        if (keystoneMessages.length > 0) {
+          messages.push({
+            role: 'system',
+            textContent: '## Recalled Context (high-signal older messages)',
+            toolCalls: null,
+            toolResults: null,
+          });
+          messages.push(...keystoneMessages);
+        }
         // Separator before recent conversation
         messages.push({
           role: 'system',
@@ -544,10 +610,16 @@ export class Compositor {
         });
         messages.push(...includedHistory);
         // Account for separator tokens in history slot
-        const sepTokens = estimateTokens('## Recalled Context (high-signal older messages)') +
-          estimateTokens('## Recent Conversation');
-        slots.history = historyTokens + keystoneTokens + sepTokens;
-        remaining -= (historyTokens + keystoneTokens + sepTokens);
+        const crossTopicSepTokens = crossTopicMessages.length > 0
+          ? estimateTokens('## Cross-Topic Context')
+          : 0;
+        const keystoneSepTokens = keystoneMessages.length > 0
+          ? estimateTokens('## Recalled Context (high-signal older messages)')
+          : 0;
+        const recentSepTokens = estimateTokens('## Recent Conversation');
+        const sepTokens = crossTopicSepTokens + keystoneSepTokens + recentSepTokens;
+        slots.history = historyTokens + keystoneTokens + crossTopicTokens + sepTokens;
+        remaining -= (historyTokens + keystoneTokens + crossTopicTokens + sepTokens);
       } else {
         messages.push(...includedHistory);
         slots.history = historyTokens;
@@ -1121,10 +1193,10 @@ export class Compositor {
       scopeFiltered: diagScopeFiltered,
       zeroResultReason,
       retrievalMode: diagRetrievalMode,
+      crossTopicKeystones: diagCrossTopicKeystones,
     };
 
-    console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode}`);
-
+    console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode} crossTopicKeystones=${diagCrossTopicKeystones}`);
     return {
       messages: outputMessages,
       tokenCount: totalTokens,
@@ -1852,5 +1924,170 @@ export class Compositor {
       // Keystone injection is best-effort — never fail compose
       return null;
     }
+  }
+
+  // ─── Cross-Topic Keystone Retrieval (P3.5) ───────────────────────
+
+  /**
+   * Pull high-signal messages from OTHER topics in this session when their
+   * content is semantically relevant to the current active topic.
+   *
+   * Heuristic-only: no model calls. Token overlap between the current topic
+   * name + last 3 user messages and candidate message content.
+   *
+   * @param agentId      - The agent's ID
+   * @param sessionKey   - Current session key
+   * @param activeTopic  - The current active topic (id + name)
+   * @param currentMessages - Recently included history messages for query extraction
+   * @param db           - The messages database
+   * @param maxKeystones - Max cross-topic keystones to return (default 3)
+   * @returns Scored keystones sorted by score DESC, deduplicated by message id
+   */
+  private async getKeystonesByTopic(
+    agentId: string,
+    sessionKey: string,
+    activeTopic: { id: string; name: string },
+    currentMessages: NeutralMessage[],
+    db: DatabaseSync,
+    maxKeystones: number = 3
+  ): Promise<ScoredKeystone[]> {
+    // Fetch all topics for this session except the active one (max 5, most recent first)
+    type TopicRow = { id: string; name: string };
+    const otherTopics = db.prepare(`
+      SELECT id, name
+      FROM topics
+      WHERE session_key = ? AND id != ?
+      ORDER BY last_active_at DESC
+      LIMIT 5
+    `).all(sessionKey, activeTopic.id) as TopicRow[];
+
+    if (otherTopics.length === 0) return [];
+
+    // Extract key terms from active topic name + last 3 user messages
+    const queryTerms = this.extractQueryTerms(activeTopic.name, currentMessages);
+    if (queryTerms.size === 0) return [];
+
+    const nowMs = Date.now();
+    const maxAgeHours = 720; // 30 days, same as within-session keystones
+    const seenIds = new Set<number>();
+    const allCandidates: ScoredKeystone[] = [];
+
+    for (const topic of otherTopics) {
+      // Fetch a bounded pool, then select the topic's top keystones before
+      // semantic filtering so cross-topic retrieval competes on the same scale.
+      type MsgRow = {
+        id: number;
+        message_index: number;
+        role: string;
+        text_content: string;
+        created_at: string;
+      };
+
+      let topicMessages: MsgRow[];
+      try {
+        topicMessages = db.prepare(`
+          SELECT m.id, m.message_index, m.role, m.text_content, m.created_at
+          FROM messages m
+          JOIN conversations c ON m.conversation_id = c.id
+          WHERE c.session_key = ?
+            AND c.agent_id = ?
+            AND m.topic_id = ?
+            AND m.text_content IS NOT NULL
+            AND m.text_content != ''
+            AND m.is_heartbeat = 0
+          ORDER BY m.message_index DESC
+          LIMIT 50
+        `).all(sessionKey, agentId, topic.id) as MsgRow[];
+      } catch {
+        // Corrupt topic data — skip this topic, never throw
+        continue;
+      }
+
+      if (topicMessages.length === 0) continue;
+
+      const topicCandidates: KeystoneCandidate[] = topicMessages.map((msg, idx) => {
+        const createdMs = new Date(msg.created_at).getTime();
+        const ageHours = (nowMs - createdMs) / (1000 * 60 * 60);
+        const ftsRank = topicMessages.length > 1
+          ? 1.0 - (idx / topicMessages.length) * 0.9
+          : 1.0;
+
+        return {
+          messageId: msg.id,
+          messageIndex: msg.message_index,
+          role: msg.role,
+          content: msg.text_content,
+          timestamp: msg.created_at,
+          episodeSignificance: null,
+          ftsRank,
+          ageHours,
+        };
+      });
+
+      const topTopicKeystones = rankKeystones(topicCandidates, maxAgeHours).slice(0, 10);
+
+      // Filter to messages with semantic overlap (≥2 matching terms)
+      const relevant = topTopicKeystones.filter(candidate => {
+        const contentLower = candidate.content.toLowerCase();
+        let matches = 0;
+        for (const term of queryTerms) {
+          if (contentLower.includes(term)) {
+            matches++;
+            if (matches >= 2) return true;
+          }
+        }
+        return false;
+      });
+
+      if (relevant.length === 0) continue;
+
+      // Re-score filtered candidates so they compete on the same final scale
+      for (const candidate of relevant) {
+        if (seenIds.has(candidate.messageId)) continue;
+        seenIds.add(candidate.messageId);
+
+        const score = scoreKeystone(candidate, maxAgeHours);
+        allCandidates.push({ ...candidate, score });
+      }
+    }
+
+    if (allCandidates.length === 0) return [];
+
+    // Sort by score DESC and return top maxKeystones
+    return allCandidates
+      .sort((a, b) => b.score - a.score)
+      .slice(0, maxKeystones);
+  }
+
+  /**
+   * Extract lowercase key terms from a topic name and the last 3 user messages.
+   * Terms are: tokens with ≥4 characters (skip short stop words).
+   * Returns a Set for O(1) lookup.
+   */
+  private extractQueryTerms(
+    topicName: string,
+    messages: NeutralMessage[]
+  ): Set<string> {
+    const terms = new Set<string>();
+    const MIN_TERM_LEN = 4;
+
+    // From topic name
+    const topicTokens = topicName.toLowerCase().match(/\b[a-z0-9]{4,}\b/g) ?? [];
+    for (const t of topicTokens) terms.add(t);
+
+    // From last 3 user messages
+    let userCount = 0;
+    for (let i = messages.length - 1; i >= 0 && userCount < 3; i--) {
+      const msg = messages[i];
+      if (msg.role === 'user' && msg.textContent) {
+        const tokens = msg.textContent.toLowerCase().match(/\b[a-z0-9]{4,}\b/g) ?? [];
+        for (const t of tokens) {
+          if (t.length >= MIN_TERM_LEN) terms.add(t);
+        }
+        userCount++;
+      }
+    }
+
+    return terms;
   }
 }

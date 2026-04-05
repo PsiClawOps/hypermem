@@ -285,6 +285,8 @@ export interface ComposeDiagnostics {
   zeroResultReason?: 'no_trigger_no_fallback' | 'empty_corpus' | 'budget_exhausted' | 'scope_filtered_all' | 'unknown';
   /** The retrieval path that was used for doc chunks */
   retrievalMode: 'triggered' | 'fallback_knn' | 'fallback_fts' | 'none';
+  /** Number of cross-topic keystone messages injected (P3.5) */
+  crossTopicKeystones?: number;
 }
 
 export interface ComposeResult {
