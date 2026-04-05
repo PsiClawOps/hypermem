@@ -657,6 +657,18 @@ export class VectorStore {
   }
 
   /**
+   * Check whether a source item already has a vector in the index.
+   * Used by the episode backfill to skip already-vectorized entries.
+   */
+  hasItem(sourceTable: string, sourceId: number): boolean {
+    this.validateSourceTable(sourceTable);
+    const row = this.db
+      .prepare('SELECT 1 FROM vec_index_map WHERE source_table = ? AND source_id = ? LIMIT 1')
+      .get(sourceTable, sourceId);
+    return row !== undefined;
+  }
+
+  /**
    * Tombstone vector entries for superseded facts and knowledge.
    *
    * When fact A is superseded by fact B (facts.superseded_by = B.id), the old
