@@ -577,8 +577,30 @@ function createHyperMemEngine(): ContextEngine {
           const sk = resolveSessionKey(sessionId, sessionKey);
           const agentId = extractAgentId(sk);
 
-          // Measure pressure BEFORE trim to pick the right tier
-          const preTrimTokens = await estimateWindowTokens(hm, agentId, sk);
+          // Measure pressure BEFORE trim to pick the right tier.
+          // Critical: use the runtime-provided messages array, NOT estimateWindowTokens()
+          // which reads Redis. After a gateway restart Redis is empty — estimateWindowTokens
+          // returns ~0, pressure reads as 0%, and the trim tiers never fire even though
+          // the session is at 98% from JSONL loaded at runtime. The messages param is
+          // always authoritative — it's what the runtime actually sent to the model.
+          const runtimeTokens = messages.reduce((sum: number, m: unknown) => {
+            const msg = m as Record<string, unknown>;
+            const textCost = estimateTokens(typeof msg.textContent === 'string' ? msg.textContent : null);
+            const toolCallCost = msg.toolCalls ? Math.ceil(JSON.stringify(msg.toolCalls).length / 2) : 0;
+            const toolResultCost = msg.toolResults ? Math.ceil(JSON.stringify(msg.toolResults).length / 2) : 0;
+            // Also count content arrays (OpenClaw native format)
+            const contentCost = Array.isArray(msg.content)
+              ? (msg.content as unknown[]).reduce((s: number, c: unknown) => {
+                  const part = c as Record<string, unknown>;
+                  return s + estimateTokens(typeof part.text === 'string' ? part.text : null);
+                }, 0)
+              : 0;
+            return sum + textCost + toolCallCost + toolResultCost + contentCost;
+          }, 0);
+          // Redis window is a useful cross-check; use whichever is higher so we never
+          // underestimate when Redis is ahead of the runtime snapshot.
+          const redisTokens = await estimateWindowTokens(hm, agentId, sk);
+          const preTrimTokens = Math.max(runtimeTokens, redisTokens);
           const pressure = preTrimTokens / effectiveBudget;
 
           // Pressure-tiered trim targets:
@@ -1062,7 +1084,24 @@ function createHyperMemEngine(): ContextEngine {
         try {
           const modelState = await hm.redis.getModelState(agentId, sk);
           if (modelState?.tokenBudget) {
-            const postTurnTokens = await estimateWindowTokens(hm, agentId, sk);
+            // Use the same dual-source pressure estimate as the tool-loop trim:
+            // max(runtime messages, Redis) so a post-restart empty-Redis session
+            // still fires correctly.
+            const runtimePostTokens = messages.reduce((sum: number, m: unknown) => {
+              const msg = m as Record<string, unknown>;
+              const textCost = estimateTokens(typeof msg.textContent === 'string' ? msg.textContent : null);
+              const toolCallCost = msg.toolCalls ? Math.ceil(JSON.stringify(msg.toolCalls).length / 2) : 0;
+              const toolResultCost = msg.toolResults ? Math.ceil(JSON.stringify(msg.toolResults).length / 2) : 0;
+              const contentCost = Array.isArray(msg.content)
+                ? (msg.content as unknown[]).reduce((s: number, c: unknown) => {
+                    const part = c as Record<string, unknown>;
+                    return s + estimateTokens(typeof part.text === 'string' ? part.text : null);
+                  }, 0)
+                : 0;
+              return sum + textCost + toolCallCost + toolResultCost + contentCost;
+            }, 0);
+            const redisPostTokens = await estimateWindowTokens(hm, agentId, sk);
+            const postTurnTokens = Math.max(runtimePostTokens, redisPostTokens);
             const postTurnPressure = postTurnTokens / modelState.tokenBudget;
             if (postTurnPressure > 0.80) {
               // Trim to 70% so next turn has 30% headroom for incoming content.
