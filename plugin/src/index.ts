@@ -32,6 +32,7 @@ import type {
   BackgroundIndexer,
   FleetStore,
 } from '@psiclawops/hypermem';
+import { detectTopicShift, SessionTopicMap } from '@psiclawops/hypermem';
 import os from 'os';
 import path from 'path';
 import fs from 'fs/promises';
@@ -751,6 +752,53 @@ function createHyperMemEngine(): ContextEngine {
           } else {
             await hm.recordAssistantMessage(agentId, sk, neutral);
           }
+        }
+
+        // P3.1: Topic detection on the inbound user message
+        // Non-fatal: topic detection never blocks afterTurn
+        try {
+          const inboundUserMsg = newMessages
+            .map(m => m as unknown as InboundMessage)
+            .find(m => m.role === 'user');
+          if (inboundUserMsg) {
+            const neutralUser = toNeutralMessage(inboundUserMsg);
+            // Gather recent messages for context (all messages before the new ones)
+            const contextMessages = (messages.slice(0, prePromptMessageCount) as unknown as InboundMessage[])
+              .filter(m => m.role !== 'system')
+              .slice(-10)
+              .map(m => toNeutralMessage(m));
+
+            const db = hm.dbManager.getMessageDb(agentId);
+            if (db) {
+              const topicMap = new SessionTopicMap(db);
+              const activeTopic = topicMap.getActiveTopic(sk);
+              const signal = detectTopicShift(neutralUser, contextMessages, activeTopic?.id ?? null);
+
+              if (signal.isNewTopic && signal.topicName) {
+                const newTopicId = topicMap.createTopic(sk, signal.topicName);
+                // Write topic_id onto the stored user message (best-effort)
+                try {
+                  const stored = db.prepare(`
+                    SELECT m.id FROM messages m
+                    JOIN conversations c ON c.id = m.conversation_id
+                    WHERE c.session_key = ? AND m.role = 'user'
+                    ORDER BY m.message_index DESC LIMIT 1
+                  `).get(sk) as { id: number } | undefined;
+                  if (stored) {
+                    db.prepare('UPDATE messages SET topic_id = ? WHERE id = ?')
+                      .run(newTopicId, stored.id);
+                  }
+                } catch {
+                  // Best-effort
+                }
+              } else if (activeTopic) {
+                topicMap.activateTopic(sk, activeTopic.id);
+                topicMap.incrementMessageCount(activeTopic.id);
+              }
+            }
+          }
+        } catch {
+          // Topic detection is entirely non-fatal
         }
 
         // Recompute the Redis hot history from SQLite so turn-age gradient is

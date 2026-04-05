@@ -144,6 +144,11 @@ export type { ProviderType } from './provider-translator.js';
 export { classifyContentType, signalWeight, isSignalBearing, SIGNAL_WEIGHT } from './content-type-classifier.js';
 export type { ContentType, ContentTypeResult } from './content-type-classifier.js';
 
+export { detectTopicShift } from './topic-detector.js';
+export type { TopicSignal } from './topic-detector.js';
+
+export { SessionTopicMap } from './session-topic-map.js';
+
 import { DatabaseManager } from './db.js';
 import { MessageStore } from './message-store.js';
 import { FactStore } from './fact-store.js';

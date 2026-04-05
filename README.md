@@ -41,11 +41,11 @@ The retrieval path is fast because the hot layer is fast. Benchmarked against a 
 | Redis history LRANGE (100 messages) | 0.16ms | 0.13ms | 0.22ms |
 | L4 facts query (top-28 by confidence×decay) | 0.29ms | 0.28ms | 0.31ms |
 | L4 FTS5 keyword search | 0.08ms | 0.076ms | 0.11ms |
-| Full 4-layer compose, warm session | 59ms | 58ms | 65ms |
-| Full 4-layer compose, cold session (first turn) | 343ms | 57ms | 1488ms |
-| Async pre-embed cost (background, not user-facing) | 302ms | 146ms | 725ms |
+| Full 4-layer compose, warm session | 52ms | 49ms | 57ms |
+| Full 4-layer compose, cold session (first turn) | 249ms | — | 1592ms |
+| Async pre-embed (background, not user-facing) | 302ms | 146ms | 725ms |
 
-L1 and L4 structured retrieval are sub-millisecond. On warm sessions — every turn after the first — the query embedding is pre-computed in the background after the assistant replies, so compose hits Redis cache instead of calling Ollama inline. Warm compose averages 59ms with a p95 of 65ms. The first turn of a new session pays the Ollama round-trip (343ms avg), then every turn after is warm. The 302ms async pre-embed cost is paid by Ollama after the assistant replies — the user never waits for it. That is fast enough that retrieval is not a constraint on turn latency.
+L1 and L4 structured retrieval are sub-millisecond. After the first turn, the query embedding is pre-computed in the background after each assistant reply and cached in Redis, so the next compose hits cache instead of calling Ollama inline. Warm sessions average 52ms end-to-end with a p95 of 57ms. The p95 collapse from 1592ms to 57ms is the headline: the "occasionally sluggish" turn is gone on warm sessions. The first turn of a new session pays the Ollama round-trip once; every turn after is warm. The async embed cost is paid after the assistant replies — the user never waits for it.
 
 ### Context that does not bloat or collapse
 
@@ -117,6 +117,24 @@ Because the budget is computed from the model's actual context window at compose
 > "Install HyperMem following INSTALL.md. I'm running a [solo / multi-agent] setup."
 
 Full installation guide: **[INSTALL.md](./INSTALL.md)**
+
+### Tuning the compositor
+
+Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults without editing plugin source. Any `compositor` key takes effect on the next gateway restart:
+
+```json
+{
+  "compositor": {
+    "defaultTokenBudget": 60000,
+    "maxFacts": 18,
+    "maxCrossSessionContext": 3000,
+    "maxRecentToolPairs": 2,
+    "maxProseToolPairs": 6
+  }
+}
+```
+
+The profile above targets roughly 35-45% token reduction for deployments on smaller context windows. INSTALL.md has a full tuning section with tradeoff notes for each knob.
 
 ### Quick path (manual)
 
