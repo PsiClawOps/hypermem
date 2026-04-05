@@ -1,0 +1,80 @@
+# HyperMem Deferred Items
+
+Items that are explicitly scoped out of current work but must be tracked for future action.
+Each entry documents the decision, the gate condition, and the implementation plan.
+
+---
+
+## D-001: Strict Topic Mode — Legacy NULL Message Backfill
+
+**Status:** 🟡 DEFERRED  
+**Added:** 2026-04-05  
+**Relates to:** Topic detection (topic-detector.ts, session-topic-map.ts)
+
+### What
+
+Once topic detection has been running in production for ≥2 weeks, run a one-time backfill
+to assign `topic_id` to historical messages that have `topic_id = NULL`. After the backfill,
+narrow `getRecentMessagesByTopic()` to exclude NULL rows so that all topic-scoped queries
+return only topically-attributed messages.
+
+### Why deferred
+
+Topic detection is still early. The classifier needs stabilization before backfill is safe:
+- False positives during the warm-up period would mis-tag legacy messages permanently
+- Coverage below 80% on new messages means the classifier isn't reliable enough to trust
+  for bulk historical attribution
+
+### Gate conditions (all must be true before proceeding)
+
+1. Topic detection has been live in production for ≥2 weeks
+2. Coverage: ≥80% of new incoming messages receive a non-NULL `topic_id`
+3. False positive rate (mis-tagged messages, sampled): <5%
+4. No active topic-schema migrations in flight
+
+### Implementation plan
+
+1. Add a `backfillTopicIds()` function in `src/topic-store.ts` (or a migration script)
+   that iterates messages with `topic_id IS NULL`, runs topic detection on their content,
+   and writes the detected topic_id.
+2. Run as a one-time migration gated by `system_state` flag `topic_backfill_v1` (same
+   pattern as the episode vector backfill).
+3. After backfill, update `getRecentMessagesByTopic()` query to add `AND topic_id IS NOT NULL`
+   so strict mode is enforced.
+4. Add a feature flag in `IndexerConfig` (`strictTopicMode: boolean`) so the behavior
+   can be toggled without a code deploy.
+
+### Risk
+
+- Bulk writes to messages.db during backfill could cause I/O contention; run in small
+  batches with a sleep between pages.
+- If topic detection changes (retrain, threshold adjustment), backfilled labels may become
+  stale. Document that the backfill is a one-time snapshot, not a live link.
+
+---
+
+## D-002: Cursor Durability (SQLite Dual-Write)
+
+**Status:** 🟡 DEFERRED  
+**Added:** prior  
+**Relates to:** background-indexer.ts, cursor handling
+
+Cursor TTL = 24h. Dual-write to SQLite required before background indexer reads cursor.
+Currently the indexer's cursor fetch is best-effort Redis only; if Redis is cold the
+cursor is unavailable and the indexer falls back to full-scan ordering.
+
+Gate: Redis availability monitoring in place, cursor miss rate <1% over 48h rolling window.
+
+---
+
+## D-003: Plugin Type Unification
+
+**Status:** 🟡 DEFERRED  
+**Added:** prior  
+**Relates to:** plugin/src/
+
+Plugin uses dynamic imports; can't use TS types from core without a structural change.
+Current shims are intentional and functional. Type safety gap is bounded to the plugin
+boundary — runtime behavior is correct.
+
+Gate: Core API stabilized (no breaking changes in 2 release cycles).

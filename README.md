@@ -42,10 +42,10 @@ The retrieval path is fast because the hot layer is fast. Benchmarked against a 
 | L4 facts query (top-28 by confidence×decay) | 0.29ms | 0.28ms | 0.31ms |
 | L4 FTS5 keyword search | 0.08ms | 0.076ms | 0.11ms |
 | Full 4-layer compose, warm session | 52ms | 49ms | 57ms |
-| Full 4-layer compose, cold session (first turn) | 249ms | — | 1592ms |
+| Full 4-layer compose, cold session (first turn) | ~250ms | — | — |
 | Async pre-embed (background, not user-facing) | 302ms | 146ms | 725ms |
 
-L1 and L4 structured retrieval are sub-millisecond. After the first turn, the query embedding is pre-computed in the background after each assistant reply and cached in Redis, so the next compose hits cache instead of calling Ollama inline. Warm sessions average 52ms end-to-end with a p95 of 57ms. The p95 collapse from 1592ms to 57ms is the headline: the "occasionally sluggish" turn is gone on warm sessions. The first turn of a new session pays the Ollama round-trip once; every turn after is warm. The async embed cost is paid after the assistant replies — the user never waits for it.
+L1 and L4 structured retrieval are sub-millisecond. After the first turn, the query embedding is pre-computed in the background after each assistant reply and cached in Redis, so the next compose hits cache instead of calling Ollama inline. Warm sessions average 52ms end-to-end with a p95 of 57ms. The first turn of a new session pays the Ollama round-trip once; every turn after is warm. The async embed cost is paid after the assistant replies — the user never waits for it.
 
 ### Context that does not bloat or collapse
 
@@ -58,6 +58,12 @@ HyperMem's compositor does not accumulate a transcript. It assembles context fre
 Long agentic sessions produce a lot of tool output. File reads, search results, test runs — each one eats tokens. Left unmanaged, old tool results crowd out recent reasoning and current context.
 
 The Tool Context Tuning feature compresses tool history by turn age. Recent turns stay verbatim. Older turns become prose stubs: `Read /src/foo.ts (1.2KB)`, `Ran npm test — exit 0`. The oldest turns drop tool payloads entirely, keeping message text. Large results use head-and-tail truncation with a middle marker. Redis hot history is recomputed from SQLite after each turn so the live cache stays aligned with the stored source of truth.
+
+### Conversations that stay on track
+
+Long sessions drift. An agent working on a database migration does not need the context from the deployment discussion two hours ago crowding out what it needs now. Without structure, history is just a pile — everything is equally available, which means nothing is prioritized.
+
+HyperMem detects topic shifts automatically using heuristics: explicit subject-change markers, conversation gaps over 30 minutes, and entity overlap analysis between recent turns. When a shift is detected, the compositor scopes history to the active topic. Prior topic context does not disappear — when the current topic overlaps with a past decision, cross-topic keystone retrieval pulls high-signal moments from earlier threads into the current context window. The right history surfaces. The rest stays out of the way.
 
 ### Subagents that inherit context
 

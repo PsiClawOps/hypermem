@@ -227,6 +227,7 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 | Cross-session context boundary markers | WQ-20260402-001 | 🟡 OPEN | `buildCrossSessionContext()` renders flat previews, no per-message boundaries or sender identity. Incident 6. |
 | Cursor durability (SQLite dual-write) | — | 🟡 DEFERRED | Cursor TTL = 24h. Dual-write to SQLite required before background indexer reads cursor. Gate 2. |
 | Plugin type unification | — | 🟡 DEFERRED | Plugin uses dynamic imports; can't use TS types from core. Shims are intentional. Structural change needed. |
+| Strict topic mode: legacy NULL backfill | — | 🟡 DEFERRED | After ≥2 weeks of topic detection in production, run backfill to assign `topic_id` to legacy NULL messages, then narrow `getRecentMessagesByTopic()` to exclude NULL. Gate: topic detection must be stable and coverage >80% of new messages before narrowing. Tracked in `specs/DEFERRED.md`. |
 | ACA Step 4 — retrieval stubs replace static files | — | 🔲 PENDING | `systemPromptAddition` carries governance doc chunks instead of embedding full workspace files. Blocked on Step 3 ✅ |
 | ACA Step 5 — governance context assembly | — | 🔲 PENDING | Full on-demand assembly replaces static prompt injection. Requires Step 4. |
 
