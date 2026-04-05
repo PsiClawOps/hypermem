@@ -1354,6 +1354,7 @@ export class Compositor {
     agentId: string,
     sessionKey: string,
     db: DatabaseSync,
+    tokenBudget?: number,
   ): Promise<void> {
     const store = new MessageStore(db);
     const conversation = store.getConversation(sessionKey);
@@ -1361,7 +1362,31 @@ export class Compositor {
 
     const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
     const transformedHistory = applyToolGradient(rawHistory);
-    await this.redis.replaceHistory(agentId, sessionKey, transformedHistory, this.config.maxHistoryMessages);
+
+    // If a token budget is provided, trim the gradient-compressed window to fit
+    // before writing to Redis. Without this, up to maxHistoryMessages messages
+    // land in Redis regardless of size, and trimHistoryToTokenBudget fires
+    // on every subsequent assemble() causing per-turn churn.
+    let historyToWrite: NeutralMessage[] = transformedHistory;
+    if (tokenBudget && tokenBudget > 0) {
+      const budgetCap = Math.floor(tokenBudget * 0.8);
+      let runningTokens = 0;
+      const capped: NeutralMessage[] = [];
+      // Walk newest-first, keep until we hit the budget
+      for (let i = transformedHistory.length - 1; i >= 0; i--) {
+        const msg = transformedHistory[i];
+        const msgTokens =
+          Math.ceil((msg.textContent?.length ?? 0) / 4) +
+          Math.ceil((msg.toolCalls ? JSON.stringify(msg.toolCalls).length : 0) / 2) +
+          Math.ceil((msg.toolResults ? JSON.stringify(msg.toolResults).length : 0) / 2);
+        if (runningTokens + msgTokens > budgetCap) break;
+        runningTokens += msgTokens;
+        capped.unshift(msg);
+      }
+      historyToWrite = capped;
+    }
+
+    await this.redis.replaceHistory(agentId, sessionKey, historyToWrite, this.config.maxHistoryMessages);
   }
 
   // ─── Slot Content Resolution ─────────────────────────────────

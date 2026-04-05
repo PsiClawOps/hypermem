@@ -637,6 +637,11 @@ function createHyperMemEngine(): ContextEngine {
       // gradient logic. A downshift >10% triggers a full reshape: apply tool
       // gradient at the new budget + trim, then write back before compose runs.
       // This prevents several turns of compaction churn after a model switch.
+      //
+      // Bug fix: previously read from getWindow() which is always null here
+      // (afterTurn invalidates it every turn). Also fixed: was doing setWindow()
+      // then invalidateWindow() which is a write-then-delete no-op. Now reads
+      // from history list and writes back via replaceHistory().
       try {
         const lastState = await hm.redis.getModelState(agentId, sk);
         const DOWNSHIFT_THRESHOLD = 0.10;
@@ -644,11 +649,15 @@ function createHyperMemEngine(): ContextEngine {
           (lastState.tokenBudget - effectiveBudget) / lastState.tokenBudget > DOWNSHIFT_THRESHOLD;
 
         if (isDownshift) {
-          const currentWindow = await hm.redis.getWindow(agentId, sk);
-          if (currentWindow && currentWindow.length > 0) {
-            const reshaped = applyToolGradientToWindow(currentWindow, effectiveBudget);
-            if (reshaped.length < currentWindow.length) {
-              await hm.redis.setWindow(agentId, sk, reshaped);
+          // Read from history list — window cache is always null here because
+          // afterTurn() calls invalidateWindow() on every turn.
+          const currentHistory = await hm.redis.getHistory(agentId, sk);
+          if (currentHistory && currentHistory.length > 0) {
+            const reshaped = applyToolGradientToWindow(currentHistory, effectiveBudget);
+            if (reshaped.length < currentHistory.length) {
+              // Write to history list (compose() input), then invalidate the
+              // stale window cache so compose() rebuilds from the new history.
+              await hm.redis.replaceHistory(agentId, sk, reshaped);
               await hm.redis.invalidateWindow(agentId, sk);
               const reshapedAt = new Date().toISOString();
               await hm.redis.setModelState(agentId, sk, {
@@ -661,7 +670,7 @@ function createHyperMemEngine(): ContextEngine {
               console.log(
                 `[hypermem-plugin] budget-downshift: ${agentId}/${sk} ` +
                 `${lastState.tokenBudget}→${effectiveBudget} tokens, ` +
-                `reshaped ${currentWindow.length}→${reshaped.length} messages, tool-gradient-applied`
+                `reshaped ${currentHistory.length}→${reshaped.length} messages, tool-gradient-applied`
               );
             }
           }
@@ -760,19 +769,40 @@ function createHyperMemEngine(): ContextEngine {
           // Non-fatal — proceed with compaction
         }
 
-        // Always re-estimate from the actual Redis window rather than trusting
-        // the caller's currentTokenCount. The runtime's estimate is what triggered
-        // compaction — if it were accurate, we wouldn't be here. Our own estimate
-        // uses the corrected tool-density heuristic (length/2 for JSON payloads).
+        // Re-estimate from the actual Redis window.
+        // The runtime's estimate (currentTokenCount) includes the full inbound message
+        // and system prompt — our estimate only covers the history window. When they
+        // diverge significantly upward, the difference is "inbound overhead" consuming
+        // budget the history is competing for. We trim history to make room.
         const effectiveBudget = tokenBudget ?? 90_000;
         const tokensBefore = await estimateWindowTokens(hm, agentId, sk);
-        if (currentTokenCount != null && Math.abs(currentTokenCount - tokensBefore) > effectiveBudget * 0.1) {
-          console.warn(`[hypermem-plugin] compact: runtime estimate (${currentTokenCount}) diverges from window estimate (${tokensBefore}) by >10% — using window estimate`);
-        }
 
         // Target depth for both Redis trimming and JSONL truncation.
         // Target 50% of budget capacity, assume ~500 tokens/message average.
         const targetDepth = Math.max(20, Math.floor((effectiveBudget * 0.5) / 500));
+
+        // Detect large-inbound-content scenario: runtime total significantly exceeds
+        // our history estimate. The gap is the inbound message + system prompt overhead.
+        // Trim history to leave room for it even if history alone is within budget.
+        if (currentTokenCount != null && currentTokenCount > tokensBefore) {
+          const inboundOverhead = currentTokenCount - tokensBefore;
+          if (inboundOverhead > effectiveBudget * 0.15) {
+            // Large inbound content (document review, big tool result, etc.)
+            // Trim history so history + inbound fits within 85% of budget.
+            const budgetForHistory = Math.floor(effectiveBudget * 0.85) - inboundOverhead;
+            if (budgetForHistory < tokensBefore && budgetForHistory > 0) {
+              const historyTrimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, budgetForHistory);
+              await hm.redis.invalidateWindow(agentId, sk).catch(() => {});
+              const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
+              await truncateJsonlIfNeeded(sessionFile, targetDepth);
+              console.log(
+                `[hypermem-plugin] compact: large-inbound-content (gap=${inboundOverhead} tokens), ` +
+                `trimmed history ${tokensBefore}→${tokensAfter} (budget-for-history=${budgetForHistory}, trimmed=${historyTrimmed} messages)`
+              );
+              return { ok: true, compacted: true, result: { tokensBefore, tokensAfter } };
+            }
+          }
+        }
 
         // Under 70% of budget by our own Redis estimate.
         // We still need to check the JSONL — the runtime's overflow is based on JSONL
@@ -924,8 +954,16 @@ function createHyperMemEngine(): ContextEngine {
         // Recompute the Redis hot history from SQLite so turn-age gradient is
         // materialized after every turn. This prevents warm-compressed history
         // from drifting back to raw payloads during live sessions.
+        //
+        // Pass the cached model tokenBudget so refreshRedisGradient can cap the
+        // gradient-compressed window to budget before writing to Redis. Without
+        // this, afterTurn writes up to 250 messages regardless of budget, causing
+        // trimHistoryToTokenBudget to fire and trim ~200 messages on every
+        // subsequent assemble() — the churn loop seen in Helm's logs.
         try {
-          await hm.refreshRedisGradient(agentId, sk);
+          const modelState = await hm.redis.getModelState(agentId, sk);
+          const gradientBudget = modelState?.tokenBudget;
+          await hm.refreshRedisGradient(agentId, sk, gradientBudget);
         } catch (refreshErr) {
           console.warn('[hypermem-plugin] afterTurn: refreshRedisGradient failed (non-fatal):', (refreshErr as Error).message);
         }
