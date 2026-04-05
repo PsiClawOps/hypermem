@@ -8,7 +8,12 @@
  * 
  * Uses node:sqlite (Node 22+) — same as HyperMem itself.
  * 
- * Usage: node scripts/migrate-clawtext.mjs [--dry-run] [--limit N]
+ * Dry-run by default. Pass --apply to actually write.
+ *
+ * Usage:
+ *   node scripts/migrate-clawtext.mjs
+ *   node scripts/migrate-clawtext.mjs --apply
+ *   node scripts/migrate-clawtext.mjs --apply --limit 100
  */
 
 import { DatabaseSync } from 'node:sqlite';
@@ -19,14 +24,15 @@ import { parseArgs } from 'node:util';
 
 const { values: args } = parseArgs({
   options: {
-    'dry-run': { type: 'boolean', default: false },
+    'apply':   { type: 'boolean', default: false },
+    'dry-run': { type: 'boolean', default: false }, // legacy alias
     'limit': { type: 'string', default: '0' },
     'clawtext-db': { type: 'string', default: path.join(os.homedir(), '.openclaw/workspace/.clawtext/session-intelligence.db') },
     'hypermem-dir': { type: 'string', default: path.join(os.homedir(), '.openclaw/hypermem') },
   }
 });
 
-const DRY_RUN = args['dry-run'];
+const DRY_RUN = !args['apply']; // --apply to write; --dry-run is accepted but is now the default
 const LIMIT = parseInt(args['limit'], 10);
 const CT_DB_PATH = args['clawtext-db'];
 const HM_DIR = args['hypermem-dir'];
@@ -283,7 +289,7 @@ function main() {
   if (DRY_RUN) {
     console.log('');
     console.log(`[migrate] *** DRY RUN — no data was written ***`);
-    console.log(`[migrate] Run without --dry-run to execute.`);
+    console.log(`[migrate] Run with --apply to execute.`);
   } else {
     console.log('');
     console.log(`[migrate] Migration complete.`);
