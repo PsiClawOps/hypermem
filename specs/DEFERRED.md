@@ -55,26 +55,59 @@ Topic detection is still early. The classifier needs stabilization before backfi
 
 ## D-002: Cursor Durability (SQLite Dual-Write)
 
-**Status:** 🟡 DEFERRED  
+**Status:** ✅ CLOSED  
 **Added:** prior  
+**Closed:** 2026-04-05  
 **Relates to:** background-indexer.ts, cursor handling
 
-Cursor TTL = 24h. Dual-write to SQLite required before background indexer reads cursor.
-Currently the indexer's cursor fetch is best-effort Redis only; if Redis is cold the
-cursor is unavailable and the indexer falls back to full-scan ordering.
-
-Gate: Redis availability monitoring in place, cursor miss rate <1% over 48h rolling window.
+Done. `getSessionCursor()` in `src/index.ts` implements Redis → SQLite fallback with
+Re-warm on miss. Background indexer consumes cursor via `CursorFetcher` callback, splits
+messages into post-cursor (unseen, high priority) and pre-cursor (seen, lower priority).
+See lines 629-651 of `src/background-indexer.ts`.
 
 ---
 
 ## D-003: Plugin Type Unification
 
-**Status:** 🟡 DEFERRED  
+**Status:** ✅ CLOSED  
 **Added:** prior  
+**Closed:** 2026-04-05  
 **Relates to:** plugin/src/
 
-Plugin uses dynamic imports; can't use TS types from core without a structural change.
-Current shims are intentional and functional. Type safety gap is bounded to the plugin
-boundary — runtime behavior is correct.
+Done. Plugin now imports `NeutralMessage`, `ComposeRequest`, `ComposeResult`, etc. from
+`@psiclawops/hypermem`. Only plugin-specific types remain local (`InboundMessage` for
+OpenClaw SDK message shape, `HyperMemInstance` for dynamic import typing). No shadowed
+types remain.
 
-Gate: Core API stabilized (no breaking changes in 2 release cycles).
+---
+
+## D-004: Model Capability Awareness in Compositor
+
+**Status:** 🟢 LOW PRIORITY  
+**Added:** prior  
+
+Compositor picks history depth / budget fraction based on `tokenBudget` from
+`ComposeRequest`, which the caller (OpenClaw gateway) fills from the agent's configured
+context window. The "awareness" gap is compositor-side model family detection to
+adjust retrieval strategy (e.g., more semantic context for weaker models). Currently
+not blocking anything — tokenBudget already adapts to model size.
+
+---
+
+## D-005: Plugin CI for All Agents
+
+**Status:** 🟡 DEFERRED  
+**Added:** prior  
+
+Expand CI (`ci.yml`) to cover all agent plugin builds, not just hypermem-core.
+Gate: additional plugins exist that need CI coverage.
+
+---
+
+## D-006: Archive FIRST_FULL_COUNCIL_ROUND
+
+**Status:** 🟡 DEFERRED  
+**Added:** prior  
+
+Housekeeping. Archive the first full council round from all council workspaces.
+Low memory impact now that HyperMem owns storage. Can be batched as a one-time run.

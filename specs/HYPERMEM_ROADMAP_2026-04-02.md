@@ -119,16 +119,36 @@ _The architecturally significant work. Turns sessions into conversation topics. 
 
 ---
 
-## Deferred (No Phase Assignment Yet)
-_Real work, but not blocking stability or the phased roadmap. Revisit after Phase 2._
+## Phase 4 — Compiled Knowledge (Karpathy Wiki Pattern)
+_Turn conversation into durable, structured knowledge that compounds over time._
 
-| Item | Notes |
-|---|---|
-| Model capability awareness in compositor | Compositor picks history depth / budget fraction based on declared model context window. Useful but not urgent — budget is currently static config. |
-| Archive FIRST_FULL_COUNCIL_ROUND from all council workspaces | Housekeeping. Low memory impact now that HyperMem owns storage. Can be batched as a one-time maintenance run. |
-| Live-load defaultOrgRegistry from library.db | Follow-on to P1.4 audit. Replace hardcoded registry with query. Gate 3 patch is the right first step. |
-| Cursor indexer integration | Cursor currently written but not consumed by background indexer as high-signal boundary. P1.3 (durability) is prerequisite. |
-| Plugin CI for all agents | Expand false-green fix (P1.1) to cover all agent plugin builds, not just hypermem-core. |
+### P4.1 — Topic Synthesis
+**Spec:** `specs/TOPIC_SYNTHESIS.md`  
+**What:** When a topic goes stale (no messages for 30min, ≥5 messages), the indexer synthesizes a wiki page: summary, key decisions, open questions, artifacts, cross-references. Written to `knowledge` table. No model calls — heuristic using ContentTypeClassifier (P2.2) + KeystoneScorer (P2.1).  
+**Owner:** Forge  
+**Status:** 🟢 Building
+
+### P4.2 — Knowledge Lint
+**Spec:** `specs/TOPIC_SYNTHESIS.md` (lint section)  
+**What:** Periodic health check on the knowledge table. Decays stale syntheses, detects orphan topics, identifies coverage gaps (large topics without synthesis).  
+**Owner:** Forge  
+**Status:** 🟢 Building (ships with P4.1)
+
+---
+
+## Deferred (No Phase Assignment Yet)
+_Tracked but not blocking. Revisit as needed._
+
+| Item | Status | Notes |
+|---|---|---|
+| D-001: Strict topic backfill | 🟡 Gated | ≥2 weeks production topic data needed. See `specs/DEFERRED.md`. |
+| D-004: Model capability awareness | 🟢 Low priority | tokenBudget already adapts via ComposeRequest. |
+| D-005: Plugin CI expansion | 🟡 Deferred | Gate: additional plugins needing CI. |
+| D-006: Archive council round | 🟡 Deferred | Housekeeping. Low impact. |
+| ~~D-002: Cursor durability~~ | ✅ Closed | Dual-write + fallback + re-warm live. |
+| ~~D-003: Plugin type unification~~ | ✅ Closed | Types imported from core. |
+| ~~Live-load org registry~~ | ✅ Closed | `refreshOrgRegistry()` live (commit `6e20af8`). |
+| ~~Cursor indexer integration~~ | ✅ Closed | Indexer splits post/pre-cursor priority. |
 | P3.4 strict-mode backfill | Option B (NULL fallback) is live during transition. When topic assignment is stable, run backfill utility to assign topic_id to legacy NULL messages, then flip getHistory() to strict mode (remove `OR topic_id IS NULL`). Prerequisite: topic detection running for ≥2 weeks in production. |
 
 ---
@@ -137,10 +157,11 @@ _Real work, but not blocking stability or the phased roadmap. Revisit after Phas
 
 | Phase | Items | Status |
 |---|---|---|
-| **Phase 1 — Stabilization** | P1.1 CI, P1.2 type unif, P1.3 cursor durability, P1.4 org registry, P1.5 JOB/MOTIVATIONS, P1.6 supersedes | 🔴 In progress |
-| **Phase 2 — Context Quality** | Keystone slot, content classifier port, proactive passes port | ⬜ Not started |
-| **Phase 3 — Sessionless** | Topic detection, schema v4, topic map/anchors, topic compositor, cross-topic keystone | 🟡 In progress (P3.5 done) |
-| **Deferred** | Model capability, archive council round, live org registry, cursor indexer | ⬜ Deferred |
+| **Phase 1 — Stabilization** | P1.1 CI, P1.2 type unif, P1.3 cursor durability, P1.4 org registry, P1.5 JOB/MOTIVATIONS, P1.6 supersedes | ✅ Complete |
+| **Phase 2 — Context Quality** | Keystone slot, content classifier port, proactive passes port | ✅ Complete |
+| **Phase 3 — Sessionless** | Topic detection, schema v6, topic map/anchors, topic compositor, cross-topic keystone | ✅ Complete |
+| **Phase 4 — Compiled Knowledge** | Topic synthesis, knowledge lint | 🟢 Building |
+| **Deferred** | Strict topic backfill, model capability, plugin CI expansion, archive council round | ⬜ Tracked |
 
 ---
 
