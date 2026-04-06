@@ -32,7 +32,7 @@ import type {
   BackgroundIndexer,
   FleetStore,
 } from '@psiclawops/hypermem';
-import { detectTopicShift, SessionTopicMap, applyToolGradientToWindow } from '@psiclawops/hypermem';
+import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow } from '@psiclawops/hypermem';
 import { evictStaleContent } from '@psiclawops/hypermem/image-eviction';
 import os from 'os';
 import path from 'path';
@@ -1251,12 +1251,12 @@ function createHyperMemEngine(): ContextEngine {
           if (m.role === 'system') continue;
           const neutral = toNeutralMessage(m);
           if (neutral.role === 'user') {
-            // SKIP: user messages are recorded by onMessageReceived() via message:received hook
-            // (bare text, before LLM call). Recording here produces a second ENVELOPE version
-            // with "Sender (untrusted metadata): {...}" prepended — halving effective history
-            // depth and leaking metadata into conversation context.
-            // Fix: Anvil bug report 2026-04-05 (dual recording path).
-            continue;
+            // Record user messages here — no message:received hook exists in the plugin API,
+            // so afterTurn is the only reliable recording path. Strip transport metadata
+            // ("Sender (untrusted metadata): {...}" envelope) before storing so clean
+            // content reaches the DB, not raw inbound framing.
+            const cleanText = neutral.textContent ? stripMessageMetadata(neutral.textContent) : neutral.textContent;
+            await hm.recordUserMessage(agentId, sk, cleanText ?? '');
           } else {
             await hm.recordAssistantMessage(agentId, sk, neutral);
           }
