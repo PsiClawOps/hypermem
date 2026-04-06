@@ -81,16 +81,20 @@ const MODEL_CONTEXT_WINDOWS: Array<{ pattern: string; tokens: number }> = [
 
 /**
  * Resolve effective token budget from model string.
- * Returns the context window for the model, minus a 10% reserve for output tokens.
+ * Returns the context window for the model, minus the configured reserve fraction
+ * for output tokens and HyperMem operational overhead.
+ * Default reserve: 25% (leaves 75% for input context).
  * Falls back to defaultTokenBudget if no model match.
  */
-function resolveModelBudget(model: string | undefined, defaultBudget: number): number {
+function resolveModelBudget(model: string | undefined, defaultBudget: number, reserve = 0.25): number {
   if (!model) return defaultBudget;
   const normalized = model.toLowerCase();
   for (const entry of MODEL_CONTEXT_WINDOWS) {
     if (normalized.includes(entry.pattern)) {
-      // Reserve 10% for output tokens; compositor should use ~90% of context window
-      return Math.floor(entry.tokens * 0.90);
+      // Reserve configurable fraction for output tokens + HyperMem overhead.
+      // 25% default gives agents headroom for large operations (reads, searches,
+      // long tool outputs) without hitting compaction triggers mid-task.
+      return Math.floor(entry.tokens * (1 - reserve));
     }
   }
   return defaultBudget;
@@ -107,6 +111,7 @@ const DEFAULT_CONFIG: CompositorConfig = {
   keystoneHistoryFraction: 0.2,
   keystoneMaxMessages: 15,
   keystoneMinSignificance: 0.5,
+  contextWindowReserve: 0.25,
 };
 
 // Tool gradient thresholds — controls how aggressively tool results are
@@ -513,7 +518,8 @@ export class Compositor {
   async compose(request: ComposeRequest, db: DatabaseSync, libraryDb?: DatabaseSync): Promise<ComposeResult> {
     const store = new MessageStore(db);
     const libDb = libraryDb || this.libraryDb;
-    const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget);
+    const reserve = this.config.contextWindowReserve ?? 0.25;
+    const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget, reserve);
     let remaining = budget;
     const warnings: string[] = [];
     const slots: SlotTokenCounts = {
@@ -1373,6 +1379,8 @@ export class Compositor {
       systemPrompt?: string;
       identity?: string;
       libraryDb?: DatabaseSync;
+      /** Model string for budget resolution. If omitted, falls back to defaultTokenBudget. */
+      model?: string;
     }
   ): Promise<void> {
     const store = new MessageStore(db);
@@ -1384,8 +1392,12 @@ export class Compositor {
     // token-budget-cap the warm set. This replaces the old WARM_BOOTSTRAP_CAP
     // message-count constant which was a blunt instrument — 100 messages of
     // large tool results can massively exceed the history budget allocation.
+    // Warm budget uses the same reserve fraction as compose() so warm history
+    // never pre-fills more than compose() would actually allow.
+    const reserve = this.config.contextWindowReserve ?? 0.25;
+    const effectiveBudget = resolveModelBudget(opts?.model, this.config.defaultTokenBudget, reserve);
     const warmBudget = Math.floor(
-      (this.config.defaultTokenBudget) * (this.config.warmHistoryBudgetFraction ?? 0.4)
+      effectiveBudget * (this.config.warmHistoryBudgetFraction ?? 0.4)
     );
     const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
     const transformedForWarm = applyToolGradient(rawHistory);

@@ -426,6 +426,18 @@ export interface CompositorConfig {
    */
   warmHistoryBudgetFraction: number;
   /**
+   * Fraction of the model context window to reserve for output tokens and
+   * HyperMem operational overhead. The compositor's effective input budget is
+   * (contextWindow × (1 - contextWindowReserve)).
+   *
+   * Higher values = more headroom for large operations, fewer turns before
+   * session break. Lower values = more context available, higher saturation risk.
+   *
+   * Default: 0.25 (25% reserve — leaves 75% for input context)
+   * Previous default was 0.10 (10% reserve).
+   */
+  contextWindowReserve?: number;
+  /**
    * Fraction of history token budget to allocate for keystone (recalled older) messages.
    * Range: 0.0–0.5. Default: 0.2 (20% of history budget).
    * Set to 0 to disable keystone injection.

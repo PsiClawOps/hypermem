@@ -4,10 +4,16 @@ LoCoMo Benchmark — Query Phase
 
 For each QA pair:
 1. Retrieve context from HyperMem via message FTS search
-2. Call gpt-4o-mini via OpenRouter with retrieved context + question
+2. Call eval-LLM via OpenAI-compatible API with retrieved context + question
 3. Save predictions as JSONL
 
-Usage: python3 query.py [--bridge http://localhost:9800] [--output /tmp/predictions.jsonl]
+Default eval-LLM: gpt-5-mini via copilot-local (http://127.0.0.1:4141/v1)
+Supports any OpenAI-compatible endpoint.
+
+Usage:
+  python3 query.py [--bridge http://localhost:9800] [--output /tmp/predictions.jsonl]
+  python3 query.py --provider-url http://127.0.0.1:4141/v1 --model gpt-5-mini
+  python3 query.py --provider-url https://api.openai.com/v1 --model gpt-4o-mini --api-key sk-...
 """
 
 import json
@@ -17,12 +23,13 @@ import argparse
 import urllib.request
 import urllib.error
 import os
+from collections import deque
 
 CATEGORY_MAP = {1: "multi-hop", 2: "temporal", 3: "open-domain", 4: "single-hop", 5: "adversarial"}
 
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-READER_MODEL = "gemini-2.0-flash"
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+# Default: gpt-5-mini via copilot-local proxy
+DEFAULT_PROVIDER_URL = "http://127.0.0.1:4141/v1"
+DEFAULT_MODEL = "gpt-5-mini"
 
 SYSTEM_PROMPT = """You are a precise question-answering assistant. You will be given retrieved conversation excerpts between two people, and a question about that conversation.
 
@@ -38,8 +45,50 @@ Rules:
 - Pay attention to temporal context (dates in brackets) when answering time-related questions."""
 
 
+class RateLimiter:
+    """Sliding window rate limiter for RPM control."""
+
+    def __init__(self, max_rpm, batch_delay):
+        self.max_rpm = max_rpm
+        self.batch_delay = batch_delay
+        self.timestamps = deque()
+
+    def wait(self):
+        """Block until the next request is allowed."""
+        now = time.monotonic()
+
+        # Always respect minimum batch delay
+        if self.timestamps:
+            elapsed = now - self.timestamps[-1]
+            if elapsed < self.batch_delay:
+                time.sleep(self.batch_delay - elapsed)
+                now = time.monotonic()
+
+        # Enforce RPM ceiling
+        if self.max_rpm > 0:
+            # Prune timestamps older than 60s
+            cutoff = now - 60
+            while self.timestamps and self.timestamps[0] < cutoff:
+                self.timestamps.popleft()
+
+            if len(self.timestamps) >= self.max_rpm:
+                # Wait until the oldest request in the window expires
+                wait_until = self.timestamps[0] + 60
+                sleep_time = wait_until - now
+                if sleep_time > 0:
+                    print(f"  [rate-limit] RPM ceiling ({self.max_rpm}), waiting {sleep_time:.1f}s...")
+                    time.sleep(sleep_time)
+                    now = time.monotonic()
+                    # Re-prune after sleeping
+                    cutoff = now - 60
+                    while self.timestamps and self.timestamps[0] < cutoff:
+                        self.timestamps.popleft()
+
+        self.timestamps.append(now)
+
+
 def api_call(url, payload, headers=None, retries=3, timeout=60):
-    """POST and return parsed JSON."""
+    """POST and return parsed JSON with retry + 429 backoff."""
     data = json.dumps(payload).encode()
     hdrs = {"Content-Type": "application/json"}
     if headers:
@@ -57,12 +106,16 @@ def api_call(url, payload, headers=None, retries=3, timeout=60):
                 time.sleep(retry_after)
                 continue
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                wait = 2 ** attempt
+                print(f"  [retry] HTTP {e.code}, attempt {attempt+1}/{retries}, waiting {wait}s...")
+                time.sleep(wait)
                 continue
             raise RuntimeError(f"HTTP {e.code}: {body[:200]}")
         except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                wait = 2 ** attempt
+                print(f"  [retry] {type(e).__name__}, attempt {attempt+1}/{retries}, waiting {wait}s...")
+                time.sleep(wait)
                 continue
             raise
 
@@ -123,43 +176,61 @@ def retrieve_context(bridge_url, agent_id, question, limit=10):
     return "\n".join(parts) if parts else "No relevant conversation excerpts found."
 
 
-def call_reader_llm(question, context, api_key):
-    """Call Gemini 2.0 Flash via Google Generative Language API."""
-    url = f"{GEMINI_URL}?key={api_key}"
+def call_reader_llm(question, context, provider_url, model, api_key=None):
+    """Call eval-LLM via OpenAI-compatible chat completions API."""
+    url = f"{provider_url}/chat/completions"
     payload = {
-        "contents": [{
-            "parts": [{
-                "text": f"{SYSTEM_PROMPT}\n\nRetrieved conversation excerpts:\n{context}\n\nQuestion: {question}\n\nAnswer:"
-            }]
-        }],
-        "generationConfig": {
-            "temperature": 0.0,
-            "maxOutputTokens": 200,
-        }
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Retrieved conversation excerpts:\n{context}\n\nQuestion: {question}\n\nAnswer:"},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 200,
     }
-    result = api_call(url, payload, timeout=30)
-    candidates = result.get("candidates", [])
-    if candidates:
-        parts = candidates[0].get("content", {}).get("parts", [])
-        if parts:
-            return parts[0].get("text", "").strip()
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    result = api_call(url, payload, headers=headers, timeout=60)
+
+    # Parse OpenAI-format response
+    choices = result.get("choices", [])
+    if choices:
+        message = choices[0].get("message", {})
+        return message.get("content", "").strip()
     return ""
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--bridge", default="http://localhost:9800")
-    parser.add_argument("--dataset", default="/tmp/locomo10.json")
-    parser.add_argument("--manifest", default="/tmp/locomo-manifest.json")
-    parser.add_argument("--output", default="/tmp/predictions.jsonl")
-    parser.add_argument("--api-key", default=GOOGLE_API_KEY)
-    parser.add_argument("--start-from", type=int, default=0, help="Resume from this QA index")
-    parser.add_argument("--batch-delay", type=float, default=0.3, help="Delay between LLM calls (seconds)")
+    parser = argparse.ArgumentParser(description="LoCoMo Benchmark - Query Phase")
+    parser.add_argument("--bridge", default="http://localhost:9800",
+                        help="HyperMem bridge server URL")
+    parser.add_argument("--dataset", default="/tmp/locomo10.json",
+                        help="Path to LoCoMo dataset JSON")
+    parser.add_argument("--manifest", default="/tmp/locomo-manifest.json",
+                        help="Path to agent manifest JSON")
+    parser.add_argument("--output", default="/tmp/predictions.jsonl",
+                        help="Output predictions JSONL path")
+    parser.add_argument("--provider-url", default=DEFAULT_PROVIDER_URL,
+                        help=f"OpenAI-compatible API base URL (default: {DEFAULT_PROVIDER_URL})")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help=f"Eval-LLM model ID (default: {DEFAULT_MODEL})")
+    parser.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY", ""),
+                        help="API key (optional for copilot-local, required for OpenAI/etc)")
+    parser.add_argument("--start-from", type=int, default=0,
+                        help="Resume from this QA index")
+    parser.add_argument("--batch-delay", type=float, default=1.0,
+                        help="Minimum delay between LLM calls in seconds (default: 1.0)")
+    parser.add_argument("--max-rpm", type=int, default=30,
+                        help="Maximum requests per minute, 0=unlimited (default: 30)")
+    parser.add_argument("--retrieval-limit", type=int, default=10,
+                        help="Number of memory results to retrieve per question (default: 10)")
     args = parser.parse_args()
 
-    if not args.api_key:
-        print("[query] ERROR: No Google API key. Set GOOGLE_API_KEY or use --api-key", file=sys.stderr)
-        sys.exit(1)
+    # Validate provider connectivity
+    print(f"[query] Eval-LLM: {args.model} via {args.provider_url}")
+    print(f"[query] Pacing: {args.batch_delay}s delay, {args.max_rpm} RPM max")
 
     # Load dataset
     print(f"[query] Loading dataset: {args.dataset}")
@@ -196,9 +267,26 @@ def main():
     print(f"[query] Total QA pairs: {len(qa_pairs)}")
     print(f"[query] Starting from index: {args.start_from}")
 
+    # Initialize rate limiter
+    limiter = RateLimiter(max_rpm=args.max_rpm, batch_delay=args.batch_delay)
+
     # Open output file (append mode for resume)
     mode = "a" if args.start_from > 0 else "w"
     out_f = open(args.output, mode)
+
+    # Write run metadata as first line (if starting fresh)
+    if args.start_from == 0:
+        meta = {
+            "_meta": True,
+            "eval_model": args.model,
+            "provider_url": args.provider_url,
+            "retrieval_limit": args.retrieval_limit,
+            "batch_delay": args.batch_delay,
+            "max_rpm": args.max_rpm,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        out_f.write(json.dumps(meta) + "\n")
+        out_f.flush()
 
     completed = args.start_from
     errors = 0
@@ -210,10 +298,17 @@ def main():
 
         try:
             # Retrieve context from HyperMem
-            context = retrieve_context(args.bridge, qa["agent_id"], qa["question"])
+            context = retrieve_context(args.bridge, qa["agent_id"], qa["question"],
+                                       limit=args.retrieval_limit)
+
+            # Rate limit before LLM call
+            limiter.wait()
 
             # Call reader LLM
-            hypothesis = call_reader_llm(qa["question"], context, args.api_key)
+            hypothesis = call_reader_llm(
+                qa["question"], context,
+                args.provider_url, args.model, args.api_key
+            )
 
             # Write prediction
             prediction = {
@@ -225,6 +320,7 @@ def main():
                 "category": qa["category"],
                 "category_name": qa["category_name"],
                 "context_length": len(context),
+                "eval_model": args.model,
             }
             out_f.write(json.dumps(prediction) + "\n")
             out_f.flush()
@@ -239,9 +335,6 @@ def main():
                 print(f"[query] {completed}/{len(qa_pairs)} ({qa['category_name']}) -- "
                       f"{rate:.1f} q/s, ETA: {eta / 60:.0f}min")
 
-            # Rate limiting
-            time.sleep(args.batch_delay)
-
         except Exception as e:
             errors += 1
             print(f"[query] ERROR at index {idx}: {e}", file=sys.stderr)
@@ -255,16 +348,19 @@ def main():
                 "category": qa["category"],
                 "category_name": qa["category_name"],
                 "error": str(e),
+                "eval_model": args.model,
             }
             out_f.write(json.dumps(prediction) + "\n")
             out_f.flush()
             completed += 1
-            time.sleep(1)  # Extra delay on error
+            time.sleep(2)  # Extra delay on error
 
     out_f.close()
     elapsed = time.time() - start_time
 
     print(f"\n[query] Complete!")
+    print(f"  Eval-LLM: {args.model}")
+    print(f"  Provider: {args.provider_url}")
     print(f"  Predictions: {completed}")
     print(f"  Errors: {errors}")
     print(f"  Time: {elapsed:.1f}s ({(completed - args.start_from) / elapsed:.1f} q/s)")
