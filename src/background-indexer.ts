@@ -217,6 +217,23 @@ function isQualityFact(content: string): boolean {
   const alphaChars = (content.match(/[a-zA-Z]/g) || []).length;
   if (alphaChars / content.length < 0.5) return false;
 
+  // TUNE-013: External/untrusted content markers — web search excerpts,
+  // external doc pulls, and injected context blocks should never become facts.
+  if (/<<<\s*(END_EXTERNAL|BEGIN_EXTERNAL|EXTERNAL_UNTRUSTED|UNTRUSTED_CONTENT)/i.test(content)) return false;
+  if (/EXTERNAL_UNTRUSTED_CONTENT\s+id=/.test(content)) return false;
+
+  // TUNE-013: Multi-paragraph content — real extracted facts are single sentences.
+  // More than 2 newlines means we captured a paragraph or structured block, not a fact.
+  const newlineCount = (content.match(/\n/g) || []).length;
+  if (newlineCount > 2) return false;
+
+  // TUNE-013: URL-heavy content — external source snippets, not actionable facts
+  const urlMatches = content.match(/https?:\/\/\S+/g) || [];
+  if (urlMatches.length >= 2) return false;  // one URL in a fact is ok; multiple = source snippet
+
+  // TUNE-013: Content starting with a markdown heading is section text, not a fact
+  if (/^#{1,4}\s/.test(content.trim())) return false;
+
   return true;
 }
 
