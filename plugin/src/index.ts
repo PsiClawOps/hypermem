@@ -633,12 +633,18 @@ function createHyperMemEngine(): ContextEngine {
           const pressure = preTrimTokens / effectiveBudget;
 
           // Pressure-tiered trim targets:
-          //   >85% (critical) → trim to 50%: blast 50% headroom for incoming wave
+          //   JSONL-replay (EC1): runtimeTokens >> redisTokens means session
+          //   loaded from a large JSONL but Redis is cold (post-restart). Trim
+          //   aggressively to 30% so system prompt + this turn's tool results fit.
+          //   >85% (critical) → trim to 50%: blast headroom for incoming wave
           //   >80% (high)     → trim to 60%: 40% headroom
           //   >75% (elevated) → trim to 65%: 35% headroom
           //   ≤75% (normal)   → trim to 80%: existing behaviour
+          const isJsonlReplay = runtimeTokens > effectiveBudget * 0.80 && redisTokens < runtimeTokens * 0.20;
           let trimTarget: number;
-          if (pressure > 0.85) {
+          if (isJsonlReplay) {
+            trimTarget = 0.30; // EC1: cold Redis + hot JSONL = post-restart replay, need max headroom
+          } else if (pressure > 0.85) {
             trimTarget = 0.50;
           } else if (pressure > 0.80) {
             trimTarget = 0.60;
@@ -693,7 +699,7 @@ function createHyperMemEngine(): ContextEngine {
             const keptCount = convMsgs.length - kept.length;
             if (keptCount > 0) {
               console.log(
-                `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}% → ` +
+                `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}%${isJsonlReplay ? ' [jsonl-replay]' : ''} → ` +
                 `target=${(trimTarget * 100).toFixed(0)}% (redis=${trimmed} msgs, messages=${keptCount} dropped)`
               );
               trimmedMessages = [...systemMsgs, ...kept] as unknown as typeof messages;
@@ -1185,12 +1191,13 @@ function createHyperMemEngine(): ContextEngine {
             const redisPostTokens = await estimateWindowTokens(hm, agentId, sk);
             const postTurnTokens = Math.max(runtimePostTokens, redisPostTokens);
             const postTurnPressure = postTurnTokens / modelState.tokenBudget;
+            // Two-tier afterTurn trim (EC3 fix, 2026-04-05):
+            //   >90% → trim to 45%: deep saturation recovery — 70% target leaves only ~8k
+            //           after system prompt (20-30k), which is not enough for any real tool work.
+            //   >80% → trim to 70%: mild pressure, preserve more history.
+            const afterTurnTrimTarget = postTurnPressure > 0.90 ? 0.45 : 0.70;
             if (postTurnPressure > 0.80) {
-              // Trim to 70% so next turn has 30% headroom for incoming content.
-              // This is lighter than the tool-loop tiers — afterTurn runs every
-              // turn, so we don't want to over-trim on sessions that are just
-              // naturally deep. Only fires when actually hot.
-              const headroomBudget = Math.floor(modelState.tokenBudget * 0.70);
+              const headroomBudget = Math.floor(modelState.tokenBudget * afterTurnTrimTarget);
               const secondaryTrimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, headroomBudget);
               if (secondaryTrimmed > 0) {
                 console.log(
