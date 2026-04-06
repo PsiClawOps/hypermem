@@ -13,6 +13,10 @@ _One guide for all migration paths. Find your current system in the table below 
 | OpenClaw QMD backend | [From QMD](#from-qmd) |
 | ClawText context engine | [From ClawText](#from-clawtext) |
 | Cognee (ECL pipeline) | [From Cognee](#from-cognee) |
+| Mem0 (cloud or OSS) | [From Mem0](#from-mem0) |
+| Zep (cloud or self-hosted) | [From Zep](#from-zep) |
+| Honcho OpenClaw plugin | [From Honcho](#from-honcho) |
+| OpenClaw memory-lancedb plugin | [From memory-lancedb](#from-memory-lancedb) |
 | Markdown MEMORY.md + daily files only | [From MEMORY.md files](#from-memorymd-files) |
 | Something else / custom engine | [From a custom system](#from-a-custom-system) |
 
@@ -389,6 +393,491 @@ db.close();
 
 ---
 
+## From Mem0
+
+Mem0 is a managed memory service (with an OSS self-hosted variant) that stores distilled facts per user or agent. It has a clean export API — this is one of the easier migrations.
+
+**What maps to what:**
+
+| Mem0 | HyperMem |
+|---|---|
+| Memory entries (`memory` field) | Facts in `library.db` |
+| `user_id` scoping | `agent_id` scoping |
+| `agent_id` / `app_id` filters | `agent_id` in HyperMem |
+| `metadata` | Stored as fact metadata / domain |
+| `created_at` | Preserved as fact timestamp |
+
+**What does not migrate:** Mem0's internal vector embeddings (regenerated automatically), category labels beyond what fits in HyperMem's domain field.
+
+**Step 1: Export from Mem0**
+
+_Cloud (managed API):_
+```python
+# export_mem0.py
+from mem0 import MemoryClient
+import json, time
+
+client = MemoryClient(api_key="your_mem0_api_key")
+
+# Option A: export job (structured)
+schema = {
+    "type": "object",
+    "properties": {
+        "memories": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "content": {"type": "string"},
+                    "metadata": {"type": "object"},
+                    "created_at": {"type": "string"}
+                }
+            }
+        }
+    }
+}
+response = client.create_memory_export(schema=schema, filters={})
+export_id = response["id"]
+time.sleep(5)  # wait for job
+export_data = client.get_memory_export(memory_export_id=export_id)
+with open("mem0_export.json", "w") as f:
+    json.dump(export_data, f, indent=2)
+print(f"Exported {len(export_data['memories'])} memories")
+```
+
+_Or use `get_all()` for a raw list (OSS or cloud):_
+```python
+from mem0 import MemoryClient
+import json
+
+client = MemoryClient(api_key="your_mem0_api_key")
+result = client.get_all(filters={"user_id": "your_user_id"}, page_size=500)
+with open("mem0_export.json", "w") as f:
+    # get_all returns {count, results: [{memory, id, metadata, ...}]}
+    json.dump(result, f, indent=2)
+print(f"Exported {result['count']} memories")
+```
+
+**Step 2: Dry run**
+```bash
+node scripts/migrate-mem0.mjs --agent main mem0_export.json
+```
+
+Save this as `scripts/migrate-mem0.mjs`:
+```js
+// scripts/migrate-mem0.mjs
+import { createHyperMem } from '@psiclawops/hypermem';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+const agentId = process.argv[2] ?? 'main';
+const exportPath = process.argv[3] ?? 'mem0_export.json';
+const dryRun = !process.argv.includes('--apply');
+
+const raw = JSON.parse(readFileSync(exportPath, 'utf-8'));
+// handle both export job format {memories: [...]} and get_all format {results: [...]}
+const entries = raw.memories ?? raw.results ?? raw;
+
+const hm = await createHyperMem({ dir: join(homedir(), '.openclaw/hypermem') });
+let imported = 0, skipped = 0;
+
+for (const entry of entries) {
+  // export job uses 'content', get_all uses 'memory'
+  const text = entry.content ?? entry.memory ?? '';
+  if (!text || text.length < 20) { skipped++; continue; }
+
+  const domain = entry.metadata?.category ?? entry.metadata?.type ?? 'general';
+
+  if (dryRun) {
+    console.log(`[dry-run] ${domain}: ${text.slice(0, 80)}`);
+    imported++;
+    continue;
+  }
+
+  await hm.addFact(agentId, text, {
+    domain,
+    source: 'mem0-migration',
+    confidence: 0.9,
+    createdAt: entry.created_at,
+  });
+  imported++;
+}
+
+console.log(`\n${dryRun ? '[dry-run] ' : ''}Imported: ${imported}, Skipped: ${skipped}`);
+if (dryRun) console.log('Run with --apply to write data.');
+```
+
+**Step 3: Import**
+```bash
+node scripts/migrate-mem0.mjs --agent main mem0_export.json --apply
+```
+
+**Step 4: Restart**
+```bash
+openclaw gateway restart
+```
+
+**Verify:**
+```bash
+node -e "
+const { DatabaseSync } = require('node:sqlite');
+const os = require('node:os'), path = require('node:path');
+const db = new DatabaseSync(path.join(os.homedir(), '.openclaw/hypermem/library.db'), { readOnly: true });
+const r = db.prepare(\"SELECT COUNT(*) as cnt FROM facts WHERE source='mem0-migration'\").get();
+console.log('Imported from Mem0:', r.cnt, 'facts');
+db.close();
+"
+```
+
+---
+
+## From Zep
+
+Zep stores conversation history per session and builds a per-user knowledge graph on top. It runs either self-hosted or as a managed cloud service. The migration extracts session messages and any queryable facts.
+
+**What maps to what:**
+
+| Zep | HyperMem |
+|---|---|
+| Session messages (`role`, `role_type`, `content`) | Per-agent `messages.db` |
+| User-level knowledge graph facts | Facts in `library.db` |
+| Group data (shared org context) | Facts in `library.db` with `domain: group` |
+| `session_id` | HyperMem session key |
+| `user_id` | `agent_id` |
+
+**What does not migrate:** Zep's internal graph edges/weights, fact ratings, ingestion-derived entity relationships (flattened to text facts on import).
+
+**Step 1: Export from Zep**
+
+```python
+# export_zep.py
+from zep_cloud.client import Zep
+import json
+
+client = Zep(api_key="your_zep_api_key")  # omit api_key for self-hosted
+# For self-hosted: client = Zep(base_url="http://localhost:8000")
+
+export = {"sessions": [], "facts": []}
+
+# Export all users and their sessions
+users = client.user.list()  # paginate if needed
+for user in users:
+    sessions = client.user.get_sessions(user.user_id)
+    for session in sessions:
+        messages = client.memory.get_session_messages(session.session_id)
+        export["sessions"].append({
+            "session_id": session.session_id,
+            "user_id": user.user_id,
+            "messages": [
+                {"role": m.role_type, "content": m.content, "created_at": str(m.created_at)}
+                for m in (messages.messages or [])
+            ]
+        })
+
+    # Export graph facts for this user
+    try:
+        graph_results = client.graph.search(query="", user_id=user.user_id, limit=500)
+        for edge in (graph_results.edges or []):
+            export["facts"].append({
+                "user_id": user.user_id,
+                "text": edge.fact,
+                "created_at": str(edge.created_at) if hasattr(edge, 'created_at') else None
+            })
+    except Exception:
+        pass  # graph search requires at least one prior message
+
+with open("zep_export.json", "w") as f:
+    json.dump(export, f, indent=2)
+print(f"Exported {len(export['sessions'])} sessions, {len(export['facts'])} facts")
+```
+
+**Step 2: Import**
+
+Save as `scripts/migrate-zep.mjs`:
+```js
+// scripts/migrate-zep.mjs
+import { createHyperMem } from '@psiclawops/hypermem';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+const agentId = process.argv[2] ?? 'main';
+const exportPath = process.argv[3] ?? 'zep_export.json';
+const dryRun = !process.argv.includes('--apply');
+
+const { sessions = [], facts = [] } = JSON.parse(readFileSync(exportPath, 'utf-8'));
+const hm = await createHyperMem({ dir: join(homedir(), '.openclaw/hypermem') });
+
+let msgCount = 0, factCount = 0;
+
+// Import session messages
+for (const session of sessions) {
+  const sessionKey = `zep-migration:${session.session_id}`;
+  for (const msg of session.messages ?? []) {
+    if (!msg.content) continue;
+    if (dryRun) { console.log(`[dry-run] msg [${msg.role}]: ${msg.content.slice(0, 60)}`); msgCount++; continue; }
+    if (msg.role === 'user' || msg.role === 'human') {
+      await hm.recordUserMessage(agentId, sessionKey, msg.content);
+    } else {
+      await hm.recordAssistantMessage(agentId, sessionKey, {
+        role: 'assistant', textContent: msg.content, toolCalls: [],
+        createdAt: msg.created_at ?? new Date().toISOString(),
+      });
+    }
+    msgCount++;
+  }
+}
+
+// Import knowledge graph facts
+for (const fact of facts) {
+  if (!fact.text || fact.text.length < 20) continue;
+  if (dryRun) { console.log(`[dry-run] fact: ${fact.text.slice(0, 80)}`); factCount++; continue; }
+  await hm.addFact(agentId, fact.text, {
+    domain: 'general',
+    source: 'zep-migration',
+    confidence: 0.85,
+    createdAt: fact.created_at,
+  });
+  factCount++;
+}
+
+console.log(`\n${dryRun ? '[dry-run] ' : ''}Messages: ${msgCount}, Facts: ${factCount}`);
+if (dryRun) console.log('Run with --apply to write data.');
+```
+
+```bash
+# Dry run
+node scripts/migrate-zep.mjs main zep_export.json
+
+# Apply
+node scripts/migrate-zep.mjs main zep_export.json --apply
+
+openclaw gateway restart
+```
+
+> **Self-hosted Zep:** if you are running the open-source Zep server, you can also export directly from the underlying Postgres database. The `zep.messages` table has `session_id`, `role`, `content`, `created_at` — the import script above accepts the same JSON shape either way.
+
+---
+
+## From Honcho
+
+Honcho is an OpenClaw plugin (`@honcho-ai/openclaw-honcho`) that persists conversations to the Honcho service (hosted or self-hosted) and builds user/agent models over time. Because it is a plugin that runs alongside OpenClaw, migration to HyperMem is mostly a slot swap — the data that matters is already in your workspace files, and Honcho's conversation history lives in the Honcho service.
+
+**What maps to what:**
+
+| Honcho | HyperMem |
+|---|---|
+| Workspace memory files (migrated on setup) | Still used — HyperMem reads these directly |
+| Honcho session messages | Per-agent `messages.db` (going forward) |
+| Honcho user model / conclusions | Facts in `library.db` |
+| `honcho_context` / `honcho_ask` tools | `memory_search` + HyperMem context assembly |
+
+**What does not migrate automatically:** Honcho's cross-session conclusions and user model from the Honcho service — these require an API export step below.
+
+**Step 1: Export conclusions from Honcho**
+
+```python
+# export_honcho.py
+import requests, json, os
+
+BASE_URL = os.getenv("HONCHO_BASE_URL", "https://api.honcho.dev")
+API_KEY = os.getenv("HONCHO_API_KEY", "")
+WORKSPACE = os.getenv("HONCHO_WORKSPACE", "openclaw")
+
+headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else {}
+
+export = {"conclusions": [], "sessions": []}
+
+# List apps (workspaces) and users
+apps = requests.get(f"{BASE_URL}/v1/apps", headers=headers).json()
+for app in apps.get("items", []):
+    app_id = app["id"]
+    users = requests.get(f"{BASE_URL}/v1/apps/{app_id}/users", headers=headers).json()
+    for user in users.get("items", []):
+        user_id = user["id"]
+        # Get conclusions (derived memory)
+        conclusions = requests.get(
+            f"{BASE_URL}/v1/apps/{app_id}/users/{user_id}/conclusions",
+            headers=headers
+        ).json()
+        for c in conclusions.get("items", []):
+            export["conclusions"].append({"user_id": user_id, "text": c.get("content", ""), "created_at": c.get("created_at")})
+
+with open("honcho_export.json", "w") as f:
+    json.dump(export, f, indent=2)
+print(f"Exported {len(export['conclusions'])} conclusions")
+```
+
+**Step 2: Import conclusions as facts**
+
+Save as `scripts/migrate-honcho.mjs`:
+```js
+// scripts/migrate-honcho.mjs
+import { createHyperMem } from '@psiclawops/hypermem';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+const agentId = process.argv[2] ?? 'main';
+const exportPath = process.argv[3] ?? 'honcho_export.json';
+const dryRun = !process.argv.includes('--apply');
+
+const { conclusions = [] } = JSON.parse(readFileSync(exportPath, 'utf-8'));
+const hm = await createHyperMem({ dir: join(homedir(), '.openclaw/hypermem') });
+let imported = 0, skipped = 0;
+
+for (const c of conclusions) {
+  const text = c.text ?? '';
+  if (!text || text.length < 20) { skipped++; continue; }
+  if (dryRun) { console.log(`[dry-run] conclusion: ${text.slice(0, 80)}`); imported++; continue; }
+  await hm.addFact(agentId, text, {
+    domain: 'general',
+    source: 'honcho-migration',
+    confidence: 0.9,
+    createdAt: c.created_at,
+  });
+  imported++;
+}
+
+console.log(`\n${dryRun ? '[dry-run] ' : ''}Imported: ${imported}, Skipped: ${skipped}`);
+if (dryRun) console.log('Run with --apply to write data.');
+```
+
+```bash
+# Dry run
+node scripts/migrate-honcho.mjs main honcho_export.json
+
+# Apply
+node scripts/migrate-honcho.mjs main honcho_export.json --apply
+```
+
+**Step 3: Uninstall Honcho plugin and enable HyperMem**
+
+```bash
+openclaw plugins uninstall @honcho-ai/openclaw-honcho
+openclaw config set plugins.slots.contextEngine hypermem
+openclaw gateway restart
+```
+
+> **Note:** Your workspace memory files (`MEMORY.md`, `memory/*.md`) that Honcho migrated on setup are still in place and will be picked up by HyperMem automatically — no re-import needed for those.
+
+---
+
+## From memory-lancedb
+
+`memory-lancedb` is an OpenClaw install-on-demand plugin (`plugins.slots.memory = "memory-lancedb"`) that provides long-term memory with auto-recall and capture using LanceDB as the backing store. Like memory-core, it occupies the `slots.memory` slot — separate from the context engine slot that HyperMem owns.
+
+**What maps to what:**
+
+| memory-lancedb | HyperMem |
+|---|---|
+| LanceDB memory vectors | Facts in `library.db` (re-embedded automatically) |
+| Captured memory entries | Facts with domain inferred from content |
+| Auto-recall injection | HyperMem context assembly (built-in) |
+| Per-agent tables | Per-agent `library.db` facts |
+
+**What does not migrate:** LanceDB vector embeddings (regenerated automatically), auto-capture triggers (HyperMem handles recall natively).
+
+**Step 1: Locate the LanceDB data directory**
+
+```bash
+# Default location — check your config if you changed it
+ls ~/.openclaw/memory-lancedb/
+# or
+openclaw config get plugins.entries.memory-lancedb.config
+```
+
+**Step 2: Export entries from LanceDB**
+
+```python
+# export_lancedb.py
+import lancedb, json, os
+
+db_path = os.path.expanduser("~/.openclaw/memory-lancedb")
+db = lancedb.connect(db_path)
+
+export = []
+for table_name in db.table_names():
+    table = db.open_table(table_name)
+    rows = table.to_pandas()
+    for _, row in rows.iterrows():
+        text = row.get("text") or row.get("content") or row.get("memory") or ""
+        if text and len(str(text)) > 20:
+            export.append({
+                "agent_id": table_name,  # table name is typically the agent id
+                "text": str(text),
+                "metadata": {k: str(v) for k, v in row.items() if k not in ("text", "content", "memory", "vector")}
+            })
+
+with open("lancedb_export.json", "w") as f:
+    json.dump(export, f, indent=2)
+print(f"Exported {len(export)} entries from {len(db.table_names())} tables")
+```
+
+Install lancedb if needed: `pip install lancedb`
+
+**Step 3: Import**
+
+Save as `scripts/migrate-lancedb.mjs`:
+```js
+// scripts/migrate-lancedb.mjs
+import { createHyperMem } from '@psiclawops/hypermem';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+// agent override — if set, all entries go to this agent regardless of export agent_id
+const agentOverride = process.argv[2] !== '--apply' && !process.argv[2]?.startsWith('--') ? process.argv[2] : null;
+const exportPath = process.argv.find(a => a.endsWith('.json')) ?? 'lancedb_export.json';
+const dryRun = !process.argv.includes('--apply');
+
+const entries = JSON.parse(readFileSync(exportPath, 'utf-8'));
+const hm = await createHyperMem({ dir: join(homedir(), '.openclaw/hypermem') });
+let imported = 0, skipped = 0;
+
+for (const entry of entries) {
+  const text = entry.text ?? '';
+  if (!text || text.length < 20) { skipped++; continue; }
+  const agentId = agentOverride ?? entry.agent_id ?? 'main';
+  if (dryRun) { console.log(`[dry-run] [${agentId}] ${text.slice(0, 80)}`); imported++; continue; }
+  await hm.addFact(agentId, text, {
+    domain: 'general',
+    source: 'lancedb-migration',
+    confidence: 0.85,
+  });
+  imported++;
+}
+
+console.log(`\n${dryRun ? '[dry-run] ' : ''}Imported: ${imported}, Skipped: ${skipped}`);
+if (dryRun) console.log('Run with --apply to write data.');
+```
+
+```bash
+# Dry run (all agents from export)
+node scripts/migrate-lancedb.mjs lancedb_export.json
+
+# Or target a specific agent
+node scripts/migrate-lancedb.mjs main lancedb_export.json
+
+# Apply
+node scripts/migrate-lancedb.mjs lancedb_export.json --apply
+```
+
+**Step 4: Disable memory-lancedb and enable HyperMem**
+
+```bash
+# Uninstall or just disable the slot
+openclaw config set plugins.slots.memory none
+openclaw config set plugins.slots.contextEngine hypermem
+openclaw gateway restart
+```
+
+LanceDB files at `~/.openclaw/memory-lancedb/` are untouched. Delete when satisfied.
+
+---
+
 ## From MEMORY.md files
 
 If your agents use the standard OpenClaw MEMORY.md + daily checkpoint pattern (`memory/YYYY-MM-DD.md`) without any other memory backend, this script scans workspace directories and imports substantive entries as facts.
@@ -572,6 +1061,33 @@ ClawText and MEMORY.md scripts infer agent identity from workspace paths and con
 **Cognee export is empty or has unexpected format**
 
 Cognee's search API behavior varies by backend and version. Try querying with a specific term instead of `"*"`, or export directly from the underlying database (SQLite at `~/.cognee/` by default). Adapt the `text` field extraction in the import script to match your export structure.
+
+**Mem0 export job returns incomplete data**
+
+The export job is async. If `get_memory_export()` returns partial results, the job wasn't finished. Add a poll loop:
+```python
+import time
+while True:
+    data = client.get_memory_export(memory_export_id=export_id)
+    if data.get('status') == 'completed': break
+    time.sleep(3)
+```
+Alternatively use `get_all()` which is synchronous.
+
+**Zep self-hosted: graph search returns 404**
+
+Graph search requires the Zep server to have processed at least one session. If the graph hasn't been built yet, skip the graph export step — session messages are the higher-value data anyway.
+
+**Honcho conclusions endpoint returns 404**
+
+The conclusions API path varies by Honcho version. Check `GET /v1/apps/{app_id}/users/{user_id}/metamessages` as an alternative — Honcho's user model is sometimes stored there. If neither works, export directly from the Honcho Postgres database (`honcho.metamessages` table).
+
+**memory-lancedb export: `lancedb` not installed**
+
+```bash
+pip install lancedb
+```
+If you don't have Python, the LanceDB files are Arrow IPC format — readable with any Arrow-compatible tool. The table names map directly to agent IDs.
 
 **QMD extra paths not appearing after migration**
 
