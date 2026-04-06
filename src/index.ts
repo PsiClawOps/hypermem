@@ -31,6 +31,8 @@ export type { SystemState, SystemEvent } from './system-store.js';
 export { WorkStore } from './work-store.js';
 export type { WorkItem, WorkEvent, WorkStatus } from './work-store.js';
 export { DesiredStateStore } from './desired-state-store.js';
+export { evictStaleContent, DEFAULT_EVICTION_CONFIG } from './image-eviction.js';
+export type { ImageEvictionConfig, EvictionStats, EvictionResult } from './image-eviction.js';
 export { KnowledgeGraph } from './knowledge-graph.js';
 export type { EntityType, KnowledgeLink, GraphNode, TraversalResult } from './knowledge-graph.js';
 

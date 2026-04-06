@@ -33,6 +33,7 @@ import type {
   FleetStore,
 } from '@psiclawops/hypermem';
 import { detectTopicShift, SessionTopicMap, applyToolGradientToWindow } from '@psiclawops/hypermem';
+import { evictStaleContent } from '@psiclawops/hypermem/image-eviction';
 import os from 'os';
 import path from 'path';
 import fs from 'fs/promises';
@@ -105,6 +106,18 @@ async function loadUserConfig(): Promise<{
     keystoneHistoryFraction: number;
     keystoneMaxMessages: number;
     keystoneMinSignificance: number;
+  }>;
+  eviction?: Partial<{
+    /** Turns before images are evicted. Default: 2 */
+    imageAgeTurns: number;
+    /** Turns before large tool results are evicted. Default: 4 */
+    toolResultAgeTurns: number;
+    /** Minimum estimated tokens to evict a tool result. Default: 200 */
+    minTokensToEvict: number;
+    /** Preview characters to keep from evicted content. Default: 120 */
+    keepPreviewChars: number;
+    /** Set false to disable the eviction pre-pass entirely. Default: true */
+    enabled: boolean;
   }>;
 }> {
   const configPath = path.join(os.homedir(), '.openclaw/hypermem/config.json');
@@ -687,6 +700,30 @@ function createHyperMemEngine(): ContextEngine {
           const sk = resolveSessionKey(sessionId, sessionKey);
           const agentId = extractAgentId(sk);
 
+          // ── Image / heavy-content eviction pre-pass ──────────────────────
+          // Evict stale image payloads and large tool results before measuring
+          // pressure. This frees tokens without compaction — images alone can
+          // account for 30%+ of context from a single screenshot 2 turns ago.
+          const evictionCfg = userConfig?.eviction;
+          const evictionEnabled = evictionCfg?.enabled !== false;
+          let workingMessages: unknown[] = messages;
+          if (evictionEnabled) {
+            const { messages: evicted, stats: evStats } = evictStaleContent(messages, {
+              imageAgeTurns: evictionCfg?.imageAgeTurns,
+              toolResultAgeTurns: evictionCfg?.toolResultAgeTurns,
+              minTokensToEvict: evictionCfg?.minTokensToEvict,
+              keepPreviewChars: evictionCfg?.keepPreviewChars,
+            });
+            workingMessages = evicted;
+            if (evStats.tokensFreed > 0) {
+              console.log(
+                `[hypermem] eviction: ${evStats.imagesEvicted} images, ` +
+                `${evStats.toolResultsEvicted} tool results, ` +
+                `~${evStats.tokensFreed.toLocaleString()} tokens freed`
+              );
+            }
+          }
+
           // Measure pressure BEFORE trim to pick the right tier.
           // Critical: use the runtime-provided messages array, NOT estimateWindowTokens()
           // which reads Redis. After a gateway restart Redis is empty — estimateWindowTokens
@@ -749,9 +786,9 @@ function createHyperMemEngine(): ContextEngine {
           //
           // Strategy: keep system/identity messages at the front, then fill from
           // the back (most recent) until we hit trimBudget. Drop the middle.
-          let trimmedMessages = messages;
+          let trimmedMessages = workingMessages;
           if (pressure > trimTarget) {
-            const msgArray = messages as unknown as Array<Record<string, unknown>>;
+            const msgArray = workingMessages as unknown as Array<Record<string, unknown>>;
             // Separate system messages (always keep) from conversation turns
             const systemMsgs = msgArray.filter(m => m.role === 'system');
             const convMsgs = msgArray.filter(m => m.role !== 'system');
