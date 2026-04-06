@@ -382,6 +382,7 @@ async function truncateJsonlIfNeeded(
   sessionFile: string | undefined,
   targetDepth: number,
   force = false,
+  tokenBudgetOverride?: number,
 ): Promise<boolean> {
   if (!sessionFile || typeof sessionFile !== 'string') return false;
   try {
@@ -412,7 +413,26 @@ async function truncateJsonlIfNeeded(
     // Only rewrite if meaningfully over target — unless force=true (over-budget path)
     if (!force && messageEntries.length <= targetDepth * 1.5) return false;
 
-    const keptMessages = messageEntries.slice(-targetDepth);
+    // If a token budget is specified, keep newest messages within that budget
+    let keptMessages: typeof messageEntries;
+    if (tokenBudgetOverride) {
+      let tokenCount = 0;
+      const kept: typeof messageEntries = [];
+      for (let i = messageEntries.length - 1; i >= 0 && kept.length < targetDepth; i--) {
+        const m = messageEntries[i].parsed?.message ?? messageEntries[i].parsed;
+        let t = 0;
+        if (m?.content) t += Math.ceil(JSON.stringify(m.content).length / 4);
+        if (m?.textContent) t += Math.ceil(String(m.textContent).length / 4);
+        if (m?.toolResults) t += Math.ceil(JSON.stringify(m.toolResults).length / 4);
+        if (m?.toolCalls) t += Math.ceil(JSON.stringify(m.toolCalls).length / 4);
+        if (tokenCount + t > tokenBudgetOverride && kept.length > 0) break;
+        kept.unshift(messageEntries[i]);
+        tokenCount += t;
+      }
+      keptMessages = kept;
+    } else {
+      keptMessages = messageEntries.slice(-targetDepth);
+    }
     const keptSet = new Set(keptMessages.map(e => e.line));
     const metaSet = new Set(metadataEntries.map(e => e.line));
     const rebuilt = [header];
@@ -467,6 +487,35 @@ function createHyperMemEngine(): ContextEngine {
         const sk = resolveSessionKey(sessionId, sessionKey);
         const agentId = extractAgentId(sk);
 
+        // EC1 pre-flight: proactively truncate the JSONL on disk if it is over
+        // the safe replay threshold. Fires BEFORE warm() so the next restart
+        // (not this one) loads a clean file. Combined with the preflight script
+        // run before each gateway restart, this closes the EC1 loop entirely.
+        //
+        // Why this doesn't help the CURRENT session:
+        //   OpenClaw has already replayed the JSONL into memory by the time
+        //   bootstrap() is called. Disk truncation here is forward-looking only.
+        //
+        // Why it still matters:
+        //   Without this, a session that saturates in operation (no preflight ran)
+        //   would restart saturated on the next boot. This ensures at least one
+        //   restart cycle later the session comes up clean.
+        try {
+          const sessionDir = path.join(os.homedir(), '.openclaw', 'agents', agentId, 'sessions');
+          const jsonlPath = path.join(sessionDir, `${sessionId}.jsonl`);
+          // EC1 threshold: 60 conversation messages (token-capped at 40% of 128k)
+          const EC1_MAX_MESSAGES = 60;
+          const EC1_TOKEN_BUDGET = Math.floor(128_000 * 0.40);
+          const truncated = await truncateJsonlIfNeeded(jsonlPath, EC1_MAX_MESSAGES, false, EC1_TOKEN_BUDGET);
+          if (truncated) {
+            console.log(
+              `[hypermem-plugin] bootstrap: proactive JSONL trim for ${agentId} ` +
+              `(EC1 guard — next restart will load clean)`
+            );
+          }
+        } catch {
+          // Non-fatal — JSONL truncation is best-effort
+        }
         // Fast path: if session already has history in Redis, skip warm entirely.
         // sessionExists() is a single EXISTS call — sub-millisecond cost.
         const alreadyWarm = await hm.redis.sessionExists(agentId, sk);
