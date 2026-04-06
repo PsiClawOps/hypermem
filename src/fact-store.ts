@@ -8,6 +8,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { Fact, FactScope } from './types.js';
+import { isSafeForSharedVisibility, requiresScan } from './secret-scanner.js';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -56,6 +57,13 @@ export class FactStore {
     const now = nowIso();
     const scope = opts?.scope || 'agent';
 
+    // Secret gate: if requested visibility is shared, verify content is clean.
+    // Downgrade to 'private' rather than reject — matches episode-store pattern.
+    let resolvedVisibility = opts?.visibility || 'private';
+    if (requiresScan(resolvedVisibility) && !isSafeForSharedVisibility(content)) {
+      resolvedVisibility = 'private';
+    }
+
     // Check for exact duplicate
     const existing = this.db.prepare(`
       SELECT * FROM facts WHERE agent_id = ? AND content = ? AND scope = ?
@@ -80,7 +88,7 @@ export class FactStore {
       opts?.domain || null,
       content,
       opts?.confidence || 1.0,
-      opts?.visibility || 'private',
+      resolvedVisibility,
       opts?.sourceType || 'conversation',
       opts?.sourceSessionKey || null,
       opts?.sourceRef || null,
@@ -98,7 +106,7 @@ export class FactStore {
       domain: opts?.domain || null,
       content,
       confidence: opts?.confidence || 1.0,
-      visibility: opts?.visibility || 'private',
+      visibility: resolvedVisibility,
       sourceType: opts?.sourceType || 'conversation',
       sourceSessionKey: opts?.sourceSessionKey || null,
       sourceRef: opts?.sourceRef || null,

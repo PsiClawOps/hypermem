@@ -111,7 +111,10 @@ export async function generateEmbeddings(
 ): Promise<Float32Array[]> {
   if (texts.length === 0) return [];
 
-  const maxSize = config.cacheSize ?? DEFAULT_EMBEDDING_CONFIG.cacheSize ?? 128;
+  const maxSize = Math.min(
+    config.cacheSize ?? DEFAULT_EMBEDDING_CONFIG.cacheSize ?? 128,
+    10_000  // Hard cap: prevent unbounded memory growth from operator misconfiguration
+  );
   const results: (Float32Array | null)[] = new Array(texts.length).fill(null);
 
   // Check cache first — build list of texts that need Ollama calls

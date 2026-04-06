@@ -944,23 +944,26 @@ export class BackgroundIndexer {
     // Mark dormant topics
     const dormantThreshold = this.parseDuration(this.config.topicDormantAfter);
     if (dormantThreshold > 0) {
+      // Compute threshold timestamp in JS and pass as parameter — avoids SQL template interpolation.
+      const dormantBefore = new Date(Date.now() - dormantThreshold * 1000).toISOString();
       libraryDb.prepare(`
         UPDATE topics
         SET status = 'dormant'
         WHERE status = 'active'
-          AND updated_at < datetime('now', '-${dormantThreshold} seconds')
-      `).run();
+          AND updated_at < ?
+      `).run(dormantBefore);
     }
 
     // Close old dormant topics
     const closedThreshold = this.parseDuration(this.config.topicClosedAfter);
     if (closedThreshold > 0) {
+      const closedBefore = new Date(Date.now() - closedThreshold * 1000).toISOString();
       libraryDb.prepare(`
         UPDATE topics
         SET status = 'closed'
         WHERE status = 'dormant'
-          AND updated_at < datetime('now', '-${closedThreshold} seconds')
-      `).run();
+          AND updated_at < ?
+      `).run(closedBefore);
     }
   }
 
