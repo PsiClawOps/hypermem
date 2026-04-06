@@ -239,6 +239,8 @@ npm run test:quick    # smoke + library + compositor — no Redis/Ollama require
 
 If build fails, fix before proceeding. Do not push a broken dist.
 
+> ⚠️ **Never manually edit files in `dist/`.** The dist is always a build artifact. Any hand-edit to `dist/` will be overwritten on the next build and may introduce mismatches (wrong module references, missing files, 0.5.0 content bleeding into a 0.4.x dist). If something in dist looks wrong, fix the source and rebuild.
+
 ---
 
 ## Step 9 — Final Leak Check
