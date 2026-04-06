@@ -106,6 +106,15 @@ export {
 export type { OrgRegistry } from './cross-agent.js';
 
 export { BackgroundIndexer, createIndexer, type CursorFetcher } from './background-indexer.js';
+export {
+  runDreamingPromoter,
+  runDreamingPassForFleet,
+  resolveAgentWorkspacePath,
+  type DreamerConfig,
+  type DreamerResult,
+  type PromotionEntry,
+  DEFAULT_DREAMER_CONFIG,
+} from './dreaming-promoter.js';
 export type { IndexerStats, WatermarkState } from './background-indexer.js';
 
 export { TopicSynthesizer } from './topic-synthesizer.js';

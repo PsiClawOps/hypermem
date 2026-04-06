@@ -190,7 +190,8 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         listAgents: () => string[],
         config?: Partial<{ enabled: boolean; periodicInterval: number }>,
         getCursor?: (agentId: string, sessionKey: string) => Promise<unknown>,
-        vectorStore?: any
+        vectorStore?: any,
+        dreamerConfig?: Record<string, unknown>
       ) => BackgroundIndexer;
     };
     const libraryDb = instance.dbManager.getLibraryDb();
@@ -220,7 +221,9 @@ async function getHyperMem(): Promise<HyperMemInstance> {
           return instance.getSessionCursor(agentId, sessionKey);
         },
         // Pass vector store so new facts/episodes are embedded at index time
-        instance.getVectorStore() ?? undefined
+        instance.getVectorStore() ?? undefined,
+        // Dreaming config — passed from HyperMem user config if set
+        (userConfig as { dreaming?: Record<string, unknown> })?.dreaming ?? {}
       );
       _indexer.start();
     } catch {

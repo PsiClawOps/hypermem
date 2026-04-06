@@ -19,6 +19,17 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { StoredMessage, IndexerConfig, EpisodeType, SessionCursor } from './types.js';
+import { lintKnowledge } from './knowledge-lint.js';
+import { MessageStore } from './message-store.js';
+import { runNoiseSweep, runToolDecay } from './proactive-pass.js';
+import { TopicSynthesizer } from './topic-synthesizer.js';
+import { runDreamingPassForFleet, type DreamerConfig } from './dreaming-promoter.js';
+import { FactStore } from './fact-store.js';
+import { EpisodeStore } from './episode-store.js';
+import { TopicStore } from './topic-store.js';
+import { KnowledgeStore } from './knowledge-store.js';
+import { isSafeForSharedVisibility } from './secret-scanner.js';
+import type { VectorStore } from './vector-store.js';
 
 // ─── Agent-to-Domain Map ────────────────────────────────────────
 // Maps well-known agent IDs to their primary domain.
@@ -53,16 +64,7 @@ const AGENT_DOMAIN_MAP: Record<string, string> = {
 function domainForAgent(agentId: string): string {
   return AGENT_DOMAIN_MAP[agentId] ?? 'general';
 }
-import { MessageStore } from './message-store.js';
-import { runNoiseSweep, runToolDecay } from './proactive-pass.js';
-import { TopicSynthesizer } from './topic-synthesizer.js';
-import { lintKnowledge } from './knowledge-lint.js';
-import { FactStore } from './fact-store.js';
-import { EpisodeStore } from './episode-store.js';
-import { TopicStore } from './topic-store.js';
-import { KnowledgeStore } from './knowledge-store.js';
-import { isSafeForSharedVisibility } from './secret-scanner.js';
-import type { VectorStore } from './vector-store.js';
+
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -446,6 +448,7 @@ function detectTopic(content: string): string | null {
 
 export class BackgroundIndexer {
   private readonly config: IndexerConfig;
+  private readonly dreamerConfig: Partial<DreamerConfig>;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private vectorStore: VectorStore | null = null;
@@ -457,7 +460,8 @@ export class BackgroundIndexer {
     private getMessageDb?: (agentId: string) => DatabaseSync,
     private getLibraryDb?: () => DatabaseSync,
     private listAgents?: () => string[],
-    private getCursor?: CursorFetcher
+    private getCursor?: CursorFetcher,
+    dreamerConfig?: Partial<DreamerConfig>
   ) {
     // Initialize synthesizer if libraryDb accessor is available
     if (getLibraryDb) {
@@ -482,6 +486,7 @@ export class BackgroundIndexer {
       episodeSignificanceThreshold: config?.episodeSignificanceThreshold ?? 0.5,
       periodicInterval: config?.periodicInterval ?? 300000, // 5 minutes
     };
+    this.dreamerConfig = dreamerConfig ?? {};
   }
 
   /**
@@ -605,6 +610,25 @@ export class BackgroundIndexer {
           }
         } catch {
           // Non-fatal
+        }
+      }
+
+      // Dreaming promotion pass — every tickInterval ticks (default 12 = ~1hr)
+      const dreamerEnabled = this.dreamerConfig.enabled ?? false;
+      const dreamerTickInterval = this.dreamerConfig.tickInterval ?? 12;
+      if (dreamerEnabled && this.tickCount % dreamerTickInterval === 0 && this.getLibraryDb) {
+        try {
+          const libDb = this.getLibraryDb();
+          if (libDb) {
+            const dreamResults = await runDreamingPassForFleet(agents, libDb, this.dreamerConfig);
+            const totalPromoted = dreamResults.reduce((s, r) => s + r.promoted, 0);
+            if (totalPromoted > 0) {
+              console.log(`[indexer] Dreaming: promoted ${totalPromoted} facts across ${dreamResults.length} agents`);
+            }
+          }
+        } catch (err) {
+          // Non-fatal — dreaming failures never block indexing
+          console.warn('[indexer] Dreaming pass failed (non-fatal):', (err as Error).message);
         }
       }
 
@@ -1120,9 +1144,10 @@ export function createIndexer(
   listAgents: () => string[],
   config?: Partial<IndexerConfig>,
   getCursor?: CursorFetcher,
-  vectorStore?: VectorStore
+  vectorStore?: VectorStore,
+  dreamerConfig?: Partial<DreamerConfig>
 ): BackgroundIndexer {
-  const indexer = new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor);
+  const indexer = new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor, dreamerConfig);
   if (vectorStore) indexer.setVectorStore(vectorStore);
   return indexer;
 }

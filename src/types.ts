@@ -374,6 +374,8 @@ export interface HyperMemConfig {
   compositor: CompositorConfig;
   indexer: IndexerConfig;
   embedding: EmbeddingProviderConfig;
+  /** Optional dreaming/promotion config. Default: disabled. */
+  dreaming?: import('./dreaming-promoter.js').DreamerConfig;
 }
 
 export interface EmbeddingProviderConfig {
