@@ -594,11 +594,40 @@ function createHyperMemEngine(): ContextEngine {
           // Identity load is best-effort — never block bootstrap on this
         }
 
+        // Capture wsPath for post-warm seeding (declared in the identity block above)
+        let _wsPathForSeed: string | undefined;
+        try {
+          const homedir2 = os.homedir();
+          const councilPath2 = path.join(homedir2, '.openclaw', 'workspace-council', agentId);
+          const workspacePath2 = path.join(homedir2, '.openclaw', 'workspace', agentId);
+          try { await fs.access(councilPath2); _wsPathForSeed = councilPath2; }
+          catch { _wsPathForSeed = workspacePath2; }
+        } catch { /* non-fatal */ }
+
         const warmPromise = hm.warm(agentId, sk, identityBlock ? { identity: identityBlock } : undefined).finally(() => {
           _warmInFlight.delete(inflightKey);
         });
         _warmInFlight.set(inflightKey, warmPromise);
         await warmPromise;
+
+        // ACA doc seeding — fire-and-forget after warm.
+        // Idempotent: WorkspaceSeeder skips files whose hash hasn't changed.
+        // Seeds SOUL.md, TOOLS.md, AGENTS.md, POLICY.md etc. into library.db
+        // doc_chunks so trigger-based retrieval can serve them at compose time.
+        if (_wsPathForSeed) {
+          const wsPathForSeed = _wsPathForSeed;
+          hm.seedWorkspace(wsPathForSeed, { agentId }).then(seedResult => {
+            if (seedResult.totalInserted > 0 || seedResult.reindexed > 0) {
+              console.log(
+                `[hypermem-plugin] bootstrap: seeded workspace docs for ${agentId} ` +
+                `(+${seedResult.totalInserted} chunks, ${seedResult.reindexed} reindexed, ` +
+                `${seedResult.skipped} unchanged, ${seedResult.errors.length} errors)`
+              );
+            }
+          }).catch(err => {
+            console.warn('[hypermem-plugin] bootstrap: workspace seeding failed (non-fatal):', (err as Error).message);
+          });
+        }
 
         // Post-warm pressure check: if messages.db had accumulated history,
         // warm() may have loaded the session straight to 80%+. Pre-trim now
