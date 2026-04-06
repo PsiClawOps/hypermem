@@ -44,6 +44,58 @@ import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
 import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
 
+/**
+ * Model context window sizes by provider/model string (or partial match).
+ * Used as fallback when tokenBudget is not passed by the runtime.
+ * Order matters: first match wins. Partial substring match on the model string.
+ */
+const MODEL_CONTEXT_WINDOWS: Array<{ pattern: string; tokens: number }> = [
+  // Anthropic
+  { pattern: 'claude-opus-4',    tokens: 200_000 },
+  { pattern: 'claude-sonnet-4',  tokens: 200_000 },
+  { pattern: 'claude-3-5',       tokens: 200_000 },
+  { pattern: 'claude-3-7',       tokens: 200_000 },
+  { pattern: 'claude',           tokens: 200_000 },
+  // OpenAI
+  { pattern: 'gpt-5',            tokens: 128_000 },
+  { pattern: 'gpt-4o',           tokens: 128_000 },
+  { pattern: 'gpt-4',            tokens: 128_000 },
+  { pattern: 'o3',               tokens: 128_000 },
+  { pattern: 'o4',               tokens: 128_000 },
+  // Google
+  { pattern: 'gemini-3.1-pro',   tokens: 1_000_000 },
+  { pattern: 'gemini-3.1-flash', tokens: 1_000_000 },
+  { pattern: 'gemini-2.5-pro',   tokens: 1_000_000 },
+  { pattern: 'gemini-2',        tokens: 1_000_000 },
+  { pattern: 'gemini',           tokens: 1_000_000 },
+  // Zhipu / GLM
+  { pattern: 'glm-5',            tokens: 131_072 },
+  { pattern: 'glm-4',            tokens: 131_072 },
+  // Alibaba / Qwen
+  { pattern: 'qwen3',            tokens: 262_144 },
+  { pattern: 'qwen',             tokens: 131_072 },
+  // DeepSeek
+  { pattern: 'deepseek-v3',      tokens: 131_072 },
+  { pattern: 'deepseek',         tokens: 131_072 },
+];
+
+/**
+ * Resolve effective token budget from model string.
+ * Returns the context window for the model, minus a 10% reserve for output tokens.
+ * Falls back to defaultTokenBudget if no model match.
+ */
+function resolveModelBudget(model: string | undefined, defaultBudget: number): number {
+  if (!model) return defaultBudget;
+  const normalized = model.toLowerCase();
+  for (const entry of MODEL_CONTEXT_WINDOWS) {
+    if (normalized.includes(entry.pattern)) {
+      // Reserve 10% for output tokens; compositor should use ~90% of context window
+      return Math.floor(entry.tokens * 0.90);
+    }
+  }
+  return defaultBudget;
+}
+
 const DEFAULT_CONFIG: CompositorConfig = {
   defaultTokenBudget: 90000,
   maxHistoryMessages: 250,
@@ -457,7 +509,7 @@ export class Compositor {
   async compose(request: ComposeRequest, db: DatabaseSync, libraryDb?: DatabaseSync): Promise<ComposeResult> {
     const store = new MessageStore(db);
     const libDb = libraryDb || this.libraryDb;
-    const budget = request.tokenBudget || this.config.defaultTokenBudget;
+    const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget);
     let remaining = budget;
     const warnings: string[] = [];
     const slots: SlotTokenCounts = {
