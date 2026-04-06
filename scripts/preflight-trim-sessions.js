@@ -46,19 +46,24 @@ function estimateTokens(text) {
   return Math.ceil(text.length / 4);
 }
 
-function estimateMessageTokens(msg) {
-  if (!msg || typeof msg !== 'object') return 0;
-  let t = 0;
-  if (typeof msg.content === 'string') t += estimateTokens(msg.content);
+function estimateMessageTokens(msg, rawLine) {
+  // Use raw line length as primary estimator — it's reliable regardless of
+  // field structure (OpenClaw JSONL stores content in various shapes).
+  // Field-level parsing is a cross-check only.
+  const rawEstimate = rawLine ? Math.ceil(rawLine.length / 4) : 0;
+  if (!msg || typeof msg !== 'object') return rawEstimate;
+  let fieldEstimate = 0;
+  if (typeof msg.content === 'string') fieldEstimate += estimateTokens(msg.content);
   if (Array.isArray(msg.content)) {
     for (const c of msg.content) {
-      if (typeof c?.text === 'string') t += estimateTokens(c.text);
+      if (typeof c?.text === 'string') fieldEstimate += estimateTokens(c.text);
     }
   }
-  if (typeof msg.textContent === 'string') t += estimateTokens(msg.textContent);
-  if (msg.toolResults) t += Math.ceil(JSON.stringify(msg.toolResults).length / 4);
-  if (msg.toolCalls) t += Math.ceil(JSON.stringify(msg.toolCalls).length / 4);
-  return t;
+  if (typeof msg.textContent === 'string') fieldEstimate += estimateTokens(msg.textContent);
+  if (msg.toolResults) fieldEstimate += Math.ceil(JSON.stringify(msg.toolResults).length / 4);
+  if (msg.toolCalls) fieldEstimate += Math.ceil(JSON.stringify(msg.toolCalls).length / 4);
+  // Take the max — whichever is higher is more likely correct
+  return Math.max(rawEstimate, fieldEstimate);
 }
 
 function trimJsonlFile(filePath, maxMessages, dryRun) {
@@ -83,18 +88,23 @@ function trimJsonlFile(filePath, maxMessages, dryRun) {
     }
   }
 
-  if (messageLines.length <= TRIM_THRESHOLD) {
-    return { skipped: true, reason: `within threshold (${messageLines.length} <= ${TRIM_THRESHOLD})` };
+  // Token-aware trim: keep newest messages within budget
+  // Budget: 40% of 128k = 51200 tokens — leaves 60% headroom after system prompt loads
+  const tokenBudget = Math.floor(128000 * 0.40);
+
+  // Estimate total tokens using raw line lengths (reliable regardless of field structure)
+  const totalEstimatedTokens = messageLines.reduce((sum, m) => sum + estimateMessageTokens(m.parsed?.message ?? m.parsed, m.line), 0);
+
+  // Skip only if BOTH message count AND token count are within safe bounds
+  if (messageLines.length <= TRIM_THRESHOLD && totalEstimatedTokens <= tokenBudget) {
+    return { skipped: true, reason: `within threshold (${messageLines.length} msgs, ~${totalEstimatedTokens} tokens)` };
   }
 
-  // Token-aware trim: keep newest messages within budget
-  // Budget: 40% of 128k = 51200 tokens
-  const tokenBudget = Math.floor(128000 * 0.40);
   let tokenCount = 0;
   const kept = [];
 
   for (let i = messageLines.length - 1; i >= 0 && kept.length < maxMessages; i--) {
-    const t = estimateMessageTokens(messageLines[i].parsed?.message ?? messageLines[i].parsed);
+    const t = estimateMessageTokens(messageLines[i].parsed?.message ?? messageLines[i].parsed, messageLines[i].line);
     if (tokenCount + t > tokenBudget && kept.length > 0) break;
     kept.unshift(messageLines[i].line);
     tokenCount += t;
