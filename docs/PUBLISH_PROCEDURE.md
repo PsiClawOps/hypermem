@@ -15,6 +15,10 @@ This is the canonical procedure for cutting a public release of HyperMem from in
 - Never on an untagged internal state — always tag internal first.
 - Never because internal has been tagged — internal versioning and public release are independent decisions.
 
+## Direct Push Rule
+
+**No agent may push directly to `PsiClawOps/hypermem`.** Not Forge, not Pylon, not anyone. All publishes go through this procedure. Direct pushes bypass the scrub and will leak internal identity into the public repo. If Forge ships a hotfix to internal, Helm runs this procedure to cut the public version — Forge does not push to public directly.
+
 ---
 
 ## Step 1 — Confirm Internal State
@@ -245,9 +249,17 @@ grep -ri 'ragesaq' src/ dist/ test/ scripts/ bench/ plugin/ docs/ README.md INST
 grep -ri 'lumadmin' src/ dist/ test/ scripts/ bench/ plugin/ docs/ README.md INSTALL.md ARCHITECTURE.md
 grep -ri 'hypermem-internal' src/ dist/ test/ scripts/ bench/ plugin/ docs/ README.md INSTALL.md ARCHITECTURE.md
 grep -ri 'psiclawops' src/ dist/ plugin/ README.md INSTALL.md  # only OK in package.json and license headers
+
+# Internal org hierarchy — must return zero results
+grep -ri 'sentinel\|anvil\|compass\|clarity\|vanguard\|pylon\|vigil\|chisel\|facet\|bastion\|crucible\|relay\|gauge\|plane' src/ dist/ plugin/ docs/ README.md INSTALL.md ARCHITECTURE.md
+grep -ri "tier.*council\|tier.*director\|tier.*specialist\|'council'\|'director'\|'specialist'" src/ dist/ plugin/ docs/ README.md INSTALL.md ARCHITECTURE.md
 ```
 
 Any match = stop and fix before continuing.
+
+**What counts as OK vs. not:**
+- Agent names as example `agentId` values in tests/bench are only OK if they are fully generic (e.g. `agent-a`, `primary-agent`, `testuser`). Real fleet names (`forge`, `helm`, `pylon`, etc.) are not OK even as examples.
+- Tier values in source code are OK if they use the public-facing names (`primary`, `coordinator`, `agent`). Internal names (`council`, `director`, `specialist`) are not OK anywhere in the public repo.
 
 ---
 
