@@ -990,6 +990,101 @@ Every council response includes:
     assert(age5 === 5, `T1 boundary: turn age at index 0 is 5 (got ${age5})`);
   }
 
+  // ── Dynamic Reserve ──
+  {
+    console.log('\n── Dynamic Reserve ──');
+
+    const agentId = 'dynamic-reserve-test';
+    const db = hm.dbManager.getMessageDb(agentId);
+    const libDb = hm.dbManager.getLibraryDb();
+
+    // Seed a conversation in SQLite
+    db.prepare(`
+      INSERT INTO conversations
+        (session_key, agent_id, channel_type, status, message_count,
+         token_count_in, token_count_out, created_at, updated_at)
+      VALUES (?, ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+    `).run('agent:dynamic-reserve-test:webchat:main', agentId);
+
+    const convRow = db.prepare('SELECT id FROM conversations WHERE session_key = ?')
+      .get('agent:dynamic-reserve-test:webchat:main');
+    const convId = convRow.id;
+
+    const insertMsg = db.prepare(`
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_results, message_index, is_heartbeat, created_at)
+      VALUES (?, ?, ?, ?, NULL, ?, 0, datetime('now'))
+    `);
+
+    // ── Test 1: Cold session (no history) → floor reserve applies ──
+    const coldResult = await compositor.compose({
+      agentId,
+      sessionKey: 'agent:dynamic-reserve-test:webchat:main',
+      userMessage: 'Hello',
+      model: 'gpt-4o', // 128k window
+    }, db, libDb);
+
+    assert(coldResult.diagnostics !== undefined, 'Dynamic reserve: diagnostics present');
+    assert(coldResult.diagnostics.dynamicReserveActive === false,
+      `Dynamic reserve: cold session uses floor (active=false, got ${coldResult.diagnostics.dynamicReserveActive})`);
+    assert(coldResult.diagnostics.reserveFraction !== undefined,
+      'Dynamic reserve: reserveFraction present in diagnostics');
+    // Floor is 0.15 by default
+    assert(Math.abs(coldResult.diagnostics.reserveFraction - 0.15) < 0.01,
+      `Dynamic reserve: cold session floor=0.15 (got ${coldResult.diagnostics.reserveFraction})`);
+    assert(coldResult.diagnostics.sessionPressureHigh === false,
+      'Dynamic reserve: cold session not high pressure');
+
+    // ── Test 2: Heavy session (large messages) → dynamic reserve engages ──
+    // Seed 20 large user+assistant messages (~8k chars each ≈ 2k tokens each)
+    const heavyContent = 'x'.repeat(8000);
+    for (let i = 0; i < 20; i++) {
+      insertMsg.run(convId, agentId, i % 2 === 0 ? 'user' : 'assistant', heavyContent, i);
+    }
+
+    const heavyResult = await compositor.compose({
+      agentId,
+      sessionKey: 'agent:dynamic-reserve-test:webchat:main',
+      userMessage: 'Continue this work',
+      model: 'gpt-4o', // 128k window
+    }, db, libDb);
+
+    assert(heavyResult.diagnostics !== undefined, 'Dynamic reserve heavy: diagnostics present');
+    assert(heavyResult.diagnostics.avgTurnCostTokens !== undefined && heavyResult.diagnostics.avgTurnCostTokens > 0,
+      `Dynamic reserve heavy: avg_turn_cost > 0 (got ${heavyResult.diagnostics.avgTurnCostTokens})`);
+    // With 8k char messages (~2k tokens each), avg ≈ 2k, horizon=5 → safety=10k, 10k/128k ≈ 7.8%
+    // Still under the 15% floor, so dynamic won't engage here. Need heavier messages.
+    // Just verify diagnostics are populated correctly.
+    assert(heavyResult.diagnostics.reserveFraction >= 0.15,
+      `Dynamic reserve heavy: reserve >= floor (got ${heavyResult.diagnostics.reserveFraction})`);
+    assert(heavyResult.diagnostics.sessionPressureHigh !== undefined,
+      'Dynamic reserve heavy: sessionPressureHigh field present');
+
+    // ── Test 3: Very heavy session → dynamic > floor, engage ──
+    // Seed 20 more very large messages (~80k chars each ≈ 20k tokens each)
+    const veryHeavyContent = 'y'.repeat(80000);
+    for (let i = 20; i < 40; i++) {
+      insertMsg.run(convId, agentId, i % 2 === 0 ? 'user' : 'assistant', veryHeavyContent, i);
+    }
+
+    const veryHeavyResult = await compositor.compose({
+      agentId,
+      sessionKey: 'agent:dynamic-reserve-test:webchat:main',
+      userMessage: 'Continue with more analysis',
+      model: 'gpt-4o', // 128k window — avg_turn_cost ~20k, horizon=5 → safety=100k, 100k/128k=78% > max(50%)
+    }, db, libDb);
+
+    assert(veryHeavyResult.diagnostics !== undefined, 'Dynamic reserve very heavy: diagnostics present');
+    assert(veryHeavyResult.diagnostics.dynamicReserveActive === true,
+      `Dynamic reserve very heavy: active=true (got ${veryHeavyResult.diagnostics.dynamicReserveActive})`);
+    // Should be clamped at max=0.50 and SESSION_PRESSURE_HIGH emitted
+    assert(veryHeavyResult.diagnostics.reserveFraction <= 0.51,
+      `Dynamic reserve very heavy: clamped at max (got ${veryHeavyResult.diagnostics.reserveFraction})`);
+    assert(veryHeavyResult.diagnostics.sessionPressureHigh === true,
+      `Dynamic reserve very heavy: sessionPressureHigh=true (got ${veryHeavyResult.diagnostics.sessionPressureHigh})`);
+    assert(veryHeavyResult.warnings.some(w => w.includes('SESSION_PRESSURE_HIGH')),
+      `Dynamic reserve very heavy: SESSION_PRESSURE_HIGH in warnings (got [${veryHeavyResult.warnings.join(', ')}])`);
+  }
+
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
   await hm.redis.flushPrefix();

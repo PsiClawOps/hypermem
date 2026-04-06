@@ -86,18 +86,81 @@ const MODEL_CONTEXT_WINDOWS: Array<{ pattern: string; tokens: number }> = [
  * Default reserve: 25% (leaves 75% for input context).
  * Falls back to defaultTokenBudget if no model match.
  */
-function resolveModelBudget(model: string | undefined, defaultBudget: number, reserve = 0.25): number {
+function resolveModelBudget(model: string | undefined, defaultBudget: number, reserve = 0.15): number {
   if (!model) return defaultBudget;
   const normalized = model.toLowerCase();
   for (const entry of MODEL_CONTEXT_WINDOWS) {
     if (normalized.includes(entry.pattern)) {
-      // Reserve configurable fraction for output tokens + HyperMem overhead.
-      // 25% default gives agents headroom for large operations (reads, searches,
-      // long tool outputs) without hitting compaction triggers mid-task.
       return Math.floor(entry.tokens * (1 - reserve));
     }
   }
   return defaultBudget;
+}
+
+/**
+ * Resolve the raw context window size for a model (no reserve applied).
+ * Used as totalWindow for dynamic reserve calculation.
+ * Falls back to defaultBudget / 0.85 (reverse of 15% reserve default) if no match.
+ */
+function resolveModelWindow(model: string | undefined, defaultBudget: number): number {
+  if (!model) return Math.floor(defaultBudget / 0.85);
+  const normalized = model.toLowerCase();
+  for (const entry of MODEL_CONTEXT_WINDOWS) {
+    if (normalized.includes(entry.pattern)) {
+      return entry.tokens;
+    }
+  }
+  return Math.floor(defaultBudget / 0.85);
+}
+
+/**
+ * Compute dynamic context window reserve based on recent turn cost.
+ *
+ * Reserve = clamp(avg_turn_cost × horizon / totalWindow, base, max)
+ *
+ * Returns the reserve fraction and diagnostics. When dynamic reserve
+ * is clamped at max, sessionPressureHigh is set true so callers can
+ * emit a warning or trigger checkpointing.
+ */
+function computeDynamicReserve(
+  recentMessages: NeutralMessage[],
+  totalWindow: number,
+  config: CompositorConfig,
+): { reserve: number; avgTurnCost: number; dynamic: boolean; pressureHigh: boolean } {
+  const base = config.contextWindowReserve ?? 0.15;
+  const horizon = config.dynamicReserveTurnHorizon ?? 5;
+  const max = config.dynamicReserveMax ?? 0.50;
+  const enabled = config.dynamicReserveEnabled ?? true;
+
+  if (!enabled || recentMessages.length === 0 || totalWindow <= 0) {
+    return { reserve: base, avgTurnCost: 0, dynamic: false, pressureHigh: false };
+  }
+
+  // Sample the last 20 user+assistant messages for turn cost estimation.
+  // Tool messages are excluded — they're already compressed by the gradient
+  // and don't represent per-turn user intent cost.
+  const sample = recentMessages
+    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .slice(-20);
+
+  if (sample.length === 0) {
+    return { reserve: base, avgTurnCost: 0, dynamic: false, pressureHigh: false };
+  }
+
+  const totalCost = sample.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
+  const avgTurnCost = Math.floor(totalCost / sample.length);
+  const safetyTokens = avgTurnCost * horizon;
+  const dynamicFrac = safetyTokens / totalWindow;
+
+  if (dynamicFrac <= base) {
+    return { reserve: base, avgTurnCost, dynamic: false, pressureHigh: false };
+  }
+
+  if (dynamicFrac >= max) {
+    return { reserve: max, avgTurnCost, dynamic: true, pressureHigh: true };
+  }
+
+  return { reserve: dynamicFrac, avgTurnCost, dynamic: true, pressureHigh: false };
 }
 
 const DEFAULT_CONFIG: CompositorConfig = {
@@ -111,7 +174,10 @@ const DEFAULT_CONFIG: CompositorConfig = {
   keystoneHistoryFraction: 0.2,
   keystoneMaxMessages: 15,
   keystoneMinSignificance: 0.5,
-  contextWindowReserve: 0.25,
+  contextWindowReserve: 0.15,
+  dynamicReserveTurnHorizon: 5,
+  dynamicReserveMax: 0.50,
+  dynamicReserveEnabled: true,
 };
 
 // Tool gradient thresholds — controls how aggressively tool results are
@@ -518,8 +584,19 @@ export class Compositor {
   async compose(request: ComposeRequest, db: DatabaseSync, libraryDb?: DatabaseSync): Promise<ComposeResult> {
     const store = new MessageStore(db);
     const libDb = libraryDb || this.libraryDb;
-    const reserve = this.config.contextWindowReserve ?? 0.25;
-    const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget, reserve);
+
+    // Dynamic reserve: use a lightweight SQLite sample to estimate avg turn cost
+    // BEFORE assembling the full context. This gives us the reserve fraction we
+    // need to compute the effective token budget at the start of compose.
+    // Full history assembly happens later in the pipeline.
+    const totalWindow = resolveModelWindow(request.model, this.config.defaultTokenBudget);
+    const sampleConv = store.getConversation(request.sessionKey);
+    const sampleMessages: NeutralMessage[] = sampleConv
+      ? (store.getRecentMessages(sampleConv.id, 40) as NeutralMessage[])
+      : [];
+    const { reserve: dynamicReserve, avgTurnCost, dynamic: isDynamic, pressureHigh } =
+      computeDynamicReserve(sampleMessages, totalWindow, this.config);
+    const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget, dynamicReserve);
     let remaining = budget;
     const warnings: string[] = [];
     const slots: SlotTokenCounts = {
@@ -1352,7 +1429,17 @@ export class Compositor {
       zeroResultReason,
       retrievalMode: diagRetrievalMode,
       crossTopicKeystones: diagCrossTopicKeystones,
+      reserveFraction: dynamicReserve,
+      avgTurnCostTokens: avgTurnCost,
+      dynamicReserveActive: isDynamic,
+      sessionPressureHigh: pressureHigh,
     };
+
+    if (pressureHigh) {
+      warnings.push(`SESSION_PRESSURE_HIGH: avg_turn_cost=${avgTurnCost} tokens, dynamic reserve capped at ${Math.round(dynamicReserve * 100)}%`);
+    } else if (dynamicReserve > 0.40) {
+      console.info(`[hypermem:compositor] dynamic_reserve=${Math.round(dynamicReserve * 100)}% avg_turn_cost=${Math.round(avgTurnCost / 1000)}k horizon=${this.config.dynamicReserveTurnHorizon ?? 5}`);
+    }
 
     console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode} crossTopicKeystones=${diagCrossTopicKeystones}`);
     return {
@@ -1394,7 +1481,7 @@ export class Compositor {
     // large tool results can massively exceed the history budget allocation.
     // Warm budget uses the same reserve fraction as compose() so warm history
     // never pre-fills more than compose() would actually allow.
-    const reserve = this.config.contextWindowReserve ?? 0.25;
+    const reserve = this.config.contextWindowReserve ?? 0.15;
     const effectiveBudget = resolveModelBudget(opts?.model, this.config.defaultTokenBudget, reserve);
     const warmBudget = Math.floor(
       effectiveBudget * (this.config.warmHistoryBudgetFraction ?? 0.4)

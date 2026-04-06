@@ -287,6 +287,14 @@ export interface ComposeDiagnostics {
   retrievalMode: 'triggered' | 'fallback_knn' | 'fallback_fts' | 'none';
   /** Number of cross-topic keystone messages injected (P3.5) */
   crossTopicKeystones?: number;
+  /** Actual reserve fraction used this compose (base or dynamic) */
+  reserveFraction?: number;
+  /** Estimated average turn cost (tokens) used in dynamic reserve calc */
+  avgTurnCostTokens?: number;
+  /** True if dynamic reserve exceeded floor and is actively adjusting budget */
+  dynamicReserveActive?: boolean;
+  /** True if dynamic reserve was clamped at dynamicReserveMax and SESSION_PRESSURE_HIGH emitted */
+  sessionPressureHigh?: boolean;
 }
 
 export interface ComposeResult {
@@ -437,6 +445,24 @@ export interface CompositorConfig {
    * Previous default was 0.10 (10% reserve).
    */
   contextWindowReserve?: number;
+  /**
+   * Number of turns to project forward when computing dynamic reserve.
+   * safety_tokens = avg_turn_cost × dynamicReserveTurnHorizon
+   * Default: 5
+   */
+  dynamicReserveTurnHorizon?: number;
+  /**
+   * Hard ceiling on the dynamic reserve fraction. When the projected safety
+   * tokens would push reserve above this, SESSION_PRESSURE_HIGH is emitted
+   * in diagnostics and reserve is clamped here.
+   * Default: 0.50
+   */
+  dynamicReserveMax?: number;
+  /**
+   * Kill switch for dynamic reserve. Set false to use fixed contextWindowReserve only.
+   * Default: true
+   */
+  dynamicReserveEnabled?: boolean;
   /**
    * Fraction of history token budget to allocate for keystone (recalled older) messages.
    * Range: 0.0–0.5. Default: 0.2 (20% of history budget).
