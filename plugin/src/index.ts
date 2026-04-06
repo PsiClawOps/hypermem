@@ -623,15 +623,68 @@ function createHyperMemEngine(): ContextEngine {
           const trimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, trimBudget);
           if (trimmed > 0) {
             await hm.redis.invalidateWindow(agentId, sk);
+          }
+
+          // Also trim the messages array itself to match the budget.
+          // Redis trim clears the *next* turn's window. This turn's messages are
+          // still the full runtime array — if we return them unchanged at 94%,
+          // OpenClaw strips tool results before sending to the model regardless
+          // of what estimatedTokens says. We need to return a slimmer array now.
+          //
+          // Strategy: keep system/identity messages at the front, then fill from
+          // the back (most recent) until we hit trimBudget. Drop the middle.
+          let trimmedMessages = messages;
+          if (pressure > trimTarget) {
+            const msgArray = messages as unknown as Array<Record<string, unknown>>;
+            // Separate system messages (always keep) from conversation turns
+            const systemMsgs = msgArray.filter(m => m.role === 'system');
+            const convMsgs = msgArray.filter(m => m.role !== 'system');
+            // Fill from the back within budget
+            let budget = trimBudget;
+            // Reserve tokens for system messages
+            for (const sm of systemMsgs) {
+              const t = estimateTokens(typeof sm.textContent === 'string' ? sm.textContent : null)
+                + (Array.isArray(sm.content) ? (sm.content as Array<Record<string,unknown>>).reduce(
+                    (s: number, c: Record<string,unknown>) => s + estimateTokens(typeof c.text === 'string' ? c.text : null), 0) : 0);
+              budget -= t;
+            }
+            const kept: Array<Record<string, unknown>> = [];
+            for (let i = convMsgs.length - 1; i >= 0 && budget > 0; i--) {
+              const m = convMsgs[i];
+              const t = estimateTokens(typeof m.textContent === 'string' ? m.textContent : null)
+                + (m.toolCalls ? Math.ceil(JSON.stringify(m.toolCalls).length / 2) : 0)
+                + (m.toolResults ? Math.ceil(JSON.stringify(m.toolResults).length / 2) : 0)
+                + (Array.isArray(m.content) ? (m.content as Array<Record<string,unknown>>).reduce(
+                    (s: number, c: Record<string,unknown>) => s + estimateTokens(typeof c.text === 'string' ? c.text : null), 0) : 0);
+              if (budget - t >= 0) {
+                kept.unshift(m);
+                budget -= t;
+              }
+            }
+            const keptCount = convMsgs.length - kept.length;
+            if (keptCount > 0) {
+              console.log(
+                `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}% → ` +
+                `target=${(trimTarget * 100).toFixed(0)}% (redis=${trimmed} msgs, messages=${keptCount} dropped)`
+              );
+              trimmedMessages = [...systemMsgs, ...kept] as unknown as typeof messages;
+            } else if (trimmed > 0) {
+              console.log(
+                `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}% → ` +
+                `target=${(trimTarget * 100).toFixed(0)}% (redis=${trimmed} msgs)`
+              );
+            }
+          } else if (trimmed > 0) {
             console.log(
               `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}% → ` +
-              `target=${(trimTarget * 100).toFixed(0)}% (trimmed ${trimmed} msgs)`
+              `target=${(trimTarget * 100).toFixed(0)}% (redis=${trimmed} msgs)`
             );
           }
+
           const windowTokens = await estimateWindowTokens(hm, agentId, sk);
           const overhead = _overheadCache.get(sk) ?? getOverheadFallback();
           return {
-            messages: messages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
+            messages: trimmedMessages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
             estimatedTokens: windowTokens + overhead,
           };
         } catch {
