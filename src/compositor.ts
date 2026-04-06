@@ -171,6 +171,27 @@ function toolLabelFromCall(name: string, args: Record<string, unknown>): string 
   }
 }
 
+/**
+ * Strip OpenClaw's external-content security wrapper from tool results before truncation.
+ * web_fetch results are wrapped in <<<BEGIN_EXTERNAL_UNTRUSTED_CONTENT ... >>> blocks.
+ * That preamble consumes the entire head budget in truncateWithHeadTail, leaving only
+ * the security notice + last sentence visible — the actual body becomes the middle marker.
+ * Strip the wrapper first so truncation operates on the real content.
+ */
+function stripSecurityPreamble(content: string): string {
+  // Match: <<<BEGIN_EXTERNAL_UNTRUSTED_CONTENT id="...">\n...\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id="...">>>
+  // Strip opening tag line and closing tag line; keep the content between.
+  const stripped = content.replace(
+    /^[\s\S]*?<<<BEGIN_EXTERNAL_UNTRUSTED_CONTENT[^\n]*>>>?\n?/,
+    ''
+  ).replace(
+    /\n?<<<END_EXTERNAL_UNTRUSTED_CONTENT[^\n]*>>>?[\s\S]*$/,
+    ''
+  );
+  // If stripping removed everything or nearly everything, return original.
+  return stripped.trim().length > 20 ? stripped.trim() : content;
+}
+
 function truncateWithHeadTail(content: string, maxChars: number): string {
   if (content.length <= maxChars) return content;
   const tailBudget = Math.min(Math.floor(maxChars * 0.30), TOOL_GRADIENT_MAX_TAIL_CHARS);
@@ -260,7 +281,10 @@ function applyTierPayloadCap(msg: NeutralMessage, perResultCap: number, perTurnC
   const toolResults = msg.toolResults?.map(result => {
     let content = result.content ?? '';
     if (content.length > perResultCap) {
-      content = truncateWithHeadTail(content, perResultCap);
+      // Strip security preamble before truncation so it doesn't consume the head budget.
+      // web_fetch results wrapped in <<<EXTERNAL_UNTRUSTED_CONTENT>>> blocks would otherwise
+      // render the truncated result as: [security notice] + [middle marker] + [last line].
+      content = truncateWithHeadTail(stripSecurityPreamble(content), perResultCap);
     }
     return { ...result, content };
   }) ?? null;
@@ -1866,7 +1890,7 @@ export class Compositor {
       if (!convRow) return null;
 
       const conversationId = convRow.conversation_id;
-      const maxAgeHours = 720; // 30 days for recency scoring
+      const maxAgeHours = 168; // 7 days — tighter window gives recency real scoring weight
       const nowMs = Date.now();
 
       // Build episode significance map from libraryDb (episodes live there, not in messages.db).
@@ -2065,7 +2089,7 @@ export class Compositor {
     if (queryTerms.size === 0) return [];
 
     const nowMs = Date.now();
-    const maxAgeHours = 720; // 30 days, same as within-session keystones
+    const maxAgeHours = 168; // 7 days, same as within-session keystones
     const seenIds = new Set<number>();
     const allCandidates: ScoredKeystone[] = [];
 
