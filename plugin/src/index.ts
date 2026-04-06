@@ -790,15 +790,15 @@ function createHyperMemEngine(): ContextEngine {
           const isJsonlReplay = runtimeTokens > effectiveBudget * 0.80 && redisTokens < runtimeTokens * 0.20;
           let trimTarget: number;
           if (isJsonlReplay) {
-            trimTarget = 0.30; // EC1: cold Redis + hot JSONL = post-restart replay, need max headroom
+            trimTarget = 0.20; // EC1: cold Redis + hot JSONL = post-restart replay, need max headroom
           } else if (pressure > 0.85) {
-            trimTarget = 0.50;
+            trimTarget = 0.40; // critical: 60% headroom for incoming wave
           } else if (pressure > 0.80) {
-            trimTarget = 0.60;
+            trimTarget = 0.50; // high: 50% headroom
           } else if (pressure > 0.75) {
-            trimTarget = 0.65;
+            trimTarget = 0.55; // elevated: 45% headroom
           } else {
-            trimTarget = 0.80;
+            trimTarget = 0.65; // normal: 35% headroom (was 0.80 — too tight)
           }
 
           const trimBudget = Math.floor(effectiveBudget * trimTarget);
@@ -936,7 +936,7 @@ function createHyperMemEngine(): ContextEngine {
       // history window it can't fit. Uses 80% of budget as the trim ceiling
       // to leave room for system prompt, facts, and identity slots.
       try {
-        const trimBudget = Math.floor(effectiveBudget * 0.8);
+        const trimBudget = Math.floor(effectiveBudget * 0.65);
         const trimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, trimBudget);
         if (trimmed > 0) {
           // Invalidate window cache since history changed

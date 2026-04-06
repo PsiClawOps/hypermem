@@ -49,17 +49,25 @@ Tool Context Tuning compresses by turn age. T0 turns stay verbatim. T1 turns bec
 
 Long sessions drift. An agent deep in a database migration does not need deployment context from two hours ago competing for tokens.
 
-HyperMem detects topic shifts with heuristics: explicit subject changes, long gaps, entity overlap between recent turns. When a shift is detected, history scopes to the active topic. Past context does not disappear — cross-topic keystone retrieval pulls high-signal moments back in when they are relevant.
+HyperMem detects topic shifts with heuristics: explicit subject changes, long gaps, entity overlap between recent turns. When a shift is detected, history scopes to the active topic. Past context does not disappear — **keystone retrieval** pulls high-signal moments back in when they are relevant. Keystone scoring weighs turn age and content density: decisions, artifact references, and conclusions surface regardless of how many sessions ago they happened.
 
 ### Knowledge that outlasts the conversation
 
 Most memory systems store what was said. HyperMem synthesizes what was learned.
 
-When a topic goes quiet, HyperMem compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. No LLM call required — content classifiers do the extraction from stored messages. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay. The conversation is gone. The knowledge it produced is not.
+When a topic goes quiet, HyperMem compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. This is classifier-driven — no LLM call required. Facts, episodes, and preferences written explicitly during the session are available immediately in structured storage. Per-turn automatic extraction from raw conversation text is on the roadmap. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay. The conversation is gone. The knowledge it produced is not.
 
-### Topics as first-class sessions
+### Virtual Sessions
 
-When a new topic takes over, the agent doesn't just detect the shift — it switches. Topic-scoped Redis warming loads only the relevant context for the active thread. Switching back restores that context cleanly. Natural language cues trigger transitions; ambiguous shifts get a soft confirmation before committing. Each topic is its own coherent working context, searchable across the fleet.
+Most memory systems treat a session as one flat stream. Long conversations drift — early context is trimmed, recent context dominates, and subject shifts create a blurry mix of conflicting state.
+
+HyperMem makes topics first-class. When a new subject takes over, the agent switches into a scoped context: its own Redis warming, its own history window, its own keystone set. Switching back restores that context cleanly. Natural language cues trigger transitions; ambiguous shifts get a soft confirmation before committing. Each topic behaves like its own isolated working session — searchable across the fleet, but focused in the window. These topic-scoped contexts are **Virtual Sessions** — each maintains its own Redis warming state, history window, and document index alongside the main session.
+
+### History that remembers its highlights
+
+Context trimming is a blunt instrument. When a session fills up, recent messages survive and old ones go — regardless of which turns actually mattered. A decision from three hours ago gets dropped. Tool noise from five minutes ago stays.
+
+HyperMem scores turns for significance as they are recorded. High-signal moments — decisions, blockers, artifacts, established facts — are marked as keystones. When pressure trims the history window, keystones are preserved ahead of ordinary turns. When a topic shift occurs and history scopes to the new thread, keystones from past contexts are still eligible for recall — the agent keeps its landmarks even when the surrounding conversation is gone.
 
 ### Subagents that hit the ground running
 
@@ -100,6 +108,17 @@ If you see `tool-loop trim` lines, the machinery is running. If results are stil
 4. **Tune** tool-heavy history by turn age so old payloads don't crowd out current work.
 5. **Compile** stale topics into structured wiki pages for future recall without raw history replay.
 6. **Carry forward** scoped context into subagents when a task needs a narrower working set.
+
+### What runs automatically
+
+No configuration required for any of these:
+
+- **Background indexer** — indexes each session's turns for semantic recall after activity drops off
+- **Topic synthesis** — compiles stale topics into structured wiki pages (classifier-driven, no LLM call)
+- **Noise sweep** — removes low-signal or expired facts on a rolling basis
+- **Tool decay** — compresses older tool history to free budget for current work
+- **Proactive embedding** — pre-embeds new content so compose calls hit cache on subsequent turns
+- **Keystone scoring** — evaluates each recorded turn for historical significance; high-signal turns are marked for preservation ahead of ordinary history during pressure trimming
 
 ---
 
@@ -144,7 +163,9 @@ HyperMem plugs into OpenClaw as a context engine and owns the full prompt compos
 | System Registry | Service state and lifecycle |
 | Work Items | Work queue with status transitions and FTS5 |
 | Session Registry | Session lifecycle tracking |
-| Desired State | Per-agent config targets with automatic drift detection |
+| Desired State | Per-agent config targets; compares running config against desired at gateway startup and surfaces drift for operator review |
+
+**Secret scanner** — Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, HyperMem scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected — the write succeeds without the content reaching fleet-visible storage.
 
 **The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and assembles a provider-format context block. A safety valve catches estimation drift and trims post-assembly. Because the budget is computed from the model's actual context window at compose time, a mid-session model swap is absorbed on the next turn with no manual intervention.
 
@@ -161,7 +182,7 @@ Full guide: **[INSTALL.md](./INSTALL.md)**
 ### Manual quick path
 
 ```bash
-git clone https://github.com/PsiClawOps/hypermem-internal.git ~/.openclaw/workspace/repo/hypermem
+git clone https://github.com/PsiClawOps/hypermem.git ~/.openclaw/workspace/repo/hypermem
 cd ~/.openclaw/workspace/repo/hypermem
 npm install && npm run build
 npm --prefix plugin install && npm --prefix plugin run build
@@ -247,9 +268,9 @@ const spawn = await buildSpawnContext(
 
 ## Known limits
 
-**Global-scope fact writes trust the caller.** Fine for single-operator alpha. Not safe for untrusted multi-tenant deployments. Write authorization is on the roadmap before any multi-tenant release.
+**Global-scope fact writes trust the caller.** The fleet registry, tier-aware composition, and cross-agent knowledge queries are all production. The specific gap: global-scope facts can be written by any agent with API access without authorization checks. Fine for single-operator deployments. Add write authorization controls before any multi-operator environment with untrusted agents — that is the one roadmap item blocking multi-tenant release, not the multi-agent story broadly.
 
-**Full per-turn fact extraction is a future step.** Proactive passes (noise sweep, tool decay) are production. Per-turn LLM-driven fact and episode extraction from live conversations is a follow-on.
+**Automatic per-turn fact extraction is a future step.** Topic synthesis (classifier-driven wiki pages), noise sweep, and tool decay all run automatically. Per-turn LLM-driven extraction of facts and episodes from raw conversation text is a follow-on. Facts and episodes available today are those written explicitly during the session.
 
 **Embedding model hot-swap is not yet implemented.** Current default is `nomic-embed-text`.
 
@@ -271,14 +292,17 @@ Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 
 ## Roadmap
 
-- [x] Compiled knowledge synthesis
-- [x] Virtual Sessions
-- [x] Live org registry
-- [x] Budget downshift reshape (adaptive budget allocation under context pressure)
-- [x] Migration guide and scripts for existing OpenClaw sessions
-- [x] Nuclear compaction path (saturated session recovery)
-- [x] Pressure-tiered tool-loop trim + messages[] trimming (ingestion wave prevention)
-- [x] Runtime-baseline pressure measurement (post-restart accuracy)
+- [x] Compiled knowledge synthesis — classifier-driven topic wiki pages; no LLM required
+- [x] Virtual Sessions — topic-scoped context isolation with independent Redis warming per thread
+- [x] Keystone history — significance scoring for recorded turns; preserved through pressure trimming and topic switches
+- [x] Live org registry — fleet agent registry with tier, org, and capability metadata in L4
+- [x] Budget downshift reshape — compositor adapts to smaller context window on the next turn after a model switch, no manual intervention
+- [x] Migration guide and scripts — dry-run-first migrations from OpenClaw built-in, ClawText, Mem0, Honcho, QMD, and Engram
+- [x] Nuclear compaction path — deep trim + JSONL truncation for sessions at ≥85% pressure
+- [x] Pressure-tiered tool-loop trim — measures runtime pressure before tool results land; trims both Redis and messages[] to prevent stripping on the current turn
+- [x] Runtime-baseline pressure measurement — accurate pressure signal after gateway restart when Redis is cold but JSONL is large
+- [x] Image pressure tracking — base64 image parts counted in pressure estimation, not silently omitted
+- [x] Tool result gradient on tool-loop path — large tool results compressed on every turn, not just during full compose
 - [ ] Versioned atomic re-indexing
 - [ ] `hypermem seed --workspace` CLI
 - [ ] Embedding model hot-swap
