@@ -4,11 +4,11 @@
 
 Direct raw-provider probes against the ChatGPT Codex responses path show that the backend limit is model-specific.
 
-| Model | OpenClaw default via `openai-codex` | Enforced subscription/AI | First fail approx | Probed |
-|---|---:|---|---:|---:|
-| `gpt-5.4` | `1,050k` | ChatGPT/Codex subscription path, raw AI backend enforced at about `921k` | `922k` | `921k` |
-| `gpt-5.4-mini` | `272k` | ChatGPT/Codex subscription path, raw AI backend enforced at about `271k` | `272k` | `271k` |
-| `gpt-5.3-codex` | `272k` | ChatGPT/Codex subscription path, raw AI backend enforced at about `271k` | `272k` | `271k` |
+| Model | OpenClaw default | Enforced Sub/API | First fail | Probed |
+|---|---:|---:|---:|---:|
+| `gpt-5.4` | `266k` | `~921k` | `922k` | `921k` |
+| `gpt-5.4-mini` | `266k` | `~271k` | `272k` | `271k` |
+| `gpt-5.3-codex` | `272k` | `~271k` | `272k` | `271k` |
 
 ## What this answers
 
