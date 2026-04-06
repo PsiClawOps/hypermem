@@ -758,7 +758,20 @@ function createHyperMemEngine(): ContextEngine {
                   return s + estimateTokens(typeof part.text === 'string' ? part.text : null);
                 }, 0)
               : 0;
-            return sum + textCost + toolCallCost + toolResultCost + contentCost;
+            // Count image parts — base64 images are large and invisible to the text estimator
+            const imageCost = Array.isArray(msg.content)
+              ? (msg.content as unknown[]).reduce((s: number, c: unknown) => {
+                  const part = c as Record<string, unknown>;
+                  if (part.type === 'image' || part.type === 'image_url') {
+                    const src = (part.source as Record<string, unknown> | undefined)?.data;
+                    const url = (part.image_url as Record<string, unknown> | undefined)?.url as string | undefined;
+                    const dataStr = typeof src === 'string' ? src : (typeof url === 'string' ? url : '');
+                    return s + Math.ceil(dataStr.length / 3); // base64 ~1.33x bytes, ~1 token/4 bytes
+                  }
+                  return s;
+                }, 0)
+              : 0;
+            return sum + textCost + toolCallCost + toolResultCost + contentCost + imageCost;
           }, 0);
           // Redis window is a useful cross-check; use whichever is higher so we never
           // underestimate when Redis is ahead of the runtime snapshot.
@@ -808,6 +821,20 @@ function createHyperMemEngine(): ContextEngine {
             // Separate system messages (always keep) from conversation turns
             const systemMsgs = msgArray.filter(m => m.role === 'system');
             const convMsgs = msgArray.filter(m => m.role !== 'system');
+            // Pre-process: inline-truncate large tool results before budget-fill drop.
+            // A message with a 40k-token tool result that barely misses budget gets dropped
+            // entirely. Replacing with a placeholder keeps the turn's metadata in context
+            // while freeing the bulk of the tokens.
+            const MAX_INLINE_TOOL_CHARS = 2000; // ~500 tokens
+            const processedConvMsgs = convMsgs.map(m => {
+              if (!m.toolResults) return m;
+              const resultStr = JSON.stringify(m.toolResults);
+              if (resultStr.length <= MAX_INLINE_TOOL_CHARS) return m;
+              return {
+                ...m,
+                toolResults: [{ type: 'text', text: `[tool result truncated: ${Math.ceil(resultStr.length / 4)} tokens]` }],
+              };
+            });
             // Fill from the back within budget
             let budget = trimBudget;
             // Reserve tokens for system messages
@@ -818,8 +845,8 @@ function createHyperMemEngine(): ContextEngine {
               budget -= t;
             }
             const kept: Array<Record<string, unknown>> = [];
-            for (let i = convMsgs.length - 1; i >= 0 && budget > 0; i--) {
-              const m = convMsgs[i];
+            for (let i = processedConvMsgs.length - 1; i >= 0 && budget > 0; i--) {
+              const m = processedConvMsgs[i];
               const t = estimateTokens(typeof m.textContent === 'string' ? m.textContent : null)
                 + (m.toolCalls ? Math.ceil(JSON.stringify(m.toolCalls).length / 2) : 0)
                 + (m.toolResults ? Math.ceil(JSON.stringify(m.toolResults).length / 2) : 0)
@@ -830,7 +857,7 @@ function createHyperMemEngine(): ContextEngine {
                 budget -= t;
               }
             }
-            const keptCount = convMsgs.length - kept.length;
+            const keptCount = processedConvMsgs.length - kept.length;
             if (keptCount > 0) {
               console.log(
                 `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}%${isJsonlReplay ? ' [jsonl-replay]' : ''} → ` +
@@ -848,6 +875,20 @@ function createHyperMemEngine(): ContextEngine {
               `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}% → ` +
               `target=${(trimTarget * 100).toFixed(0)}% (redis=${trimmed} msgs)`
             );
+          }
+
+          // Apply tool gradient to compress large tool results before returning.
+          // The full compose path runs applyToolGradientToWindow during reshaping;
+          // the tool-loop path was previously skipping this, leaving a 40k-token
+          // web_search result uncompressed every turn.
+          try {
+            const gradientApplied = applyToolGradientToWindow(
+              trimmedMessages as unknown as NeutralMessage[],
+              trimBudget
+            );
+            trimmedMessages = gradientApplied as unknown as typeof trimmedMessages;
+          } catch {
+            // Non-fatal: if gradient fails, continue with untouched trimmedMessages
           }
 
           const windowTokens = await estimateWindowTokens(hm, agentId, sk);
