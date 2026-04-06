@@ -393,11 +393,21 @@ function toNeutralMessage(msg: InboundMessage): NeutralMessage {
   } else if (contentBlockToolCalls.length > 0) {
     toolCalls = contentBlockToolCalls;
   }
-  const toolResults: NeutralToolResult[] | null = (msg.role === 'tool' || msg.role === 'tool_result')
-    ? (msg.content as unknown as NeutralToolResult[] | null) ?? null
-    : null;
+  // OpenClaw uses role 'toolResult' (camelCase). Support all three spellings.
+  const isToolResultMsg = msg.role === 'tool' || msg.role === 'tool_result' || msg.role === 'toolResult';
 
-  const role = msg.role === 'tool' || msg.role === 'tool_result'
+  // When the message is a tool result, wrap textContent as a single NeutralToolResult so the
+  // gradient can compress it. The flat content was already extracted into textContent above;
+  // do NOT also leave it in textContent or it counts double.
+  let toolResults: NeutralToolResult[] | null = null;
+  if (isToolResultMsg && textContent) {
+    const toolCallId = (msg.tool_call_id as string) ?? (msg.toolCallId as string) ?? 'unknown';
+    const toolName   = (msg.name as string)         ?? (msg.toolName as string)   ?? 'tool';
+    toolResults  = [{ callId: toolCallId, name: toolName, content: textContent }];
+    textContent  = null;  // owned by toolResults now, not duplicated in textContent
+  }
+
+  const role = msg.role === 'tool' || msg.role === 'tool_result' || msg.role === 'toolResult'
     ? 'assistant'  // Tool results are part of the assistant turn in our model
     : (msg.role as 'user' | 'assistant' | 'system');
 
