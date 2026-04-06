@@ -45,17 +45,84 @@ export interface EvictionResult {
 }
 
 export const DEFAULT_EVICTION_CONFIG: ImageEvictionConfig = {
-  imageAgeTurns: 2,
+  imageAgeTurns: 1,
   toolResultAgeTurns: 4,
   minTokensToEvict: 200,
   keepPreviewChars: 120,
 };
 
-// ── Rough token estimation ────────────────────────────────────────────────────
+// ── Token estimation ─────────────────────────────────────────────────────────
 
-/** Base64 strings are ~0.75 bytes/char but tokens are ~4 chars — net ~3 chars/token for dense base64. */
+/**
+ * Attempt to read image dimensions from the first few bytes of a base64-encoded image.
+ * Supports PNG, JPEG, GIF, WebP. Returns null if format is unrecognized or parse fails.
+ */
+function tryReadImageDimensions(base64: string): { width: number; height: number } | null {
+  try {
+    // PNG: decode 32 bytes — magic at 0-7, IHDR at 8-15, width at 16-19, height at 20-23
+    const hdrBuf = Buffer.from(base64.slice(0, 44), 'base64');
+
+    if (hdrBuf[0] === 0x89 && hdrBuf[1] === 0x50 && hdrBuf[2] === 0x4e && hdrBuf[3] === 0x47) {
+      const w = hdrBuf.readUInt32BE(16);
+      const h = hdrBuf.readUInt32BE(20);
+      if (w > 0 && h > 0 && w <= 16384 && h <= 16384) return { width: w, height: h };
+    }
+
+    // GIF: 6-byte header, then width/height as little-endian 16-bit at offsets 6-7, 8-9
+    if (hdrBuf[0] === 0x47 && hdrBuf[1] === 0x49 && hdrBuf[2] === 0x46) {
+      const w = hdrBuf.readUInt16LE(6);
+      const h = hdrBuf.readUInt16LE(8);
+      if (w > 0 && h > 0) return { width: w, height: h };
+    }
+
+    // JPEG: SOI is \xff\xd8 — scan a larger chunk for SOF0 (\xff\xc0) or SOF2 (\xff\xc2)
+    if (hdrBuf[0] === 0xff && hdrBuf[1] === 0xd8) {
+      const jpegBuf = Buffer.from(base64.slice(0, 680), 'base64');
+      for (let i = 2; i < jpegBuf.length - 8; i++) {
+        if (jpegBuf[i] === 0xff && (jpegBuf[i + 1] === 0xc0 || jpegBuf[i + 1] === 0xc2)) {
+          const h = jpegBuf.readUInt16BE(i + 5);
+          const w = jpegBuf.readUInt16BE(i + 7);
+          if (w > 0 && h > 0 && w <= 16384 && h <= 16384) return { width: w, height: h };
+        }
+      }
+    }
+
+    // WebP: RIFF....WEBP — VP8L (lossless) has readable dimensions quickly
+    if (
+      hdrBuf[0] === 0x52 && hdrBuf[1] === 0x49 && hdrBuf[2] === 0x46 && hdrBuf[3] === 0x46 &&
+      hdrBuf[8] === 0x57 && hdrBuf[9] === 0x45 && hdrBuf[10] === 0x42 && hdrBuf[11] === 0x50 &&
+      hdrBuf[12] === 0x56 && hdrBuf[13] === 0x50 && hdrBuf[14] === 0x38 && hdrBuf[15] === 0x4c
+    ) {
+      if (hdrBuf[20] === 0x2f) {
+        const bits = hdrBuf.readUInt32LE(21);
+        const w = (bits & 0x3fff) + 1;
+        const h = ((bits >> 14) & 0x3fff) + 1;
+        if (w > 0 && h > 0) return { width: w, height: h };
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Estimate virtual tokens for a base64-encoded image using provider-appropriate math.
+ * Uses Claude's formula (w×h / 750, capped at 1600) as the canonical estimate —
+ * GPT-4o and Gemini are in the same ballpark for typical screenshots.
+ * Falls back to a conservative 1200-token default when dimensions cannot be read.
+ *
+ * NOTE: Base64 string length is irrelevant — providers decode the image and run it
+ * through a vision encoder. Only pixel dimensions determine token cost.
+ */
 function estimateBase64Tokens(base64: string): number {
-  return Math.ceil(base64.length / 3);
+  const dims = tryReadImageDimensions(base64);
+  if (dims) {
+    return Math.min(Math.ceil((dims.width * dims.height) / 750), 1600);
+  }
+  // Fallback: typical tool screenshot ~1000-1600 tokens; use midpoint
+  return 1200;
 }
 
 /** Standard prose/JSON estimation. */
@@ -169,7 +236,9 @@ export function evictStaleContent(
 
         // Replace with a text descriptor
         const mediaType = inferMediaType(b);
-        const descriptor = `[${mediaType} evicted — ~${tokens.toLocaleString()} tokens, ${turnAge} turns ago]`;
+        const dims = tryReadImageDimensions(base64);
+        const dimStr = dims ? ` ${dims.width}×${dims.height}` : '';
+        const descriptor = `[${mediaType}${dimStr} evicted — ~${tokens.toLocaleString()} tokens, ${turnAge} turns ago]`;
         stats.imagesEvicted++;
         stats.tokensFreed += tokens;
         changed = true;

@@ -119,13 +119,15 @@ describe('evictStaleContent', () => {
       assert.equal(messages[0].content[0].type, 'image_url');
     });
 
-    it('does NOT evict small base64 images below minTokensToEvict', () => {
-      const smallBase64 = fakeBase64(50); // only ~50 tokens
+    it('does NOT evict images below minTokensToEvict', () => {
+      // With the virtual-token estimator, unrecognized headers fall back to ~1200 tokens.
+      // Use a minTokensToEvict above that fallback to verify the threshold gate still works.
+      const smallBase64 = fakeBase64(50);
       const msgs = [
         imageMsg('user', smallBase64),
         assistantMsg('r1'), assistantMsg('r2'), assistantMsg('r3'),
       ];
-      const { stats } = evictStaleContent(msgs, { imageAgeTurns: 2, minTokensToEvict: 200 });
+      const { stats } = evictStaleContent(msgs, { imageAgeTurns: 2, minTokensToEvict: 2000 });
       assert.equal(stats.imagesEvicted, 0);
     });
   });
@@ -252,7 +254,7 @@ describe('evictStaleContent', () => {
 
   describe('DEFAULT_EVICTION_CONFIG', () => {
     it('has expected defaults', () => {
-      assert.equal(DEFAULT_EVICTION_CONFIG.imageAgeTurns, 2);
+      assert.equal(DEFAULT_EVICTION_CONFIG.imageAgeTurns, 1);
       assert.equal(DEFAULT_EVICTION_CONFIG.toolResultAgeTurns, 4);
       assert.equal(DEFAULT_EVICTION_CONFIG.minTokensToEvict, 200);
       assert.equal(DEFAULT_EVICTION_CONFIG.keepPreviewChars, 120);
