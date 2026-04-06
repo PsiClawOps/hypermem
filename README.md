@@ -69,6 +69,29 @@ Spawned subagents start cold. They don't know what the parent was doing, which f
 
 ---
 
+## Pressure management
+
+HyperMem assembles context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript and Redis window. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
+
+| Path | Trigger | Action |
+|---|---|---|
+| **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures runtime pressure before results land. >85%: trims to 50% budget. >80%: 60%. >75%: 65%. Also trims the messages[] array returned to the runtime — this is what actually prevents stripping on the current turn, not just the next one |
+| **AfterTurn trim** | Every turn at >80% | Pre-emptive headroom cut after the assistant replies, before the next turn arrives |
+| **Nuclear compaction** | compact() at >85% | Cuts Redis to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
+| **Density-aware JSONL truncation** | compact() | Counts tokens per message, not message count — catches large-message sessions that looked "fine" by count but were full by volume |
+
+**The one thing these paths cannot fix:** a session whose JSONL transcript on disk is already at 98% when the gateway restarts. The JSONL loads into runtime context before any compaction runs. If your pre-restart session was large, you start at whatever pressure that JSONL represents. Check `session_status` immediately on startup. If you're above 85%, start a fresh session — don't attempt tool work.
+
+**Pressure telemetry in logs:**
+```
+[hypermem-plugin] tool-loop trim: pressure=91.3% → target=50% (redis=43 msgs, messages=67 dropped)
+[hypermem-plugin] compact: NUCLEAR — session at 118400/128000 tokens (92% full), deep-trimmed...
+```
+
+If you see `tool-loop trim` lines, the machinery is running. If results are still stripped after that log line appears, the session was past the recovery threshold before the trim ran — start fresh.
+
+---
+
 ## How it works
 
 1. **Record** each turn into SQLite and mirror hot session state into Redis.
@@ -253,6 +276,9 @@ Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 - [x] Live org registry
 - [x] Budget downshift reshape (adaptive budget allocation under context pressure)
 - [x] Migration guide and scripts for existing OpenClaw sessions
+- [x] Nuclear compaction path (saturated session recovery)
+- [x] Pressure-tiered tool-loop trim + messages[] trimming (ingestion wave prevention)
+- [x] Runtime-baseline pressure measurement (post-restart accuracy)
 - [ ] Versioned atomic re-indexing
 - [ ] `hypermem seed --workspace` CLI
 - [ ] Embedding model hot-swap
