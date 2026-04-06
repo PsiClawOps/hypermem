@@ -67,6 +67,18 @@ let _generateEmbeddings: ((texts: string[]) => Promise<Float32Array[]>) | null =
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _taskFlowRuntime: any | null = null;
 
+// ─── Eviction config cache ────────────────────────────────────
+// Populated from user config during HyperMem init. Stored here so
+// assemble() (which can't await loadUserConfig) can read it without
+// re-reading disk on every turn.
+let _evictionConfig: {
+  enabled?: boolean;
+  imageAgeTurns?: number;
+  toolResultAgeTurns?: number;
+  minTokensToEvict?: number;
+  keepPreviewChars?: number;
+} | undefined;
+
 // ─── System overhead cache ────────────────────────────────────
 // Caches the non-history token cost (contextBlock + runtime system prompt)
 // from the last full compose per session key. Used in tool-loop turns to
@@ -150,6 +162,10 @@ async function getHyperMem(): Promise<HyperMemInstance> {
 
     // Load optional user config — compositor tuning overrides
     const userConfig = await loadUserConfig();
+
+    // Cache eviction config at module scope so assemble() can read it
+    // synchronously without re-reading disk on every turn.
+    _evictionConfig = userConfig.eviction ?? {};
 
     const instance = await HyperMem.create({
       dataDir: path.join(os.homedir(), '.openclaw/hypermem'),
@@ -704,7 +720,7 @@ function createHyperMemEngine(): ContextEngine {
           // Evict stale image payloads and large tool results before measuring
           // pressure. This frees tokens without compaction — images alone can
           // account for 30%+ of context from a single screenshot 2 turns ago.
-          const evictionCfg = userConfig?.eviction;
+          const evictionCfg = _evictionConfig;
           const evictionEnabled = evictionCfg?.enabled !== false;
           let workingMessages: unknown[] = messages;
           if (evictionEnabled) {

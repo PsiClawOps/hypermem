@@ -154,7 +154,7 @@ export function evictStaleContent(
 
     // ── Image eviction (user messages with content arrays) ──────────────────
     if (role === 'user' && Array.isArray(m.content)) {
-      if (turnAge < cfg.imageAgeTurns) return msg;
+      if (turnAge <= cfg.imageAgeTurns) return msg;
 
       let changed = false;
       let newContent = (m.content as unknown[]).map(block => {
@@ -182,7 +182,7 @@ export function evictStaleContent(
 
     // ── Tool result eviction (tool-role messages or toolResults arrays) ──────
     if (role === 'tool' && typeof m.content === 'string') {
-      if (turnAge < cfg.toolResultAgeTurns) return msg;
+      if (turnAge <= cfg.toolResultAgeTurns) return msg;
 
       const tokens = estimateTokens(m.content);
       if (tokens < cfg.minTokensToEvict) return msg;
@@ -196,7 +196,7 @@ export function evictStaleContent(
     }
 
     // NeutralMessage format — toolResults as array on assistant/user messages
-    if (Array.isArray(m.toolResults) && turnAge >= cfg.toolResultAgeTurns) {
+    if (Array.isArray(m.toolResults) && turnAge > cfg.toolResultAgeTurns) {
       let changed = false;
       const newToolResults = (m.toolResults as unknown[]).map(tr => {
         const r = tr as Record<string, unknown>;
