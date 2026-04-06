@@ -533,7 +533,39 @@ function createHyperMemEngine(): ContextEngine {
         }
 
         // Cold start: warm Redis with the session — pre-loads history + slots
-        const warmPromise = hm.warm(agentId, sk).finally(() => {
+        // CRIT-002: Load identity block (SOUL.md + IDENTITY.md + MOTIVATIONS.md)
+        // and pass into warm() so the compositor identity slot is populated.
+        // Previously opts.identity was always undefined — the slot was allocated
+        // but always empty. Non-fatal: missing files are silently skipped.
+        let identityBlock: string | undefined;
+        try {
+          // Council agents live at workspace-council/<agentId>/
+          // Other agents at workspace/<agentId>/ — try council path first
+          const homedir = os.homedir();
+          const councilPath = path.join(homedir, '.openclaw', 'workspace-council', agentId);
+          const workspacePath = path.join(homedir, '.openclaw', 'workspace', agentId);
+          let wsPath = councilPath;
+          try {
+            await fs.access(councilPath);
+          } catch {
+            wsPath = workspacePath;
+          }
+          const identityFiles = ['SOUL.md', 'IDENTITY.md', 'MOTIVATIONS.md', 'STYLE.md'];
+          const parts: string[] = [];
+          for (const fname of identityFiles) {
+            try {
+              const content = await fs.readFile(path.join(wsPath, fname), 'utf-8');
+              if (content.trim()) parts.push(content.trim());
+            } catch {
+              // File absent — skip silently
+            }
+          }
+          if (parts.length > 0) identityBlock = parts.join('\n\n');
+        } catch {
+          // Identity load is best-effort — never block bootstrap on this
+        }
+
+        const warmPromise = hm.warm(agentId, sk, identityBlock ? { identity: identityBlock } : undefined).finally(() => {
           _warmInFlight.delete(inflightKey);
         });
         _warmInFlight.set(inflightKey, warmPromise);

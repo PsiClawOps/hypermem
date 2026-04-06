@@ -1528,7 +1528,16 @@ export class Compositor {
     if (allowed.length === 0) return [null, 0, filteredCount];
 
     const content = allowed
-      .map(r => `- [${r.domain || 'general'}] ${r.content}`)
+      .map(r => {
+        // Session attribution: label facts from a different session so the model
+        // can distinguish current-session context from cross-session facts.
+        // Shows last 8 chars of session key as a stable short identifier.
+        const fromOtherSession = r.sessionKey && r.sessionKey !== sessionKey;
+        const sessionSuffix = fromOtherSession
+          ? `, session:${r.sessionKey!.slice(-8)}`
+          : '';
+        return `- [${r.domain || 'general'}${sessionSuffix}] ${r.content}`;
+      })
       .join('\n');
 
     return [content, allowed.length, filteredCount];
