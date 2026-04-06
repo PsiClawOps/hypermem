@@ -4,11 +4,11 @@
 
 Direct raw-provider probes against the ChatGPT Codex responses path show that the backend limit is model-specific.
 
-| Model | Max approx accepted/completed | First fail approx | Notes |
-|---|---:|---:|---|
-| `gpt-5.4` | `921k` | `922k` | completion-confirmed near boundary |
-| `gpt-5.4-mini` | `271k` | `272k` | request-acceptance boundary on raw path |
-| `gpt-5.3-codex` | `271k` | `272k` | request-acceptance boundary on raw path |
+| Model | OpenClaw default via `openai-codex` | Enforced subscription/AI | First fail approx | Probed |
+|---|---:|---|---:|---:|
+| `gpt-5.4` | `1,050k` | ChatGPT/Codex subscription path, raw AI backend enforced at about `921k` | `922k` | `921k` |
+| `gpt-5.4-mini` | `272k` | ChatGPT/Codex subscription path, raw AI backend enforced at about `271k` | `272k` | `271k` |
+| `gpt-5.3-codex` | `272k` | ChatGPT/Codex subscription path, raw AI backend enforced at about `271k` | `272k` | `271k` |
 
 ## What this answers
 
@@ -25,15 +25,9 @@ These tests were done against the raw provider path, not the OpenClaw gateway/mo
 - Auth: provider-owned OAuth profile used by OpenClaw
 - Transport: `stream=true` SSE
 
-## Method
-
 Input load was generated with repeated minimal text (`"a "`) to approximate token count while minimizing output complexity.
 
-Interpretation rules:
-- `gpt-5.4`: near-boundary values were treated as success only when completion was observed.
-- `gpt-5.4-mini` and `gpt-5.3-codex`: treated as accepted when request creation succeeded without explicit streaming error, and failed when explicit error/event failure appeared.
-
-This means the `gpt-5.4` number is the strongest result of the three. The other two are still good operational boundaries, but with slightly weaker evidence than full completion confirmation.
+`gpt-5.4` was completion-confirmed near the boundary. `gpt-5.4-mini` and `gpt-5.3-codex` were treated as accepted when request creation succeeded without explicit streaming error, and failed when explicit error/event failure appeared.
 
 ## Boundary detail
 
