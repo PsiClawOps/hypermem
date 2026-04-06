@@ -111,3 +111,55 @@ Gate: additional plugins exist that need CI coverage.
 
 Housekeeping. Archive the first full council round from all council workspaces.
 Low memory impact now that HyperMem owns storage. Can be batched as a one-time run.
+
+---
+
+## D-007: Obsidian Vault Integration
+
+**Status:** 🟡 DEFERRED — target v0.5.0  
+**Added:** 2026-04-06  
+**Requested by:** ragesaq  
+
+### What
+
+Two-way sync between HyperMem's knowledge/fact stores and an Obsidian vault directory.
+Agents can read from the vault as a knowledge source and write back structured knowledge
+as Obsidian markdown notes with YAML frontmatter.
+
+### Shape (rough)
+
+**Ingest direction (vault → HyperMem):**
+- Watch a configured vault directory for `.md` file changes
+- Parse frontmatter (`tags`, `type`, `domain`, `confidence`, `visibility`) to map to
+  `knowledge` or `fact` table entries
+- Body text becomes the `content` field
+- File mtime used as `source_ref` for versioning
+- Configurable watch glob (e.g. `memory/**/*.md`, `decisions/*.md`)
+
+**Writeback direction (HyperMem → vault):**
+- `exportKnowledge(domain)` serializes knowledge entries as Obsidian-formatted `.md`
+- YAML frontmatter includes `hypermem_id`, `agent_id`, `confidence`, `visibility`
+- Optional: populate `[[wikilinks]]` from knowledge graph links (supports/contradicts/related)
+- Triggered manually or by an `afterTurn` hook if writeback is enabled
+
+### Implementation plan
+
+1. Add `VaultConfig` to `HyperMemConfig` (optional, off by default):
+   `{ path: string; watchGlob?: string; writeback?: boolean; domain?: string }`
+2. New module: `src/vault-sync.ts` — file watcher + ingest parser + writeback serializer
+3. Hook ingest into `BackgroundIndexer` startup if `vault.path` is configured
+4. Writeback: export method on `KnowledgeStore`, callable by agents via tool or CLI
+5. CLI: `openclaw hypermem vault export --domain <domain>` (uses registerCli)
+
+### Gate conditions
+
+- v0.4.x is stable in production (at least 2 weeks)
+- Public API for knowledge-store is stable (no breaking changes planned)
+- Obsidian Local REST API or file-watch approach decided (local filesystem is simpler;
+  REST API approach requires the Obsidian Local REST Community Plugin)
+
+### Risk
+
+- File-watch on large vaults (10k+ notes) could be noisy; use debounced batch ingest
+- Wikilink resolution requires knowledge graph to be populated first — cold-start gap
+- Writeback formatting must survive round-trips (parse → write → parse → same data)
