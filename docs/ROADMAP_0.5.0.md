@@ -83,6 +83,18 @@ Cognee uses an ECL pipeline with graph + vector dual storage (Python SDK, `topot
 
 ---
 
+## Backlog (unscheduled)
+
+**Zero-external-dependency Redis alternative**
+Current: `ioredis` requires a running Redis server. Installation friction for new users is real even if Redis is a one-liner to install. Options to evaluate:
+- **SQLite KV mode** — investigate using `cr-sqlite` or a similar SQLite fork that exposes an in-process KV store with TTL support. Goal: drop the Redis process requirement entirely for single-node installs while keeping the same hot-cache semantics.
+- **In-process Map + TTL hardening** — the existing JS fallback is too limited for production workloads. Expanding it could serve as a stopgap while the SQLite path is evaluated.
+- **lmdb** — embedded KV with Node bindings, no external process, fast. API is different from Redis but the abstraction layer in `redis.ts` could be adapted.
+
+Approach: evaluate SQLite KV first (lowest new dependency surface), then lmdb. Whichever path is chosen, the `redis.ts` abstraction layer means the rest of the codebase doesn't change.
+
+---
+
 ## Version target
 
 0.5.0 when P0 items are complete and at least two P1 items ship. No hard date.
