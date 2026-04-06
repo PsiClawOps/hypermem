@@ -1,6 +1,6 @@
 {
   "name": "@psiclawops/hypermem-context-engine",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "HyperMem context engine plugin for OpenClaw",
   "type": "module",
   "main": "dist/index.js",

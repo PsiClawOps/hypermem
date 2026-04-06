@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LIBRARY_SCHEMA_VERSION = 9;
+export const LIBRARY_SCHEMA_VERSION = 10;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -744,7 +744,7 @@ function applyV8EpisodeSourceMessageId(db: DatabaseSync): void {
 
 // ── Migration runner ──────────────────────────────────────────
 
-export function migrateLibrary(db: DatabaseSync): void {
+export function migrateLibrary(db: DatabaseSync, engineVersion?: string): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
       version INTEGER PRIMARY KEY,
@@ -817,5 +817,25 @@ export function migrateLibrary(db: DatabaseSync): void {
     applyV9DocChunkSessionKey(db);
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(9, nowIso());
+  }
+
+  if (currentVersion < 10) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS meta (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(10, nowIso());
+  }
+
+  // Always stamp the running engine version so any query can surface it.
+  if (engineVersion) {
+    db.prepare(`
+      INSERT INTO meta (key, value, updated_at) VALUES ('engine_version', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(engineVersion, nowIso());
   }
 }
