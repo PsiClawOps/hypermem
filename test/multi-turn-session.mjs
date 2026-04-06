@@ -64,7 +64,7 @@ async function run() {
   console.log('  HyperMem Multi-Turn Session Validation');
   console.log('═══════════════════════════════════════════════════\n');
 
-  const repoRoot = '/home/lumadmin/.openclaw/workspace/repo/hypermem';
+  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
   const realHome = process.env.HOME;
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-multi-turn-'));
   const dataDir = path.join(tmpHome, '.openclaw', 'hypermem');
