@@ -490,6 +490,35 @@ function createHyperMemEngine(): ContextEngine {
         _warmInFlight.set(inflightKey, warmPromise);
         await warmPromise;
 
+        // Post-warm pressure check: if messages.db had accumulated history,
+        // warm() may have loaded the session straight to 80%+. Pre-trim now
+        // so the first turn has headroom instead of starting saturated.
+        // This is the "restart at 98%" failure mode reported by Helm 2026-04-05:
+        // JSONL truncation + Redis flush isn't enough if messages.db is still full
+        // and warm() reloads it. Trim here closes the loop.
+        try {
+          const postWarmTokens = await estimateWindowTokens(hm, agentId, sk);
+          // Use a conservative 90k default; if the session is genuinely large,
+          // we'll underestimate budget and trim more aggressively — that's fine.
+          const warmBudget = 90_000;
+          const warmPressure = postWarmTokens / warmBudget;
+          if (warmPressure > 0.80) {
+            const warmTrimTarget = warmPressure > 0.90 ? 0.40 : 0.55;
+            const warmTrimBudget = Math.floor(warmBudget * warmTrimTarget);
+            const warmTrimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, warmTrimBudget);
+            if (warmTrimmed > 0) {
+              await hm.redis.invalidateWindow(agentId, sk);
+              console.log(
+                `[hypermem-plugin] bootstrap: high-pressure startup ` +
+                `(${(warmPressure * 100).toFixed(1)}%), pre-trimmed Redis to ` +
+                `~${warmTrimTarget * 100}% (${warmTrimmed} msgs dropped)`
+              );
+            }
+          }
+        } catch {
+          // Non-fatal — first turn's tool-loop trim is the fallback
+        }
+
         return { bootstrapped: true };
       } catch (err) {
         // Bootstrap failure is non-fatal — log and continue
