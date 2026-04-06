@@ -11,7 +11,7 @@
  */
 
 /** Release version — matches package.json and is stamped into library.db on every startup. */
-export const ENGINE_VERSION = '0.5.0-dev';
+export const ENGINE_VERSION = '0.4.0';
 
 export { DatabaseManager } from './db.js';
 export type { DatabaseManagerConfig } from './db.js';
