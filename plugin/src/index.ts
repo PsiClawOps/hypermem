@@ -79,6 +79,19 @@ let _evictionConfig: {
   keepPreviewChars?: number;
 } | undefined;
 
+// ─── Context window reserve cache ────────────────────────────
+// Populated from user config during HyperMem init. Ensures HyperMem leaves
+// a guaranteed headroom fraction for system prompts, tool results, and
+// incoming data — preventing the trim tiers from firing too close to the edge.
+//
+// contextWindowSize: full model context window in tokens (default: 128_000)
+// contextWindowReserve: fraction [0.0–0.5] to keep free (default: 0.25)
+//
+// Effective history budget = (windowSize * (1 - reserve)) - overheadFallback
+// e.g. 128k * 0.75 - 28k = 68k for council agents at 25% reserve
+let _contextWindowSize: number = 128_000;
+let _contextWindowReserve: number = 0.25;
+
 // ─── System overhead cache ────────────────────────────────────
 // Caches the non-history token cost (contextBlock + runtime system prompt)
 // from the last full compose per session key. Used in tool-loop turns to
@@ -99,6 +112,28 @@ const OVERHEAD_FALLBACK_DEFAULT = 15_000;
 function getOverheadFallback(tier?: string): number {
   if (!tier) return OVERHEAD_FALLBACK_DEFAULT;
   return OVERHEAD_FALLBACK[tier] ?? OVERHEAD_FALLBACK_DEFAULT;
+}
+
+/**
+ * Compute the effective history budget for trim and compact operations.
+ *
+ * Priority:
+ *   1. tokenBudget passed by the runtime (most precise)
+ *   2. Derived from context window config: windowSize * (1 - reserve)
+ *
+ * The reserve fraction (default 0.25 = 25%) guarantees headroom for:
+ *   - System prompt + identity blocks (~28k for council agents)
+ *   - Incoming tool results (can be 10–30k in parallel web_search bursts)
+ *   - Response generation buffer (~4k)
+ *
+ * Without the reserve, trim tiers fire at 75–85% of tokenBudget but
+ * total context (history + system) exceeds the model window before trim
+ * completes, causing result stripping.
+ */
+function computeEffectiveBudget(tokenBudget?: number): number {
+  if (tokenBudget) return tokenBudget;
+  // Derived from window config: floor to avoid fractional tokens
+  return Math.floor(_contextWindowSize * (1 - _contextWindowReserve));
 }
 
 /**
@@ -131,6 +166,17 @@ async function loadUserConfig(): Promise<{
     /** Set false to disable the eviction pre-pass entirely. Default: true */
     enabled: boolean;
   }>;
+  /**
+   * Full model context window size in tokens. Default: 128_000.
+   * Used with contextWindowReserve to derive effective history budget.
+   */
+  contextWindowSize?: number;
+  /**
+   * Fraction [0.0–0.5] of the context window to reserve for system prompts,
+   * incoming tool results, and operational headroom. Default: 0.25 (25%).
+   * Higher values = earlier trims, more headroom for large operations.
+   */
+  contextWindowReserve?: number;
 }> {
   const configPath = path.join(os.homedir(), '.openclaw/hypermem/config.json');
   try {
@@ -166,6 +212,21 @@ async function getHyperMem(): Promise<HyperMemInstance> {
     // Cache eviction config at module scope so assemble() can read it
     // synchronously without re-reading disk on every turn.
     _evictionConfig = userConfig.eviction ?? {};
+
+    // Cache context window config so all three trim hotpaths use the same values.
+    if (typeof userConfig.contextWindowSize === 'number' && userConfig.contextWindowSize > 0) {
+      _contextWindowSize = userConfig.contextWindowSize;
+    }
+    if (typeof userConfig.contextWindowReserve === 'number' &&
+        userConfig.contextWindowReserve >= 0 && userConfig.contextWindowReserve <= 0.5) {
+      _contextWindowReserve = userConfig.contextWindowReserve;
+    }
+    const reservedTokens = Math.floor(_contextWindowSize * _contextWindowReserve);
+    console.log(
+      `[hypermem-plugin] context window: ${_contextWindowSize} tokens, ` +
+      `${Math.round(_contextWindowReserve * 100)}% reserved (${reservedTokens} tokens), ` +
+      `effective history budget: ${_contextWindowSize - reservedTokens} tokens`
+    );
 
     const instance = await HyperMem.create({
       dataDir: path.join(os.homedir(), '.openclaw/hypermem'),
@@ -742,7 +803,7 @@ function createHyperMemEngine(): ContextEngine {
         // a fixed 80% trim only frees 11% headroom — the wave overflows anyway
         // and results strip silently. Tier the trim target based on pre-trim
         // pressure so high-pressure sessions get real headroom before results land.
-        const effectiveBudget = tokenBudget ?? 90_000;
+        const effectiveBudget = computeEffectiveBudget(tokenBudget);
         try {
           const hm = await getHyperMem();
           const sk = resolveSessionKey(sessionId, sessionKey);
@@ -958,7 +1019,7 @@ function createHyperMemEngine(): ContextEngine {
       // This is a preventive guard — the compositor's safety valve still trims
       // by token count post-assembly, but limiting depth up front avoids
       // feeding the compactor a window it can't reduce.
-      const effectiveBudget = tokenBudget ?? 90000;
+      const effectiveBudget = computeEffectiveBudget(tokenBudget);
       const historyDepth = Math.min(250, Math.max(50, Math.floor((effectiveBudget * 0.65) / 500)));
 
       // ── Redis guardrail: trim history to token budget ────────────────────
@@ -1114,7 +1175,7 @@ function createHyperMemEngine(): ContextEngine {
             // Only skip if session is NOT critically full — nuclear path must bypass this guard.
             // If currentTokenCount > 85% budget, fall through to nuclear compaction below.
             const isCriticallyFull = currentTokenCount != null &&
-              currentTokenCount > ((tokenBudget ?? 90_000) * 0.85);
+              currentTokenCount > (computeEffectiveBudget(tokenBudget) * 0.85);
             if (reshapeAge < 30_000 && !isCriticallyFull) {
               console.log(`[hypermem-plugin] compact: skipping — reshape pass ran ${reshapeAge}ms ago`);
               return { ok: true, compacted: false, reason: 'reshape-recently-ran' };
@@ -1129,7 +1190,7 @@ function createHyperMemEngine(): ContextEngine {
         // and system prompt — our estimate only covers the history window. When they
         // diverge significantly upward, the difference is "inbound overhead" consuming
         // budget the history is competing for. We trim history to make room.
-        const effectiveBudget = tokenBudget ?? 90_000;
+        const effectiveBudget = computeEffectiveBudget(tokenBudget);
         const tokensBefore = await estimateWindowTokens(hm, agentId, sk);
 
         // Target depth for both Redis trimming and JSONL truncation.
