@@ -181,20 +181,22 @@ const DEFAULT_CONFIG: CompositorConfig = {
 };
 
 // Tool gradient thresholds — controls how aggressively tool results are
-// truncated as they age out of the recent window. Tuned 2026-04-06 to
-// drop content faster; heavy tool sessions at T1 (12k×10 msgs) were the
-// primary driver of 95%+ context saturation.
-const TOOL_GRADIENT_T0_TURNS = 3;   // most recent: near-full fidelity (was 4)
-const TOOL_GRADIENT_T1_TURNS = 8;   // moderate truncation (was 10)
-const TOOL_GRADIENT_T2_TURNS = 12;  // aggressive truncation (was 15)
-const TOOL_GRADIENT_T0_CHAR_CAP = 32_000;
-const TOOL_GRADIENT_T1_CHAR_CAP = 8_000;  // per-message cap (was 12k)
-const TOOL_GRADIENT_T1_TURN_CAP = 16_000; // per-turn-pair cap (was 24k)
-const TOOL_GRADIENT_T2_CHAR_CAP = 1_000;  // per-message cap (was 1.5k)
-const TOOL_GRADIENT_T2_TURN_CAP = 4_000;  // per-turn-pair cap (was 6k)
-const TOOL_GRADIENT_T3_CHAR_CAP = 200;    // oldest tier: stub only (was 300)
-const TOOL_GRADIENT_T3_TURN_CAP = 1_000;  // per-turn-pair cap (was 2k)
-const TOOL_GRADIENT_MAX_TAIL_CHARS = 3_000; // tail preserve budget (was 4k)
+// truncated as they age out of the recent window.
+// Redesigned 2026-04-06: T0 = current turn only (full fidelity), drop starts at turn 1.
+// Prior: T0 covered turns 0-3, meaning 3 turns of near-full content before any compression.
+const TOOL_GRADIENT_T0_TURNS = 0;   // current turn only: full fidelity
+const TOOL_GRADIENT_T1_TURNS = 3;   // turns 1-3: moderate truncation (was 8)
+const TOOL_GRADIENT_T2_TURNS = 7;   // turns 4-7: aggressive truncation (was 12)
+// T3 = turns 8+: one-liner stub
+const TOOL_GRADIENT_T0_CHAR_CAP = 100_000; // safety ceiling only — head+tail at 12k tail
+const TOOL_GRADIENT_T0_MAX_TAIL_CHARS = 12_000; // larger tail for T0: preserves closing content
+const TOOL_GRADIENT_T1_CHAR_CAP = 6_000;  // per-message cap (was 8k)
+const TOOL_GRADIENT_T1_TURN_CAP = 12_000; // per-turn-pair cap (was 16k)
+const TOOL_GRADIENT_T2_CHAR_CAP = 800;    // per-message cap (was 1k)
+const TOOL_GRADIENT_T2_TURN_CAP = 3_000;  // per-turn-pair cap (was 4k)
+const TOOL_GRADIENT_T3_CHAR_CAP = 150;    // oldest tier: stub only (was 200)
+const TOOL_GRADIENT_T3_TURN_CAP = 800;    // per-turn-pair cap (was 1k)
+const TOOL_GRADIENT_MAX_TAIL_CHARS = 3_000; // tail preserve budget for T1+
 const TOOL_GRADIENT_MIDDLE_MARKER = '\n[... tool output truncated ...]\n';
 
 // ─── Trigger Registry ────────────────────────────────────────────
@@ -319,9 +321,9 @@ function stripSecurityPreamble(content: string): string {
   return stripped.trim().length > 20 ? stripped.trim() : content;
 }
 
-function truncateWithHeadTail(content: string, maxChars: number): string {
+function truncateWithHeadTail(content: string, maxChars: number, maxTailChars = TOOL_GRADIENT_MAX_TAIL_CHARS): string {
   if (content.length <= maxChars) return content;
-  const tailBudget = Math.min(Math.floor(maxChars * 0.30), TOOL_GRADIENT_MAX_TAIL_CHARS);
+  const tailBudget = Math.min(Math.floor(maxChars * 0.30), maxTailChars);
   const headBudget = Math.max(0, maxChars - tailBudget - TOOL_GRADIENT_MIDDLE_MARKER.length);
   return content.slice(0, headBudget) + TOOL_GRADIENT_MIDDLE_MARKER + content.slice(-tailBudget);
 }
@@ -404,14 +406,14 @@ function hasToolContent(msg: NeutralMessage): boolean {
   return Boolean((msg.toolCalls && msg.toolCalls.length > 0) || (msg.toolResults && msg.toolResults.length > 0));
 }
 
-function applyTierPayloadCap(msg: NeutralMessage, perResultCap: number, perTurnCap?: number, usedSoFar: number = 0): { msg: NeutralMessage; usedChars: number } {
+function applyTierPayloadCap(msg: NeutralMessage, perResultCap: number, perTurnCap?: number, usedSoFar: number = 0, maxTailChars = TOOL_GRADIENT_MAX_TAIL_CHARS): { msg: NeutralMessage; usedChars: number } {
   const toolResults = msg.toolResults?.map(result => {
     let content = result.content ?? '';
     if (content.length > perResultCap) {
       // Strip security preamble before truncation so it doesn't consume the head budget.
       // web_fetch results wrapped in <<<EXTERNAL_UNTRUSTED_CONTENT>>> blocks would otherwise
       // render the truncated result as: [security notice] + [middle marker] + [last line].
-      content = truncateWithHeadTail(stripSecurityPreamble(content), perResultCap);
+      content = truncateWithHeadTail(stripSecurityPreamble(content), perResultCap, maxTailChars);
     }
     return { ...result, content };
   }) ?? null;
@@ -454,7 +456,8 @@ function applyToolGradient<T extends NeutralMessage>(messages: T[]): T[] {
     const usage = perTurnUsage.get(turnAge) ?? { t1: 0, t2: 0, t3: 0 };
 
     if (turnAge <= TOOL_GRADIENT_T0_TURNS) {
-      const capped = applyTierPayloadCap(msg, TOOL_GRADIENT_T0_CHAR_CAP);
+      // T0: current turn only. Safety cap with larger tail budget so closing content survives.
+      const capped = applyTierPayloadCap(msg, TOOL_GRADIENT_T0_CHAR_CAP, undefined, 0, TOOL_GRADIENT_T0_MAX_TAIL_CHARS);
       result[i] = capped.msg as T;
     } else if (turnAge <= TOOL_GRADIENT_T1_TURNS) {
       const capped = applyTierPayloadCap(msg, TOOL_GRADIENT_T1_CHAR_CAP, TOOL_GRADIENT_T1_TURN_CAP, usage.t1);
