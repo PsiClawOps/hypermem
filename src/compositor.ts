@@ -109,17 +109,21 @@ const DEFAULT_CONFIG: CompositorConfig = {
   keystoneMinSignificance: 0.5,
 };
 
-const TOOL_GRADIENT_T0_TURNS = 4;
-const TOOL_GRADIENT_T1_TURNS = 10;
-const TOOL_GRADIENT_T2_TURNS = 15;
+// Tool gradient thresholds — controls how aggressively tool results are
+// truncated as they age out of the recent window. Tuned 2026-04-06 to
+// drop content faster; heavy tool sessions at T1 (12k×10 msgs) were the
+// primary driver of 95%+ context saturation.
+const TOOL_GRADIENT_T0_TURNS = 3;   // most recent: near-full fidelity (was 4)
+const TOOL_GRADIENT_T1_TURNS = 8;   // moderate truncation (was 10)
+const TOOL_GRADIENT_T2_TURNS = 12;  // aggressive truncation (was 15)
 const TOOL_GRADIENT_T0_CHAR_CAP = 32_000;
-const TOOL_GRADIENT_T1_CHAR_CAP = 12_000;
-const TOOL_GRADIENT_T1_TURN_CAP = 24_000;
-const TOOL_GRADIENT_T2_CHAR_CAP = 1_500;
-const TOOL_GRADIENT_T2_TURN_CAP = 6_000;
-const TOOL_GRADIENT_T3_CHAR_CAP = 300;
-const TOOL_GRADIENT_T3_TURN_CAP = 2_000;
-const TOOL_GRADIENT_MAX_TAIL_CHARS = 4_000;
+const TOOL_GRADIENT_T1_CHAR_CAP = 8_000;  // per-message cap (was 12k)
+const TOOL_GRADIENT_T1_TURN_CAP = 16_000; // per-turn-pair cap (was 24k)
+const TOOL_GRADIENT_T2_CHAR_CAP = 1_000;  // per-message cap (was 1.5k)
+const TOOL_GRADIENT_T2_TURN_CAP = 4_000;  // per-turn-pair cap (was 6k)
+const TOOL_GRADIENT_T3_CHAR_CAP = 200;    // oldest tier: stub only (was 300)
+const TOOL_GRADIENT_T3_TURN_CAP = 1_000;  // per-turn-pair cap (was 2k)
+const TOOL_GRADIENT_MAX_TAIL_CHARS = 3_000; // tail preserve budget (was 4k)
 const TOOL_GRADIENT_MIDDLE_MARKER = '\n[... tool output truncated ...]\n';
 
 // ─── Trigger Registry ────────────────────────────────────────────

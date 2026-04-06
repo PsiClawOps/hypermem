@@ -194,7 +194,7 @@ export function runNoiseSweep(
 export function runToolDecay(
   db: DatabaseSync,
   conversationId: number,
-  recentWindowSize: number = 80,
+  recentWindowSize: number = 40, // was 80 — cut in half so DB-level truncation fires sooner
 ): ToolDecayResult {
   const ZERO: ToolDecayResult = { messagesUpdated: 0, bytesFreed: 0, passType: 'tool_decay' };
 

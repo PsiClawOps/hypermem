@@ -26,9 +26,9 @@ import type { DatabaseSync } from 'node:sqlite';
 export interface DreamerConfig {
   /** Enable the promotion pass. Default: false */
   enabled: boolean;
-  /** Minimum composite score for promotion. Default: 0.55 */
+  /** Minimum composite score for promotion. Default: 0.70 */
   minScore: number;
-  /** Minimum confidence threshold (pre-scoring). Default: 0.60 */
+  /** Minimum confidence threshold (pre-scoring). Default: 0.70 */
   minConfidence: number;
   /** Max new pointer entries to write per agent per run. Default: 5 */
   maxPromotionsPerRun: number;
@@ -44,8 +44,8 @@ export interface DreamerConfig {
 
 export const DEFAULT_DREAMER_CONFIG: DreamerConfig = {
   enabled: false,
-  minScore: 0.55,
-  minConfidence: 0.60,
+  minScore: 0.70,
+  minConfidence: 0.70,
   maxPromotionsPerRun: 5,
   tickInterval: 12,
   dryRun: false,

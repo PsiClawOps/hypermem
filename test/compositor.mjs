@@ -762,10 +762,10 @@ Every council response includes:
     assert(content.length < payload12k.length, 'T1: per-result cap applied at turn age 5');
     assert(content.length <= 12_000 + 100, 'T1: result capped at ~12K');
 
-    // Turn age 10 is still T1 boundary
-    const msgs10 = buildConvoWithTurnAge('user', 'short payload', 10);
+    // Turn age 8 is now the T1 boundary (T1_TURNS was reduced from 10 to 8)
+    const msgs10 = buildConvoWithTurnAge('user', 'short payload', 8);
     const out10 = applyToolGradient(msgs10);
-    assert(out10[0].toolResults !== null, 'T1: toolResults preserved at turn age 10 (boundary)');
+    assert(out10[0].toolResults !== null, 'T1: toolResults preserved at turn age 8 (boundary)');
   }
 
   // ── T1 → T2 downgrade: per-turn aggregate cap (24K) exceeded ──
