@@ -185,8 +185,8 @@ const DEFAULT_CONFIG: CompositorConfig = {
 // truncated as they age out of the recent window.
 // Redesigned 2026-04-06: T0 = current turn only (full fidelity), drop starts at turn 1.
 // Prior: T0 covered turns 0-3, meaning 3 turns of near-full content before any compression.
-const TOOL_GRADIENT_T0_TURNS = 0;   // current turn only: capped high-fidelity
-const TOOL_GRADIENT_T1_TURNS = 3;   // turns 1-3: moderate truncation (was 8)
+const TOOL_GRADIENT_T0_TURNS = 1;   // current + last completed turn: full fidelity (was 0 — caused silent T1 truncation of immediately preceding tool results)
+const TOOL_GRADIENT_T1_TURNS = 4;   // turns 2-4: moderate truncation (was 3)
 const TOOL_GRADIENT_T2_TURNS = 7;   // turns 4-7: aggressive truncation (was 12)
 // T3 = turns 8+: one-liner stub
 const TOOL_GRADIENT_T0_CHAR_CAP = 16_000;  // realistic T0 per-result cap, not near-full replay

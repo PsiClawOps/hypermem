@@ -793,25 +793,32 @@ Every council response includes:
     assert(summarized === 1, `T0 turn cap: overflow downgraded to summary (got ${summarized})`);
   }
 
-  // ── T1: turn age 1-3 - payload capped at 6K/result ──
+  // ── T1: turn age 2-4 - payload capped at 6K/result ──
   {
     const payload8k = 'Y'.repeat(8_000); // > 6K T1 cap
-    const msgs = buildConvoWithTurnAge('user', payload8k, 1); // turn age = 1 (T1)
+    const msgs = buildConvoWithTurnAge('user', payload8k, 2); // turn age = 2 (first T1 with T0_TURNS=1)
     const out = applyToolGradient(msgs);
     const content = out[0].toolResults[0].content;
-    assert(out[0].toolResults !== null, 'T1: toolResults present at turn age 1');
-    assert(content.length < payload8k.length, 'T1: per-result cap applied at turn age 1');
+    assert(out[0].toolResults !== null, 'T1: toolResults present at turn age 2');
+    assert(content.length < payload8k.length, 'T1: per-result cap applied at turn age 2');
     assert(content.length <= 6_000 + 100, 'T1: result capped at ~6K');
 
-    // Turn age 3 is T1 boundary
-    const msgs3 = buildConvoWithTurnAge('user', 'short payload', 3);
-    const out3 = applyToolGradient(msgs3);
-    assert(out3[0].toolResults !== null, 'T1: toolResults preserved at turn age 3 (boundary)');
+    // Turn age 1 is now T0 — should get 16K cap, not 6K
+    const msgsT0 = buildConvoWithTurnAge('user', payload8k, 1);
+    const outT0 = applyToolGradient(msgsT0);
+    const contentT0 = outT0[0].toolResults[0].content;
+    assert(outT0[0].toolResults !== null, 'T0: toolResults present at turn age 1');
+    assert(contentT0.length === payload8k.length, 'T0: 8K payload under 16K cap — not truncated at turn age 1');
 
-    // Turn age 4 is T2 - toolResults stripped
-    const msgs4 = buildConvoWithTurnAge('user', payload8k, 4);
-    const out4 = applyToolGradient(msgs4);
-    assert(out4[0].toolResults === null, 'T2: toolResults stripped at turn age 4 (first T2 turn)');
+    // Turn age 4 is T1 boundary (T1_TURNS=4)
+    const msgs4b = buildConvoWithTurnAge('user', 'short payload', 4);
+    const out4b = applyToolGradient(msgs4b);
+    assert(out4b[0].toolResults !== null, 'T1: toolResults preserved at turn age 4 (boundary)');
+
+    // Turn age 5 is T2 - toolResults stripped
+    const msgs5 = buildConvoWithTurnAge('user', payload8k, 5);
+    const out5 = applyToolGradient(msgs5);
+    assert(out5[0].toolResults === null, 'T2: toolResults stripped at turn age 5 (first T2 turn)');
   }
 
   // ── T1 → T2 downgrade: per-turn aggregate cap (12K) exceeded ──
@@ -831,13 +838,14 @@ Every council response includes:
     });
 
     const msgs3 = [
-      asstToolMsg(payload7k),  // index 0: turn age = 1, processed last
-      asstToolMsg(payload7k),  // index 1: turn age = 1, processed 2nd
-      asstToolMsg(payload7k),  // index 2: turn age = 1, processed 1st
+      asstToolMsg(payload7k),  // index 0: turn age = 2 (T1), processed last
+      asstToolMsg(payload7k),  // index 1: turn age = 2 (T1), processed 2nd
+      asstToolMsg(payload7k),  // index 2: turn age = 2 (T1), processed 1st
       textMsg('user', 'q1'),
+      textMsg('user', 'q2'),
     ];
     const age0b = getTurnAge(msgs3, 0);
-    assert(age0b === 1, `T1 downgrade (3msg) setup: index 0 has turn age 1 (got ${age0b})`);
+    assert(age0b === 2, `T1 downgrade (3msg) setup: index 0 has turn age 2 (got ${age0b})`);
 
     const out3 = applyToolGradient(msgs3);
     const newest = out3[2]; // processed first, 6K fits (usage: 0→6K)
@@ -852,32 +860,32 @@ Every council response includes:
       'T1 downgrade: oldest message has prose summary in textContent');
   }
 
-  // ── T2: turn age 4-7 - payload replaced with prose envelope ──
+  // ── T2: turn age 5-8 - payload replaced with prose envelope ──
   {
     const payload = 'function doThing() { return 42; } // some code here';
-    const msgs = buildConvoWithTurnAge('user', payload, 4); // turn age = 4 (first T2)
+    const msgs = buildConvoWithTurnAge('user', payload, 5); // turn age = 5 (first T2 with T1_TURNS=4)
     const out = applyToolGradient(msgs);
     const msg = out[0];
-    assert(msg.toolResults === null, 'T2: toolResults stripped at turn age 4');
-    assert(msg.toolCalls === null, 'T2: toolCalls stripped at turn age 4');
+    assert(msg.toolResults === null, 'T2: toolResults stripped at turn age 5');
+    assert(msg.toolCalls === null, 'T2: toolCalls stripped at turn age 5');
     assert(msg.textContent !== null && msg.textContent.length > 0, 'T2: prose envelope in textContent');
     assert(/read|Read|\[/.test(msg.textContent), 'T2: textContent contains tool label');
 
-    // Turn age 7 is T2 boundary
-    const msgs7 = buildConvoWithTurnAge('user', payload, 7);
+    // Turn age 8 is T2 boundary (T2_TURNS = 8)
+    const msgs7 = buildConvoWithTurnAge('user', payload, 8);
     const out7 = applyToolGradient(msgs7);
-    assert(out7[0].toolResults === null, 'T2: toolResults stripped at turn age 7 (boundary)');
-    assert(out7[0].textContent !== null, 'T2: prose envelope present at turn age 7');
+    assert(out7[0].toolResults === null, 'T2: toolResults stripped at turn age 8 (boundary)');
+    assert(out7[0].textContent !== null, 'T2: prose envelope present at turn age 8');
   }
 
   // ── T3: turn age 8+ - payload replaced with compact outcome stub ──
   {
     const payload = 'The quick brown fox jumps over the lazy dog. Some important content here.';
-    const msgs = buildConvoWithTurnAge('user', payload, 8); // turn age = 8 (first T3)
+    const msgs = buildConvoWithTurnAge('user', payload, 9); // turn age = 9 (first T3 with T2_TURNS=8)
     const out = applyToolGradient(msgs);
     const msg = out[0];
-    assert(msg.toolResults === null, 'T3: toolResults stripped at turn age 8');
-    assert(msg.toolCalls === null, 'T3: toolCalls stripped at turn age 8');
+    assert(msg.toolResults === null, 'T3: toolResults stripped at turn age 9');
+    assert(msg.toolCalls === null, 'T3: toolCalls stripped at turn age 9');
     assert(msg.textContent !== null && msg.textContent.length > 0, 'T3: compact stub in textContent');
     // T3 stub should be short - capped at 150 chars per result
     assert(msg.textContent.length <= 200, `T3: stub is compact (got ${msg.textContent.length} chars)`);
@@ -961,7 +969,7 @@ Every council response includes:
       textContent: null,
       toolCalls: [{ id: 'tc_ws', name: 'web_search', arguments: JSON.stringify({ query: 'image token cost' }) }],
       toolResults: [{ callId: 'tc_ws', name: 'web_search', content: '{"results":[{"title":"How Images Work"},{"title":"Context Windows"}]}' }],
-    }, textMsg('user', 'follow-up question 1'), textMsg('user', 'follow-up question 2'), textMsg('user', 'follow-up question 3'), textMsg('user', 'follow-up question 4')];
+    }, textMsg('user', 'follow-up question 1'), textMsg('user', 'follow-up question 2'), textMsg('user', 'follow-up question 3'), textMsg('user', 'follow-up question 4'), textMsg('user', 'follow-up question 5')];
     const outWeb = applyToolGradient(webMsgs);
     assert(outWeb[0].textContent.includes("Searched 'image token cost'"), 'web_search summary keeps query');
     assert(outWeb[0].textContent.includes('2 results'), 'web_search summary keeps result count');
@@ -971,7 +979,7 @@ Every council response includes:
       textContent: null,
       toolCalls: [{ id: 'tc_exec', name: 'exec', arguments: JSON.stringify({ command: 'npm test' }) }],
       toolResults: [{ callId: 'tc_exec', name: 'exec', content: 'exit code: 1\nFAIL src/foo.test.ts\n1 failed' }],
-    }, textMsg('user', 'follow-up question 1'), textMsg('user', 'follow-up question 2'), textMsg('user', 'follow-up question 3'), textMsg('user', 'follow-up question 4')];
+    }, textMsg('user', 'follow-up question 1'), textMsg('user', 'follow-up question 2'), textMsg('user', 'follow-up question 3'), textMsg('user', 'follow-up question 4'), textMsg('user', 'follow-up question 5')];
     const outExec = applyToolGradient(execMsgs);
     assert(outExec[0].textContent.includes('Ran npm test'), 'exec summary keeps command');
     assert(outExec[0].textContent.includes('exit 1'), 'exec summary keeps exit code');
@@ -981,7 +989,7 @@ Every council response includes:
       textContent: null,
       toolCalls: [{ id: 'tc_read2', name: 'read', arguments: JSON.stringify({ path: '/src/foo.ts' }) }],
       toolResults: [{ callId: 'tc_read2', name: 'read', content: '# Foo\nexport function run() {}' }],
-    }, textMsg('user', 'follow-up question 1'), textMsg('user', 'follow-up question 2'), textMsg('user', 'follow-up question 3'), textMsg('user', 'follow-up question 4')];
+    }, textMsg('user', 'follow-up question 1'), textMsg('user', 'follow-up question 2'), textMsg('user', 'follow-up question 3'), textMsg('user', 'follow-up question 4'), textMsg('user', 'follow-up question 5')];
     const outRead = applyToolGradient(readMsgs);
     assert(outRead[0].textContent.includes('Read /src/foo.ts'), 'read summary keeps path');
     assert(outRead[0].textContent.includes('Foo'), 'read summary keeps heading');
