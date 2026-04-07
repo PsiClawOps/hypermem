@@ -761,7 +761,7 @@ function createHyperMemEngine(): ContextEngine {
         const hm = await getHyperMem();
         const sk = resolveSessionKey(sessionId, sessionKey);
         const agentId = extractAgentId(sk);
-        const neutral = toNeutralMessage(msg);
+        let neutral = toNeutralMessage(msg);
 
         // Route to appropriate record method based on role.
         // User messages are intentionally NOT recorded here — afterTurn() handles
@@ -769,9 +769,49 @@ function createHyperMemEngine(): ContextEngine {
         // Recording here too causes dual-write: once raw (here), once clean (afterTurn).
         if (neutral.role === 'user') {
           return { ingested: false };
-        } else {
-          await hm.recordAssistantMessage(agentId, sk, neutral);
         }
+
+        // ── Pre-ingestion wave guard ──────────────────────────────────────────
+        // Tool result payloads can be 10k-50k tokens each. When a parallel tool
+        // batch (4-6 results) lands while the session is already at 70%+, storing
+        // full payloads pushes Redis past the nuclear path threshold before the
+        // next assemble() can trim. Use Redis current state (appropriate here —
+        // we're deciding what to write TO Redis) as the pressure signal.
+        // Above 70%: truncate toolResult content to a compact stub.
+        // Above 85%: skip recording entirely — assemble() trim is the safety net.
+        const isInboundToolResult = msg.role === 'tool' || msg.role === 'tool_result' || msg.role === 'toolResult';
+        if (isInboundToolResult && neutral.toolResults && neutral.toolResults.length > 0) {
+          const redisTokens = await estimateWindowTokens(hm, agentId, sk);
+          const effectiveBudget = computeEffectiveBudget(undefined);
+          const redisPressure = redisTokens / effectiveBudget;
+
+          if (redisPressure > 0.85) {
+            // Critical: skip recording — Redis is already overloaded
+            console.log(
+              `[hypermem] ingest wave-guard: skipping toolResult (Redis pressure ${(redisPressure * 100).toFixed(0)}% > 85%)`
+            );
+            return { ingested: false };
+          } else if (redisPressure > 0.70) {
+            // Elevated: store truncated stub to preserve tool call pairing in history
+            const MAX_TOOL_RESULT_CHARS = 500;
+            neutral = {
+              ...neutral,
+              toolResults: neutral.toolResults.map(tr => {
+                const content = typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content);
+                if (content.length <= MAX_TOOL_RESULT_CHARS) return tr;
+                return {
+                  ...tr,
+                  content: `[truncated by wave-guard at ${(redisPressure * 100).toFixed(0)}% pressure: ${Math.ceil(content.length / 4)} tokens]`,
+                };
+              }),
+            };
+            console.log(
+              `[hypermem] ingest wave-guard: truncated toolResult (Redis pressure ${(redisPressure * 100).toFixed(0)}% > 70%)`
+            );
+          }
+        }
+
+        await hm.recordAssistantMessage(agentId, sk, neutral);
         return { ingested: true };
       } catch (err) {
         // Ingest failure is non-fatal — record is best-effort
