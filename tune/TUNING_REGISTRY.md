@@ -176,3 +176,29 @@ Each entry records the change, rationale, and date — so we can track drift ove
 - **After:** Boilerplate rejected at index time; episodes require meaningful confidence to appear in prompt. Cross-session bleed substantially reduced.
 - **Date:** 2026-04-06
 - **Status:** active
+
+### TUNE-015 — Recency decay half-life + createdAt in hybrid retrieval
+- **Files:** `src/compositor.ts`, `src/hybrid-retrieval.ts`
+- **Problem (Helm dispatch):** Hybrid retrieval was using `updatedAt` timestamps for recency scoring, not `createdAt`. Old facts that had been touched by migrations scored as recent. Half-life of 14 days was too long — stale context from 2 weeks ago was surfacing at meaningful scores.
+- **Changes:**
+  - Switch recency scoring to `createdAt` — reflects when the fact was learned, not when it was last touched
+  - `recencyHalfLifeDays`: 14 → 7 — halves the decay window, gives current-week facts a larger recency bonus vs. older ones
+- **Before:** 14-day half-life on `updatedAt`. Facts from migrations 10 days ago scored as current. Recency signal had low differentiation across the typical active window.
+- **After:** 7-day half-life on `createdAt`. Facts from this week dominate recency scoring. Two-week-old facts score at ~25% recency weight vs. 50% before.
+- **Date:** 2026-04-06
+- **Note:** Implemented as part of TUNE-016 commit (2073687) — no standalone commit.
+- **Status:** active
+
+### TUNE-016 — FOS/MOD v0.4 score floor tightening + age/score thresholds
+- **Files:** `src/compositor.ts`, `src/hybrid-retrieval.ts`, `src/fos-mod.ts`
+- **Problem:** FTS-only results (no KNN agreement) were surfacing at score:0.008–0.05 as if they had semantic relevance. These are lexical matches with no embedding confirmation — high false-positive rate. Facts and episodes older than 30 days were rarely useful but consumed slot budget. Minimum recall score of 0.70 was letting marginal matches through.
+- **Changes:**
+  - FTS-only floor: 0.008 → 0.05 — FTS-only results must score above 0.05 to surface. Requires stronger lexical signal when no KNN agreement.
+  - `recencyHalfLifeDays`: 14 → 7 (see TUNE-015)
+  - `maxAgeDays`: 90 → 30 — facts/episodes older than 30 days excluded from recall
+  - `minScore`: 0.70 → 0.75 — marginal matches pruned before slot assembly
+- **Before:** FTS-only hits at score:0.01 contaminating recall. 90-day fact window pulling quarter-old context. 0.70 score floor letting in noisy matches.
+- **After:** FTS-only hits require lexical confidence (0.05). 30-day window keeps context current. 0.75 floor cuts the long tail of marginal matches. Implemented alongside FOS/MOD v0.4 (66 new tests, all passing).
+- **Commit:** 2073687
+- **Date:** 2026-04-06
+- **Status:** active
