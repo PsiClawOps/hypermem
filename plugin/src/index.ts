@@ -1358,12 +1358,12 @@ function createHyperMemEngine(): ContextEngine {
           if (m.role === 'system') continue;
           const neutral = toNeutralMessage(m);
           if (neutral.role === 'user') {
-            // Record user messages here — no message:received hook exists in the plugin API,
-            // so afterTurn is the only reliable recording path. Strip transport metadata
-            // ("Sender (untrusted metadata): {...}" envelope) before storing so clean
-            // content reaches the DB, not raw inbound framing.
-            const cleanText = neutral.textContent ? stripMessageMetadata(neutral.textContent) : neutral.textContent;
-            await hm.recordUserMessage(agentId, sk, cleanText ?? '');
+            // SKIP: handler.js onMessageReceived() already records user messages via the
+            // message:received hook event (clean bare content, fires before LLM call).
+            // Recording here too caused dual-write: bare in handler.js + envelope in afterTurn.
+            // Fix: handler.js owns user message recording. afterTurn owns assistant/tool.
+            // See: ANVIL_FULL_ANALYSIS_dual_record_bug.md
+            continue;
           } else {
             await hm.recordAssistantMessage(agentId, sk, neutral);
           }

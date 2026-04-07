@@ -1370,7 +1370,23 @@ export class Compositor {
     // instructions in the same context block, closest to the conversation.
     if (libDb && remaining > 100 && request.includeLibrary !== false) {
       const assemblyModelId = request.model;
-      const taskContext = undefined; // reserved for future task-type awareness in ComposeRequest
+      // Detect file-write context from recent tool calls
+      // If the model recently called 'write' or 'edit', relax FOS density constraints
+      let taskContext: string | undefined;
+      if (messages.length > 0) {
+        for (let i = messages.length - 1; i >= Math.max(0, messages.length - 4); i--) {
+          const msg = messages[i];
+          if (msg.toolCalls && msg.toolCalls.length > 0) {
+            const hasFileWrite = msg.toolCalls.some(
+              (tc: { name: string }) => tc.name === 'write' || tc.name === 'edit'
+            );
+            if (hasFileWrite) {
+              taskContext = 'file-write';
+              break;
+            }
+          }
+        }
+      }
 
       const fos = getActiveFOS(libDb);
       if (fos) {
