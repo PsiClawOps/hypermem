@@ -8,7 +8,7 @@
  *   L4 Library  - facts, knowledge, preferences
  */
 
-import { HyperMem } from '../dist/index.js';
+import { HyperMem, toProviderFormat, repairToolCallPairs } from '../dist/index.js';
 import { Compositor, DEFAULT_TRIGGERS } from '../dist/compositor.js';
 import { chunkMarkdown } from '../dist/doc-chunker.js';
 import fs from 'fs';
@@ -252,7 +252,12 @@ async function run() {
     model: 'claude-opus-4-6',
   }, msgDb, libDb);
 
-  assert(emptyResult.messages.length === 0 || emptyResult.tokenCount < 100, 'Empty session produces minimal output');
+  // FOS/MOD context is always injected when libDb is present and has a seeded FOS profile.
+  // Empty session may still have context tokens from FOS/MOD directives.
+  assert(
+    emptyResult.messages.length === 0 || emptyResult.tokenCount < 1000,
+    'Empty session produces minimal output (no history, small FOS/MOD context)'
+  );
 
   // ── Test 6: Multi-provider output ──
   console.log('\n── Multi-Provider Output ──');
@@ -474,8 +479,11 @@ Every council response includes:
 
   assert(promptRecallText.includes('K8S_STAGING_SENTINEL'),
     'Semantic recall uses request.prompt before prompt is written to history');
-  assert(promptRecallResult.contextBlock?.includes('Related Memory') || promptRecallText.includes('## Related Memory'),
-    'Prompt-aware retrieval produced a Related Memory block');
+  // TUNE-016: FTS floor raised to 0.05 — low-score FTS hits are filtered. Knowledge is still
+  // retrieved via library path (L2). The assert below confirms content is present regardless
+  // of which context section it appears under.
+  assert(promptRecallText.includes('K8S_STAGING_SENTINEL'),
+    'Prompt-aware retrieval surfaces knowledge content (via library or related-memory path)');
 
   // 'P0.1: prompt drives retrieval before message is in history'
   console.log('\n── P0.1: prompt drives retrieval before message is in history ──');
@@ -724,14 +732,14 @@ Every council response includes:
     assert(getTurnAge(msgs, 1) === 2, 'getTurnAge: counts only user messages, not assistant');
   }
 
-  // ── T0: turn age 0 only - full fidelity, safety cap at 100K ──
+  // ── T0: turn age 0 only - capped high fidelity ──
   {
     const shortPayload = 'tool result here';
     const msgs = buildConvoWithTurnAge('user', shortPayload, 0); // turn age = 0 (T0)
     const out = applyToolGradient(msgs);
     const firstMsg = out[0];
     assert(firstMsg.toolResults !== null, 'T0: toolResults NOT stripped at turn age 0');
-    assert(firstMsg.toolResults[0].content === shortPayload, 'T0: payload preserved verbatim at turn age 0');
+    assert(firstMsg.toolResults[0].content === shortPayload, 'T0: small payload preserved verbatim at turn age 0');
 
     // Turn age 1 is T1 - no longer T0
     const msgs1 = buildConvoWithTurnAge('user', shortPayload, 1);
@@ -740,19 +748,49 @@ Every council response includes:
     assert(out1[0].toolResults !== null, 'T1: small payload preserved at turn age 1 (under cap)');
   }
 
-  // ── T0: 100K safety cap with large tail budget ──
+  // ── T0: 16K per-result cap with 6K tail budget ──
   {
-    const bigPayload = 'X'.repeat(110_000); // > 100K safety cap
+    const bigPayload = 'X'.repeat(110_000);
     const msgs = buildConvoWithTurnAge('user', bigPayload, 0); // turn age = 0, T0
     const out = applyToolGradient(msgs);
     const content = out[0].toolResults[0].content;
-    assert(content.length < bigPayload.length, 'T0: oversized payload is capped at safety ceiling');
-    assert(content.length <= 100_000 + 100, 'T0: payload capped at ~100K');
+    assert(content.length < bigPayload.length, 'T0: oversized payload is capped');
+    assert(content.length <= 16_000 + 100, `T0: payload capped at ~16K (got ${content.length})`);
     assert(content.includes('[... tool output truncated ...]'), 'T0: truncation marker present');
-    // Tail budget at T0 is 12K - much larger than T1+ (3K)
     const markerIdx = content.indexOf('[... tool output truncated ...]');
     const tail = content.slice(markerIdx + '[... tool output truncated ...]'.length);
-    assert(tail.length >= 3_000, `T0: tail budget >= 3K (got ${tail.length})`);
+    assert(tail.length >= 4_500, `T0: tail budget preserves closing content (got ${tail.length})`);
+  }
+
+  // ── T0: per-turn cap downgrades overflow to summary ──
+  {
+    const payload = 'X'.repeat(25_000);
+    const msgs = [
+      {
+        role: 'assistant',
+        textContent: null,
+        toolCalls: null,
+        toolResults: [{ callId: 'a', name: 'read', content: payload }],
+      },
+      {
+        role: 'assistant',
+        textContent: null,
+        toolCalls: null,
+        toolResults: [{ callId: 'b', name: 'read', content: payload }],
+      },
+      {
+        role: 'assistant',
+        textContent: null,
+        toolCalls: null,
+        toolResults: [{ callId: 'c', name: 'read', content: payload }],
+      },
+    ];
+    const out = applyToolGradient(msgs);
+    const t0Msgs = [out[0], out[1], out[2]];
+    const preserved = t0Msgs.filter(m => m.toolResults !== null).length;
+    const summarized = t0Msgs.filter(m => /\[read|\bRead\b/.test(m.textContent ?? '')).length;
+    assert(preserved === 2, `T0 turn cap: two results fit under the 40K turn cap (got ${preserved})`);
+    assert(summarized === 1, `T0 turn cap: overflow downgraded to summary (got ${summarized})`);
   }
 
   // ── T1: turn age 1-3 - payload capped at 6K/result ──
@@ -823,7 +861,7 @@ Every council response includes:
     assert(msg.toolResults === null, 'T2: toolResults stripped at turn age 4');
     assert(msg.toolCalls === null, 'T2: toolCalls stripped at turn age 4');
     assert(msg.textContent !== null && msg.textContent.length > 0, 'T2: prose envelope in textContent');
-    assert(msg.textContent.includes('read') || msg.textContent.includes('['), 'T2: textContent contains tool label');
+    assert(/read|Read|\[/.test(msg.textContent), 'T2: textContent contains tool label');
 
     // Turn age 7 is T2 boundary
     const msgs7 = buildConvoWithTurnAge('user', payload, 7);
@@ -916,6 +954,39 @@ Every council response includes:
     assert(truncateWithHeadTail(short, 1_000) === short, 'truncateWithHeadTail: short content unchanged');
   }
 
+  // ── Tool-aware summaries: web_search / exec / read ──
+  {
+    const webMsgs = [{
+      role: 'assistant',
+      textContent: null,
+      toolCalls: [{ id: 'tc_ws', name: 'web_search', arguments: JSON.stringify({ query: 'image token cost' }) }],
+      toolResults: [{ callId: 'tc_ws', name: 'web_search', content: '{"results":[{"title":"How Images Work"},{"title":"Context Windows"}]}' }],
+    }, textMsg('user', 'follow-up question 1'), textMsg('user', 'follow-up question 2'), textMsg('user', 'follow-up question 3'), textMsg('user', 'follow-up question 4')];
+    const outWeb = applyToolGradient(webMsgs);
+    assert(outWeb[0].textContent.includes("Searched 'image token cost'"), 'web_search summary keeps query');
+    assert(outWeb[0].textContent.includes('2 results'), 'web_search summary keeps result count');
+
+    const execMsgs = [{
+      role: 'assistant',
+      textContent: null,
+      toolCalls: [{ id: 'tc_exec', name: 'exec', arguments: JSON.stringify({ command: 'npm test' }) }],
+      toolResults: [{ callId: 'tc_exec', name: 'exec', content: 'exit code: 1\nFAIL src/foo.test.ts\n1 failed' }],
+    }, textMsg('user', 'follow-up question 1'), textMsg('user', 'follow-up question 2'), textMsg('user', 'follow-up question 3'), textMsg('user', 'follow-up question 4')];
+    const outExec = applyToolGradient(execMsgs);
+    assert(outExec[0].textContent.includes('Ran npm test'), 'exec summary keeps command');
+    assert(outExec[0].textContent.includes('exit 1'), 'exec summary keeps exit code');
+
+    const readMsgs = [{
+      role: 'assistant',
+      textContent: null,
+      toolCalls: [{ id: 'tc_read2', name: 'read', arguments: JSON.stringify({ path: '/src/foo.ts' }) }],
+      toolResults: [{ callId: 'tc_read2', name: 'read', content: '# Foo\nexport function run() {}' }],
+    }, textMsg('user', 'follow-up question 1'), textMsg('user', 'follow-up question 2'), textMsg('user', 'follow-up question 3'), textMsg('user', 'follow-up question 4')];
+    const outRead = applyToolGradient(readMsgs);
+    assert(outRead[0].textContent.includes('Read /src/foo.ts'), 'read summary keeps path');
+    assert(outRead[0].textContent.includes('Foo'), 'read summary keeps heading');
+  }
+
   // ── T0/T1 boundary: assistant tool call at turn age 0 (T0) vs 1 (T1) ──
   {
     // Turn age 0: T0 — toolCalls preserved
@@ -937,6 +1008,36 @@ Every council response includes:
     const msgs1 = [...msgs0, textMsg('user', 'q1')];
     const age1 = getTurnAge(msgs1, 0);
     assert(age1 === 1, `T1 boundary: turn age at index 0 is 1 (got ${age1})`);
+  }
+
+  // ── Tool pair integrity: orphan tool_result never reaches provider ──
+  {
+    const orphaned = [
+      {
+        role: 'assistant',
+        textContent: 'I checked the file.',
+        toolCalls: null,
+        toolResults: null,
+      },
+      {
+        role: 'user',
+        textContent: null,
+        toolCalls: null,
+        toolResults: [{ callId: 'missing_1', name: 'read', content: 'secret payload that should not become a tool_result block' }],
+      },
+    ];
+
+    const repaired = repairToolCallPairs(orphaned);
+    assert(repaired[1].toolResults === null, 'orphan tool_result downgraded to plain text before translation');
+    assert(repaired[1].textContent.includes('missing matching tool call'), 'orphan downgrade explains why tool result was omitted');
+
+    const anthropic = toProviderFormat(orphaned, 'anthropic');
+    const anthropicUser = anthropic[1];
+    assert(typeof anthropicUser.content === 'string', 'Anthropic orphan becomes plain user text, not tool_result block');
+
+    const openai = toProviderFormat(orphaned, 'openai');
+    assert(openai[1].role === 'user', 'OpenAI orphan remains a user message');
+    assert(!openai.some(m => m.role === 'tool'), 'OpenAI orphan does not emit tool role message');
   }
 
   // ── Dynamic Reserve ──

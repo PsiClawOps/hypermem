@@ -76,6 +76,7 @@ export {
   normalizeToolCallId,
   generateToolCallId,
   detectProvider,
+  repairToolCallPairs,
 } from './provider-translator.js';
 
 export { migrate, SCHEMA_VERSION } from './schema.js';
@@ -170,6 +171,23 @@ export { detectTopicShift, stripMessageMetadata } from './topic-detector.js';
 export type { TopicSignal } from './topic-detector.js';
 
 export { SessionTopicMap } from './session-topic-map.js';
+
+export {
+  getActiveFOS,
+  matchMOD,
+  renderFOS,
+  renderMOD,
+  recordOutputMetrics,
+} from './fos-mod.js';
+export type {
+  FOSRecord,
+  MODRecord,
+  FOSDirectives,
+  FOSTaskVariant,
+  MODCorrection,
+  MODCalibration,
+  OutputMetricsRow,
+} from './fos-mod.js';
 
 import { DatabaseManager } from './db.js';
 import { MessageStore } from './message-store.js';

@@ -43,6 +43,7 @@ import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction-fence.js';
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
 import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
+import { getActiveFOS, matchMOD, renderFOS, renderMOD, buildActionVerificationSummary } from './fos-mod.js';
 
 /**
  * Model context window sizes by provider/model string (or partial match).
@@ -184,18 +185,19 @@ const DEFAULT_CONFIG: CompositorConfig = {
 // truncated as they age out of the recent window.
 // Redesigned 2026-04-06: T0 = current turn only (full fidelity), drop starts at turn 1.
 // Prior: T0 covered turns 0-3, meaning 3 turns of near-full content before any compression.
-const TOOL_GRADIENT_T0_TURNS = 0;   // current turn only: full fidelity
+const TOOL_GRADIENT_T0_TURNS = 0;   // current turn only: capped high-fidelity
 const TOOL_GRADIENT_T1_TURNS = 3;   // turns 1-3: moderate truncation (was 8)
 const TOOL_GRADIENT_T2_TURNS = 7;   // turns 4-7: aggressive truncation (was 12)
 // T3 = turns 8+: one-liner stub
-const TOOL_GRADIENT_T0_CHAR_CAP = 100_000; // safety ceiling only — head+tail at 12k tail
-const TOOL_GRADIENT_T0_MAX_TAIL_CHARS = 12_000; // larger tail for T0: preserves closing content
-const TOOL_GRADIENT_T1_CHAR_CAP = 6_000;  // per-message cap (was 8k)
-const TOOL_GRADIENT_T1_TURN_CAP = 12_000; // per-turn-pair cap (was 16k)
-const TOOL_GRADIENT_T2_CHAR_CAP = 800;    // per-message cap (was 1k)
-const TOOL_GRADIENT_T2_TURN_CAP = 3_000;  // per-turn-pair cap (was 4k)
-const TOOL_GRADIENT_T3_CHAR_CAP = 150;    // oldest tier: stub only (was 200)
-const TOOL_GRADIENT_T3_TURN_CAP = 800;    // per-turn-pair cap (was 1k)
+const TOOL_GRADIENT_T0_CHAR_CAP = 16_000;  // realistic T0 per-result cap, not near-full replay
+const TOOL_GRADIENT_T0_TURN_CAP = 40_000;  // current-turn aggregate cap across all tool results
+const TOOL_GRADIENT_T0_MAX_TAIL_CHARS = 6_000; // preserve closing content without burning budget
+const TOOL_GRADIENT_T1_CHAR_CAP = 6_000;   // per-message cap (was 8k)
+const TOOL_GRADIENT_T1_TURN_CAP = 12_000;  // per-turn-pair cap (was 16k)
+const TOOL_GRADIENT_T2_CHAR_CAP = 800;     // per-message cap (was 1k)
+const TOOL_GRADIENT_T2_TURN_CAP = 3_000;   // per-turn-pair cap (was 4k)
+const TOOL_GRADIENT_T3_CHAR_CAP = 150;     // oldest tier: stub only (was 200)
+const TOOL_GRADIENT_T3_TURN_CAP = 800;     // per-turn-pair cap (was 1k)
 const TOOL_GRADIENT_MAX_TAIL_CHARS = 3_000; // tail preserve budget for T1+
 const TOOL_GRADIENT_MIDDLE_MARKER = '\n[... tool output truncated ...]\n';
 
@@ -207,7 +209,7 @@ export { CollectionTrigger, DEFAULT_TRIGGERS, matchTriggers } from './trigger-re
 
 // ─── Test-only exports (not part of public API) ───────────────────────────
 // These are exported solely for unit testing. Do not use in production code.
-export { getTurnAge, applyToolGradient, appendToolSummary, truncateWithHeadTail, applyTierPayloadCap };
+export { getTurnAge, applyToolGradient, appendToolSummary, truncateWithHeadTail, applyTierPayloadCap, evictLargeToolResults };
 
 /**
  * Public reshape helper: apply tool gradient then trim to fit within a token budget.
@@ -321,6 +323,13 @@ function stripSecurityPreamble(content: string): string {
   return stripped.trim().length > 20 ? stripped.trim() : content;
 }
 
+// Minimum floor: if trimming would leave less than 30% of original content, return a
+// stripped sentinel instead of a misleading fragment. A partial result that looks
+// complete is worse than a clear signal that the result was dropped.
+// Applied only in applyTierPayloadCap (pressure-driven trimming), not in structural
+// truncation paths where head+tail is always semantically useful.
+const TOOL_GRADIENT_MIN_USEFUL_FRACTION = 0.30;
+
 function truncateWithHeadTail(content: string, maxChars: number, maxTailChars = TOOL_GRADIENT_MAX_TAIL_CHARS): string {
   if (content.length <= maxChars) return content;
   const tailBudget = Math.min(Math.floor(maxChars * 0.30), maxTailChars);
@@ -340,19 +349,105 @@ function firstNonEmptyLine(content: string): string {
   return line.trim();
 }
 
+function normalizeInline(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function hostFromUrl(raw: string): string {
+  try {
+    return new URL(raw).hostname;
+  } catch {
+    return raw;
+  }
+}
+
+function extractTopHeading(content: string): string {
+  const heading = content.split('\n').find(line => /^#{1,3}\s+/.test(line.trim()));
+  return heading ? heading.replace(/^#{1,3}\s+/, '').trim() : '';
+}
+
+function extractExitCode(content: string): string | null {
+  const match = content.match(/(?:exit code|exit|code)\s*[:=]?\s*(\d+)/i);
+  return match ? match[1] : null;
+}
+
+function estimateSearchResultCount(content: string): number | null {
+  const jsonMatch = content.match(/"results"\s*:\s*\[/);
+  if (jsonMatch) {
+    const titles = content.match(/"title"\s*:/g);
+    if (titles?.length) return titles.length;
+  }
+  const resultLines = content.match(/\bSource:\b|\bsiteName\b|\btitle\b/gi);
+  return resultLines?.length ? Math.min(resultLines.length, 20) : null;
+}
+
 function summarizeOutcome(label: string, content: string, maxChars: number): string {
   const firstLine = firstNonEmptyLine(content);
   const base = firstLine ? `${label} — ${firstLine}` : `${label} — ${content.length} chars`;
   return truncateHead(base, maxChars);
 }
 
-function buildTier2Envelope(label: string, content: string, maxChars: number): string {
+function summarizeToolInteraction(name: string, args: Record<string, unknown>, content: string, maxChars: number, compact = false): string {
+  const line = normalizeInline(firstNonEmptyLine(content));
+  switch (name) {
+    case 'read': {
+      const path = String(args.path ?? args.file_path ?? args.filePath ?? 'file');
+      const heading = extractTopHeading(content);
+      const detail = heading || line || `${content.length} chars`;
+      return truncateHead(`Read ${path} — ${detail}`, maxChars);
+    }
+    case 'exec': {
+      const cmd = String(args.command ?? 'command').slice(0, compact ? 40 : 80);
+      const exitCode = extractExitCode(content);
+      const status = exitCode ? `exit ${exitCode}` : (/(error|failed|timeout|timed out)/i.test(content) ? 'failed' : 'completed');
+      const detail = line && !/^exit\s+\d+$/i.test(line) ? `, ${line}` : '';
+      return truncateHead(`Ran ${cmd} — ${status}${detail}`, maxChars);
+    }
+    case 'web_search': {
+      const query = String(args.query ?? 'query').slice(0, compact ? 40 : 80);
+      const count = estimateSearchResultCount(content);
+      const heading = extractTopHeading(content);
+      const detail = heading || line;
+      const countText = count ? ` — ${count} results` : '';
+      const summary = compact
+        ? `Searched '${query}'${countText}`
+        : `Searched '${query}'${countText}${detail ? `, top: ${detail}` : ''}`;
+      return truncateHead(summary, maxChars);
+    }
+    case 'web_fetch': {
+      const url = String(args.url ?? 'url');
+      const host = hostFromUrl(url);
+      const heading = extractTopHeading(content);
+      const detail = heading || line || `${content.length} chars`;
+      return truncateHead(`Fetched ${host} — ${detail}`, maxChars);
+    }
+    case 'memory_search': {
+      const query = String(args.query ?? 'query').slice(0, compact ? 40 : 80);
+      const count = estimateSearchResultCount(content);
+      return truncateHead(`Searched memory for '${query}'${count ? ` — ${count} hits` : ''}${line ? `, top: ${line}` : ''}`, maxChars);
+    }
+    default: {
+      const label = toolLabelFromCall(name, args);
+      return compact
+        ? truncateHead(`${label} — ${line || `${content.length} chars`}`, maxChars)
+        : (() => {
+            const prefix = `[${label}] `;
+            const available = Math.max(40, maxChars - prefix.length);
+            return prefix + truncateWithHeadTail(content, available);
+          })();
+    }
+  }
+}
+
+function buildTier2Envelope(label: string, content: string, maxChars: number, name?: string, args?: Record<string, unknown>): string {
+  if (name && args) return summarizeToolInteraction(name, args, content, maxChars, false);
   const prefix = `[${label}] `;
   const available = Math.max(40, maxChars - prefix.length);
   return prefix + truncateWithHeadTail(content, available);
 }
 
-function buildTier3Envelope(label: string, content: string, maxChars: number): string {
+function buildTier3Envelope(label: string, content: string, maxChars: number, name?: string, args?: Record<string, unknown>): string {
+  if (name && args) return `[${summarizeToolInteraction(name, args, content, maxChars - 2, true)}]`;
   return `[${summarizeOutcome(label, content, maxChars - 2)}]`;
 }
 
@@ -370,8 +465,8 @@ function extractToolProseSummary(msg: NeutralMessage, perResultCap: number, comp
       const resultContent = msg.toolResults?.find(r => r.callId === tc.id)?.content ?? '';
       if (resultContent) {
         parts.push(compact
-          ? buildTier3Envelope(label, resultContent, perResultCap)
-          : buildTier2Envelope(label, resultContent, perResultCap));
+          ? buildTier3Envelope(label, resultContent, perResultCap, tc.name, args)
+          : buildTier2Envelope(label, resultContent, perResultCap, tc.name, args));
       } else {
         parts.push(compact ? `[${truncateHead(label, perResultCap - 2)}]` : label);
       }
@@ -379,9 +474,10 @@ function extractToolProseSummary(msg: NeutralMessage, perResultCap: number, comp
   } else if (msg.toolResults && msg.toolResults.length > 0) {
     for (const tr of msg.toolResults) {
       const label = tr.name || 'tool_result';
+      const args: Record<string, unknown> = {};
       parts.push(compact
-        ? buildTier3Envelope(label, tr.content ?? '', perResultCap)
-        : buildTier2Envelope(label, tr.content ?? '', perResultCap));
+        ? buildTier3Envelope(label, tr.content ?? '', perResultCap, tr.name || 'tool_result', args)
+        : buildTier2Envelope(label, tr.content ?? '', perResultCap, tr.name || 'tool_result', args));
     }
   }
 
@@ -413,7 +509,21 @@ function applyTierPayloadCap(msg: NeutralMessage, perResultCap: number, perTurnC
       // Strip security preamble before truncation so it doesn't consume the head budget.
       // web_fetch results wrapped in <<<EXTERNAL_UNTRUSTED_CONTENT>>> blocks would otherwise
       // render the truncated result as: [security notice] + [middle marker] + [last line].
-      content = truncateWithHeadTail(stripSecurityPreamble(content), perResultCap, maxTailChars);
+      const stripped = stripSecurityPreamble(content);
+      // Floor check (TUNE-015): if the cap would leave less than 30% of the stripped content
+      // AND less than 2000 chars absolute, return a sentinel instead of a misleading fragment.
+      // Partial results that look complete are worse than a clear dropped-result signal.
+      // The absolute floor prevents the sentinel from firing on large natural truncations
+      // (e.g., 110k → 16k is a meaningful slice, not a misleading fragment).
+      if (perResultCap < stripped.length * TOOL_GRADIENT_MIN_USEFUL_FRACTION && perResultCap < 2_000) {
+        content = `[result too large for current context budget \u2014 ${stripped.length} chars stripped]`;
+      } else {
+        // Reserve space for the \n[trimmed] marker within the cap so the total
+        // content length stays within perResultCap and doesn't overflow the
+        // per-turn aggregate cap when multiple results are truncated.
+        const TRIMMED_MARKER = '\n[trimmed]';
+        content = truncateWithHeadTail(stripped, perResultCap - TRIMMED_MARKER.length, maxTailChars) + TRIMMED_MARKER;
+      }
     }
     return { ...result, content };
   }) ?? null;
@@ -439,6 +549,36 @@ function applyTierPayloadCap(msg: NeutralMessage, perResultCap: number, perTurnC
 }
 
 /**
+ * Evict tool results exceeding 800 tokens (~3200 chars) before the history
+ * budget-fit loop. Large stale results waste budget; replace them with a
+ * stub so consumers know the result existed and can re-run if needed.
+ *
+ * Applied to the already-gradient-processed history before window selection.
+ * Does NOT affect the current turn (turn age 0).
+ */
+const TOOL_RESULT_EVICTION_CHAR_THRESHOLD = 3_200; // ~800 tokens at 4 chars/token
+
+function evictLargeToolResults<T extends NeutralMessage>(messages: T[]): T[] {
+  return messages.map((msg, idx) => {
+    // Never evict from the current turn — the model needs full context there.
+    const turnAge = getTurnAge(messages, idx);
+    if (turnAge === 0) return msg;
+    if (!msg.toolResults || msg.toolResults.length === 0) return msg;
+
+    const evicted = msg.toolResults.map(result => {
+      const content = result.content ?? '';
+      if (content.length <= TOOL_RESULT_EVICTION_CHAR_THRESHOLD) return result;
+      const approxKTokens = Math.round(content.length / 4 / 1000);
+      return {
+        ...result,
+        content: `[tool result evicted: ~${approxKTokens}k tokens \u2014 use memory_search or re-run if needed]`,
+      };
+    });
+    return { ...msg, toolResults: evicted };
+  }) as T[];
+}
+
+/**
  * Apply gradient tool treatment to a message array.
  *
  * Tiers are based on turn age, where turn age is the number of newer user
@@ -446,18 +586,19 @@ function applyTierPayloadCap(msg: NeutralMessage, perResultCap: number, perTurnC
  */
 function applyToolGradient<T extends NeutralMessage>(messages: T[]): T[] {
   const result = [...messages] as T[];
-  const perTurnUsage = new Map<number, { t1: number; t2: number; t3: number }>();
+  const perTurnUsage = new Map<number, { t0: number; t1: number; t2: number; t3: number }>();
 
   for (let i = result.length - 1; i >= 0; i--) {
     const msg = result[i];
     if (!hasToolContent(msg)) continue;
 
     const turnAge = getTurnAge(result, i);
-    const usage = perTurnUsage.get(turnAge) ?? { t1: 0, t2: 0, t3: 0 };
+    const usage = perTurnUsage.get(turnAge) ?? { t0: 0, t1: 0, t2: 0, t3: 0 };
 
     if (turnAge <= TOOL_GRADIENT_T0_TURNS) {
-      // T0: current turn only. Safety cap with larger tail budget so closing content survives.
-      const capped = applyTierPayloadCap(msg, TOOL_GRADIENT_T0_CHAR_CAP, undefined, 0, TOOL_GRADIENT_T0_MAX_TAIL_CHARS);
+      // T0: current turn only. Still cap aggressively, because the model already saw it last turn.
+      const capped = applyTierPayloadCap(msg, TOOL_GRADIENT_T0_CHAR_CAP, TOOL_GRADIENT_T0_TURN_CAP, usage.t0, TOOL_GRADIENT_T0_MAX_TAIL_CHARS);
+      usage.t0 = capped.usedChars;
       result[i] = capped.msg as T;
     } else if (turnAge <= TOOL_GRADIENT_T1_TURNS) {
       const capped = applyTierPayloadCap(msg, TOOL_GRADIENT_T1_CHAR_CAP, TOOL_GRADIENT_T1_TURN_CAP, usage.t1);
@@ -713,13 +854,18 @@ export class Compositor {
       // undercounted at length/4 when it should be measured post-stub).
       const transformedHistory = applyToolGradient(historyMessages);
 
+      // ── Evict large tool results (>800 tokens) before window selection ─────
+      // Replace oversized stale results with stubs so they don't burn budget.
+      // Current-turn results (turn age 0) are never evicted.
+      const evictedHistory = evictLargeToolResults(transformedHistory);
+
       // ── Budget-fit: walk newest→oldest, drop until it fits ──────────────
       // No transformation happens here — only include/exclude decisions.
       let historyTokens = 0;
       const includedHistory: NeutralMessage[] = [];
 
-      for (let i = transformedHistory.length - 1; i >= 0; i--) {
-        const msg = transformedHistory[i];
+      for (let i = evictedHistory.length - 1; i >= 0; i--) {
+        const msg = evictedHistory[i];
         const msgTokens = estimateMessageTokens(msg);
 
         if (historyTokens + msgTokens > remaining) {
@@ -1215,6 +1361,62 @@ export class Compositor {
           remaining -= truncTokens;
           slots.context += truncTokens;
           warnings.push('Cross-session context truncated');
+        }
+      }
+    }
+
+    // ── FOS/MOD: Fleet Output Standard + Model Output Directive ────
+    // Inject after all memory recall sections so the model gets output
+    // instructions in the same context block, closest to the conversation.
+    if (libDb && remaining > 100 && request.includeLibrary !== false) {
+      const assemblyModelId = request.model;
+      const taskContext = undefined; // reserved for future task-type awareness in ComposeRequest
+
+      const fos = getActiveFOS(libDb);
+      if (fos) {
+        const fosLines = renderFOS(fos, taskContext);
+        if (fosLines.length > 0) {
+          const fosContent = fosLines.join('\n');
+          const fosTokens = Math.ceil(fosContent.length / 4);
+          if (fosTokens <= remaining) {
+            contextParts.push(fosContent);
+            contextTokens += fosTokens;
+            remaining -= fosTokens;
+            slots.context += fosTokens;
+          }
+        }
+      }
+
+      const mod = matchMOD(assemblyModelId, libDb);
+      if (mod && fos && remaining > 50) {
+        const modLines = renderMOD(mod, fos, assemblyModelId || '', taskContext);
+        if (modLines.length > 0) {
+          const modContent = modLines.join('\n');
+          const modTokens = Math.ceil(modContent.length / 4);
+          if (modTokens <= remaining) {
+            contextParts.push(modContent);
+            contextTokens += modTokens;
+            remaining -= modTokens;
+            slots.context += modTokens;
+          }
+        }
+      }
+
+      // ── Action Verification Summary ─────────────────────────
+      // Inject a rolling buffer of the last N verified tool actions.
+      // Pressure-aware: 5 actions at <80%, 3 at 80-90%, 1 at 90-95%, drop at >=95%.
+      // Uses the already-assembled message array for scanning.
+      if (remaining > 50) {
+        const pressurePct = budget > 0 ? Math.round(((budget - remaining) / budget) * 100) : 0;
+        const actionSummary = buildActionVerificationSummary(messages, pressurePct);
+        if (actionSummary) {
+          const actionTokens = Math.ceil(actionSummary.length / 4);
+          if (actionTokens <= remaining) {
+            contextParts.push(actionSummary);
+            contextTokens += actionTokens;
+            remaining -= actionTokens;
+            slots.context += actionTokens;
+          }
         }
       }
     }
@@ -1829,9 +2031,46 @@ export class Compositor {
       const lines: string[] = [];
       let tokens = 0;
 
-      for (const result of results) {
+      // TUNE-015: apply recency decay to recall scores.
+      // Messages and episodes from distant past score down even if semantically relevant.
+      // A 5-day-old task-request should not compete equally with today's messages.
+      //   - Episodes: exponential decay, half-life 7 days
+      //   - Facts/knowledge: step-function penalty for items older than 48h
+      //     (prevents completed/stale tasks from outranking recent ones)
+      //       48-72h: multiply by 0.7
+      //       >72h:   multiply by 0.5
+      const now = Date.now();
+      const decayedResults = results.map(result => {
+        if (!result.createdAt) return result;
+        const ageMs = now - new Date(result.createdAt).getTime();
+        const ageDays = ageMs / 86_400_000;
+        if (result.sourceTable === 'episodes') {
+          // Exponential half-life decay for episodes
+          const decayFactor = Math.pow(0.5, ageDays / 7);
+          return { ...result, score: result.score * decayFactor };
+        }
+        // Step-function recency penalty for facts and knowledge
+        const ageHours = ageMs / 3_600_000;
+        if (ageHours > 72) {
+          return { ...result, score: result.score * 0.5 };
+        }
+        if (ageHours > 48) {
+          return { ...result, score: result.score * 0.7 };
+        }
+        return result;
+      });
+      // Re-sort after decay adjustment
+      decayedResults.sort((a, b) => b.score - a.score);
+
+      for (const result of decayedResults) {
         // TUNE-001: drop very-low-relevance results (RRF scores below 0.008 are noise)
         if (result.score < 0.008) continue;
+        // TUNE-016: FTS-only results require higher floor — low-score FTS hits are noise
+        if (result.sources.length === 1 && result.sources[0] === 'fts' && result.score < 0.05) continue;
+        // TUNE-014: episodes require higher confidence — score:2 episodes bleed adjacent
+        // session context and contaminate current session. Require fts+knn agreement
+        // (score >= 0.04) for episodes to make it into assembled context.
+        if (result.sourceTable === 'episodes' && result.score < 0.04) continue;
         const label = this.formatHybridResult(result);
         const lineTokens = estimateTokens(label);
         if (tokens + lineTokens > maxTokens) break;

@@ -23,9 +23,9 @@
  */
 
 export interface ImageEvictionConfig {
-  /** Turns after which images are evicted. Default: 2 */
+  /** Turns after which images are evicted. Default: 1 */
   imageAgeTurns: number;
-  /** Turns after which large tool results are evicted. Default: 4 */
+  /** Turns after which large tool results are evicted. Default: 1 */
   toolResultAgeTurns: number;
   /** Minimum estimated tokens to bother evicting a tool result. Default: 200 */
   minTokensToEvict: number;
@@ -46,7 +46,7 @@ export interface EvictionResult {
 
 export const DEFAULT_EVICTION_CONFIG: ImageEvictionConfig = {
   imageAgeTurns: 1,
-  toolResultAgeTurns: 4,
+  toolResultAgeTurns: 1,
   minTokensToEvict: 200,
   keepPreviewChars: 120,
 };

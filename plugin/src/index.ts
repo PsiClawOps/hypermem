@@ -396,25 +396,25 @@ function toNeutralMessage(msg: InboundMessage): NeutralMessage {
   // OpenClaw uses role 'toolResult' (camelCase). Support all three spellings.
   const isToolResultMsg = msg.role === 'tool' || msg.role === 'tool_result' || msg.role === 'toolResult';
 
-  // When the message is a tool result, wrap textContent as a single NeutralToolResult so the
-  // gradient can compress it. The flat content was already extracted into textContent above;
-  // do NOT also leave it in textContent or it counts double.
+  // Tool results must stay on the result side of the transcript. If we persist them as
+  // assistant rows with orphaned toolResults, later replay can retain a tool_result after
+  // trimming away the matching assistant tool_use, which Anthropic rejects with a 400.
   let toolResults: NeutralToolResult[] | null = null;
   if (isToolResultMsg && textContent) {
     const toolCallId = (msg.tool_call_id as string) ?? (msg.toolCallId as string) ?? 'unknown';
     const toolName   = (msg.name as string)         ?? (msg.toolName as string)   ?? 'tool';
-    toolResults  = [{ callId: toolCallId, name: toolName, content: textContent }];
-    textContent  = null;  // owned by toolResults now, not duplicated in textContent
+    toolResults = [{ callId: toolCallId, name: toolName, content: textContent }];
+    textContent = null;  // owned by toolResults now, not duplicated in textContent
   }
 
-  const role = msg.role === 'tool' || msg.role === 'tool_result' || msg.role === 'toolResult'
-    ? 'assistant'  // Tool results are part of the assistant turn in our model
+  const role = isToolResultMsg
+    ? 'user'
     : (msg.role as 'user' | 'assistant' | 'system');
 
   return {
     role,
     textContent,
-    toolCalls,
+    toolCalls: isToolResultMsg ? null : toolCalls,
     toolResults,
   };
 }
@@ -501,6 +501,8 @@ async function truncateJsonlIfNeeded(
       } catch {
         entries.push({ line: lines[i], parsed: null });
       }
+      // Yield every 100 entries to avoid blocking the event loop
+      if (i % 100 === 0) await new Promise(r => setImmediate(r));
     }
 
     const messageEntries: typeof entries = [];
@@ -761,10 +763,12 @@ function createHyperMemEngine(): ContextEngine {
         const agentId = extractAgentId(sk);
         const neutral = toNeutralMessage(msg);
 
-        // Route to appropriate record method based on role
+        // Route to appropriate record method based on role.
+        // User messages are intentionally NOT recorded here — afterTurn() handles
+        // user recording with proper metadata stripping (stripMessageMetadata).
+        // Recording here too causes dual-write: once raw (here), once clean (afterTurn).
         if (neutral.role === 'user') {
-          // recordUserMessage expects (agentId, sessionKey, content: string, opts?)
-          await hm.recordUserMessage(agentId, sk, neutral.textContent ?? '');
+          return { ingested: false };
         } else {
           await hm.recordAssistantMessage(agentId, sk, neutral);
         }

@@ -44,13 +44,13 @@ export interface DreamerConfig {
 
 export const DEFAULT_DREAMER_CONFIG: DreamerConfig = {
   enabled: false,
-  minScore: 0.70,
+  minScore: 0.75,
   minConfidence: 0.70,
   maxPromotionsPerRun: 5,
   tickInterval: 12,
   dryRun: false,
-  recencyHalfLifeDays: 14,
-  maxAgeDays: 90,
+  recencyHalfLifeDays: 7,
+  maxAgeDays: 30,
 };
 
 // ─── Types ───────────────────────────────────────────────────────────────────

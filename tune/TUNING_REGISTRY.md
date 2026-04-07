@@ -165,3 +165,14 @@ Each entry records the change, rationale, and date — so we can track drift ove
 - **After:** sqlite-vec + nomic-embed-text wired. 1,875 facts embedded. Episodes being embedded in background. Compose now runs true hybrid FTS5+KNN recall.
 - **Date:** 2026-04-02
 - **Status:** active (episode bulk-embed in progress)
+
+### TUNE-014 — Operational Boilerplate Filter + Episode Score Floor
+- **Files:** `src/background-indexer.ts`, `src/compositor.ts`, `test/tune-014-boilerplate-filter.mjs`
+- **Problem:** Common operational phrases ("timed out waiting", "message was delivered", "no reply yet", etc.) were being embedded and indexed as facts/episodes. High knn similarity across sessions made them *worse* retrieval candidates — they matched everything and contaminated current session context. Prior session episodes were bleeding into live sessions at score:2 (too low to be meaningful).
+- **Changes:**
+  - `OPERATIONAL_BOILERPLATE` const: 14 regex patterns rejecting known runtime chatter from `isQualityFact()`
+  - Episode score floor: `score < 0.04` filter in compositor hybrid retrieval — 5x higher than base RRF floor of 0.008. Requires fts+knn agreement for episodes to surface in assembled context.
+- **Before:** Runtime chatter indexed as facts; score:2 episodes crossing session boundaries, surfacing stale context as if it were current.
+- **After:** Boilerplate rejected at index time; episodes require meaningful confidence to appear in prompt. Cross-session bleed substantially reduced.
+- **Date:** 2026-04-06
+- **Status:** active

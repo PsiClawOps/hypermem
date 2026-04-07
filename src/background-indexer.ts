@@ -175,6 +175,30 @@ function extractFactCandidates(content: string): FactCandidate[] {
  * Rejects pattern matches that are code, table fragments, questions,
  * or too short to be meaningful facts.
  */
+/**
+ * Operational boilerplate phrases that appear frequently across sessions
+ * but carry zero signal value. High knn similarity makes them *worse*
+ * retrieval candidates — they match everything and contaminate episodes.
+ */
+const OPERATIONAL_BOILERPLATE: RegExp[] = [
+  /timed?\s*out\s*waiting/i,
+  /message\s*was\s*delivered/i,
+  /no\s*reply\s*(back\s*)?yet/i,
+  /picked?\s*it\s*up\s*on\s*(next\s*)?heartbeat/i,
+  /session\s*not\s*found/i,
+  /\bretrying\b/i,
+  /tool\s*call\s*failed/i,
+  /exec\s*completed/i,
+  /no\s*reply\s*needed/i,
+  /still\s*waiting/i,
+  /will\s*pick\s*(it\s*)?up\s*(on\s*(next|the))?/i,
+  /message\s*is\s*in\s*(his|her|their|the)\s*queue/i,
+  /sent\s+to\s+(anvil|compass|clarity|sentinel|vanguard|forge)/i,
+  /dispatched\s+(it\s+)?to/i,
+  /timed\s*out\s*after/i,
+  /\bNO_REPLY\b/,
+];
+
 function isQualityFact(content: string): boolean {
   // Too short — sentence fragments
   if (content.length < 40) return false;
@@ -235,6 +259,12 @@ function isQualityFact(content: string): boolean {
 
   // TUNE-013: Content starting with a markdown heading is section text, not a fact
   if (/^#{1,4}\s/.test(content.trim())) return false;
+
+  // TUNE-014: Operational boilerplate — phrases common across sessions that produce
+  // high knn similarity scores but carry zero signal. They cross-contaminate episodes.
+  for (const pattern of OPERATIONAL_BOILERPLATE) {
+    if (pattern.test(content)) return false;
+  }
 
   return true;
 }

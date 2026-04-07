@@ -156,7 +156,7 @@ describe('evictStaleContent', () => {
         assistantMsg('r1'), assistantMsg('r2'), assistantMsg('r3'), assistantMsg('r4'), assistantMsg('r5'),
         userTextMsg('ok'),
       ];
-      const { messages, stats } = evictStaleContent(msgs, { toolResultAgeTurns: 4, minTokensToEvict: 200 });
+      const { messages, stats } = evictStaleContent(msgs, { toolResultAgeTurns: 1, minTokensToEvict: 200 });
       assert.equal(stats.toolResultsEvicted, 1);
       assert.ok(messages[0].content.includes('evicted'));
       assert.ok(messages[0].content.includes('read'));
@@ -181,7 +181,7 @@ describe('evictStaleContent', () => {
         toolMsg(small),
         assistantMsg('r1'), assistantMsg('r2'), assistantMsg('r3'), assistantMsg('r4'), assistantMsg('r5'),
       ];
-      const { stats } = evictStaleContent(msgs, { toolResultAgeTurns: 4, minTokensToEvict: 200 });
+      const { stats } = evictStaleContent(msgs, { toolResultAgeTurns: 1, minTokensToEvict: 200 });
       assert.equal(stats.toolResultsEvicted, 0);
     });
   });
@@ -192,7 +192,7 @@ describe('evictStaleContent', () => {
         assistantMsg('big response ' + 'x'.repeat(5000)),
         assistantMsg('r2'), assistantMsg('r3'), assistantMsg('r4'),
       ];
-      const { messages, stats } = evictStaleContent(msgs, { imageAgeTurns: 2, toolResultAgeTurns: 4 });
+      const { messages, stats } = evictStaleContent(msgs, { imageAgeTurns: 2, toolResultAgeTurns: 1 });
       assert.equal(stats.imagesEvicted, 0);
       assert.equal(stats.toolResultsEvicted, 0);
       assert.equal(messages[0].content, msgs[0].content);
@@ -255,7 +255,7 @@ describe('evictStaleContent', () => {
   describe('DEFAULT_EVICTION_CONFIG', () => {
     it('has expected defaults', () => {
       assert.equal(DEFAULT_EVICTION_CONFIG.imageAgeTurns, 1);
-      assert.equal(DEFAULT_EVICTION_CONFIG.toolResultAgeTurns, 4);
+      assert.equal(DEFAULT_EVICTION_CONFIG.toolResultAgeTurns, 1);
       assert.equal(DEFAULT_EVICTION_CONFIG.minTokensToEvict, 200);
       assert.equal(DEFAULT_EVICTION_CONFIG.keepPreviewChars, 120);
     });

@@ -342,6 +342,7 @@ export class RedisLayer {
     // Walk newest→oldest, find the cut point
     let tokenSum = 0;
     let keepFrom = 0; // index (0-based) of the oldest message to keep
+    let yieldCounter = 0;
     for (let i = items.length - 1; i >= 0; i--) {
       try {
         const msg: StoredMessage = JSON.parse(items[i]);
@@ -361,6 +362,8 @@ export class RedisLayer {
           break;
         }
       }
+      // Yield every 50 messages to avoid blocking the event loop
+      if (++yieldCounter % 50 === 0) await new Promise(r => setImmediate(r));
     }
 
     if (keepFrom <= 0) return 0; // everything fits
