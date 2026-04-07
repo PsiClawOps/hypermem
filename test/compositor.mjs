@@ -681,6 +681,7 @@ Every council response includes:
     appendToolSummary,
     truncateWithHeadTail,
     applyTierPayloadCap,
+    evictLargeToolResults,
   } = await import('../dist/compositor.js');
 
   // Helper: build a synthetic NeutralMessage with tool content
@@ -732,7 +733,7 @@ Every council response includes:
     assert(getTurnAge(msgs, 1) === 2, 'getTurnAge: counts only user messages, not assistant');
   }
 
-  // ── T0: turn age 0 only - capped high fidelity ──
+  // ── T0/T1: recent window preserves full results when pressure is low ──
   {
     const shortPayload = 'tool result here';
     const msgs = buildConvoWithTurnAge('user', shortPayload, 0); // turn age = 0 (T0)
@@ -741,56 +742,44 @@ Every council response includes:
     assert(firstMsg.toolResults !== null, 'T0: toolResults NOT stripped at turn age 0');
     assert(firstMsg.toolResults[0].content === shortPayload, 'T0: small payload preserved verbatim at turn age 0');
 
-    // Turn age 1 is T1 - no longer T0
+    // Turn age 1 is still in the protected recent-turn window.
     const msgs1 = buildConvoWithTurnAge('user', shortPayload, 1);
     const out1 = applyToolGradient(msgs1);
-    // T1 has a per-result cap but still keeps toolResults for small payloads
-    assert(out1[0].toolResults !== null, 'T1: small payload preserved at turn age 1 (under cap)');
+    assert(out1[0].toolResults !== null, 'T0/T1: small payload preserved at turn age 1');
   }
 
-  // ── T0: 16K per-result cap with 6K tail budget ──
+  // ── T0: >40k result survives intact when projected pressure is low ──
   {
-    const bigPayload = 'X'.repeat(110_000);
-    const msgs = buildConvoWithTurnAge('user', bigPayload, 0); // turn age = 0, T0
+    const bigPayload = 'X'.repeat(50_000);
+    const msgs = buildConvoWithTurnAge('user', bigPayload, 0);
     const out = applyToolGradient(msgs);
     const content = out[0].toolResults[0].content;
-    assert(content.length < bigPayload.length, 'T0: oversized payload is capped');
-    assert(content.length <= 16_000 + 100, `T0: payload capped at ~16K (got ${content.length})`);
-    assert(content.includes('[... tool output truncated ...]'), 'T0: truncation marker present');
-    const markerIdx = content.indexOf('[... tool output truncated ...]');
-    const tail = content.slice(markerIdx + '[... tool output truncated ...]'.length);
-    assert(tail.length >= 4_500, `T0: tail budget preserves closing content (got ${tail.length})`);
+    assert(content.length === bigPayload.length, 'T0: 50k result preserved when projected occupancy is below orange zone');
+    assert(!content.includes('reason=oversize_turn0_trim'), 'T0: low-pressure path does not inject trim note');
   }
 
-  // ── T0: per-turn cap downgrades overflow to summary ──
+  // ── T0/T1: high-pressure >40k result gets structured head+tail trim note ──
   {
-    const payload = 'X'.repeat(25_000);
     const msgs = [
-      {
-        role: 'assistant',
-        textContent: null,
-        toolCalls: null,
-        toolResults: [{ callId: 'a', name: 'read', content: payload }],
-      },
-      {
-        role: 'assistant',
-        textContent: null,
-        toolCalls: null,
-        toolResults: [{ callId: 'b', name: 'read', content: payload }],
-      },
-      {
-        role: 'assistant',
-        textContent: null,
-        toolCalls: null,
-        toolResults: [{ callId: 'c', name: 'read', content: payload }],
-      },
+      textMsg('assistant', 'A'.repeat(200_000)),
+      toolMsg('user', 'X'.repeat(50_000)),
     ];
     const out = applyToolGradient(msgs);
-    const t0Msgs = [out[0], out[1], out[2]];
-    const preserved = t0Msgs.filter(m => m.toolResults !== null).length;
-    const summarized = t0Msgs.filter(m => /\[read|\bRead\b/.test(m.textContent ?? '')).length;
-    assert(preserved === 2, `T0 turn cap: two results fit under the 40K turn cap (got ${preserved})`);
-    assert(summarized === 1, `T0 turn cap: overflow downgraded to summary (got ${summarized})`);
+    const content = out[1].toolResults[0].content;
+    assert(content.includes('[hypermem_tool_result_trim'), 'T0 trim note: structured note injected');
+    assert(content.includes('reason=oversize_turn0_trim'), 'T0 trim note: reason recorded');
+    assert(content.includes('[... tool output truncated ...]'), 'T0 trim note: head+tail body preserved');
+    assert(content.length <= 40_500, `T0 trim note: payload reduced to ~40k envelope (got ${content.length})`);
+  }
+
+  // ── T0/T1: age-1 large result is protected from secondary eviction ──
+  {
+    const payload = 'X'.repeat(10_000);
+    const msgs = buildConvoWithTurnAge('user', payload, 1); // turn age = 1
+    const transformed = applyToolGradient(msgs);
+    const evicted = evictLargeToolResults(transformed);
+    assert(evicted[0].toolResults !== null, 'T0/T1 eviction guard: toolResults still present at turn age 1');
+    assert(evicted[0].toolResults[0].content === payload, 'T0/T1 eviction guard: age-1 large result not stubbed out');
   }
 
   // ── T1: turn age 2-4 - payload capped at 6K/result ──
@@ -808,7 +797,7 @@ Every council response includes:
     const outT0 = applyToolGradient(msgsT0);
     const contentT0 = outT0[0].toolResults[0].content;
     assert(outT0[0].toolResults !== null, 'T0: toolResults present at turn age 1');
-    assert(contentT0.length === payload8k.length, 'T0: 8K payload under 16K cap — not truncated at turn age 1');
+    assert(contentT0.length === payload8k.length, 'T0/T1: 8K payload stays full in the protected recent-turn window');
 
     // Turn age 4 is T1 boundary (T1_TURNS=4)
     const msgs4b = buildConvoWithTurnAge('user', 'short payload', 4);

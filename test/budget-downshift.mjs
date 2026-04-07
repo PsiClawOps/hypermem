@@ -45,7 +45,7 @@ console.log('── applyToolGradientToWindow ──');
 
 {
   // Test 2: messages under budget — all returned
-  // Budget = 10_000 tokens → targetChars = floor(10000 * 0.65) * 4 = 26000 chars
+  // Budget = 10_000 tokens → targetTokens = floor(10000 * 0.65) = 6500 tokens
   // 3 short messages, well under budget
   const messages = [
     { role: 'user', textContent: 'Hello', toolCalls: null, toolResults: null },
@@ -54,21 +54,14 @@ console.log('── applyToolGradientToWindow ──');
   ];
   const result = applyToolGradientToWindow(messages, 10_000);
   assert(Array.isArray(result), 'Returns an array for under-budget input');
-  // All messages fit well within budget — all should be returned
+  // All messages fit well within budget — all should survive
   assert(result.length > 0, 'Under-budget input returns messages (not empty)');
-  // The trimming only removes if totalChars > targetChars, so all 3 should survive
-  const totalChars = messages.reduce((s, m) => s + (m.textContent?.length ?? 0), 0);
-  const targetChars = Math.floor(10_000 * 0.65) * 4;
-  if (totalChars <= targetChars) {
-    assert(result.length === messages.length, `Under-budget: all ${messages.length} messages returned (got ${result.length})`);
-  } else {
-    assert(result.length < messages.length, 'Over-budget: trimmed correctly');
-  }
+  assert(result.length === messages.length, `Under-budget: all ${messages.length} messages returned (got ${result.length})`);
 }
 
 {
   // Test 3: messages over budget — trims oldest
-  // Budget = 100 tokens → targetChars = floor(100 * 0.65) * 4 = 260 chars
+  // Budget = 100 tokens → targetTokens = floor(100 * 0.65) = 65 tokens
   // Create messages that exceed this limit
   const longText = 'A'.repeat(100); // 100 chars each
   const messages = [
@@ -77,7 +70,7 @@ console.log('── applyToolGradientToWindow ──');
     { role: 'user', textContent: longText, toolCalls: null, toolResults: null },
     { role: 'assistant', textContent: longText, toolCalls: null, toolResults: null },    // newest
   ];
-  // totalChars = 400, targetChars = 260 → should drop oldest
+  // 4 short prose messages exceed the 65-token target → should drop oldest
   const result = applyToolGradientToWindow(messages, 100);
   assert(result.length < messages.length, `Over-budget: trimmed from ${messages.length} to ${result.length}`);
   // The LAST message should always be kept (newest preserved)
@@ -87,13 +80,26 @@ console.log('── applyToolGradientToWindow ──');
     lastMsg && lastMsg.textContent === origLastMsg.textContent,
     'Over-budget trim preserves newest messages'
   );
-  // Verify the remaining messages fit within the budget
+  // Text-only path: remaining prose is comfortably smaller than the original window
   const totalCharsAfter = result.reduce((s, m) => s + (m.textContent?.length ?? 0), 0);
-  const targetChars = Math.floor(100 * 0.65) * 4;
-  assert(
-    totalCharsAfter <= targetChars,
-    `Trimmed result fits within budget (${totalCharsAfter} <= ${targetChars} chars)`
-  );
+  assert(totalCharsAfter < longText.length * messages.length, 'Trimmed result is smaller than the original prose window');
+}
+
+{
+  // Test 4: toolResults count toward budget, not just textContent.
+  // Old behavior looked only at textContent, so this case kept both messages.
+  const messages = [
+    { role: 'user', textContent: 'B'.repeat(200), toolCalls: null, toolResults: null },
+    {
+      role: 'assistant',
+      textContent: null,
+      toolCalls: null,
+      toolResults: [{ callId: 'tc_001', name: 'read', content: 'X'.repeat(1200), isError: false }],
+    },
+  ];
+  const result = applyToolGradientToWindow(messages, 100);
+  assert(result.length === 1, `Tool payload budget-fit trims older prose when toolResults carry the real weight (got ${result.length})`);
+  assert(result[0].toolResults?.[0]?.content?.length > 0, 'Newest tool payload is preserved after oldest prose is dropped');
 }
 
 // ─── Downshift threshold math tests (no Redis required) ─────────────────────

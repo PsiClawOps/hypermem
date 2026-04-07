@@ -183,15 +183,13 @@ const DEFAULT_CONFIG: CompositorConfig = {
 
 // Tool gradient thresholds — controls how aggressively tool results are
 // truncated as they age out of the recent window.
-// Redesigned 2026-04-06: T0 = current turn only (full fidelity), drop starts at turn 1.
-// Prior: T0 covered turns 0-3, meaning 3 turns of near-full content before any compression.
+// Recent-turn policy (2026-04-07): protect turn 0 + turn 1, budget against a
+// conservative 120k planning window, and only head+tail trim large (>40k)
+// recent results when projected occupancy crosses the orange zone.
 const TOOL_GRADIENT_T0_TURNS = 1;   // current + last completed turn: full fidelity (was 0 — caused silent T1 truncation of immediately preceding tool results)
 const TOOL_GRADIENT_T1_TURNS = 4;   // turns 2-4: moderate truncation (was 3)
 const TOOL_GRADIENT_T2_TURNS = 7;   // turns 4-7: aggressive truncation (was 12)
 // T3 = turns 8+: one-liner stub
-const TOOL_GRADIENT_T0_CHAR_CAP = 16_000;  // realistic T0 per-result cap, not near-full replay
-const TOOL_GRADIENT_T0_TURN_CAP = 40_000;  // current-turn aggregate cap across all tool results
-const TOOL_GRADIENT_T0_MAX_TAIL_CHARS = 6_000; // preserve closing content without burning budget
 const TOOL_GRADIENT_T1_CHAR_CAP = 6_000;   // per-message cap (was 8k)
 const TOOL_GRADIENT_T1_TURN_CAP = 12_000;  // per-turn-pair cap (was 16k)
 const TOOL_GRADIENT_T2_CHAR_CAP = 800;     // per-message cap (was 1k)
@@ -200,6 +198,15 @@ const TOOL_GRADIENT_T3_CHAR_CAP = 150;     // oldest tier: stub only (was 200)
 const TOOL_GRADIENT_T3_TURN_CAP = 800;     // per-turn-pair cap (was 1k)
 const TOOL_GRADIENT_MAX_TAIL_CHARS = 3_000; // tail preserve budget for T1+
 const TOOL_GRADIENT_MIDDLE_MARKER = '\n[... tool output truncated ...]\n';
+const TOOL_PLANNING_BASELINE_WINDOW = 120_000;
+const TOOL_PLANNING_MIN_RESERVE_TOKENS = 24_000;
+const TOOL_PRESSURE_YELLOW = 0.75;
+const TOOL_PRESSURE_ORANGE = 0.80;
+const TOOL_PRESSURE_RED = 0.85;
+const TOOL_RECENT_OVERSIZE_CHAR_THRESHOLD = 40_000;
+const TOOL_RECENT_OVERSIZE_TARGET_CHARS = 40_000;
+const TOOL_RECENT_OVERSIZE_MAX_TAIL_CHARS = 12_000;
+const TOOL_TRIM_NOTE_PREFIX = '[hypermem_tool_result_trim';
 
 // ─── Trigger Registry ────────────────────────────────────────────
 // Moved to src/trigger-registry.ts (W5).
@@ -225,16 +232,16 @@ export { getTurnAge, applyToolGradient, appendToolSummary, truncateWithHeadTail,
  */
 export function applyToolGradientToWindow(
   messages: NeutralMessage[],
-  tokenBudget: number
+  tokenBudget: number,
+  totalWindowTokens?: number,
 ): NeutralMessage[] {
-  const reshaped = applyToolGradient(messages);
-  const targetChars = Math.floor(tokenBudget * 0.65) * 4;
-  // estimate: sum of (msg.textContent?.length ?? 0) for each message
-  let totalChars = reshaped.reduce((sum, m) => sum + (m.textContent?.length ?? 0), 0);
+  const reshaped = applyToolGradient(messages, { totalWindowTokens });
+  const targetTokens = Math.floor(tokenBudget * 0.65);
+  let totalTokens = reshaped.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
   let start = 0;
   // walk oldest to newest, drop until we fit
-  while (totalChars > targetChars && start < reshaped.length - 1) {
-    totalChars -= reshaped[start].textContent?.length ?? 0;
+  while (totalTokens > targetTokens && start < reshaped.length - 1) {
+    totalTokens -= estimateMessageTokens(reshaped[start]);
     start++;
   }
   return reshaped.slice(start);
@@ -502,6 +509,125 @@ function hasToolContent(msg: NeutralMessage): boolean {
   return Boolean((msg.toolCalls && msg.toolCalls.length > 0) || (msg.toolResults && msg.toolResults.length > 0));
 }
 
+type ToolPressureZone = 'green' | 'yellow' | 'orange' | 'red';
+
+interface ToolPressureState {
+  planningWindowTokens: number;
+  reserveTokens: number;
+  projectedTokens: number;
+  occupancy: number;
+  zone: ToolPressureZone;
+}
+
+function resolveToolPlanningWindow(totalWindowTokens?: number): number {
+  const actualWindow = totalWindowTokens && totalWindowTokens > 0
+    ? totalWindowTokens
+    : TOOL_PLANNING_BASELINE_WINDOW;
+  return Math.min(actualWindow, TOOL_PLANNING_BASELINE_WINDOW);
+}
+
+function computeToolPressureState(messages: NeutralMessage[], totalWindowTokens?: number): ToolPressureState {
+  const planningWindowTokens = resolveToolPlanningWindow(totalWindowTokens);
+  const reserveTokens = Math.max(
+    TOOL_PLANNING_MIN_RESERVE_TOKENS,
+    Math.floor(planningWindowTokens * 0.10),
+  );
+  const usedTokens = messages.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
+  const projectedTokens = usedTokens + reserveTokens;
+  const occupancy = planningWindowTokens > 0 ? projectedTokens / planningWindowTokens : 1;
+
+  let zone: ToolPressureZone = 'green';
+  if (occupancy > TOOL_PRESSURE_RED) zone = 'red';
+  else if (occupancy > TOOL_PRESSURE_ORANGE) zone = 'orange';
+  else if (occupancy > TOOL_PRESSURE_YELLOW) zone = 'yellow';
+
+  return {
+    planningWindowTokens,
+    reserveTokens,
+    projectedTokens,
+    occupancy,
+    zone,
+  };
+}
+
+function isStructuredTrimNote(content: string): boolean {
+  return content.startsWith(TOOL_TRIM_NOTE_PREFIX);
+}
+
+function buildRecentTrimNote(
+  originalChars: number,
+  keptHeadChars: number,
+  keptTailChars: number,
+  pressure: ToolPressureState,
+  resultId?: string,
+): string {
+  const parts = [
+    TOOL_TRIM_NOTE_PREFIX,
+    'partial_result=true',
+    'reason=oversize_turn0_trim',
+    `original_chars=${originalChars}`,
+    `kept_head_chars=${keptHeadChars}`,
+    `kept_tail_chars=${keptTailChars}`,
+    `projected_occupancy_pct=${Math.round(pressure.occupancy * 100)}`,
+    `planning_window_tokens=${pressure.planningWindowTokens}`,
+    `reserve_tokens=${pressure.reserveTokens}`,
+    'retry_recommended=true',
+  ];
+  if (resultId) parts.push(`result_id=${resultId}`);
+  parts.push(']');
+  return parts.join(' ');
+}
+
+function countHeadTailChars(content: string): { headChars: number; tailChars: number } {
+  const markerIdx = content.indexOf(TOOL_GRADIENT_MIDDLE_MARKER);
+  if (markerIdx === -1) {
+    return { headChars: content.length, tailChars: 0 };
+  }
+  return {
+    headChars: markerIdx,
+    tailChars: content.length - markerIdx - TOOL_GRADIENT_MIDDLE_MARKER.length,
+  };
+}
+
+function trimRecentToolResult(
+  content: string,
+  pressure: ToolPressureState,
+  resultId?: string,
+): string {
+  if (isStructuredTrimNote(content)) return content;
+
+  const stripped = stripSecurityPreamble(content);
+  const baseOriginal = stripped.length > 0 ? stripped : content;
+  const noteSkeleton = buildRecentTrimNote(baseOriginal.length, 0, 0, pressure, resultId);
+  const availableChars = Math.max(
+    2_000,
+    TOOL_RECENT_OVERSIZE_TARGET_CHARS - noteSkeleton.length - 1,
+  );
+  const truncated = truncateWithHeadTail(baseOriginal, availableChars, TOOL_RECENT_OVERSIZE_MAX_TAIL_CHARS);
+  const { headChars, tailChars } = countHeadTailChars(truncated);
+  const note = buildRecentTrimNote(baseOriginal.length, headChars, tailChars, pressure, resultId);
+  return `${note}
+${truncated}`;
+}
+
+function protectRecentToolContent<T extends NeutralMessage>(msg: T, pressure: ToolPressureState): T {
+  if (!msg.toolResults || msg.toolResults.length === 0) return msg;
+
+  const shouldEmergencyTrim = pressure.zone === 'orange' || pressure.zone === 'red';
+  const toolResults = msg.toolResults.map(result => {
+    const content = result.content ?? '';
+    if (!content) return result;
+    if (!shouldEmergencyTrim) return result;
+    if (content.length <= TOOL_RECENT_OVERSIZE_CHAR_THRESHOLD) return result;
+    return {
+      ...result,
+      content: trimRecentToolResult(content, pressure, result.callId || result.name || undefined),
+    };
+  });
+
+  return { ...msg, toolResults } as T;
+}
+
 function applyTierPayloadCap(msg: NeutralMessage, perResultCap: number, perTurnCap?: number, usedSoFar: number = 0, maxTailChars = TOOL_GRADIENT_MAX_TAIL_CHARS): { msg: NeutralMessage; usedChars: number } {
   const toolResults = msg.toolResults?.map(result => {
     let content = result.content ?? '';
@@ -554,15 +680,15 @@ function applyTierPayloadCap(msg: NeutralMessage, perResultCap: number, perTurnC
  * stub so consumers know the result existed and can re-run if needed.
  *
  * Applied to the already-gradient-processed history before window selection.
- * Does NOT affect the current turn (turn age 0).
+ * Does NOT affect turn 0 or turn 1.
  */
 const TOOL_RESULT_EVICTION_CHAR_THRESHOLD = 3_200; // ~800 tokens at 4 chars/token
 
 function evictLargeToolResults<T extends NeutralMessage>(messages: T[]): T[] {
   return messages.map((msg, idx) => {
-    // Never evict from the current turn — the model needs full context there.
+    // Never evict from the protected recent-turn window.
     const turnAge = getTurnAge(messages, idx);
-    if (turnAge === 0) return msg;
+    if (turnAge <= TOOL_GRADIENT_T0_TURNS) return msg;
     if (!msg.toolResults || msg.toolResults.length === 0) return msg;
 
     const evicted = msg.toolResults.map(result => {
@@ -584,8 +710,9 @@ function evictLargeToolResults<T extends NeutralMessage>(messages: T[]): T[] {
  * Tiers are based on turn age, where turn age is the number of newer user
  * messages after the current message.
  */
-function applyToolGradient<T extends NeutralMessage>(messages: T[]): T[] {
+function applyToolGradient<T extends NeutralMessage>(messages: T[], opts?: { totalWindowTokens?: number }): T[] {
   const result = [...messages] as T[];
+  const pressure = computeToolPressureState(messages, opts?.totalWindowTokens);
   const perTurnUsage = new Map<number, { t0: number; t1: number; t2: number; t3: number }>();
 
   for (let i = result.length - 1; i >= 0; i--) {
@@ -596,10 +723,9 @@ function applyToolGradient<T extends NeutralMessage>(messages: T[]): T[] {
     const usage = perTurnUsage.get(turnAge) ?? { t0: 0, t1: 0, t2: 0, t3: 0 };
 
     if (turnAge <= TOOL_GRADIENT_T0_TURNS) {
-      // T0: current turn only. Still cap aggressively, because the model already saw it last turn.
-      const capped = applyTierPayloadCap(msg, TOOL_GRADIENT_T0_CHAR_CAP, TOOL_GRADIENT_T0_TURN_CAP, usage.t0, TOOL_GRADIENT_T0_MAX_TAIL_CHARS);
-      usage.t0 = capped.usedChars;
-      result[i] = capped.msg as T;
+      // T0/T1: preserve full recent tool results unless we hit the conservative
+      // orange/red pressure zones and the payload itself is oversized (>40k).
+      result[i] = protectRecentToolContent(msg, pressure) as T;
     } else if (turnAge <= TOOL_GRADIENT_T1_TURNS) {
       const capped = applyTierPayloadCap(msg, TOOL_GRADIENT_T1_CHAR_CAP, TOOL_GRADIENT_T1_TURN_CAP, usage.t1);
       usage.t1 = capped.usedChars;
@@ -852,7 +978,7 @@ export class Compositor {
       // This ensures estimateMessageTokens() measures actual submission cost,
       // not pre-transform cost (which caused overflow: dense tool JSON was
       // undercounted at length/4 when it should be measured post-stub).
-      const transformedHistory = applyToolGradient(historyMessages);
+      const transformedHistory = applyToolGradient(historyMessages, { totalWindowTokens: totalWindow });
 
       // ── Evict large tool results (>800 tokens) before window selection ─────
       // Replace oversized stale results with stubs so they don't burn budget.
@@ -1708,7 +1834,9 @@ export class Compositor {
       effectiveBudget * (this.config.warmHistoryBudgetFraction ?? 0.4)
     );
     const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
-    const transformedForWarm = applyToolGradient(rawHistory);
+    const transformedForWarm = applyToolGradient(rawHistory, {
+      totalWindowTokens: resolveModelWindow(opts?.model, this.config.defaultTokenBudget),
+    });
 
     // Walk newest→oldest, accumulate transformed token cost, stop when budget exhausted
     let warmTokens = 0;
@@ -1761,7 +1889,11 @@ export class Compositor {
     if (!conversation) return;
 
     const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
-    const transformedHistory = applyToolGradient(rawHistory);
+    const transformedHistory = applyToolGradient(rawHistory, {
+      totalWindowTokens: tokenBudget && tokenBudget > 0
+        ? Math.max(tokenBudget, Math.floor(tokenBudget / 0.80))
+        : TOOL_PLANNING_BASELINE_WINDOW,
+    });
 
     // If a token budget is provided, trim the gradient-compressed window to fit
     // before writing to Redis. Without this, up to maxHistoryMessages messages
