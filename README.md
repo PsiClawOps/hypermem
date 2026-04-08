@@ -1,12 +1,12 @@
 # hyper**mem**
 
-*Coherent Agents. Every Session.*
+*Coherent agents. Every session.*
 
 *Identity that holds. Context that composes.*
 
 ---
 
-hyper**mem** is a runtime context engine for OpenClaw agents.
+hypermem is a runtime context engine for OpenClaw agents.
 
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git ~/.openclaw/workspace/repo/hypermem
@@ -23,7 +23,7 @@ L3  Vectors DB    Per-agent semantic search with sqlite-vec embeddings
 L4  Library DB    Fleet-wide structured knowledge, facts, episodes, registry
 ```
 
-This is the core claim: hyper**mem** is not transcript replay. It is context management. Each turn is rebuilt from active topic, hot state, durable history, semantic recall, and compiled knowledge inside a fixed token budget.
+This is the core claim: hypermem is not transcript replay. It is context management. Each turn is rebuilt from active topic, hot state, durable history, semantic recall, and compiled knowledge inside a fixed token budget.
 
 ```
   user message
@@ -75,9 +75,9 @@ What's in storage, not in this prompt:
   Change the topic, and the next turn pulls different content from the same storage.
 ```
 
-OpenClaw gives agents a solid baseline: workspace memory files, hybrid file search, and compaction safeguards. hyper**mem** goes deeper. It replaces transcript accumulation with a context engine that assembles prompts fresh from storage on every turn.
+OpenClaw gives agents a solid baseline: workspace memory files, hybrid file search, and compaction safeguards. hypermem goes deeper. It replaces transcript accumulation with a context engine that assembles prompts fresh from storage on every turn.
 
-### How a prompt gets built: standard vs. HyperCompositor
+### How a prompt gets built: standard vs. hypercompositor
 
 Two problems kill agent sessions. **New-session amnesia:** the agent restarts and everything is gone. Decisions, preferences, work state, context. The operator re-explains. The agent re-asks. **Compaction crunch:** long sessions fill the context window, the runtime summarizes to make room, and specifics are lost. Tool output, exact decisions, file paths. The agent keeps running but degraded, confident about things it no longer actually knows.
 
@@ -110,7 +110,7 @@ When it fills:                          When budget is exceeded:
 | Topic changes | All history competes equally | Scoped retrieval by active topic |
 | Tool output | Stays until trimmed | Compressed by turn age (T0/T1/T2/T3) |
 | Model swap mid-session | Re-count, hope it fits | Budget recomputed from new window size next turn |
-| Compose cost | Free (it is the transcript) | 52ms avg, 57ms p95 |
+| Compose time | Free (it is the transcript) | 52ms avg, 57ms p95 |
 
 ---
 
@@ -120,13 +120,13 @@ When it fills:                          When budget is exceeded:
 
 When an agent restarts, it wakes up empty. Decisions made, preferences established, work in progress: gone. Operators re-explain context. Agents ask questions they have already asked. The work is real. The memory is not.
 
-hyper**mem** warms sessions from SQLite and Redis before the first turn. The agent picks up mid-conversation. Session continuity is no longer a function of uptime; it is a property of the architecture.
+hypermem warms sessions from SQLite and Redis before the first turn. The agent picks up mid-conversation. Session continuity is no longer a function of uptime; it is a property of the architecture.
 
 ### Context that never collapses
 
 Transcripts grow. Windows fill. Runtimes compact history into a summary, and specifics, tool detail, and work state get lost in the process. The agent keeps going, but degraded.
 
-hyper**mem** never reaches that cliff. It assembles context fresh on every turn inside a strict token budget. History, facts, recall, and library data compete for tokens intentionally. If the model window changes mid-session, the compositor adapts on the next turn. There is no accumulated transcript to compress.
+hypermem never reaches that cliff. It assembles context fresh on every turn inside a strict token budget. History, facts, recall, and library data compete for tokens intentionally. If the model window changes mid-session, the compositor adapts on the next turn. There is no accumulated transcript to compress.
 
 ### Retrieval that actually finds things
 
@@ -142,17 +142,17 @@ Tool Context Tuning compresses by turn age. T0 turns stay verbatim under normal 
 
 ### Knowledge that outlasts the conversation
 
-Most memory systems store what was said. hyper**mem** synthesizes what was learned.
+Most memory systems store what was said. hypermem synthesizes what was learned.
 
-When a topic goes quiet, hyper**mem** compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. This is classifier-driven; no LLM call required. Facts, episodes, and preferences written explicitly during the session are available immediately in structured storage. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay. The conversation is gone. The knowledge it produced is not.
+When a topic goes quiet, hypermem compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. This is classifier-driven; no LLM call required. Facts, episodes, and preferences written explicitly during the session are available immediately in structured storage. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay. The conversation is gone. The knowledge it produced is not.
 
-OpenClaw 2026.4.7 ships memory wiki for structured storage. hyper**mem** goes further: wiki pages are synthesized by topic classifier and injected by the compositor within token budget.
+OpenClaw 2026.4.7 ships memory wiki for structured storage. hypermem goes further: wiki pages are synthesized by topic classifier and injected by the compositor within token budget.
 
 ### History that remembers its highlights
 
 Context trimming is a blunt instrument. When a session fills up, recent messages survive and old ones go, regardless of which turns actually mattered. A decision from three hours ago gets dropped. Tool noise from five minutes ago stays.
 
-hyper**mem** scores turns for significance as they are recorded. High-signal moments (decisions, blockers, artifacts, established facts) are marked as keystones. When pressure trims the history window, keystones are preserved ahead of ordinary turns. When a topic shift occurs and history scopes to the new thread, keystones from past contexts are still eligible for recall. The agent keeps its landmarks even when the surrounding conversation is gone.
+hypermem scores turns for significance as they are recorded. High-signal moments (decisions, blockers, artifacts, established facts) are marked as keystones. When pressure trims the history window, keystones are preserved ahead of ordinary turns. When a topic shift occurs and history scopes to the new thread, keystones from past contexts are still eligible for recall. The agent keeps its landmarks even when the surrounding conversation is gone.
 
 ### Output normalization
 
@@ -192,9 +192,11 @@ The pagination, bold headers, and trailing offer-to-elaborate are GPT-5.4 defaul
 
 ### Outputs you can verify
 
-Agents make plausible-sounding claims that contradict stored facts, or execute tool calls without any grounded basis for the action. Neither failure is obvious from the transcript.
+Every response is checked against the fact corpus before it is recorded. No LLM call. FOS/MOD (Fact-Oriented Synthesis / Moderation) runs a classifier against the live L4 fact corpus on each turn: unsupported claims are flagged, contradictions with established facts surface in diagnostics, and a confabulation risk score is attached to the stored episode.
 
-FOS/MOD (Fact-Oriented Synthesis / Moderation) is hypermem's verification layer. Before a response is recorded, a classifier checks the content against the in-session fact corpus: unsupported claims are flagged, contradictions with established facts are surfaced in diagnostics, and a confabulation risk score is attached to the stored episode. Action verification applies the same check to tool calls before they fire. High-risk operations without grounded fact support surface in logs before execution. No LLM call required. All verification runs against the live L4 fact corpus.
+Action verification applies the same check to tool calls before they fire. High-risk operations without grounded fact support surface in logs before execution.
+
+Without this, agents make plausible-sounding claims that contradict stored facts, or execute tool calls without grounded basis. Neither failure is obvious from the transcript. FOS/MOD makes both visible.
 
 Output normalization directives (the `outputProfile` setting) are also part of the FOS layer. See [Output normalization](#output-normalization) above for profiles and examples.
 
@@ -208,7 +210,7 @@ Spawned subagents start cold. They don't know what the parent was doing, which f
 
 ## Pressure management
 
-hyper**mem** assembles context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript and Redis window. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
+hypermem assembles context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript and Redis window. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
 
 | Path | Trigger | Action |
 |---|---|---|
@@ -218,27 +220,7 @@ hyper**mem** assembles context fresh on every turn, but a long-running session s
 | **Density-aware JSONL truncation** | compact() | Counts tokens per message, not message count. Catches large-message sessions that looked fine by count but were full by volume |
 | **Pre-ingestion wave guard** | Any toolResult payload before recording | Truncates or skips large tool payloads before they enter the ingest path, preventing the ingest itself from adding pressure during high-volume agentic runs |
 
-**The one thing these paths cannot fix:** a session whose JSONL transcript on disk is already at 98% when the gateway restarts. The JSONL loads into runtime context before any compaction runs. If your pre-restart session was large, you start at whatever pressure that JSONL represents. Check `session_status` immediately on startup. If you're above 85%, start a fresh session; don't attempt tool work.
-
-What the logs look like at each pressure level:
-
-```
-# 75% -- green zone, no trim fired
-[hypermem-plugin] tool-loop: pressure=74.8% -- within threshold, full results retained
-
-# 85% -- hard caution, trim fires on T0 and T1
-[hypermem-plugin] tool-loop trim: pressure=86.1% -> target=50%
-  redis=43 msgs trimmed to 22, messages[]=67 entries dropped
-  T0 result trimmed head+tail (original=52,400 chars, trimmed=8,200 chars)
-  [hypermem_tool_result_trim chars_removed=44200 reason=pressure_t0_trim]
-
-# 92% -- nuclear path
-[hypermem-plugin] compact: NUCLEAR -- session at 118,400/128,000 tokens (92% full)
-  deep-trimmed Redis to 25% budget (43->11 msgs)
-  JSONL truncated to 20% depth (847->169 turns)
-```
-
-At 75%, nothing is touched; the session is healthy and full results land. At 85%, T0 gets trimmed head-and-tail and the messages array the runtime sees is cut before results arrive, which is what actually prevents stripping on the current turn. Nuclear fires only when the compact call runs above 85%. It is aggressive and buys headroom for the next several turns, not the current one.
+**The one thing these paths cannot fix:** a session whose JSONL transcript on disk is already at 98% when the gateway restarts. The JSONL loads into runtime context before any compaction runs. Check `session_status` on startup. If you're above 85%, start a fresh session.
 
 ---
 
@@ -255,13 +237,11 @@ At 75%, nothing is touched; the session is healthy and full results land. At 85%
 
 No configuration required for any of these:
 
-- **Background indexer:** indexes each session's turns for semantic recall after activity drops off
-- **Topic synthesis:** compiles stale topics into structured wiki pages (classifier-driven, no LLM call)
+- **Semantic indexer:** indexes each session's turns for recall after activity drops off, pre-embeds new content so compose calls hit cache on subsequent turns
+- **Topic synthesis:** compiles stale topics into structured wiki pages and promotes high-signal facts from the hot Redis layer to pointer-format entries in MEMORY.md; both classifier-driven, no LLM call
 - **Noise sweep:** removes low-signal or expired facts on a rolling basis
 - **Tool decay:** compresses older tool history to free budget for current work
-- **Proactive embedding:** pre-embeds new content so compose calls hit cache on subsequent turns
 - **Keystone scoring:** evaluates each recorded turn for historical significance; high-signal turns are marked for preservation ahead of ordinary history during pressure trimming
-- **Dreaming promoter:** after activity drops off, promotes high-signal facts and episodes from the hot Redis layer to pointer-format entries in MEMORY.md; no LLM call, classifier-driven
 
 ---
 
@@ -285,7 +265,7 @@ L1 and L4 structured retrieval are sub-millisecond. After the first turn, query 
 
 ## Architecture
 
-hyper**mem** plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle.
+hypermem plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle.
 
 **L1: Redis** is the hot layer. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and fleet registry data. The compositor goes here first on every turn.
 
@@ -308,7 +288,7 @@ hyper**mem** plugs into OpenClaw as a context engine and owns the full prompt co
 | Session Registry | Session lifecycle tracking |
 | Desired State | Per-agent config targets; compares running config against desired at gateway startup and surfaces drift for operator review |
 
-**Secret scanner:** Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, hyper**mem** scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected; the write succeeds without the content reaching fleet-visible storage.
+**Secret scanner:** Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, hypermem scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected; the write succeeds without the content reaching fleet-visible storage.
 
 **The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and assembles a provider-format context block. A safety valve catches estimation drift and trims post-assembly. Because the budget is computed from the model's actual context window at compose time (resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly), a mid-session model swap is absorbed on the next turn with no manual intervention. T0 is preserved verbatim up to 80% projected occupancy. At high pressure with a large result, T0 is trimmed head-and-tail with a structured trim note. Compression of older turns starts at T1.
 
@@ -370,14 +350,6 @@ Schema versions are stamped into each database on startup and checked on open. A
 
 ## Installation
 
-**Let your OpenClaw agent install this.** The configuration varies by deployment shape, and there are enough moving parts that manual setup is error-prone. Hand this to your agent:
-
-> "Install hyper**mem** following INSTALL.md. I'm running a [solo / multi-agent] setup."
-
-Full guide: **[INSTALL.md](./INSTALL.md)**
-
-### Manual quick path
-
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git ~/.openclaw/workspace/repo/hypermem
 cd ~/.openclaw/workspace/repo/hypermem
@@ -393,9 +365,17 @@ Run `session_status` after your next conversation. You'll see compositor stats: 
 
 **Requirements:** Node.js 22+, OpenClaw with context engine plugin support, Redis 7+, Ollama with `nomic-embed-text`.
 
+Full guide with deployment-specific options: **[INSTALL.md](./INSTALL.md)**
+
+### Agent-assisted install
+
+If you prefer, hand the install to your OpenClaw agent:
+
+> "Install hypermem following INSTALL.md. I'm running a [solo / multi-agent] setup."
+
 ### Tuning
 
-hyper**mem** ships three aligned operating profiles: `light`, `standard`, and `full`. Pick one and set `outputProfile` in your config. Everything else follows.
+hypermem ships three aligned operating profiles: `light`, `standard`, and `full`. Pick one and set `outputProfile` in your config. Everything else follows.
 
 | Profile | Context window | Budget fraction | Best for |
 |---|---|---|---|
@@ -491,7 +471,7 @@ const spawn = await buildSpawnContext(
 
 ## Migration
 
-hyper**mem** doesn't touch your existing memory data. Install it, switch the context engine, and migrate historical data on your own timeline, before or after switching.
+hypermem doesn't touch your existing memory data. Install it, switch the context engine, and migrate historical data on your own timeline, before or after switching.
 
 Migrations are supported from any memory platform. Worked examples are included in the migration documentation for: **OpenClaw built-in memory, ClawText, Mem0, Honcho, QMD session exports, and Engram**.
 
