@@ -186,6 +186,17 @@ hyper**mem** plugs into OpenClaw as a context engine and owns the full prompt co
 
 ## Requirements
 
+**Current release: HyperMem 0.5.0** — topic-aware memory and compiled-knowledge system, optimized to run light by default and scale up when operators need richer context.
+
+What 0.5.0 includes:
+- Topic-aware context tracking
+- Compiled knowledge / wiki-like synthesis and recall
+- Metrics dashboard primitives
+- Obsidian import and export
+- Aligned runtime profiles: `light`, `standard`, `full`
+
+Out of scope for 0.5.0: full Virtual Sessions, ambiguous topic-switch confirmation / revert flow, cross-agent topic search, LLM reflection pass.
+
 | Requirement | Version | Notes |
 |---|---|---|
 | **Node.js** | `>=22.0.0` | Required for native `node:sqlite` module |
@@ -236,6 +247,22 @@ Verify: `openclaw logs --limit 50 | grep hypermem` — you should see `[hypermem
 
 ### Tuning
 
+hyper**mem** ships three aligned operating profiles: `light`, `standard`, and `full`. Pick one and set `outputProfile` in your config. Everything else follows.
+
+| Profile | Best for | Context weight | Wiki budget | Output shaping |
+|---|---|---|---|---|
+| `light` | 64k-class models, single-agent installs, minimal parallel work | Lower | Smaller | Lighter |
+| `standard` | Normal OpenClaw deployments | Balanced | Default | Full directive set |
+| `full` | Large-context or multi-agent installs, maximum richness | Richer | Larger | Strongest |
+
+**Start with `light`** on 64k models or single-agent systems. Move to `standard` once the system has stable latency and headroom. Use `full` only when you want maximum context richness and have the budget for it.
+
+Primary tuning knobs:
+
+- **`targetBudgetFraction`** — caps total non-history context weight. Lower values force lighter assembly.
+- **`wikiTokenCap`** — caps compiled-knowledge/wiki contribution.
+- **`outputProfile`** — `light`, `standard`, or `full`. Controls how much FOS/MOD guidance is injected per turn.
+
 Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes effect on gateway restart:
 
 ```json
@@ -252,11 +279,15 @@ Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes
 }
 ```
 
-`outputProfile` controls the FOS/MOD output normalization tier injected into each composed context. Valid values: `"light"` (~100 tokens — anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration), `"standard"` (~250 tokens — full directive set plus pagination and hedging rules), `"full"` (~400 tokens — complete output normalization for high-stakes or fleet-wide deployments). Default: `"standard"`.
+`outputProfile` valid values: `"light"` (~100 tokens — anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration), `"standard"` (~250 tokens — full directive set plus pagination and hedging rules), `"full"` (~400 tokens — complete output normalization for high-stakes or fleet-wide deployments). Default: `"standard"`.
 
-Context presets ship as named profiles: `light`, `standard`, `full`. Import with `import { lightProfile, standardProfile, fullProfile } from '@psiclawops/hypermem'` and pass to `HyperMem.create()` as the base config.
+Context presets ship as named profiles importable from the package:
 
-This config targets ~35-45% token reduction for smaller context windows. Full tuning notes are in INSTALL.md.
+```typescript
+import { lightProfile, standardProfile, fullProfile } from '@psiclawops/hypermem';
+```
+
+Pass to `HyperMem.create()` as the base config. Full tuning notes are in INSTALL.md.
 
 ---
 
@@ -307,16 +338,6 @@ const spawn = await buildSpawnContext(
         ├── messages_2026Q1.db   (rotated archive)
         └── vectors.db
 ```
-
----
-
-## Known limits
-
-**Global-scope fact writes trust the caller.** The fleet registry, tier-aware composition, and cross-agent knowledge queries are all production. The specific gap: global-scope facts can be written by any agent with API access without authorization checks. Fine for single-operator deployments. Add write authorization controls before any multi-operator environment with untrusted agents — that is the one roadmap item blocking multi-tenant release, not the multi-agent story broadly.
-
-**Automatic per-turn fact extraction is a future step.** Topic synthesis (classifier-driven wiki pages), noise sweep, and tool decay all run automatically. Per-turn LLM-driven extraction of facts and episodes from raw conversation text is a follow-on. Facts and episodes available today are those written explicitly during the session.
-
-**Embedding model hot-swap is not yet implemented.** Current default is `nomic-embed-text`.
 
 ---
 
