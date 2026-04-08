@@ -69,6 +69,12 @@ Context trimming is a blunt instrument. When a session fills up, recent messages
 
 HyperMem scores turns for significance as they are recorded. High-signal moments — decisions, blockers, artifacts, established facts — are marked as keystones. When pressure trims the history window, keystones are preserved ahead of ordinary turns. When a topic shift occurs and history scopes to the new thread, keystones from past contexts are still eligible for recall — the agent keeps its landmarks even when the surrounding conversation is gone.
 
+### Outputs you can verify
+
+Agents confabulate. They make plausible-sounding claims that contradict stored facts, or execute tool calls without any grounded basis for the action. Neither failure is obvious from the transcript.
+
+FOS/MOD (Fact-Oriented Synthesis / Moderation) is HyperMem's verification layer. Before a response is recorded, a classifier checks the content against the in-session fact corpus: unsupported claims are flagged, contradictions with established facts are surfaced in diagnostics, and a confabulation risk score is attached to the stored episode. Action verification applies the same check to tool calls before they fire — high-risk operations without grounded fact support surface in logs before execution. No LLM call required. All verification runs against the live L4 fact corpus.
+
 ### Subagents that hit the ground running
 
 Spawned subagents start cold. They don't know what the parent was doing, which files were in scope, or what decisions preceded the spawn.
@@ -87,6 +93,7 @@ HyperMem assembles context fresh on every turn, but a long-running session still
 | **AfterTurn trim** | Every turn at >80% | Pre-emptive headroom cut after the assistant replies, before the next turn arrives |
 | **Nuclear compaction** | compact() at >85% | Cuts Redis to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
 | **Density-aware JSONL truncation** | compact() | Counts tokens per message, not message count — catches large-message sessions that looked "fine" by count but were full by volume |
+| **Pre-ingestion wave guard** | Any toolResult payload before recording | Truncates or skips large tool payloads before they enter the ingest path — prevents the ingest itself from adding pressure during high-volume agentic runs |
 
 **The one thing these paths cannot fix:** a session whose JSONL transcript on disk is already at 98% when the gateway restarts. The JSONL loads into runtime context before any compaction runs. If your pre-restart session was large, you start at whatever pressure that JSONL represents. Check `session_status` immediately on startup. If you're above 85%, start a fresh session — don't attempt tool work.
 
@@ -119,6 +126,7 @@ No configuration required for any of these:
 - **Tool decay** — compresses older tool history to free budget for current work
 - **Proactive embedding** — pre-embeds new content so compose calls hit cache on subsequent turns
 - **Keystone scoring** — evaluates each recorded turn for historical significance; high-signal turns are marked for preservation ahead of ordinary history during pressure trimming
+- **Dreaming promoter** — after activity drops off, promotes high-signal facts and episodes from the hot Redis layer to pointer-format entries in MEMORY.md; no LLM call, classifier-driven
 
 ---
 
@@ -167,7 +175,7 @@ HyperMem plugs into OpenClaw as a context engine and owns the full prompt compos
 
 **Secret scanner** — Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, HyperMem scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected — the write succeeds without the content reaching fleet-visible storage.
 
-**The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and assembles a provider-format context block. A safety valve catches estimation drift and trims post-assembly. Because the budget is computed from the model's actual context window at compose time, a mid-session model swap is absorbed on the next turn with no manual intervention.
+**The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and assembles a provider-format context block. A safety valve catches estimation drift and trims post-assembly. Because the budget is computed from the model's actual context window at compose time — resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly — a mid-session model swap is absorbed on the next turn with no manual intervention. T0 (the current turn's tool output) is always preserved verbatim; compression starts at T1.
 
 ---
 
@@ -207,7 +215,8 @@ Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes
     "maxFacts": 18,
     "maxCrossSessionContext": 3000,
     "maxRecentToolPairs": 2,
-    "maxProseToolPairs": 6
+    "maxProseToolPairs": 6,
+    "contextWindowReserveFraction": 0.25
   }
 }
 ```
@@ -303,6 +312,11 @@ Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 - [x] Runtime-baseline pressure measurement — accurate pressure signal after gateway restart when Redis is cold but JSONL is large
 - [x] Image pressure tracking — base64 image parts counted in pressure estimation, not silently omitted
 - [x] Tool result gradient on tool-loop path — large tool results compressed on every turn, not just during full compose
+- [x] FOS/MOD — fact-grounded response verification and action pre-check; confabulation guard; no LLM call
+- [x] Dreaming promoter — pointer-format MEMORY.md promotion from Redis hot layer; classifier-driven
+- [x] Model-aware token budget — resolves context window from model string when runtime omits tokenBudget
+- [x] Dynamic context window reserve — configurable headroom fraction based on observed avg turn cost
+- [x] Pre-ingestion wave guard — truncate/skip large tool payloads before they enter the ingest path
 - [ ] Versioned atomic re-indexing
 - [ ] `hypermem seed --workspace` CLI
 - [ ] Embedding model hot-swap
