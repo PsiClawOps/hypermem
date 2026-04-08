@@ -1663,27 +1663,23 @@ function createHyperMemEngine(): ContextEngine {
         // P1.7: Direct per-agent tick after each turn — no need to wait for 5-min interval.
         if (_indexer) {
           const _agentIdForTick = agentId;
-          const _skForTick = sk;
           const runTick = async () => {
             if (_taskFlowRuntime) {
+              // Use createManaged + finish/fail only — do NOT call runTask().
+              // runTask() writes a task_run row to runs.sqlite with status='running'
+              // and the TaskFlow runtime has no completeTask() method, so those rows
+              // would accumulate forever and block clean restarts.
+              const flow = _taskFlowRuntime.createManaged({
+                controllerId: 'hypermem/indexer',
+                goal: `Index messages for ${_agentIdForTick}`,
+              });
               try {
-                const flow = _taskFlowRuntime.createManaged({
-                  controllerId: 'hypermem/indexer',
-                  goal: `Index messages for ${_agentIdForTick}`,
-                });
-                _taskFlowRuntime.runTask({
-                  flowId: flow.flowId,
-                  runtime: 'local',
-                  childSessionKey: _skForTick,
-                  task: `Indexer tick — ${_agentIdForTick}`,
-                  status: 'running',
-                  startedAt: Date.now(),
-                });
                 await _indexer!.tick();
-                // createManaged tracks completion automatically
-              } catch {
-                // TaskFlow wrapping is best-effort — fall back to bare tick
-                await _indexer!.tick();
+                _taskFlowRuntime.finish({ flowId: flow.flowId });
+              } catch (tickErr) {
+                // Best-effort fail — non-fatal, but mark the flow so it doesn't leak
+                try { _taskFlowRuntime.fail({ flowId: flow.flowId }); } catch { /* ignore */ }
+                throw tickErr;
               }
             } else {
               await _indexer!.tick();
