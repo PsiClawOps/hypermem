@@ -23,7 +23,8 @@
     "test:quick": "node test/smoke.mjs && node test/library.mjs && node test/compositor.mjs",
     "validate:plugin-pipeline": "npm --prefix plugin run build && node test/plugin-pipeline.mjs",
     "test:multi-turn": "node test/multi-turn-session.mjs",
-    "test:ci": "npm test && npm --prefix plugin run typecheck"
+    "test:ci": "npm test && npm --prefix plugin run typecheck",
+    "smoke": "node scripts/smoke-test.mjs"
   },
   "dependencies": {
     "ioredis": "^5.4.1",

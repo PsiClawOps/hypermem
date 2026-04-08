@@ -50,6 +50,7 @@ export {
   TRIGGER_REGISTRY,
   TRIGGER_REGISTRY_VERSION,
   TRIGGER_REGISTRY_HASH,
+  DEFAULT_TRIGGERS,
   matchTriggers,
 } from './trigger-registry.js';
 
