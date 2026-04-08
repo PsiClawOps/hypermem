@@ -75,6 +75,8 @@ Agents confabulate. They make plausible-sounding claims that contradict stored f
 
 FOS/MOD (Fact-Oriented Synthesis / Moderation) is HyperMem's verification layer. Before a response is recorded, a classifier checks the content against the in-session fact corpus: unsupported claims are flagged, contradictions with established facts are surfaced in diagnostics, and a confabulation risk score is attached to the stored episode. Action verification applies the same check to tool calls before they fire — high-risk operations without grounded fact support surface in logs before execution. No LLM call required. All verification runs against the live L4 fact corpus.
 
+FOS also injects output normalization directives into composed context via the `outputProfile` config key. Three tiers: `light` (~100 tokens), `standard` (~250 tokens), `full` (~400 tokens). The directives cover anti-sycophancy, prohibited vocabulary, length calibration, evidence hedging policy, and pagination rules — tuned to counteract the known output tendencies of the models in use. The tier is set once in config and applied on every compose turn.
+
 ### Subagents that hit the ground running
 
 Spawned subagents start cold. They don't know what the parent was doing, which files were in scope, or what decisions preceded the spawn.
@@ -242,12 +244,17 @@ Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes
     "maxCrossSessionContext": 3000,
     "maxRecentToolPairs": 2,
     "maxProseToolPairs": 6,
-    "contextWindowReserveFraction": 0.25
+    "contextWindowReserveFraction": 0.25,
+    "outputProfile": "standard"
   }
 }
 ```
 
-This profile targets ~35-45% token reduction for smaller context windows. Full tuning notes are in INSTALL.md.
+`outputProfile` controls the FOS/MOD output normalization tier injected into each composed context. Valid values: `"light"` (~100 tokens — anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration), `"standard"` (~250 tokens — full directive set plus pagination and hedging rules), `"full"` (~400 tokens — complete output normalization for high-stakes or fleet-wide deployments). Default: `"standard"`.
+
+Context presets ship as named profiles: `light`, `standard`, `full`. Import with `import { lightProfile, standardProfile, fullProfile } from '@psiclawops/hypermem'` and pass to `HyperMem.create()` as the base config.
+
+This config targets ~35-45% token reduction for smaller context windows. Full tuning notes are in INSTALL.md.
 
 ---
 
@@ -344,6 +351,11 @@ Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 - [x] Dynamic context window reserve — configurable headroom fraction based on observed avg turn cost
 - [x] Pre-ingestion wave guard — truncate/skip large tool payloads before they enter the ingest path
 - [x] Aggregate trigger budget cap — total token ceiling across all triggered collections per compose turn; prevents pathological prompts from overconsumming retrieval budget
+- [x] FOS output profiles — three-tier output normalization (light/standard/full); `outputProfile` config key; replaces `outputStandard`; backward-compat aliases retained
+- [x] Context presets — named profiles (light/standard/full) importable from the package; `extended` deprecated with compat redirect to `full`
+- [x] Configuration profiles — `minimal`, `standard`, `rich` compositor bundles for quick deployment
+- [x] Obsidian vault exporter — `exportToVault()` writes agent memory to an Obsidian-compatible vault directory
+- [x] Metrics dashboard — per-agent and fleet-wide memory health report via `getMetricsDashboard()`
 - [ ] Versioned atomic re-indexing
 - [ ] `hypermem seed --workspace` CLI
 - [ ] Embedding model hot-swap
