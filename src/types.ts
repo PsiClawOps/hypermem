@@ -415,6 +415,15 @@ export interface CompositorConfig {
   maxFacts: number;
   maxCrossSessionContext: number;  // tokens
   /**
+   * Aggregate token ceiling across all trigger-fired doc chunk collections in a
+   * single compose pass. When unset, hypermem uses a dynamic ceiling of 40% of
+   * the remaining budget at the start of trigger retrieval.
+   *
+   * This prevents pathological prompts from firing many trigger collections at
+   * once and starving the rest of the prompt budget.
+   */
+  maxTotalTriggerTokens?: number;
+  /**
    * How many recent tool call/result pairs to keep verbatim in history.
    * Tool call/result content beyond this threshold gets prose-stub treatment.
    * Default: 3

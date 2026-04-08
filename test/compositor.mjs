@@ -11,6 +11,7 @@
 import { HyperMem, toProviderFormat, repairToolCallPairs } from '../dist/index.js';
 import { Compositor, DEFAULT_TRIGGERS } from '../dist/compositor.js';
 import { chunkMarkdown } from '../dist/doc-chunker.js';
+import { DocChunkStore } from '../dist/doc-chunk-store.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -1130,6 +1131,59 @@ Every council response includes:
       `Dynamic reserve very heavy: sessionPressureHigh=true (got ${veryHeavyResult.diagnostics.sessionPressureHigh})`);
     assert(veryHeavyResult.warnings.some(w => w.includes('SESSION_PRESSURE_HIGH')),
       `Dynamic reserve very heavy: SESSION_PRESSURE_HIGH in warnings (got [${veryHeavyResult.warnings.join(', ')}])`);
+  }
+
+
+  // ── Test 13: Aggregate trigger budget cap ──
+  console.log('── Aggregate Trigger Budget Cap ──');
+
+  {
+    const docChunkStore = new DocChunkStore(libDb);
+    const triggerPrompt = DEFAULT_TRIGGERS.map(t => t.keywords[0]).join(' ');
+    let uncappedTriggerTokens = 0;
+
+    for (const [i, trigger] of DEFAULT_TRIGGERS.entries()) {
+      const keyword = trigger.keywords[0];
+      const repeated = (`${keyword} guidance and ${keyword} review notes. `).repeat(70);
+      const markdown = `# ${trigger.collection}
+
+## Retrieved Section
+
+${repeated}`;
+      const chunks = chunkMarkdown(markdown, {
+        collection: trigger.collection,
+        sourcePath: `/virtual/${trigger.collection.replace(/\//g, '_')}_${i}.md`,
+        scope: 'agent',
+        tier: 'council',
+        agentId,
+      });
+      const firstChunk = chunks[0];
+      if (!firstChunk) continue;
+      uncappedTriggerTokens += Math.min(trigger.maxTokens || 1000, firstChunk.tokenEstimate);
+      docChunkStore.indexChunks(chunks);
+    }
+
+    const triggerBudgetResult = await compositor.compose({
+      agentId,
+      sessionKey,
+      tokenBudget: 5000,
+      provider: 'anthropic',
+      model: 'claude-opus-4-6',
+      tier: 'council',
+      includeHistory: false,
+      includeFacts: false,
+      includeLibrary: false,
+      includeContext: false,
+      includeDocChunks: true,
+      prompt: triggerPrompt,
+    }, msgDb, libDb);
+
+    assert(triggerBudgetResult.diagnostics.triggerHits >= 6,
+      `Aggregate trigger cap: multiple triggers matched (got ${triggerBudgetResult.diagnostics.triggerHits})`);
+    assert(triggerBudgetResult.slots.library <= 2200,
+      `Aggregate trigger cap: library tokens bounded (got ${triggerBudgetResult.slots.library})`);
+    assert(triggerBudgetResult.slots.library < uncappedTriggerTokens,
+      `Aggregate trigger cap: capped below uncapped potential (${triggerBudgetResult.slots.library} < ${uncappedTriggerTokens})`);
   }
 
   // ── Cleanup ──

@@ -1298,13 +1298,24 @@ export class Compositor {
         diagRetrievalMode = 'triggered';
         const docChunkStore = new DocChunkStore(libDb);
         const docParts: string[] = [];
+        const maxTotalTriggerTokens = Math.min(
+          remaining,
+          this.config.maxTotalTriggerTokens && this.config.maxTotalTriggerTokens > 0
+            ? this.config.maxTotalTriggerTokens
+            : Math.floor(remaining * 0.40)
+        );
+        let totalTriggerTokens = 0;
 
         for (const trigger of triggered) {
           if (remaining < 200) break;
 
+          const triggerBudgetRemaining = maxTotalTriggerTokens - totalTriggerTokens;
+          if (triggerBudgetRemaining < 200) break;
+
           const maxTokens = Math.min(
             trigger.maxTokens || 1000,
-            Math.floor(remaining * 0.12) // No single collection takes > 12% of remaining (W4: was 0.15)
+            Math.floor(remaining * 0.12), // No single collection takes > 12% of remaining (W4: was 0.15)
+            triggerBudgetRemaining
           );
 
           try {
@@ -1379,6 +1390,7 @@ export class Compositor {
             if (chunkLines.length > 0) {
               const collectionLabel = trigger.collection.split('/').pop() || trigger.collection;
               docParts.push(`## ${collectionLabel} (retrieved)\n${chunkLines.join('\n\n')}`);
+              totalTriggerTokens += chunkTokens;
               contextTokens += chunkTokens;
               remaining -= chunkTokens;
               slots.library += chunkTokens;

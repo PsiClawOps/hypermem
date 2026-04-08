@@ -62,17 +62,14 @@ The `TRIGGER_REGISTRY_HASH` in startup logs provides an audit signal: a substitu
 
 ---
 
-### [KL-05] No aggregate cap on total triggered-collection token budget
+### [KL-05] ~~No aggregate cap on total triggered-collection token budget~~ — FIXED in 0.5.0
 
 **Severity:** Low  
 **Affects:** 0.3.0 and earlier  
+**Fixed in:** 0.5.0  
 **Reviewed by:** Sentinel (W9)
 
-Individual triggered collections are capped at ~12% of remaining budget. However, there is no aggregate cap across all simultaneously-fired triggers. A message containing keywords that match all 7 default triggers could consume up to ~7,400 tokens across the combined collections before other context slots run.
-
-In practice this requires a pathological (or adversarial) message and the absolute token cost is bounded by the trigger count. Not a practical concern for normal operation.
-
-**Planned fix (V2):** Add `maxTotalTriggerTokens` config option (suggested default: 40% of remaining budget) as an aggregate ceiling across all triggers in a single compose pass.
+`maxTotalTriggerTokens` config option added. Defaults to 40% of remaining budget at trigger-retrieval time. All simultaneously-fired triggers share this ceiling. Individual per-trigger cap of ~12% of remaining still applies as a secondary guard. Covered by Test 13 in `test/compositor.mjs`.
 
 ---
 
