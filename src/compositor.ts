@@ -1128,6 +1128,15 @@ export class Compositor {
         remaining -= historyTokens;
       }
 
+      // targetBudgetFraction cap: limit total context slots to a fraction of the
+      // effective budget. This gives operators a single knob to make the system
+      // lighter without tuning individual slot fractions.
+      const targetFraction = this.config.targetBudgetFraction ?? 0.65;
+      const contextCap = Math.floor(budget * targetFraction);
+      if (remaining > contextCap) {
+        remaining = contextCap;
+      }
+
       // T1.3: Ghost message suppression.
       // If the last message in the included history is a warm-seeded user message
       // AND there's a subsequent message in SQLite that wasn't included (meaning

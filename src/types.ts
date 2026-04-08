@@ -492,6 +492,19 @@ export interface CompositorConfig {
    */
   keystoneMinSignificance?: number;
   /**
+   * Fraction of the effective token budget to target for context assembly.
+   * The compositor fills slots until this fraction is consumed, leaving the
+   * remainder for conversation history and response headroom.
+   *
+   * Lower values = lighter context, faster turns, less memory surfaced.
+   * Higher values = richer context, more memory, higher saturation risk.
+   *
+   * Range: 0.3–0.85. Default: 0.65
+   * Typical lightweight config: 0.45
+   * Typical fleet/multi-agent config: 0.65
+   */
+  targetBudgetFraction?: number;
+  /**
    * Enable Fleet Output Standard (FOS) injection.
    * FOS injects shared output rules (no em dashes, lead with answer, etc.) into
    * every composed context. Disable if the operator manages output standards
