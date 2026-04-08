@@ -338,7 +338,10 @@ export class HyperMem {
         const vs = new VectorStore(vectorDb, merged.embedding, hm.dbManager.getLibraryDb());
         vs.ensureTables();
         hm.compositor.setVectorStore(vs);
-        console.log('[hypermem] Vector store initialized (sqlite-vec + nomic-embed-text)');
+        const embeddingDesc = merged.embedding.provider === 'openai'
+          ? `${merged.embedding.openaiBaseUrl?.includes('openrouter') ? 'openrouter' : 'openai'}/${merged.embedding.model ?? 'text-embedding-3-small'}`
+          : `ollama/${merged.embedding.model ?? 'nomic-embed-text'}`;
+        console.log(`[hypermem] Vector store initialized (sqlite-vec + ${embeddingDesc})`);
       } else {
         console.warn('[hypermem] sqlite-vec unavailable — semantic recall in FTS5-only mode');
       }
