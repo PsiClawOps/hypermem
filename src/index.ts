@@ -1511,3 +1511,5 @@ export default HyperMem;
 
 export { SessionFlusher, flushSession } from './session-flusher.js';
 export type { FlushSessionOptions, FlushSessionResult } from './session-flusher.js';
+export { importVault, watchVault, parseObsidianNote, parseFrontmatter, extractWikilinks, extractTags, cleanObsidianMarkdown } from './obsidian-watcher.js';
+export type { ObsidianConfig, ObsidianNote, ObsidianImportResult, ObsidianWikiLink, VaultChangeCallback } from './obsidian-watcher.js';

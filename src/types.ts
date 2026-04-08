@@ -384,6 +384,8 @@ export interface HyperMemConfig {
   embedding: EmbeddingProviderConfig;
   /** Optional dreaming/promotion config. Default: disabled. */
   dreaming?: import('./dreaming-promoter.js').DreamerConfig;
+  /** Optional Obsidian vault integration. Default: disabled. */
+  obsidian?: import('./obsidian-watcher.js').ObsidianConfig;
 }
 
 export interface EmbeddingProviderConfig {

@@ -216,3 +216,54 @@ const hm = await HyperMem.create({
   },
 });
 ```
+
+---
+
+## Obsidian Vault Integration
+
+Import notes from an Obsidian vault into hypermem's fact and doc-chunk pipeline.
+
+```json
+{
+  "obsidian": {
+    "enabled": true,
+    "vaultPath": "/home/user/Documents/MyVault",
+    "collection": "obsidian/vault",
+    "watchInterval": 30000,
+    "excludeFolders": ["archive", "private"],
+    "importTags": true,
+    "importFrontmatter": true,
+    "staleDays": 7
+  }
+}
+```
+
+| Knob | Default | Effect |
+|---|---|---|
+| `enabled` | `false` | Master switch — vault not watched unless `true` |
+| `vaultPath` | _(required)_ | Absolute path to your Obsidian vault directory |
+| `collection` | `obsidian/vault` | Doc-chunk collection name for imported notes |
+| `watchInterval` | `30000` | Polling interval ms (fallback alongside `fs.watch`) |
+| `excludeFolders` | `[]` | Additional folders to skip (merged with `.obsidian/app.json` excludedFolders) |
+| `importTags` | `true` | Import `#tags` from content and frontmatter |
+| `importFrontmatter` | `true` | Import YAML frontmatter key/value pairs |
+| `staleDays` | `7` | Re-import files not seen in N days |
+
+**What gets imported:**
+- All `.md` files in the vault (excluding `.obsidian/`, `templates/`, `attachments/`)
+- `[[Wikilinks]]` are converted to plain text and tracked as cross-references
+- `![[Embedded files]]` are stripped (binary attachments skipped)
+- `#tags` are preserved as fact tags for retrieval filtering
+- YAML frontmatter fields are extracted as structured metadata
+
+**What's excluded automatically:**
+- `.obsidian/` config directory
+- `.trash/` Obsidian trash
+- `templates/` and `Templates/` folders
+- `attachments/` and `_attachments/` folders
+- Any folders listed in `.obsidian/app.json` `excludedFolders`
+
+**Secret scanning:** All files pass through `secret-scanner` before ingest. Notes containing API keys, tokens, or credentials are silently skipped.
+
+**Relationship to OpenClaw's native memory wiki:**
+OpenClaw's wiki targets human-readable Obsidian output. hypermem's Obsidian layer ingests FROM Obsidian — your curated vault notes become live runtime context, queried on every compositor pass and injected automatically into agent sessions.
