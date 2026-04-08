@@ -18,15 +18,25 @@ import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 
 export interface EmbeddingConfig {
+  /**
+   * Embedding provider. Default: 'ollama'.
+   * - 'ollama': local Ollama instance (nomic-embed-text or any pull'd model)
+   * - 'openai': OpenAI Embeddings API (text-embedding-3-small / 3-large)
+   */
+  provider?: 'ollama' | 'openai';
   /** Ollama base URL. Default: http://localhost:11434 */
   ollamaUrl: string;
-  /** Embedding model name. Default: nomic-embed-text */
+  /** OpenAI API key. Required when provider is 'openai'. */
+  openaiApiKey?: string;
+  /** OpenAI base URL. Default: https://api.openai.com/v1 */
+  openaiBaseUrl?: string;
+  /** Embedding model name. Default: nomic-embed-text (ollama) or text-embedding-3-small (openai) */
   model: string;
-  /** Embedding dimensions. Default: 768 */
+  /** Embedding dimensions. Default: 768 (ollama/nomic) or 1536 (openai/3-small) */
   dimensions: number;
   /** Request timeout ms. Default: 10000 */
   timeout: number;
-  /** Max texts per batch request. Default: 32 */
+  /** Max texts per batch request. Default: 32 (ollama) or 128 (openai) */
   batchSize: number;
   /** LRU cache max entries. Default: 128 */
   cacheSize?: number;
@@ -50,13 +60,22 @@ export interface VectorIndexStats {
 }
 
 const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
+  provider: 'ollama',
   ollamaUrl: 'http://localhost:11434',
+  openaiBaseUrl: 'https://api.openai.com/v1',
   model: 'nomic-embed-text',
   dimensions: 768,
   timeout: 10000,
   batchSize: 32,
   cacheSize: 128,
 };
+
+/** Provider-specific defaults applied when provider is 'openai' and fields are not set. */
+const OPENAI_DEFAULTS = {
+  model: 'text-embedding-3-small',
+  dimensions: 1536,
+  batchSize: 128,
+} as const;
 
 // ─── LRU Embedding Cache ─────────────────────────────────────────
 // Module-level, per-process. Survives across compose calls within the
@@ -101,6 +120,68 @@ export function clearEmbeddingCache(): void {
 }
 
 /**
+ * Generate embeddings via OpenAI Embeddings API.
+ * Batches up to batchSize inputs per request.
+ */
+async function generateOpenAIEmbeddings(
+  texts: string[],
+  config: EmbeddingConfig
+): Promise<Float32Array[]> {
+  if (!config.openaiApiKey) {
+    throw new Error(
+      '[hypermem] OpenAI embedding provider requires openaiApiKey in embedding config. ' +
+      'Set it in hypermem.json or fall back to provider: "ollama".'
+    );
+  }
+
+  const baseUrl = config.openaiBaseUrl ?? 'https://api.openai.com/v1';
+  const model = config.model;
+  const results: Float32Array[] = [];
+
+  for (let i = 0; i < texts.length; i += config.batchSize) {
+    const batch = texts.slice(i, i + config.batchSize);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.timeout);
+
+    try {
+      const response = await fetch(`${baseUrl}/embeddings`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.openaiApiKey}`,
+        },
+        body: JSON.stringify({ model, input: batch }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        throw new Error(`OpenAI embedding failed: ${response.status} ${response.statusText} — ${body}`);
+      }
+
+      const data = await response.json() as { data: Array<{ embedding: number[]; index: number }> };
+
+      // OpenAI returns results in order by default but may not guarantee it — sort by index.
+      const sorted = data.data.sort((a, b) => a.index - b.index);
+      for (const item of sorted) {
+        if (item.embedding.length !== config.dimensions) {
+          throw new Error(
+            `OpenAI embedding dimension mismatch: expected ${config.dimensions}, got ${item.embedding.length}. ` +
+            'If you changed models, re-index via hypermem reindex.'
+          );
+        }
+        results.push(new Float32Array(item.embedding));
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  return results;
+}
+
+/**
  * Generate embeddings via Ollama API.
  * Supports single and batch embedding.
  * Results are cached per text hash — cache hits skip the Ollama call entirely.
@@ -109,6 +190,20 @@ export async function generateEmbeddings(
   texts: string[],
   config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG
 ): Promise<Float32Array[]> {
+  // Apply provider-specific defaults when provider is 'openai' and fields are at Ollama defaults
+  if (config.provider === 'openai') {
+    // Merge: OpenAI defaults fill in any unset fields, user-supplied values always win
+    config = {
+      ...DEFAULT_EMBEDDING_CONFIG,
+      ...config,
+      model: config.model !== DEFAULT_EMBEDDING_CONFIG.model ? config.model : OPENAI_DEFAULTS.model,
+      dimensions: config.dimensions !== DEFAULT_EMBEDDING_CONFIG.dimensions ? config.dimensions : OPENAI_DEFAULTS.dimensions,
+      batchSize: config.batchSize !== DEFAULT_EMBEDDING_CONFIG.batchSize ? config.batchSize : OPENAI_DEFAULTS.batchSize,
+    };
+    // OpenAI path — no LRU cache (responses are billed; caching at this layer
+    // adds complexity without proportional benefit given async background use).
+    return generateOpenAIEmbeddings(texts, config);
+  }
   if (texts.length === 0) return [];
 
   const maxSize = Math.min(

@@ -397,15 +397,35 @@ export interface HyperMemConfig {
 }
 
 export interface EmbeddingProviderConfig {
+  /**
+   * Embedding provider. Default: 'ollama'.
+   * - 'ollama': local Ollama (nomic-embed-text or any pulled model)
+   * - 'openai': OpenAI Embeddings API (text-embedding-3-small / 3-large)
+   */
+  provider?: 'ollama' | 'openai';
   /** Ollama base URL. Default: http://localhost:11434 */
   ollamaUrl: string;
-  /** Embedding model name. Default: nomic-embed-text */
+  /** OpenAI API key. Required when provider is 'openai'. */
+  openaiApiKey?: string;
+  /** OpenAI base URL. Default: https://api.openai.com/v1 */
+  openaiBaseUrl?: string;
+  /**
+   * Embedding model name.
+   * - ollama default: nomic-embed-text (768d)
+   * - openai default: text-embedding-3-small (1536d)
+   */
   model: string;
-  /** Embedding dimensions. Default: 768 */
+  /**
+   * Embedding dimensions. Must match the model.
+   * - nomic-embed-text: 768
+   * - text-embedding-3-small: 1536
+   * - text-embedding-3-large: 3072
+   * WARNING: changing providers requires a full re-index (dimensions are incompatible).
+   */
   dimensions: number;
   /** Request timeout ms. Default: 10000 */
   timeout: number;
-  /** Max texts per batch request. Default: 32 */
+  /** Max texts per batch request. Default: 32 (ollama) or 128 (openai) */
   batchSize: number;
 }
 

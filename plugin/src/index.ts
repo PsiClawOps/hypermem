@@ -63,6 +63,16 @@ let _hmInitPromise: Promise<HyperMemInstance> | null = null;
 let _indexer: BackgroundIndexer | null = null;
 let _fleetStore: FleetStore | null = null;
 let _generateEmbeddings: ((texts: string[]) => Promise<Float32Array[]>) | null = null;
+let _embeddingConfig: {
+  provider: 'ollama' | 'openai';
+  ollamaUrl: string;
+  openaiBaseUrl: string;
+  openaiApiKey?: string;
+  model: string;
+  dimensions: number;
+  timeout: number;
+  batchSize: number;
+} | null = null;
 // P1.7: TaskFlow runtime reference — bound at registration time, best-effort.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _taskFlowRuntime: any | null = null;
@@ -169,6 +179,26 @@ async function loadUserConfig(): Promise<{
     enabled: boolean;
   }>;
   /**
+   * Embedding provider configuration.
+   * If omitted, defaults to Ollama + nomic-embed-text (768d).
+   *
+   * Example (OpenAI):
+   *   { "provider": "openai", "openaiApiKey": "sk-...", "model": "text-embedding-3-small", "dimensions": 1536, "batchSize": 128 }
+   *
+   * WARNING: switching providers requires a full re-index. Existing vectors use
+   * different dimensions and are incompatible with the new provider's output.
+   */
+  embedding?: {
+    provider?: 'ollama' | 'openai';
+    ollamaUrl?: string;
+    openaiApiKey?: string;
+    openaiBaseUrl?: string;
+    model?: string;
+    dimensions?: number;
+    timeout?: number;
+    batchSize?: number;
+  };
+  /**
    * Full model context window size in tokens. Default: 128_000.
    * Used with contextWindowReserve to derive effective history budget.
    */
@@ -203,13 +233,37 @@ async function getHyperMem(): Promise<HyperMemInstance> {
     const mod = await import(HYPERMEM_PATH);
     const HyperMem = mod.HyperMem;
 
-    // Capture generateEmbeddings from the dynamic module for use in afterTurn()
+    // Capture generateEmbeddings from the dynamic module for use in afterTurn().
+    // Bind it with the user's embedding config so the pre-compute path uses the
+    // same provider as the indexer (Ollama vs OpenAI).
     if (typeof mod.generateEmbeddings === 'function') {
-      _generateEmbeddings = mod.generateEmbeddings as (texts: string[]) => Promise<Float32Array[]>;
+      const rawGenerate = mod.generateEmbeddings as (texts: string[], config?: unknown) => Promise<Float32Array[]>;
+      _generateEmbeddings = (texts: string[]) => rawGenerate(texts, _embeddingConfig ?? undefined);
     }
 
     // Load optional user config — compositor tuning overrides
     const userConfig = await loadUserConfig();
+
+    // Build embedding config from user config. Applied to both HyperMem core
+    // (VectorStore init) and the _generateEmbeddings closure above.
+    if (userConfig.embedding) {
+      const ue = userConfig.embedding;
+      _embeddingConfig = {
+        provider: ue.provider ?? 'ollama',
+        ollamaUrl: ue.ollamaUrl ?? 'http://localhost:11434',
+        openaiBaseUrl: ue.openaiBaseUrl ?? 'https://api.openai.com/v1',
+        openaiApiKey: ue.openaiApiKey,
+        // Apply provider-specific model + dimension defaults when not explicitly set
+        model: ue.model ?? (ue.provider === 'openai' ? 'text-embedding-3-small' : 'nomic-embed-text'),
+        dimensions: ue.dimensions ?? (ue.provider === 'openai' ? 1536 : 768),
+        timeout: ue.timeout ?? 10000,
+        batchSize: ue.batchSize ?? (ue.provider === 'openai' ? 128 : 32),
+      };
+      console.log(
+        `[hypermem-plugin] Embedding provider: ${_embeddingConfig.provider} ` +
+        `(model: ${_embeddingConfig.model}, ${_embeddingConfig.dimensions}d, batch: ${_embeddingConfig.batchSize})`
+      );
+    }
 
     // Cache eviction config at module scope so assemble() can read it
     // synchronously without re-reading disk on every turn.
@@ -243,6 +297,7 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         historyTTL: 86400,     // 24h for history — ages out, not count-trimmed
       },
       ...(userConfig.compositor ? { compositor: userConfig.compositor } : {}),
+      ...(_embeddingConfig ? { embedding: _embeddingConfig } : {}),
     });
 
     _hm = instance;
