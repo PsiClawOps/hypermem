@@ -386,6 +386,14 @@ export interface HyperMemConfig {
   dreaming?: import('./dreaming-promoter.js').DreamerConfig;
   /** Optional Obsidian vault integration. Default: disabled. */
   obsidian?: import('./obsidian-watcher.js').ObsidianConfig;
+  /**
+   * Cache replay threshold (ms). When > 0, assemble() returns a cached
+   * contextBlock (systemPromptAddition) for sessions active within this
+   * window, producing byte-identical prompts and hitting provider prefix cache
+   * (Anthropic / OpenAI). Set to 0 to disable.
+   * Default: 900_000 (15 minutes).
+   */
+  warmCacheReplayThresholdMs?: number;
 }
 
 export interface EmbeddingProviderConfig {

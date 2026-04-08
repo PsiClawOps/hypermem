@@ -91,6 +91,8 @@ let _evictionConfig: {
 // e.g. 128k * 0.75 - 28k = 68k for council agents at 25% reserve
 let _contextWindowSize: number = 128_000;
 let _contextWindowReserve: number = 0.25;
+// Cache replay threshold: 15min default. Set to 0 in user config to disable.
+let _cacheReplayThresholdMs: number = 900_000;
 
 // ─── System overhead cache ────────────────────────────────────
 // Caches the non-history token cost (contextBlock + runtime system prompt)
@@ -220,6 +222,9 @@ async function getHyperMem(): Promise<HyperMemInstance> {
     if (typeof userConfig.contextWindowReserve === 'number' &&
         userConfig.contextWindowReserve >= 0 && userConfig.contextWindowReserve <= 0.5) {
       _contextWindowReserve = userConfig.contextWindowReserve;
+    }
+    if (typeof (userConfig as { warmCacheReplayThresholdMs?: number }).warmCacheReplayThresholdMs === 'number') {
+      _cacheReplayThresholdMs = (userConfig as { warmCacheReplayThresholdMs?: number }).warmCacheReplayThresholdMs!;
     }
     const reservedTokens = Math.floor(_contextWindowSize * _contextWindowReserve);
     console.log(
@@ -1222,6 +1227,28 @@ function createHyperMemEngine(): ContextEngine {
         console.warn('[hypermem-plugin] assemble: reshape pass failed (non-fatal):', (reshapeErr as Error).message);
       }
 
+      // ── Cache replay fast path ─────────────────────────────────────────────
+      // If the session was active recently, return the cached contextBlock
+      // (systemPromptAddition) to produce a byte-identical system prompt and
+      // hit the provider prefix cache (Anthropic / OpenAI).
+      // The message window is always rebuilt fresh — only the compositor output
+      // (contextBlock) is cached, since that's what determines prefix identity.
+      const cacheReplayThresholdMs = _cacheReplayThresholdMs;
+      let cachedContextBlock: string | null = null;
+      if (cacheReplayThresholdMs > 0) {
+        try {
+          const cachedAt = await hm.redis.getSlot(agentId, sk, 'assemblyContextAt');
+          if (cachedAt && Date.now() - parseInt(cachedAt) < cacheReplayThresholdMs) {
+            cachedContextBlock = await hm.redis.getSlot(agentId, sk, 'assemblyContextBlock');
+            if (cachedContextBlock) {
+              console.log(`[hypermem-plugin] assemble: cache replay hit for ${agentId} (${Math.round((Date.now() - parseInt(cachedAt)) / 1000)}s old)`);
+            }
+          }
+        } catch {
+          // Non-fatal — fall through to full assembly
+        }
+      }
+
       const request: ComposeRequest = {
         agentId,
         sessionKey: sk,
@@ -1229,12 +1256,30 @@ function createHyperMemEngine(): ContextEngine {
         historyDepth,
         tier,
         model,          // pass model for provider detection
-        includeDocChunks: true,
+        includeDocChunks: !cachedContextBlock,  // skip doc retrieval on cache hit
         prompt,
         skipProviderTranslation: true,  // runtime handles provider translation
       };
 
       const result: ComposeResult = await hm.compose(request);
+
+      // Use cached contextBlock if available (cache replay), otherwise use fresh result.
+      // After a full compose, write the new contextBlock to cache for the next turn.
+      if (cachedContextBlock) {
+        result.contextBlock = cachedContextBlock;
+      } else if (result.contextBlock && cacheReplayThresholdMs > 0) {
+        // Write cache async — never block the assemble() return on this
+        const blockToCache = result.contextBlock;
+        const nowStr = Date.now().toString();
+        const ttlSec = Math.ceil((cacheReplayThresholdMs * 2) / 1000);
+        Promise.all([
+          hm.redis.setSlot(agentId, sk, 'assemblyContextBlock', blockToCache),
+          hm.redis.setSlot(agentId, sk, 'assemblyContextAt', nowStr),
+        ]).then(() => {
+          // Extend TTL on the cached keys to 2× the threshold
+          // setSlot uses the sessionTTL from RedisLayer config — acceptable fallback
+        }).catch(() => { /* Non-fatal */ });
+      }
 
       // Convert NeutralMessage[] → AgentMessage[] for the OpenClaw runtime.
       // neutralToAgentMessage can return a single message or an array (tool results
@@ -1809,6 +1854,25 @@ function neutralToAgentMessage(msg: NeutralMessage): InboundMessage | InboundMes
     stopReason: 'stop',
     timestamp: now,
   };
+}
+
+// ─── Cache Bust Utility ────────────────────────────────────────────────────
+
+/**
+ * Bust the assembly cache for a specific agent+session.
+ * Call this after writing to identity files (SOUL.md, IDENTITY.md, TOOLS.md,
+ * USER.md) to ensure the next assemble() runs full compositor, not a replay.
+ */
+export async function bustAssemblyCache(agentId: string, sessionKey: string): Promise<void> {
+  try {
+    const hm = await getHyperMem();
+    await Promise.all([
+      hm.redis.setSlot(agentId, sessionKey, 'assemblyContextBlock', ''),
+      hm.redis.setSlot(agentId, sessionKey, 'assemblyContextAt', '0'),
+    ]);
+  } catch {
+    // Non-fatal
+  }
 }
 
 // ─── Plugin Entry ───────────────────────────────────────────────
