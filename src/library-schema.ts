@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LIBRARY_SCHEMA_VERSION = 12;
+export const LIBRARY_SCHEMA_VERSION = 13;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -1071,6 +1071,41 @@ export function migrateLibrary(db: DatabaseSync, engineVersion?: string): void {
     applyV12FosMod(db);
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(12, nowIso());
+  }
+
+  // ── V13: Temporal index ──────────────────────────────────────────────────
+  // Maps fact_id → occurred_at (unix ms). Initially backfilled from created_at
+  // (ingest time as proxy). Enables time-range retrieval for LoCoMo temporal
+  // questions without vector similarity.
+  if (currentVersion < 13) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS temporal_index (
+        fact_id     INTEGER PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE,
+        agent_id    TEXT NOT NULL,
+        occurred_at INTEGER NOT NULL,
+        ingest_at   INTEGER NOT NULL,
+        time_ref    TEXT,
+        confidence  REAL NOT NULL DEFAULT 0.5
+      )
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_temporal_agent_time ON temporal_index(agent_id, occurred_at DESC)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_temporal_occurred ON temporal_index(occurred_at DESC)');
+
+    // Backfill existing facts using created_at as occurred_at proxy
+    db.exec(`
+      INSERT OR IGNORE INTO temporal_index (fact_id, agent_id, occurred_at, ingest_at, confidence)
+      SELECT
+        id,
+        agent_id,
+        CAST((julianday(created_at) - 2440587.5) * 86400000 AS INTEGER),
+        CAST((julianday(created_at) - 2440587.5) * 86400000 AS INTEGER),
+        0.5
+      FROM facts
+      WHERE superseded_by IS NULL
+    `);
+
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(13, nowIso());
   }
 
   // Always ensure meta exists before stamping the running engine version.

@@ -28,6 +28,7 @@ import { FactStore } from './fact-store.js';
 import { EpisodeStore } from './episode-store.js';
 import { TopicStore } from './topic-store.js';
 import { KnowledgeStore } from './knowledge-store.js';
+import { TemporalStore } from './temporal-store.js';
 import { isSafeForSharedVisibility } from './secret-scanner.js';
 import type { VectorStore } from './vector-store.js';
 
@@ -716,6 +717,7 @@ export class BackgroundIndexer {
     const episodeStore = new EpisodeStore(libraryDb);
     const topicStore = new TopicStore(libraryDb);
     const knowledgeStore = new KnowledgeStore(libraryDb);
+    const temporalStore = new TemporalStore(libraryDb);
 
     // Get watermark — last processed message ID for this agent
     const watermark = this.getWatermark(libraryDb, agentId);
@@ -803,6 +805,9 @@ export class BackgroundIndexer {
           // A supersede is detected when an existing active fact shares the
           // same 60-char prefix (same topic, different phrasing/update).
           if (fact.id) {
+            // Index into temporal store (ingest_at as proxy, confidence=0.5)
+            temporalStore.indexFact(fact.id, agentId, fact.createdAt);
+
             const oldFactId = factStore.findSupersedableByContent(agentId, factContent);
             if (oldFactId !== null && oldFactId !== fact.id) {
               const didSupersede = factStore.markSuperseded(oldFactId, fact.id);

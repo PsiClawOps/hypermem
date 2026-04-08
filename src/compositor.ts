@@ -45,6 +45,7 @@ import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeysto
 import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
 import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderLightFOS, resolveOutputTier, buildActionVerificationSummary } from './fos-mod.js';
 import { KnowledgeStore } from './knowledge-store.js';
+import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
 
 /**
  * Model context window sizes by provider/model string (or partial match).
@@ -1280,6 +1281,60 @@ export class Compositor {
             slots.facts = truncTokens;
             warnings.push('Facts truncated to fit budget');
           }
+        }
+      }
+
+      // ── Temporal retrieval (L4: Library) ─────────────────────
+      // Fires when the query has temporal signals (before/after/when/last etc).
+      // Returns facts in time order from temporal_index. Deduplicates against
+      // facts already included above. Uses ingest_at as occurred_at proxy (v1).
+      const queryText = request.prompt ?? '';
+
+      if (queryText && hasTemporalSignals(queryText) && libDb && remaining > 300) {
+        try {
+          const temporalStore = new TemporalStore(libDb);
+          const temporalFacts = temporalStore.timeRangeQuery({
+            agentId: request.agentId,
+            limit: 15,
+            order: 'DESC',
+          });
+
+          if (temporalFacts.length > 0) {
+            // Deduplicate against facts already in context
+            const existingContent = contextParts.join('\n');
+            const novel = temporalFacts.filter(
+              f => !existingContent.includes(f.content.slice(0, 60))
+            );
+
+            if (novel.length > 0) {
+              const temporalBlock = novel
+                .map(f => {
+                  const ts = new Date(f.occurredAt).toISOString().slice(0, 10);
+                  return `[${ts}] ${f.content}`;
+                })
+                .join('\n');
+
+              const temporalSection = `## Temporal Context\n${temporalBlock}`;
+              const tempTokens = estimateTokens(temporalSection);
+              const tempBudget = Math.floor(remaining * 0.20); // Cap at 20% of remaining
+
+              if (tempTokens <= tempBudget) {
+                contextParts.push(temporalSection);
+                contextTokens += tempTokens;
+                remaining -= tempTokens;
+                slots.facts = (slots.facts ?? 0) + tempTokens;
+              } else {
+                const truncated = this.truncateToTokens(temporalSection, tempBudget);
+                const truncTokens = estimateTokens(truncated);
+                contextParts.push(truncated);
+                contextTokens += truncTokens;
+                remaining -= truncTokens;
+                slots.facts = (slots.facts ?? 0) + truncTokens;
+              }
+            }
+          }
+        } catch {
+          // Temporal index not yet available (migration pending) — skip silently
         }
       }
     }
