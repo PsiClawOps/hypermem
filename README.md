@@ -1,6 +1,8 @@
-# hyper**mem**
+<p align="center">
+  <img src="assets/logo.png" alt="hypermem" width="283" />
+</p>
 
-*Coherent agents. Every session.*
+<p align="center"><em>Coherent agents. Every session.</em></p>
 
 *Identity that holds. Context that composes.*
 
