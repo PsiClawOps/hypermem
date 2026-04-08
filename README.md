@@ -185,7 +185,7 @@ hyper**mem** plugs into OpenClaw as a context engine and owns the full prompt co
 | Requirement | Version | Notes |
 |---|---|---|
 | **Node.js** | `>=22.0.0` | Required for native `node:sqlite` module |
-| **Redis** | `>=6.0.0` | L1 hot cache; local or remote |
+| **Redis >= 7.0.0** | L1 hot cache; local or remote |
 | **ioredis** | `^5.4.1` | Installed automatically via npm |
 | **sqlite-vec** | `0.1.9` | Bundled; no separate install needed |
 
