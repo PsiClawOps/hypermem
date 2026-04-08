@@ -2,12 +2,15 @@
  * embed-existing.mjs — One-time bulk embedding migration
  *
  * Embeds all existing clean facts and high-significance episodes
- * into vectors.db via nomic-embed-text (Ollama).
+ * into vectors.db. Supports Ollama (local) and OpenAI-compatible
+ * providers (OpenRouter, OpenAI) via hypermem config.
  *
  * Usage:
  *   node scripts/embed-existing.mjs [--dry-run] [--batch-size 32] [--table facts|episodes|all]
  *
- * Safe to re-run: VectorStore.indexItem() skips items already embedded (content hash check).
+ * Safe to re-run: skips items already embedded (content hash check).
+ * NOTE: If switching providers/models, clear vectors.db first —
+ *       dimensions change and existing vectors are incompatible.
  */
 
 import { DatabaseSync } from 'node:sqlite';
@@ -21,21 +24,63 @@ const require = createRequire(import.meta.url);
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes('--dry-run');
 const TABLE = args.find((_, i) => args[i - 1] === '--table') ?? 'all';
-const BATCH_SIZE = parseInt(args.find((_, i) => args[i - 1] === '--batch-size') ?? '32') || 32;
+const BATCH_SIZE_ARG = parseInt(args.find((_, i) => args[i - 1] === '--batch-size') ?? '0') || 0;
 const LIMIT = parseInt(args.find((_, i) => args[i - 1] === '--limit') ?? '0') || 0;
 
 const DATA_DIR = path.join(process.env.HOME || '/home/lumadmin', '.openclaw', 'hypermem');
 const LIBRARY_DB_PATH = path.join(DATA_DIR, 'library.db');
 const VECTORS_DB_PATH = path.join(DATA_DIR, 'vectors.db');
-const OLLAMA_URL = 'http://localhost:11434';
-const EMBED_MODEL = 'nomic-embed-text';
-const DIM = 768;
+
+// ── Load hypermem config ──────────────────────────────────────
+const HYPERMEM_CONFIG_PATH = path.join(DATA_DIR, 'config.json');
+let hypermemConfig = {};
+try {
+  hypermemConfig = JSON.parse(fs.readFileSync(HYPERMEM_CONFIG_PATH, 'utf8'));
+} catch { /* no config, use defaults */ }
+
+const embeddingCfg = hypermemConfig.embedding ?? {};
+const PROVIDER = embeddingCfg.provider ?? 'ollama';
+const OLLAMA_URL = embeddingCfg.ollamaUrl ?? 'http://localhost:11434';
+const EMBED_MODEL = embeddingCfg.model ?? (PROVIDER === 'openai' ? 'qwen/qwen3-embedding-8b' : 'nomic-embed-text');
+const DIM = embeddingCfg.dimensions ?? (PROVIDER === 'openai' ? 4096 : 768);
+const BATCH_SIZE = BATCH_SIZE_ARG || (embeddingCfg.batchSize ?? (PROVIDER === 'openai' ? 128 : 32));
+
+// OpenAI-compatible: resolve API key
+let OPENAI_API_KEY = embeddingCfg.openaiApiKey ?? null;
+const OPENAI_BASE_URL = embeddingCfg.openaiBaseUrl ?? 'https://api.openai.com/v1';
+if (PROVIDER === 'openai' && !OPENAI_API_KEY) {
+  // Fall back to auth-profiles.json
+  try {
+    const authPath = path.join(process.env.HOME || '/home/lumadmin', '.openclaw', 'auth-profiles.json');
+    const authProfiles = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+    // Try openrouter first, then openai
+    OPENAI_API_KEY = authProfiles?.openrouter?.apiKey
+      ?? authProfiles?.openrouter?.key
+      ?? authProfiles?.openai?.apiKey
+      ?? authProfiles?.openai?.key
+      ?? null;
+  } catch { /* no auth file */ }
+}
+if (PROVIDER === 'openai' && !OPENAI_API_KEY) {
+  // Fall back to environment variables
+  OPENAI_API_KEY = process.env.OPENROUTER_API_KEY
+    ?? process.env.OPENAI_API_KEY
+    ?? null;
+}
+if (PROVIDER === 'openai' && !OPENAI_API_KEY) {
+  console.error('[embed-existing] ERROR: openai provider configured but no API key found.');
+  console.error('  Set embedding.openaiApiKey in hypermem/config.json or configure openrouter in auth-profiles.json');
+  process.exit(1);
+}
 
 // ── Setup ─────────────────────────────────────────────────────
 console.log(`[embed-existing] Starting${DRY_RUN ? ' (DRY RUN)' : ''}`);
+console.log(`  Provider:   ${PROVIDER === 'openai' ? `openai-compatible (${OPENAI_BASE_URL})` : 'ollama'}`);
+console.log(`  Model:      ${EMBED_MODEL}`);
+console.log(`  Dimensions: ${DIM}`);
 console.log(`  Library DB: ${LIBRARY_DB_PATH}`);
 console.log(`  Vectors DB: ${VECTORS_DB_PATH}`);
-console.log(`  Tables: ${TABLE}`);
+console.log(`  Tables:     ${TABLE}`);
 console.log(`  Batch size: ${BATCH_SIZE}`);
 
 const libDb = new DatabaseSync(LIBRARY_DB_PATH);
@@ -57,6 +102,19 @@ try {
 }
 
 // Ensure vector tables
+// Check for dimension mismatch on existing tables
+try {
+  const existingRow = vecDb.prepare(`SELECT vector_extract(embedding) FROM vec_facts LIMIT 1`).get();
+  if (existingRow) {
+    const existingLen = JSON.parse(existingRow['vector_extract(embedding)']).length;
+    if (existingLen !== DIM) {
+      console.error(`[embed-existing] DIMENSION MISMATCH: vectors.db has ${existingLen}d, config expects ${DIM}d.`);
+      console.error('  Clear vectors.db before switching providers: rm ~/.openclaw/hypermem/vectors.db');
+      process.exit(1);
+    }
+  }
+} catch { /* table doesn't exist yet, safe to create */ }
+
 vecDb.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(embedding float[${DIM}])`);
 vecDb.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_knowledge USING vec0(embedding float[${DIM}])`);
 vecDb.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_episodes USING vec0(embedding float[${DIM}])`);
@@ -74,7 +132,7 @@ vecDb.exec(`
 vecDb.exec('CREATE INDEX IF NOT EXISTS idx_vec_map_source ON vec_index_map(source_table, source_id)');
 
 // ── Embedding ─────────────────────────────────────────────────
-async function embedBatch(texts) {
+async function embedBatchOllama(texts) {
   const res = await fetch(`${OLLAMA_URL}/api/embed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -82,8 +140,28 @@ async function embedBatch(texts) {
   });
   if (!res.ok) throw new Error(`Ollama embed failed: ${res.status} ${res.statusText}`);
   const data = await res.json();
-  return data.embeddings; // float[][] 
+  return data.embeddings; // float[][]
 }
+
+async function embedBatchOpenAI(texts) {
+  const res = await fetch(`${OPENAI_BASE_URL}/embeddings`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({ model: EMBED_MODEL, input: texts }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`OpenAI embed failed: ${res.status} ${res.statusText} — ${body}`);
+  }
+  const data = await res.json();
+  // OpenAI returns { data: [{ embedding: float[], index: number }] }
+  return data.data.sort((a, b) => a.index - b.index).map(d => d.embedding);
+}
+
+const embedBatch = PROVIDER === 'openai' ? embedBatchOpenAI : embedBatchOllama;
 
 function simpleHash(str) {
   let h = 0;
