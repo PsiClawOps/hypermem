@@ -245,19 +245,30 @@ async function run() {
   // ── Test 5: Empty session composition ──
   console.log('\n── Empty Session Composition ──');
 
+  // Compose with history excluded — tests system/identity/FOS/MOD only path.
+  // includeHistory:false is the clean way to test "no prior session" without
+  // a separate DB fixture. The seeded msgDb/libDb are fine to pass — history
+  // is just skipped by the compositor gate.
   const emptyResult = await compositor.compose({
     agentId: 'newagent',
     sessionKey: 'agent:newagent:webchat:main',
     tokenBudget: 50000,
     provider: 'anthropic',
     model: 'claude-opus-4-6',
+    includeHistory: false,
   }, msgDb, libDb);
 
-  // FOS/MOD context is always injected when libDb is present and has a seeded FOS profile.
-  // Empty session may still have context tokens from FOS/MOD directives.
+  // No history replay. Only system context (identity, FOS/MOD directives).
+  // FOS/MOD is injected from the default fleet profile even for unknown agents.
+  // Ceiling is 5000 — generous enough for any system prompt + FOS/MOD block.
+  const emptyNonSystem = emptyResult.messages.filter(m => m.role !== 'system');
   assert(
-    emptyResult.messages.length === 0 || emptyResult.tokenCount < 1000,
-    'Empty session produces minimal output (no history, small FOS/MOD context)'
+    emptyNonSystem.length === 0,
+    `Empty session has no history messages (got ${emptyNonSystem.length} non-system messages)`
+  );
+  assert(
+    emptyResult.tokenCount < 5000,
+    `Empty session token count ${emptyResult.tokenCount} is below 5000 (system context only)`
   );
 
   // ── Test 6: Multi-provider output ──

@@ -1696,6 +1696,23 @@ export class Compositor {
 
     const totalTokens = budget - remaining;
 
+    // ─── Slot reconciliation ─────────────────────────────────────────────────
+    // totalTokens = budget - remaining is the authoritative spend figure.
+    // The slot accounting can drift from this due to history trim (which
+    // reduces slots.history but adds back to remaining after the budget
+    // was already committed) and FOS/MOD token rounding.
+    // Reconcile: assign any unaccounted tokens to slots.history so that
+    // sum(slots) === totalTokens always holds.
+    {
+      const slotSum = (slots.system ?? 0) + (slots.identity ?? 0) +
+        (slots.history ?? 0) + (slots.facts ?? 0) +
+        (slots.context ?? 0) + (slots.library ?? 0);
+      const delta = totalTokens - slotSum;
+      if (delta !== 0) {
+        slots.history = (slots.history ?? 0) + delta;
+      }
+    }
+
     // ─── Write Window Cache ─────────────────────────────
     // Cache the composed message array so the plugin can serve it directly
     // on the next assemble() call without re-running the full compose pipeline.
