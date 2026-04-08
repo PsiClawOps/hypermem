@@ -1513,5 +1513,7 @@ export { SessionFlusher, flushSession } from './session-flusher.js';
 export type { FlushSessionOptions, FlushSessionResult } from './session-flusher.js';
 export { importVault, watchVault, parseObsidianNote, parseFrontmatter, extractWikilinks, extractTags, cleanObsidianMarkdown } from './obsidian-watcher.js';
 export type { ObsidianConfig, ObsidianNote, ObsidianImportResult, ObsidianWikiLink, VaultChangeCallback } from './obsidian-watcher.js';
+export { exportToVault } from './obsidian-exporter.js';
+export type { ObsidianExportConfig, ObsidianExportResult } from './obsidian-exporter.js';
 export { collectMetrics, formatMetricsSummary } from './metrics-dashboard.js';
 export type { HyperMemMetrics, FactMetrics, WikiMetrics, EpisodeMetrics, VectorMetrics, CompositionMetrics, IngestionMetrics, SystemHealth, MetricsDashboardOptions } from './metrics-dashboard.js';
