@@ -292,27 +292,41 @@ function globMatch(pattern: string, value: string): boolean {
 /**
  * Output standard tiers. Controls what FOS content is injected into context.
  *
- * 'starter'  — 3-4 density directives only. No MOD, no fleet concepts.
- *              Works standalone on a 64k single-agent setup.
+ * 'light'    — ~100 token standalone directives. No MOD, no fleet concepts.
+ *              Works on any single-agent 64k setup. No DB required.
  * 'standard' — Full FOS: density targets, format rules, compression ratios,
  *              task-context scoping. MOD suppressed.
- * 'fleet'    — FOS + MOD. Full spec for multi-agent fleet operators.
+ * 'full'     — FOS + MOD. Full spec for multi-agent fleet operators.
+ *
+ * Backward compat: 'starter' maps to 'light', 'fleet' maps to 'full'.
  */
-export type OutputStandardTier = 'starter' | 'standard' | 'fleet';
+export type OutputProfileTier = 'light' | 'standard' | 'full';
+/** @deprecated Use OutputProfileTier */
+export type OutputStandardTier = OutputProfileTier;
 
 /**
- * Render a lightweight starter-tier output standard.
- * Standalone: no compositor concepts, no fleet terminology.
- * Three focused directives: concise, facts-first, token-efficient formatting.
+ * Render the light-tier output profile.
+ * Standalone: no compositor concepts, no fleet terminology, no DB required.
+ * ~100 tokens. Covers anti-sycophancy, em dash ban, AI vocab ban, length targets,
+ * anti-pagination, and evidence calibration.
  */
-export function renderStarterFOS(): string[] {
+export function renderLightFOS(): string[] {
   return [
     '## Output Standard',
     '- Lead with the answer. Conclusion first, reasoning after.',
-    '- Facts over filler. Every sentence states a fact, makes a decision, or advances an argument.',
-    '- Token-efficient formatting: no headers for short answers, no bullet padding, no preamble.',
-    '- Simple: 1-3 sentences. Analysis: 200-400 words. Code: code first, explain only non-obvious parts.',
+    '- No sycophantic openings: never start with "Great question", "Certainly", "Absolutely", "Of course".',
+    '- No em dashes. Use commas, colons, semicolons, or periods.',
+    '- Avoid AI vocabulary: delve, tapestry, pivotal, fostering, leverage, robust, noteworthy, realm, harness, showcase.',
+    '- Simple answers: 1-3 sentences. Analysis: 200-500 words. Code: code first, explain only non-obvious parts.',
+    '- Every sentence states a fact, makes a decision, or advances an argument. Cut filler.',
+    '- Do not paginate short answers. No headers, sections, or bullet lists unless the content requires structure.',
+    '- Numbers over adjectives. Match confidence to evidence.',
   ];
+}
+
+/** @deprecated Use renderLightFOS */
+export function renderStarterFOS(): string[] {
+  return renderLightFOS();
 }
 
 /**
@@ -320,26 +334,33 @@ export function renderStarterFOS(): string[] {
  * MOD is only eligible at the 'fleet' tier.
  */
 export function resolveOutputTier(
-  outputStandard: OutputStandardTier | undefined,
+  outputProfile: OutputProfileTier | undefined,
   enableFOS: boolean | undefined,
   enableMOD: boolean | undefined
-): { tier: OutputStandardTier; fos: boolean; mod: boolean } {
-  // Legacy path: if outputStandard is not set, honor enableFOS/enableMOD directly
-  if (outputStandard === undefined) {
+): { tier: OutputProfileTier; fos: boolean; mod: boolean } {
+  // Legacy path: if outputProfile is not set, honor enableFOS/enableMOD directly
+  if (outputProfile === undefined) {
     return {
-      tier: 'fleet',
+      tier: 'full',
       fos: enableFOS !== false,
       mod: enableMOD !== false,
     };
   }
 
-  switch (outputStandard) {
-    case 'starter':
-      return { tier: 'starter', fos: false, mod: false };
+  // Backward compat: map old names to new
+  const tier = (outputProfile as string) === 'starter' ? 'light'
+    : (outputProfile as string) === 'fleet' ? 'full'
+    : outputProfile;
+
+  switch (tier) {
+    case 'light':
+      return { tier: 'light', fos: false, mod: false };
     case 'standard':
       return { tier: 'standard', fos: true, mod: false };
-    case 'fleet':
-      return { tier: 'fleet', fos: true, mod: enableMOD !== false };
+    case 'full':
+      return { tier: 'full', fos: true, mod: enableMOD !== false };
+    default:
+      return { tier: 'full', fos: true, mod: enableMOD !== false };
   }
 }
 

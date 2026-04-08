@@ -520,20 +520,20 @@ export interface CompositorConfig {
    */
   enableMOD?: boolean;
   /**
-   * Output standard tier. Controls what FOS content is injected.
+   * Output profile tier. Controls what FOS content is injected.
    *
-   * 'starter' — density targeting only (3-4 directives). No MOD, no fleet concepts.
-   *             Works standalone on a single-agent 64k setup. Default for new installs.
-   * 'standard' — full FOS: density targets, format rules, compression ratios, task-context
-   *              scoping. No MOD. For small fleets and intermediate users.
-   * 'fleet'    — FOS + MOD. Cross-agent coordination, identity-scoped formatting, full spec.
-   *              For multi-agent fleet operators.
+   * 'light'    — ~100 token standalone directives. No MOD, no fleet concepts.
+   *             Works on any single-agent 64k setup. No DB required.
+   * 'standard' — Full FOS: density targets, format rules, compression ratios,
+   *              task-context scoping. No MOD.
+   * 'full'     — FOS + MOD. Cross-agent coordination, full spec.
    *
-   * Default: 'fleet' (backward-compatible). New install default: 'starter'.
-   * MOD injection is automatically suppressed for 'starter' and 'standard' tiers
-   * regardless of the enableMOD setting.
+   * Backward compat: 'starter' maps to 'light', 'fleet' maps to 'full'.
+   * Default: 'full' (backward-compatible). New install default: 'light'.
    */
-  outputStandard?: 'starter' | 'standard' | 'fleet';
+  outputProfile?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
+  /** @deprecated Use outputProfile */
+  outputStandard?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
   /**
    * Hard token ceiling for wiki page injection per compose pass.
    * Limits how much synthesized topic knowledge is inserted into context.

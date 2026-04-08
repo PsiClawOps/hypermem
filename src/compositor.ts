@@ -43,7 +43,7 @@ import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction-fence.js';
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
 import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
-import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderStarterFOS, resolveOutputTier, buildActionVerificationSummary } from './fos-mod.js';
+import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderLightFOS, renderStarterFOS, resolveOutputTier, buildActionVerificationSummary } from './fos-mod.js';
 import { KnowledgeStore } from './knowledge-store.js';
 
 /**
@@ -1565,21 +1565,21 @@ export class Compositor {
       const fosEnabled = this.config?.enableFOS !== false;
       const modEnabled = this.config?.enableMOD !== false;
       const outputTier = resolveOutputTier(
-        this.config?.outputStandard,
+        (this.config?.outputProfile ?? this.config?.outputStandard) as any,
         fosEnabled,
         modEnabled
       );
 
-      // Starter tier: inject lightweight standalone directives, no DB lookup needed
-      if (outputTier.tier === 'starter') {
-        const starterLines = renderStarterFOS();
-        const starterContent = starterLines.join('\n');
-        const starterTokens = Math.ceil(starterContent.length / 4);
-        if (starterTokens <= remaining) {
-          contextParts.push(starterContent);
-          contextTokens += starterTokens;
-          remaining -= starterTokens;
-          slots.context += starterTokens;
+      // Light tier: inject lightweight standalone directives, no DB lookup needed
+      if (outputTier.tier === 'light') {
+        const lightLines = renderLightFOS();
+        const lightContent = lightLines.join('\n');
+        const lightTokens = Math.ceil(lightContent.length / 4);
+        if (lightTokens <= remaining) {
+          contextParts.push(lightContent);
+          contextTokens += lightTokens;
+          remaining -= lightTokens;
+          slots.context += lightTokens;
         }
       } else {
         // standard or fleet tier: full FOS from DB

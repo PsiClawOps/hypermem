@@ -41,7 +41,7 @@ const BASE_EMBEDDING: EmbeddingProviderConfig = {
 //   - Single agent — no cross-session context needed
 //   - Minimal ACA stack — no dreaming, no background indexing overhead
 //   - Low Redis churn — longer flush intervals, shorter history window
-//   - outputStandard: 'starter' — 3-4 density directives, no fleet concepts
+//   - outputProfile: 'light' — ~100 token standalone directives, no fleet concepts
 //   - No parallel operations — sequential fact extraction only
 // ---------------------------------------------------------------------------
 
@@ -62,7 +62,7 @@ const LIGHT_COMPOSITOR: CompositorConfig = {
   keystoneMinSignificance: 0.7,     // higher bar — only high-signal keystone messages
   targetBudgetFraction: 0.50,       // Anvil spec: 0.50 for light
   maxTotalTriggerTokens: 1500,      // tight trigger ceiling
-  outputStandard: 'starter',        // standalone density directives only, no fleet concepts
+  outputProfile: 'light',        // standalone density directives only, no fleet concepts
   wikiTokenCap: 300,                // Anvil spec: 300 for light
 };
 
@@ -98,7 +98,7 @@ export const lightProfile: HyperMemConfig = {
 //   - Mid-range models (Sonnet, GPT-5-mini, Gemini Flash) at 128k
 //   - Small multi-agent setups or single power-user agents
 //   - Full ACA stack — dreaming optional, background indexing on
-//   - outputStandard: 'standard' — full FOS, no MOD
+//   - outputProfile: 'standard' — full FOS, no MOD
 // ---------------------------------------------------------------------------
 
 const STANDARD_COMPOSITOR: CompositorConfig = {
@@ -118,7 +118,7 @@ const STANDARD_COMPOSITOR: CompositorConfig = {
   keystoneMinSignificance: 0.5,
   targetBudgetFraction: 0.65,       // Anvil spec: 0.65 for standard
   maxTotalTriggerTokens: 4000,
-  outputStandard: 'standard',       // full FOS, MOD suppressed
+  outputProfile: 'standard',       // full FOS, MOD suppressed
   wikiTokenCap: 600,                // Anvil spec: 600 for standard
 };
 
@@ -148,7 +148,7 @@ export const standardProfile: HyperMemConfig = {
 //   - Large context models (Opus, GPT-5.4, Gemini Pro) at 200k+
 //   - Council / multi-agent fleet deployments
 //   - Full ACA stack including dreaming, background indexing, cross-session
-//   - outputStandard: 'fleet' — FOS + MOD, full spec
+//   - outputProfile: 'full' — FOS + MOD, full spec
 //   - Higher keystone threshold — more historical context worth surfacing
 // ---------------------------------------------------------------------------
 
@@ -169,7 +169,7 @@ const EXTENDED_COMPOSITOR: CompositorConfig = {
   keystoneMinSignificance: 0.4,
   targetBudgetFraction: 0.55,       // Anvil spec: 0.55 for extended (history is huge, budget carefully)
   maxTotalTriggerTokens: 10000,
-  outputStandard: 'fleet',          // FOS + MOD — full fleet spec
+  outputProfile: 'full',          // FOS + MOD — full fleet spec
   wikiTokenCap: 800,                // Anvil spec: 800 for extended
 };
 
@@ -230,7 +230,7 @@ export function getProfile(name: ProfileName): HyperMemConfig {
  * @example
  * const config = mergeProfile('light', {
  *   redis: { host: 'redis.internal', port: 6380 },
- *   compositor: { outputStandard: 'standard' },  // upgrade tier
+ *   compositor: { outputProfile: 'standard' },  // upgrade tier
  * });
  */
 export function mergeProfile(
