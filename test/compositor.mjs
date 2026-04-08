@@ -271,6 +271,16 @@ async function run() {
     `Empty session token count ${emptyResult.tokenCount} is below 5000 (system context only)`
   );
 
+  const emptySystemMessages = emptyResult.messages.filter(m => m.role === 'system');
+  const outputStandardMsg = emptySystemMessages.find(m => typeof m.content === 'string' && String(m.content).includes('## Output Standard'));
+  assert(outputStandardMsg !== undefined, 'Empty session keeps output profile in static system prefix');
+  const cachedBoundaryMsg = emptySystemMessages.find(m => m.cache_control && m.cache_control.type === 'ephemeral');
+  assert(cachedBoundaryMsg !== undefined, 'Anthropic output marks a static cache boundary');
+  assert(
+    cachedBoundaryMsg && typeof cachedBoundaryMsg.content === 'string' && cachedBoundaryMsg.content.includes('## Output Standard'),
+    'Cache boundary lands on the stable output-profile prefix'
+  );
+
   // ── Test 6: Multi-provider output ──
   console.log('\n── Multi-Provider Output ──');
 

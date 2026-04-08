@@ -130,8 +130,8 @@ export function detectProvider(providerString: string | null | undefined): Provi
  * The last system message BEFORE the dynamicBoundary marker gets
  * cache_control: {type: "ephemeral"} to mark the static/dynamic boundary.
  *
- * Static (cacheable): system prompt + identity — stable across sessions
- * Dynamic (not cacheable): context block (facts/recall), conversation history
+ * Static (cacheable): system prompt + identity + stable output profile prefix
+ * Dynamic (not cacheable): context block (facts/recall/recent actions), conversation history
  *
  * This allows Anthropic to cache the static prefix and skip re-tokenizing it.
  */

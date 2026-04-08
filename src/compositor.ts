@@ -43,7 +43,7 @@ import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction-fence.js';
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
 import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
-import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderLightFOS, renderStarterFOS, resolveOutputTier, buildActionVerificationSummary } from './fos-mod.js';
+import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderLightFOS, resolveOutputTier, buildActionVerificationSummary } from './fos-mod.js';
 import { KnowledgeStore } from './knowledge-store.js';
 
 /**
@@ -921,6 +921,56 @@ export class Compositor {
       remaining -= tokens;
     }
 
+    // ─── Stable Output Profile Prefix ──────────────────────────
+    // Keep deterministic output instructions on the static side of the cache
+    // boundary so Anthropic and OpenAI warm-prefix caching can reuse them.
+    if (remaining > 100 && request.includeLibrary !== false) {
+      const fosEnabled = this.config?.enableFOS !== false;
+      const modEnabled = this.config?.enableMOD !== false;
+      const outputTier = resolveOutputTier(
+        (this.config?.outputProfile ?? this.config?.outputStandard) as any,
+        fosEnabled,
+        modEnabled
+      );
+
+      const stableOutputParts: string[] = [];
+
+      if (outputTier.tier === 'light') {
+        stableOutputParts.push(renderLightFOS().join('\n'));
+      } else if (libDb) {
+        if (outputTier.fos) {
+          const fos = getActiveFOS(libDb);
+          if (fos) {
+            const fosContent = renderFOS(fos).join('\n');
+            if (fosContent.trim()) stableOutputParts.push(fosContent);
+          }
+        }
+
+        if (outputTier.mod) {
+          const mod = matchMOD(request.model, libDb);
+          if (mod) {
+            const modContent = renderMOD(mod, null, request.model || '').join('\n');
+            if (modContent.trim()) stableOutputParts.push(modContent);
+          }
+        }
+      }
+
+      if (stableOutputParts.length > 0) {
+        const stableOutputContent = stableOutputParts.join('\n\n');
+        const stableOutputTokens = estimateTokens(stableOutputContent);
+        if (stableOutputTokens <= remaining) {
+          messages.push({
+            role: 'system',
+            textContent: stableOutputContent,
+            toolCalls: null,
+            toolResults: null,
+          });
+          slots.system += stableOutputTokens;
+          remaining -= stableOutputTokens;
+        }
+      }
+    }
+
     // ─── Conversation History ──────────────────────────────────
     let diagCrossTopicKeystones = 0;
     // Hoisted: activeTopicId/name resolved inside history block, used for window dual-write (VS-1) and wiki page injection
@@ -1539,98 +1589,18 @@ export class Compositor {
       }
     }
 
-    // ── FOS/MOD: Fleet Output Standard + Model Output Directive ────
-    // Inject after all memory recall sections so the model gets output
-    // instructions in the same context block, closest to the conversation.
-    if (libDb && remaining > 100 && request.includeLibrary !== false) {
-      const assemblyModelId = request.model;
-      // Detect file-write context from recent tool calls
-      // If the model recently called 'write' or 'edit', relax FOS density constraints
-      let taskContext: string | undefined;
-      if (messages.length > 0) {
-        for (let i = messages.length - 1; i >= Math.max(0, messages.length - 4); i--) {
-          const msg = messages[i];
-          if (msg.toolCalls && msg.toolCalls.length > 0) {
-            const hasFileWrite = msg.toolCalls.some(
-              (tc: { name: string }) => tc.name === 'write' || tc.name === 'edit'
-            );
-            if (hasFileWrite) {
-              taskContext = 'file-write';
-              break;
-            }
-          }
-        }
-      }
-
-      const fosEnabled = this.config?.enableFOS !== false;
-      const modEnabled = this.config?.enableMOD !== false;
-      const outputTier = resolveOutputTier(
-        (this.config?.outputProfile ?? this.config?.outputStandard) as any,
-        fosEnabled,
-        modEnabled
-      );
-
-      // Light tier: inject lightweight standalone directives, no DB lookup needed
-      if (outputTier.tier === 'light') {
-        const lightLines = renderLightFOS();
-        const lightContent = lightLines.join('\n');
-        const lightTokens = Math.ceil(lightContent.length / 4);
-        if (lightTokens <= remaining) {
-          contextParts.push(lightContent);
-          contextTokens += lightTokens;
-          remaining -= lightTokens;
-          slots.context += lightTokens;
-        }
-      } else {
-        // standard or fleet tier: full FOS from DB
-        const fos = outputTier.fos ? getActiveFOS(libDb) : null;
-        if (fos) {
-          const fosLines = renderFOS(fos, taskContext);
-          if (fosLines.length > 0) {
-            const fosContent = fosLines.join('\n');
-            const fosTokens = Math.ceil(fosContent.length / 4);
-            if (fosTokens <= remaining) {
-              contextParts.push(fosContent);
-              contextTokens += fosTokens;
-              remaining -= fosTokens;
-              slots.context += fosTokens;
-            }
-          }
-        }
-
-        // fleet tier only: MOD injection
-        const mod = outputTier.mod ? matchMOD(assemblyModelId, libDb) : null;
-        if (mod && remaining > 50) {
-          const fosForMod = outputTier.fos ? getActiveFOS(libDb) : null;
-          const modLines = renderMOD(mod, fosForMod, assemblyModelId || '', taskContext);
-          if (modLines.length > 0) {
-            const modContent = modLines.join('\n');
-            const modTokens = Math.ceil(modContent.length / 4);
-            if (modTokens <= remaining) {
-              contextParts.push(modContent);
-              contextTokens += modTokens;
-              remaining -= modTokens;
-              slots.context += modTokens;
-            }
-          }
-        }
-      } // end else (standard/fleet tier)
-
-      // ── Action Verification Summary ─────────────────────────
-      // Inject a rolling buffer of the last N verified tool actions.
-      // Pressure-aware: 5 actions at <80%, 3 at 80-90%, 1 at 90-95%, drop at >=95%.
-      // Uses the already-assembled message array for scanning.
-      if (remaining > 50) {
-        const pressurePct = budget > 0 ? Math.round(((budget - remaining) / budget) * 100) : 0;
-        const actionSummary = buildActionVerificationSummary(messages, pressurePct);
-        if (actionSummary) {
-          const actionTokens = Math.ceil(actionSummary.length / 4);
-          if (actionTokens <= remaining) {
-            contextParts.push(actionSummary);
-            contextTokens += actionTokens;
-            remaining -= actionTokens;
-            slots.context += actionTokens;
-          }
+    // ── Action Verification Summary ─────────────────────────
+    // Keep recent action history on the dynamic side of the cache boundary.
+    if (remaining > 50 && request.includeLibrary !== false) {
+      const pressurePct = budget > 0 ? Math.round(((budget - remaining) / budget) * 100) : 0;
+      const actionSummary = buildActionVerificationSummary(messages, pressurePct);
+      if (actionSummary) {
+        const actionTokens = Math.ceil(actionSummary.length / 4);
+        if (actionTokens <= remaining) {
+          contextParts.push(actionSummary);
+          contextTokens += actionTokens;
+          remaining -= actionTokens;
+          slots.context += actionTokens;
         }
       }
     }
