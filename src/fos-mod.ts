@@ -543,7 +543,7 @@ export function recordOutputMetrics(db: DatabaseSync, metrics: OutputMetricsRow)
   try {
     const now = new Date().toISOString();
     db.prepare(`
-      INSERT INTO output_metrics (
+      INSERT OR REPLACE INTO output_metrics (
         id, timestamp, agent_id, session_key, model_id, provider,
         fos_version, mod_version, mod_id, task_type,
         output_tokens, input_tokens, cache_read_tokens,

@@ -556,7 +556,10 @@ async function truncateJsonlIfNeeded(
     );
     return true;
   } catch (err) {
-    console.warn('[hypermem-plugin] truncateJsonl failed (non-fatal):', (err as Error).message);
+    // ENOENT is expected when session file doesn't exist yet — not worth logging
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn('[hypermem-plugin] truncateJsonl failed (non-fatal):', (err as Error).message);
+    }
     return false;
   }
 }
