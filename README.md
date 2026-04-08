@@ -43,7 +43,7 @@ FTS5 full-text search catches exact matches. KNN vector search catches semantic 
 
 Long agentic sessions generate a lot of tool output. Left unmanaged, old results crowd out current reasoning.
 
-Tool Context Tuning compresses by turn age. T0 turns stay verbatim. T1 turns become short prose stubs: `Read /src/foo.ts (1.2KB)`, `Ran npm test — exit 0`. T2 and T3 turns drop payloads entirely, keeping message text. Large results keep the head and tail and cut the middle. For multi-agent fleets, compression is tier-aware: director and council agents preserve more context per pass, reflecting their coordination scope; specialists use a tighter cap to stay focused. The live Redis cache is refreshed from SQLite after each turn so it never drifts from the source of truth.
+Tool Context Tuning compresses by turn age. T0 turns stay verbatim under normal pressure. At projected occupancy above 80% with a large result (>40k chars), T0 is trimmed head-and-tail with a structured `[hypermem_tool_result_trim ... reason=oversize_turn0_trim]` note. T1 turns become short prose stubs: `Read /src/foo.ts (1.2KB)`, `Ran npm test — exit 0`. T2 and T3 turns drop payloads entirely, keeping message text. Large results keep the head and tail and cut the middle. For multi-agent fleets, compression is tier-aware: director and council agents preserve more context per pass, reflecting their coordination scope; specialists use a tighter cap to stay focused. The live Redis cache is refreshed from SQLite after each turn so it never drifts from the source of truth.
 
 ### Sessions that stay on topic
 
@@ -89,7 +89,7 @@ hyper**mem** assembles context fresh on every turn, but a long-running session s
 
 | Path | Trigger | Action |
 |---|---|---|
-| **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures runtime pressure before results land. >85%: trims to 50% budget. >80%: 60%. >75%: 65%. Also trims the messages[] array returned to the runtime — this is what actually prevents stripping on the current turn, not just the next one |
+| **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures projected occupancy before results land. Plans against a 120k baseline window regardless of actual provider context size. 75%: green zone, keep full. 80%: defensive — trim large results (>40k chars) head+tail with structured note. 85%: hard caution zone — trim on turn 0 and turn 1. Also trims the messages[] array returned to the runtime — this is what actually prevents stripping on the current turn, not just the next one |
 | **AfterTurn trim** | Every turn at >80% | Pre-emptive headroom cut after the assistant replies, before the next turn arrives |
 | **Nuclear compaction** | compact() at >85% | Cuts Redis to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
 | **Density-aware JSONL truncation** | compact() | Counts tokens per message, not message count — catches large-message sessions that looked "fine" by count but were full by volume |
@@ -175,7 +175,7 @@ hyper**mem** plugs into OpenClaw as a context engine and owns the full prompt co
 
 **Secret scanner** — Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, hyper**mem** scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected — the write succeeds without the content reaching fleet-visible storage.
 
-**The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and assembles a provider-format context block. A safety valve catches estimation drift and trims post-assembly. Because the budget is computed from the model's actual context window at compose time — resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly — a mid-session model swap is absorbed on the next turn with no manual intervention. T0 (the current turn's tool output) is always preserved verbatim; compression starts at T1.
+**The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and assembles a provider-format context block. A safety valve catches estimation drift and trims post-assembly. Because the budget is computed from the model's actual context window at compose time — resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly — a mid-session model swap is absorbed on the next turn with no manual intervention. T0 is preserved verbatim up to 80% projected occupancy. At high pressure with a large result, T0 is trimmed head-and-tail with a structured trim note. Compression of older turns starts at T1.
 
 ---
 
@@ -317,6 +317,7 @@ Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 - [x] Model-aware token budget — resolves context window from model string when runtime omits tokenBudget
 - [x] Dynamic context window reserve — configurable headroom fraction based on observed avg turn cost
 - [x] Pre-ingestion wave guard — truncate/skip large tool payloads before they enter the ingest path
+- [x] Aggregate trigger budget cap — total token ceiling across all triggered collections per compose turn; prevents pathological prompts from overconsumming retrieval budget
 - [ ] Versioned atomic re-indexing
 - [ ] `hypermem seed --workspace` CLI
 - [ ] Embedding model hot-swap
