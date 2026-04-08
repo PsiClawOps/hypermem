@@ -258,6 +258,8 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     factDecayRate: 0.01,
     episodeSignificanceThreshold: 0.5,
     periodicInterval: 300000,
+    batchSize: 128,
+    maxMessagesPerTick: 500,
   },
   embedding: {
     ollamaUrl: 'http://localhost:11434',

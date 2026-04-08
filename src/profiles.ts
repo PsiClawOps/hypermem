@@ -74,6 +74,8 @@ const LIGHT_INDEXER: IndexerConfig = {
   factDecayRate: 0.05,              // slightly faster decay — fewer facts, keep them fresh
   episodeSignificanceThreshold: 0.6, // higher bar — only store meaningful episodes
   periodicInterval: 120000,         // 2min — less frequent background work on small systems
+        batchSize: 64,
+        maxMessagesPerTick: 200,
 };
 
 export const lightProfile: HyperMemConfig = {
@@ -130,6 +132,8 @@ const STANDARD_INDEXER: IndexerConfig = {
   factDecayRate: 0.02,
   episodeSignificanceThreshold: 0.5,
   periodicInterval: 60000,          // 1min — standard background cadence
+        batchSize: 128,
+        maxMessagesPerTick: 500,
 };
 
 export const standardProfile: HyperMemConfig = {
@@ -181,6 +185,8 @@ const EXTENDED_INDEXER: IndexerConfig = {
   factDecayRate: 0.01,              // slow decay — preserve more institutional memory
   episodeSignificanceThreshold: 0.4,
   periodicInterval: 30000,          // 30s — frequent background work for fleet throughput
+        batchSize: 256,
+        maxMessagesPerTick: 1000,
 };
 
 export const fullProfile: HyperMemConfig = {

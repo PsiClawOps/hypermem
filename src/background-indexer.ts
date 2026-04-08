@@ -515,7 +515,9 @@ export class BackgroundIndexer {
       topicClosedAfter: config?.topicClosedAfter ?? '7d',
       factDecayRate: config?.factDecayRate ?? 0.01,
       episodeSignificanceThreshold: config?.episodeSignificanceThreshold ?? 0.5,
-      periodicInterval: config?.periodicInterval ?? 300000, // 5 minutes
+      periodicInterval: config?.periodicInterval ?? 60000,  // 1 minute
+      batchSize: config?.batchSize ?? 128,
+      maxMessagesPerTick: config?.maxMessagesPerTick ?? 500,
     };
     this.dreamerConfig = dreamerConfig ?? {};
   }
@@ -554,7 +556,7 @@ export class BackgroundIndexer {
       });
     }, this.config.periodicInterval);
 
-    console.log(`[indexer] Started with interval ${this.config.periodicInterval}ms`);
+    console.log(`[indexer] Started with interval ${this.config.periodicInterval}ms, batchSize ${this.config.batchSize}, maxPerTick ${this.config.maxMessagesPerTick}`);
   }
 
   /**
@@ -587,10 +589,16 @@ export class BackgroundIndexer {
 
       const agents = this.listAgents();
       const libraryDb = this.getLibraryDb();
+      let tickTotal = 0;
 
       for (const agentId of agents) {
+        if (tickTotal >= this.config.maxMessagesPerTick) {
+          console.log(`[indexer] maxMessagesPerTick (${this.config.maxMessagesPerTick}) reached — deferring remaining agents`);
+          break;
+        }
         try {
           const stats = await this.processAgent(agentId, libraryDb);
+          tickTotal += stats.messagesProcessed;
           if (stats.messagesProcessed > 0 || stats.tombstoned > 0) {
             results.push(stats);
           }
@@ -723,8 +731,8 @@ export class BackgroundIndexer {
     const watermark = this.getWatermark(libraryDb, agentId);
     const lastProcessedId = watermark?.lastMessageId ?? 0;
 
-    // Fetch unindexed messages (batch size: 100)
-    const messages = this.getUnindexedMessages(messageDb, agentId, lastProcessedId, 100);
+    // Fetch unindexed messages (batch size from config)
+    const messages = this.getUnindexedMessages(messageDb, agentId, lastProcessedId, this.config.batchSize);
 
     if (messages.length === 0) {
       // Even with no new messages, run tombstone cleanup in case supersedes

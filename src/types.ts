@@ -589,4 +589,6 @@ export interface IndexerConfig {
   factDecayRate: number;
   episodeSignificanceThreshold: number;
   periodicInterval: number;    // milliseconds
+  batchSize: number;           // messages per indexer tick
+  maxMessagesPerTick: number;  // total messages processed per tick (all agents)
 }
