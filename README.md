@@ -25,74 +25,58 @@ L4  Library DB    Fleet-wide structured knowledge, facts, episodes, registry
 
 This is the core claim: hyper**mem** is not transcript replay. It is context management. Each turn is rebuilt from active topic, hot state, durable history, semantic recall, and compiled knowledge inside a fixed token budget.
 
-```mermaid
-flowchart LR
-    U[Incoming user turn] --> T[Topic detection and active-thread scope]
-    U --> C[HyperCompositor]
-    T --> C
-    L1[L1 Redis<br/>hot session state<br/>identity, recent history, cache] --> C
-    L2[L2 Messages DB<br/>durable per-agent history] --> C
-    L3[L3 Vectors DB<br/>semantic recall and document matches] --> C
-    L4[L4 Library DB<br/>facts, wiki, episodes, registry] --> C
-    C --> P[Budgeting, slot caps, pressure controls, keystone preservation]
-    P --> F[FOS output profile<br/>light, standard, full]
-    F --> M[Model response]
-    M --> A[afterTurn ingest]
-    A --> R1[Refresh Redis hot state]
-    A --> R2[Write durable history]
-    A --> R3[Index semantic recall]
-    A --> R4[Synthesize topic wiki]
-    R4 --> L4
+```
+  user message
+       │
+  topic detection ──► scope retrieval to active thread
+       │
+  ┌────┴────────────────────────────────────────────┐
+  │              query 4 layers (parallel)           │
+  │                                                  │
+  │  L1 Redis     L2 History    L3 Vectors  L4 Library │
+  │  hot state    durable       semantic    facts/wiki │
+  │  0.1ms        0.16ms        0.29ms      0.08ms     │
+  └────┬────────────────────────────────────────────┘
+       │
+  budget allocator ──► 10 slots, fixed token cap
+       │
+  tool compression ──► T0 verbatim → T1 stubs → T2+ dropped
+       │
+  keystone guard ──► high-signal turns survive pressure
+       │
+  FOS profile ──► output normalization directives
+       │
+  assembled prompt ──► 9,852 tokens (16% of 60k budget)    52ms
+       │
+  model response
+       │
+  afterTurn ──► write back to all 4 layers
 ```
 
 OpenClaw already gives agents a solid baseline: workspace memory files, hybrid file search, and compaction safeguards. hyper**mem** goes deeper. It replaces transcript accumulation with a context engine that assembles prompts fresh from storage on every turn, purpose-built to eliminate each failure mode at the source.
 
 ### How a prompt gets built: standard vs. HyperCompositor
 
-Most context engines (including OpenClaw's built-in path) work the same way: accumulate a transcript, trim from the top when it fills up, hope the important parts survive.
+Most context engines accumulate a transcript, trim from the top when it fills up, and hope the important parts survive. The HyperCompositor never accumulates. Each turn is assembled fresh from storage.
 
-```mermaid
-flowchart TB
-    subgraph standard["Standard OpenClaw"]
-        direction TB
-        S1[User message] --> S2[Append to transcript]
-        S2 --> S3[Transcript full?]
-        S3 -->|no| S4[Send entire transcript to model]
-        S3 -->|yes| S5[Trim oldest messages]
-        S5 --> S6[Summarize trimmed portion]
-        S6 --> S4
-        S4 --> S7[Model response]
-        S7 --> S2
-    end
-
-    subgraph hyper["HyperCompositor"]
-        direction TB
-        H1[User message] --> H2[Detect active topic]
-        H1 --> H3[Query all 4 layers in parallel]
-        H2 --> H3
-        H3 --> HL1[L1 Redis: hot state,<br/>identity, recent history]
-        H3 --> HL2[L2 Messages: durable<br/>per-agent history]
-        H3 --> HL3[L3 Vectors: semantic<br/>recall matches]
-        H3 --> HL4[L4 Library: facts,<br/>wiki, episodes]
-        HL1 --> H4[Token budget allocator]
-        HL2 --> H4
-        HL3 --> H4
-        HL4 --> H4
-        H4 --> H5[Per-slot caps +<br/>tool context tuning]
-        H5 --> H6[Keystone preservation]
-        H6 --> H7[FOS output profile]
-        H7 --> H8[Assembled prompt<br/>~16% of budget used]
-        H8 --> H9[Model response]
-        H9 --> H10[afterTurn ingest]
-        H10 --> H11[Write to all 4 layers]
-    end
 ```
+Standard                                HyperCompositor
+────────────────────────────────        ────────────────────────────────
+message → append to transcript          message → detect active topic
+transcript full → trim oldest           query 4 storage layers in parallel
+trimmed content → summarize (lossy)     budget allocator: 10 slots, fixed cap
+send transcript to model                tool compression by turn age
+model responds → append again           keystone guard + FOS profile
+                                        assembled prompt → model
+     ┌──────────────────┐               model responds → afterTurn ingest
+     │  loop until full  │               → write back to all 4 layers
+     └──────────────────┘
 
-The standard path is a queue with a pressure valve. When it fills, content is lost permanently. Summaries are lossy. There is no way to recover a specific decision from 200 turns ago once it has been compressed into a paragraph.
-
-The HyperCompositor never accumulates. Each turn is assembled fresh from storage. History, facts, semantic recall, and compiled knowledge all compete for tokens within a fixed budget. Nothing is lost from storage when the budget is exceeded; it simply is not selected for this turn. Change the topic back, and the relevant context is retrieved again.
-
-Key differences:
+When it fills:                          When budget is exceeded:
+  content is lost permanently             content stays in storage
+  summaries are lossy                     not selected for this turn
+  no recovery path                        change topic back → retrieved again
+```
 
 | | Standard | HyperCompositor |
 |---|---|---|
