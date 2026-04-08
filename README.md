@@ -4,8 +4,6 @@
 
 <p align="center"><em>Coherent agents. Every session.</em></p>
 
-*Identity that holds. Context that composes.*
-
 ---
 
 hypermem is a runtime context engine for OpenClaw agents.
