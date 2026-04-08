@@ -183,7 +183,7 @@ const EXTENDED_INDEXER: IndexerConfig = {
   periodicInterval: 30000,          // 30s — frequent background work for fleet throughput
 };
 
-export const extendedProfile: HyperMemConfig = {
+export const fullProfile: HyperMemConfig = {
   enabled: true,
   dataDir: './hypermem-data',
   redis: BASE_REDIS,
@@ -200,16 +200,17 @@ export const extendedProfile: HyperMemConfig = {
 // Profile registry
 // ---------------------------------------------------------------------------
 
-export type ProfileName = 'light' | 'standard' | 'extended';
+export type ProfileName = 'light' | 'standard' | 'full';
 
 // Legacy aliases — kept for backward compat, removed in 1.0
 export const minimalProfile = lightProfile;
-export const richProfile = extendedProfile;
+export const extendedProfile = fullProfile;
+export const richProfile = fullProfile;
 
 export const PROFILES: Record<ProfileName, HyperMemConfig> = {
   light: lightProfile,
   standard: standardProfile,
-  extended: extendedProfile,
+  full: fullProfile,
 };
 
 /**
@@ -219,8 +220,10 @@ export const PROFILES: Record<ProfileName, HyperMemConfig> = {
  * const config = getProfile('light');
  * const hm = createHyperMem(config);
  */
-export function getProfile(name: ProfileName): HyperMemConfig {
-  return structuredClone(PROFILES[name]);
+export function getProfile(name: ProfileName | 'extended'): HyperMemConfig {
+  // backward compat
+  if ((name as string) === 'extended') return structuredClone(fullProfile);
+  return structuredClone(PROFILES[name as ProfileName]);
 }
 
 /**
@@ -234,7 +237,7 @@ export function getProfile(name: ProfileName): HyperMemConfig {
  * });
  */
 export function mergeProfile(
-  name: ProfileName,
+  name: ProfileName | 'extended',
   overrides: DeepPartial<HyperMemConfig>,
 ): HyperMemConfig {
   const base = getProfile(name);
