@@ -519,6 +519,31 @@ export interface CompositorConfig {
    * Default: true
    */
   enableMOD?: boolean;
+  /**
+   * Output standard tier. Controls what FOS content is injected.
+   *
+   * 'starter' — density targeting only (3-4 directives). No MOD, no fleet concepts.
+   *             Works standalone on a single-agent 64k setup. Default for new installs.
+   * 'standard' — full FOS: density targets, format rules, compression ratios, task-context
+   *              scoping. No MOD. For small fleets and intermediate users.
+   * 'fleet'    — FOS + MOD. Cross-agent coordination, identity-scoped formatting, full spec.
+   *              For multi-agent fleet operators.
+   *
+   * Default: 'fleet' (backward-compatible). New install default: 'starter'.
+   * MOD injection is automatically suppressed for 'starter' and 'standard' tiers
+   * regardless of the enableMOD setting.
+   */
+  outputStandard?: 'starter' | 'standard' | 'fleet';
+  /**
+   * Hard token ceiling for wiki page injection per compose pass.
+   * Limits how much synthesized topic knowledge is inserted into context.
+   * Lower values keep context lighter; higher values surface more topic depth.
+   *
+   * Default: 600 tokens
+   * Light preset: 300 tokens
+   * Extended preset: 800 tokens
+   */
+  wikiTokenCap?: number;
   // Note: assembly order is fixed in compose() — system, identity, history,
   // facts, knowledge, preferences, semanticRecall, cross-session, library.
   //

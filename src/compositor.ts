@@ -43,7 +43,7 @@ import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction-fence.js';
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
 import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
-import { getActiveFOS, matchMOD, renderFOS, renderMOD, buildActionVerificationSummary } from './fos-mod.js';
+import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderStarterFOS, resolveOutputTier, buildActionVerificationSummary } from './fos-mod.js';
 import { KnowledgeStore } from './knowledge-store.js';
 
 /**
@@ -1564,36 +1564,57 @@ export class Compositor {
 
       const fosEnabled = this.config?.enableFOS !== false;
       const modEnabled = this.config?.enableMOD !== false;
+      const outputTier = resolveOutputTier(
+        this.config?.outputStandard,
+        fosEnabled,
+        modEnabled
+      );
 
-      const fos = fosEnabled ? getActiveFOS(libDb) : null;
-      if (fos) {
-        const fosLines = renderFOS(fos, taskContext);
-        if (fosLines.length > 0) {
-          const fosContent = fosLines.join('\n');
-          const fosTokens = Math.ceil(fosContent.length / 4);
-          if (fosTokens <= remaining) {
-            contextParts.push(fosContent);
-            contextTokens += fosTokens;
-            remaining -= fosTokens;
-            slots.context += fosTokens;
+      // Starter tier: inject lightweight standalone directives, no DB lookup needed
+      if (outputTier.tier === 'starter') {
+        const starterLines = renderStarterFOS();
+        const starterContent = starterLines.join('\n');
+        const starterTokens = Math.ceil(starterContent.length / 4);
+        if (starterTokens <= remaining) {
+          contextParts.push(starterContent);
+          contextTokens += starterTokens;
+          remaining -= starterTokens;
+          slots.context += starterTokens;
+        }
+      } else {
+        // standard or fleet tier: full FOS from DB
+        const fos = outputTier.fos ? getActiveFOS(libDb) : null;
+        if (fos) {
+          const fosLines = renderFOS(fos, taskContext);
+          if (fosLines.length > 0) {
+            const fosContent = fosLines.join('\n');
+            const fosTokens = Math.ceil(fosContent.length / 4);
+            if (fosTokens <= remaining) {
+              contextParts.push(fosContent);
+              contextTokens += fosTokens;
+              remaining -= fosTokens;
+              slots.context += fosTokens;
+            }
           }
         }
-      }
 
-      const mod = modEnabled ? matchMOD(assemblyModelId, libDb) : null;
-      if (mod && fos && remaining > 50) {
-        const modLines = renderMOD(mod, fos, assemblyModelId || '', taskContext);
-        if (modLines.length > 0) {
-          const modContent = modLines.join('\n');
-          const modTokens = Math.ceil(modContent.length / 4);
-          if (modTokens <= remaining) {
-            contextParts.push(modContent);
-            contextTokens += modTokens;
-            remaining -= modTokens;
-            slots.context += modTokens;
+        // fleet tier only: MOD injection
+        const mod = outputTier.mod ? matchMOD(assemblyModelId, libDb) : null;
+        if (mod && remaining > 50) {
+          const fosForMod = outputTier.fos ? getActiveFOS(libDb) : null;
+          const modLines = renderMOD(mod, fosForMod, assemblyModelId || '', taskContext);
+          if (modLines.length > 0) {
+            const modContent = modLines.join('\n');
+            const modTokens = Math.ceil(modContent.length / 4);
+            if (modTokens <= remaining) {
+              contextParts.push(modContent);
+              contextTokens += modTokens;
+              remaining -= modTokens;
+              slots.context += modTokens;
+            }
           }
         }
-      }
+      } // end else (standard/fleet tier)
 
       // ── Action Verification Summary ─────────────────────────
       // Inject a rolling buffer of the last N verified tool actions.

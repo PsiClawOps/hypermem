@@ -287,6 +287,62 @@ function globMatch(pattern: string, value: string): boolean {
  * Respects token_budget (default 250 tokens). Never cuts mid-sentence.
  * If taskContext is provided and a matching task variant exists, overrides density targets.
  */
+// ── FOS Tier rendering ──────────────────────────────────────────────────────
+
+/**
+ * Output standard tiers. Controls what FOS content is injected into context.
+ *
+ * 'starter'  — 3-4 density directives only. No MOD, no fleet concepts.
+ *              Works standalone on a 64k single-agent setup.
+ * 'standard' — Full FOS: density targets, format rules, compression ratios,
+ *              task-context scoping. MOD suppressed.
+ * 'fleet'    — FOS + MOD. Full spec for multi-agent fleet operators.
+ */
+export type OutputStandardTier = 'starter' | 'standard' | 'fleet';
+
+/**
+ * Render a lightweight starter-tier output standard.
+ * Standalone: no compositor concepts, no fleet terminology.
+ * Three focused directives: concise, facts-first, token-efficient formatting.
+ */
+export function renderStarterFOS(): string[] {
+  return [
+    '## Output Standard',
+    '- Lead with the answer. Conclusion first, reasoning after.',
+    '- Facts over filler. Every sentence states a fact, makes a decision, or advances an argument.',
+    '- Token-efficient formatting: no headers for short answers, no bullet padding, no preamble.',
+    '- Simple: 1-3 sentences. Analysis: 200-400 words. Code: code first, explain only non-obvious parts.',
+  ];
+}
+
+/**
+ * Resolve the effective output standard tier given compositor config.
+ * MOD is only eligible at the 'fleet' tier.
+ */
+export function resolveOutputTier(
+  outputStandard: OutputStandardTier | undefined,
+  enableFOS: boolean | undefined,
+  enableMOD: boolean | undefined
+): { tier: OutputStandardTier; fos: boolean; mod: boolean } {
+  // Legacy path: if outputStandard is not set, honor enableFOS/enableMOD directly
+  if (outputStandard === undefined) {
+    return {
+      tier: 'fleet',
+      fos: enableFOS !== false,
+      mod: enableMOD !== false,
+    };
+  }
+
+  switch (outputStandard) {
+    case 'starter':
+      return { tier: 'starter', fos: false, mod: false };
+    case 'standard':
+      return { tier: 'standard', fos: true, mod: false };
+    case 'fleet':
+      return { tier: 'fleet', fos: true, mod: enableMOD !== false };
+  }
+}
+
 export function renderFOS(fos: FOSRecord, taskContext?: string): string[] {
   const budget = fos.token_budget || FOS_TOKEN_BUDGET;
   const d = fos.directives;

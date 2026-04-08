@@ -34,18 +34,18 @@ const BASE_EMBEDDING: EmbeddingProviderConfig = {
 };
 
 // ---------------------------------------------------------------------------
-// minimal — 64k context window, single agent, constrained resources
+// light — 64k context window, single agent, constrained resources
 //
 // Design intent:
 //   - Small local models (Mistral 7B, Phi-3, Llama 3 8B) at 64k context
 //   - Single agent — no cross-session context needed
 //   - Minimal ACA stack — no dreaming, no background indexing overhead
 //   - Low Redis churn — longer flush intervals, shorter history window
-//   - FOS/MOD off — lightweight deployments usually manage output externally
+//   - outputStandard: 'starter' — 3-4 density directives, no fleet concepts
 //   - No parallel operations — sequential fact extraction only
 // ---------------------------------------------------------------------------
 
-const MINIMAL_COMPOSITOR: CompositorConfig = {
+const LIGHT_COMPOSITOR: CompositorConfig = {
   defaultTokenBudget: 40000,        // leaves ~24k for model output at 64k window
   maxHistoryMessages: 200,          // keep window tight — small models lose coherence past ~150 msgs
   maxFacts: 15,                     // surface top facts only, don't swamp the window
@@ -60,13 +60,13 @@ const MINIMAL_COMPOSITOR: CompositorConfig = {
   keystoneHistoryFraction: 0.1,     // light keystone — history window is already small
   keystoneMaxMessages: 5,
   keystoneMinSignificance: 0.7,     // higher bar — only high-signal keystone messages
-  targetBudgetFraction: 0.40,       // conservative — leave plenty of room
+  targetBudgetFraction: 0.50,       // Anvil spec: 0.50 for light
   maxTotalTriggerTokens: 1500,      // tight trigger ceiling
-  enableFOS: false,                 // manage output standards externally
-  enableMOD: false,                 // skip per-model calibration overhead
+  outputStandard: 'starter',        // standalone density directives only, no fleet concepts
+  wikiTokenCap: 300,                // Anvil spec: 300 for light
 };
 
-const MINIMAL_INDEXER: IndexerConfig = {
+const LIGHT_INDEXER: IndexerConfig = {
   enabled: true,
   factExtractionMode: 'pattern',    // pattern only — tiered extraction is heavier
   topicDormantAfter: '12h',         // faster dormancy — small systems don't need long windows
@@ -76,12 +76,12 @@ const MINIMAL_INDEXER: IndexerConfig = {
   periodicInterval: 120000,         // 2min — less frequent background work on small systems
 };
 
-export const minimalProfile: HyperMemConfig = {
+export const lightProfile: HyperMemConfig = {
   enabled: true,
   dataDir: './hypermem-data',
   redis: BASE_REDIS,
-  compositor: MINIMAL_COMPOSITOR,
-  indexer: MINIMAL_INDEXER,
+  compositor: LIGHT_COMPOSITOR,
+  indexer: LIGHT_INDEXER,
   embedding: {
     ...BASE_EMBEDDING,
     batchSize: 8,                   // smaller batches — don't spike memory on embed
@@ -98,7 +98,7 @@ export const minimalProfile: HyperMemConfig = {
 //   - Mid-range models (Sonnet, GPT-5-mini, Gemini Flash) at 128k
 //   - Small multi-agent setups or single power-user agents
 //   - Full ACA stack — dreaming optional, background indexing on
-//   - FOS/MOD on — fleet output consistency
+//   - outputStandard: 'standard' — full FOS, no MOD
 // ---------------------------------------------------------------------------
 
 const STANDARD_COMPOSITOR: CompositorConfig = {
@@ -116,10 +116,10 @@ const STANDARD_COMPOSITOR: CompositorConfig = {
   keystoneHistoryFraction: 0.20,
   keystoneMaxMessages: 15,
   keystoneMinSignificance: 0.5,
-  targetBudgetFraction: 0.65,
+  targetBudgetFraction: 0.65,       // Anvil spec: 0.65 for standard
   maxTotalTriggerTokens: 4000,
-  enableFOS: true,
-  enableMOD: true,
+  outputStandard: 'standard',       // full FOS, MOD suppressed
+  wikiTokenCap: 600,                // Anvil spec: 600 for standard
 };
 
 const STANDARD_INDEXER: IndexerConfig = {
@@ -142,17 +142,17 @@ export const standardProfile: HyperMemConfig = {
 };
 
 // ---------------------------------------------------------------------------
-// rich — 200k+ context window, multi-agent, full feature set
+// extended — 200k+ context window, multi-agent, full feature set
 //
 // Design intent:
 //   - Large context models (Opus, GPT-5.4, Gemini Pro) at 200k+
 //   - Council / multi-agent fleet deployments
 //   - Full ACA stack including dreaming, background indexing, cross-session
-//   - FOS/MOD on — fleet output consistency critical at this scale
+//   - outputStandard: 'fleet' — FOS + MOD, full spec
 //   - Higher keystone threshold — more historical context worth surfacing
 // ---------------------------------------------------------------------------
 
-const RICH_COMPOSITOR: CompositorConfig = {
+const EXTENDED_COMPOSITOR: CompositorConfig = {
   defaultTokenBudget: 160000,
   maxHistoryMessages: 1000,
   maxFacts: 60,
@@ -167,13 +167,13 @@ const RICH_COMPOSITOR: CompositorConfig = {
   keystoneHistoryFraction: 0.25,
   keystoneMaxMessages: 30,
   keystoneMinSignificance: 0.4,
-  targetBudgetFraction: 0.75,
+  targetBudgetFraction: 0.55,       // Anvil spec: 0.55 for extended (history is huge, budget carefully)
   maxTotalTriggerTokens: 10000,
-  enableFOS: true,
-  enableMOD: true,
+  outputStandard: 'fleet',          // FOS + MOD — full fleet spec
+  wikiTokenCap: 800,                // Anvil spec: 800 for extended
 };
 
-const RICH_INDEXER: IndexerConfig = {
+const EXTENDED_INDEXER: IndexerConfig = {
   enabled: true,
   factExtractionMode: 'tiered',
   topicDormantAfter: '48h',
@@ -183,12 +183,12 @@ const RICH_INDEXER: IndexerConfig = {
   periodicInterval: 30000,          // 30s — frequent background work for fleet throughput
 };
 
-export const richProfile: HyperMemConfig = {
+export const extendedProfile: HyperMemConfig = {
   enabled: true,
   dataDir: './hypermem-data',
   redis: BASE_REDIS,
-  compositor: RICH_COMPOSITOR,
-  indexer: RICH_INDEXER,
+  compositor: EXTENDED_COMPOSITOR,
+  indexer: EXTENDED_INDEXER,
   embedding: {
     ...BASE_EMBEDDING,
     batchSize: 64,                  // larger batches — more throughput for fleet ingest
@@ -200,19 +200,23 @@ export const richProfile: HyperMemConfig = {
 // Profile registry
 // ---------------------------------------------------------------------------
 
-export type ProfileName = 'minimal' | 'standard' | 'rich';
+export type ProfileName = 'light' | 'standard' | 'extended';
+
+// Legacy aliases — kept for backward compat, removed in 1.0
+export const minimalProfile = lightProfile;
+export const richProfile = extendedProfile;
 
 export const PROFILES: Record<ProfileName, HyperMemConfig> = {
-  minimal: minimalProfile,
+  light: lightProfile,
   standard: standardProfile,
-  rich: richProfile,
+  extended: extendedProfile,
 };
 
 /**
  * Load a named profile.
  *
  * @example
- * const config = getProfile('minimal');
+ * const config = getProfile('light');
  * const hm = createHyperMem(config);
  */
 export function getProfile(name: ProfileName): HyperMemConfig {
@@ -224,9 +228,9 @@ export function getProfile(name: ProfileName): HyperMemConfig {
  * Deep-merges compositor and indexer; top-level fields are replaced.
  *
  * @example
- * const config = mergeProfile('minimal', {
+ * const config = mergeProfile('light', {
  *   redis: { host: 'redis.internal', port: 6380 },
- *   compositor: { enableFOS: true },   // re-enable FOS on minimal
+ *   compositor: { outputStandard: 'standard' },  // upgrade tier
  * });
  */
 export function mergeProfile(
