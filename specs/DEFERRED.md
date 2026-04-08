@@ -114,9 +114,57 @@ Low memory impact now that hypermem owns storage. Can be batched as a one-time r
 
 ---
 
+## D-008: LLM-Assisted Reflection Passes
+
+**Status:** 🟡 DEFERRED — target v0.6.x  
+**Added:** 2026-04-07  
+**Requested by:** ragesaq  
+
+### What
+
+Replace or augment the current heuristic topic synthesis with optional LLM-generated
+reflection passes. Instead of pattern-matching on ContentType + Keystone scores to
+produce wiki pages, call the configured model to synthesize a richer narrative summary
+when a topic closes or goes stale.
+
+### Why deferred
+
+Heuristic synthesis is complete and ships in 0.5.0. It does real work at zero inference
+cost. LLM passes add richness but add per-synthesis latency and token cost — wrong
+trade-off for the initial release. Start light, upgrade when heuristic limitations
+are actually observed in production.
+
+### Gate conditions (all must be true before proceeding)
+
+1. v0.5.0 has been in production for ≥4 weeks
+2. Heuristic synthesis quality has been evaluated (at least 50 topic pages reviewed)
+3. Specific failure modes documented — what does heuristic miss that LLM would catch?
+4. Inference cost model is understood (tokens per synthesis cycle × synthesis frequency)
+
+### Shape (rough)
+
+- `SynthesisMode: 'heuristic' | 'llm' | 'hybrid'` in `TopicSynthesizerConfig`
+- `hybrid`: heuristic pass first, LLM enrichment only if heuristic confidence < threshold
+- LLM call is async, non-blocking — heuristic page is written immediately, LLM enrichment
+  replaces it when ready
+- Model used for reflection is configurable and defaults to the agent's standard model
+- Scheduled reflection: time-triggered (e.g. every 24h) in addition to staleness-triggered
+
+### Risk
+
+- Inference cost scales with synthesis frequency — need hard caps on calls per hour
+- LLM reflection could introduce hallucinated connections between facts; need a
+  confidence filter on enriched content before writing to knowledge table
+- Cold-start: LLM reflection on sparse topics (< 5 facts) produces low-quality output;
+  minimum fact threshold required before LLM pass fires
+
+---
+
 ## D-007: Obsidian Vault Integration
 
-**Status:** 🟡 DEFERRED — target v0.5.0  
+**Status:** ✅ CLOSED — shipped in v0.5.0 (`f91dd68`, `f660f23`)  
+**Added:** 2026-04-06  
+**Closed:** 2026-04-07  
 **Added:** 2026-04-06  
 **Requested by:** ragesaq  
 
@@ -151,15 +199,5 @@ as Obsidian markdown notes with YAML frontmatter.
 4. Writeback: export method on `KnowledgeStore`, callable by agents via tool or CLI
 5. CLI: `openclaw hypermem vault export --domain <domain>` (uses registerCli)
 
-### Gate conditions
-
-- v0.4.x is stable in production (at least 2 weeks)
-- Public API for knowledge-store is stable (no breaking changes planned)
-- Obsidian Local REST API or file-watch approach decided (local filesystem is simpler;
-  REST API approach requires the Obsidian Local REST Community Plugin)
-
-### Risk
-
-- File-watch on large vaults (10k+ notes) could be noisy; use debounced batch ingest
-- Wikilink resolution requires knowledge graph to be populated first — cold-start gap
-- Writeback formatting must survive round-trips (parse → write → parse → same data)
+Shipped: `importVault()` + `watchVault()` (vault → hypermem), `exportToVault()` (hypermem → vault).
+Full frontmatter, `[[wikilinks]]`, tag extraction, secret scanner, skip-unchanged. See `src/obsidian-watcher.ts` and `src/obsidian-exporter.ts`.
