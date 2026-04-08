@@ -121,6 +121,9 @@ export type { IndexerStats, WatermarkState } from './background-indexer.js';
 export { TopicSynthesizer } from './topic-synthesizer.js';
 export type { SynthesisResult, SynthesisConfig } from './topic-synthesizer.js';
 
+export { WikiPageEmitter } from './wiki-page-emitter.js';
+export type { WikiPage, WikiLink, WikiPageSummary } from './wiki-page-emitter.js';
+
 export { lintKnowledge } from './knowledge-lint.js';
 export type { LintResult } from './knowledge-lint.js';
 

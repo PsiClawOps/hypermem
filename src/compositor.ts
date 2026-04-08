@@ -44,6 +44,7 @@ import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
 import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
 import { getActiveFOS, matchMOD, renderFOS, renderMOD, buildActionVerificationSummary } from './fos-mod.js';
+import { KnowledgeStore } from './knowledge-store.js';
 
 /**
  * Model context window sizes by provider/model string (or partial match).
@@ -922,8 +923,9 @@ export class Compositor {
 
     // ─── Conversation History ──────────────────────────────────
     let diagCrossTopicKeystones = 0;
-    // Hoisted: activeTopicId resolved inside history block, used for window dual-write (VS-1)
+    // Hoisted: activeTopicId/name resolved inside history block, used for window dual-write (VS-1) and wiki page injection
     let composedActiveTopicId: string | undefined;
+    let composedActiveTopicName: string | undefined;
     if (request.includeHistory !== false) {
       // P3.4: Look up the active topic for this session (non-fatal)
       let activeTopicId: string | undefined;
@@ -949,8 +951,9 @@ export class Compositor {
           // Topic lookup is best-effort — fall back to ID-only history fetch
         }
       }
-      // Hoist resolved topic id so the window dual-write section can access it
+      // Hoist resolved topic id+name so the window dual-write and wiki injection sections can access them
       composedActiveTopicId = activeTopicId;
+      composedActiveTopicName = activeTopic?.name;
 
       const rawHistoryMessages = await this.getHistory(
         request.agentId,
@@ -1168,6 +1171,30 @@ export class Compositor {
     let diagDocChunkCollections = 0;
     let diagScopeFiltered = 0;
     let diagRetrievalMode: ComposeDiagnostics['retrievalMode'] = 'none';
+
+    // ── Wiki Page (L4: Library — active topic synthesis) ──────
+    // Inject synthesized wiki page for the active topic before general knowledge.
+    // Token budget: capped at 15% of remaining.
+    if (request.includeLibrary !== false && remaining > 300 && libDb && composedActiveTopicName) {
+      const wikiContent = this.buildWikiPageContext(request.agentId, composedActiveTopicName, libDb);
+      if (wikiContent) {
+        const tokens = estimateTokens(wikiContent);
+        const cap = Math.floor(remaining * 0.15);
+        if (tokens <= cap) {
+          contextParts.push(wikiContent);
+          contextTokens += tokens;
+          remaining -= tokens;
+          slots.library += tokens;
+        } else {
+          const truncated = this.truncateToTokens(wikiContent, cap);
+          const truncTokens = estimateTokens(truncated);
+          contextParts.push(truncated);
+          contextTokens += truncTokens;
+          remaining -= truncTokens;
+          slots.library += truncTokens;
+        }
+      }
+    }
 
     // ── Facts (L4: Library) ──────────────────────────────────
     // scope: agent — filtered by agentId via filterByScope after fetch
@@ -2109,6 +2136,20 @@ export class Compositor {
     }
 
     return lines.join('\n');
+  }
+
+  /**
+   * Build wiki page context for the active topic.
+   * Queries the knowledge table for a synthesized topic page and returns it
+   * wrapped with a header. Capped at 600 tokens.
+   */
+  private buildWikiPageContext(agentId: string, topicName: string, db: DatabaseSync): string | null {
+    const knowledgeStore = new KnowledgeStore(db);
+    const knowledge = knowledgeStore.get(agentId, 'topic-synthesis', topicName);
+    if (!knowledge) return null;
+
+    const wrapped = `## Active Topic: ${topicName}\n${knowledge.content}`;
+    return this.truncateToTokens(wrapped, 600);
   }
 
   /**
