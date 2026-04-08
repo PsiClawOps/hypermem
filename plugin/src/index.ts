@@ -1102,46 +1102,61 @@ function createHyperMemEngine(): ContextEngine {
                     }, 0) : 0);
               budget -= t;
             }
-            // FIX (Bug 1): Force-keep the LAST message (the current tool result) before
-            // the budget-fill loop. Without this, a large tool result skips the
-            // `budget - t >= 0` check, gets dropped, and the model sees an unpaired
-            // tool_call. Pre-deduct its cost and always append it.
-            const lastConvMsg = processedConvMsgs[processedConvMsgs.length - 1];
-            const lastMsgCost = lastConvMsg
-              ? estimateTokens(typeof lastConvMsg.textContent === 'string' ? lastConvMsg.textContent : null)
-                + (lastConvMsg.toolCalls ? Math.ceil(JSON.stringify(lastConvMsg.toolCalls).length / 2) : 0)
-                + (lastConvMsg.toolResults ? Math.ceil(JSON.stringify(lastConvMsg.toolResults).length / 2) : 0)
-                + (Array.isArray(lastConvMsg.content) ? (lastConvMsg.content as Array<Record<string,unknown>>).reduce(
-                    (s: number, c: Record<string,unknown>) => {
-                      const textVal = typeof c.text === 'string' ? c.text
-                        : typeof c.content === 'string' ? c.content
-                        : c.content != null ? JSON.stringify(c.content) : null;
-                      return s + estimateTokens(textVal);
-                    }, 0) : 0)
-              : 0;
-            budget -= lastMsgCost;
+            // FIX (Bug 1 — extended): Force-keep ALL current-turn tool results, not just
+            // the last one. When parallel tool calls fire, each result arrives as a separate
+            // role='user'/toolResults message. The original fix only protected the last
+            // message, leaving N-1 parallel results vulnerable to compaction, which produced
+            // "No result provided" for those tool calls.
+            //
+            // Algorithm:
+            // 1. Walk backwards from tail collecting consecutive toolResults messages.
+            // 2. Also collect the immediately preceding assistant toolCalls message so
+            //    we don't leave orphaned tool_use blocks.
+            // 3. Pre-deduct all force-kept costs from budget.
+            // 4. Fill remaining budget oldest-to-newest for everything before them.
+            const msgCost = (m: Record<string, unknown>): number =>
+              estimateTokens(typeof m.textContent === 'string' ? m.textContent : null)
+              + (m.toolCalls ? Math.ceil(JSON.stringify(m.toolCalls).length / 2) : 0)
+              + (m.toolResults ? Math.ceil(JSON.stringify(m.toolResults).length / 2) : 0)
+              + (Array.isArray(m.content) ? (m.content as Array<Record<string,unknown>>).reduce(
+                  (s: number, c: Record<string,unknown>) => {
+                    const textVal = typeof c.text === 'string' ? c.text
+                      : typeof c.content === 'string' ? c.content
+                      : c.content != null ? JSON.stringify(c.content) : null;
+                    return s + estimateTokens(textVal);
+                  }, 0) : 0);
+
+            // Collect tail tool-result messages (current turn)
+            const forceKept: Array<Record<string, unknown>> = [];
+            let tailIdx = processedConvMsgs.length - 1;
+            while (tailIdx >= 0 && (processedConvMsgs[tailIdx] as Record<string,unknown>).toolResults) {
+              forceKept.unshift(processedConvMsgs[tailIdx] as Record<string,unknown>);
+              tailIdx--;
+            }
+            // Also force-keep the preceding assistant toolCalls message to avoid orphaned tool_use
+            if (tailIdx >= 0 && (processedConvMsgs[tailIdx] as Record<string,unknown>).toolCalls) {
+              forceKept.unshift(processedConvMsgs[tailIdx] as Record<string,unknown>);
+              tailIdx--;
+            }
+            // If nothing looks like a tool-result tail, fall back to keeping the last message
+            if (forceKept.length === 0 && processedConvMsgs.length > 0) {
+              forceKept.push(processedConvMsgs[processedConvMsgs.length - 1] as Record<string,unknown>);
+              tailIdx = processedConvMsgs.length - 2;
+            }
+            for (const fk of forceKept) budget -= msgCost(fk);
+
             const kept: Array<Record<string, unknown>> = [];
-            // Fill remaining budget newest-to-oldest, skipping the last message (force-kept)
-            for (let i = processedConvMsgs.length - 2; i >= 0 && budget > 0; i--) {
-              const m = processedConvMsgs[i];
-              const t = estimateTokens(typeof m.textContent === 'string' ? m.textContent : null)
-                + (m.toolCalls ? Math.ceil(JSON.stringify(m.toolCalls).length / 2) : 0)
-                + (m.toolResults ? Math.ceil(JSON.stringify(m.toolResults).length / 2) : 0)
-                // FIX (Bug 2 — budget-fill estimator): read c.content, not just c.text
-                + (Array.isArray(m.content) ? (m.content as Array<Record<string,unknown>>).reduce(
-                    (s: number, c: Record<string,unknown>) => {
-                      const textVal = typeof c.text === 'string' ? c.text
-                        : typeof c.content === 'string' ? c.content
-                        : c.content != null ? JSON.stringify(c.content) : null;
-                      return s + estimateTokens(textVal);
-                    }, 0) : 0);
+            // Fill remaining budget newest-to-oldest for messages before the force-kept tail
+            for (let i = tailIdx; i >= 0 && budget > 0; i--) {
+              const m = processedConvMsgs[i] as Record<string, unknown>;
+              const t = msgCost(m);
               if (budget - t >= 0) {
                 kept.unshift(m);
                 budget -= t;
               }
             }
-            // Always append the force-kept last message
-            if (lastConvMsg) kept.push(lastConvMsg);
+            // Always append the force-kept tail (assistant toolCalls + all parallel tool results)
+            for (const fk of forceKept) kept.push(fk);
             const keptCount = processedConvMsgs.length - kept.length;
             if (keptCount > 0) {
               console.log(
