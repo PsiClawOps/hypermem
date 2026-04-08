@@ -10,8 +10,7 @@
  *   L4: library.db  — fleet-wide structured knowledge (crown jewel)
  */
 
-/** Release version — matches package.json and is stamped into library.db on every startup. */
-export const ENGINE_VERSION = '0.4.0';
+export { ENGINE_VERSION } from './version.js';
 
 export { DatabaseManager } from './db.js';
 export type { DatabaseManagerConfig } from './db.js';
