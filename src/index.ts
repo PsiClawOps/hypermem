@@ -1517,3 +1517,5 @@ export { exportToVault } from './obsidian-exporter.js';
 export type { ObsidianExportConfig, ObsidianExportResult } from './obsidian-exporter.js';
 export { collectMetrics, formatMetricsSummary } from './metrics-dashboard.js';
 export type { HyperMemMetrics, FactMetrics, WikiMetrics, EpisodeMetrics, VectorMetrics, CompositionMetrics, IngestionMetrics, SystemHealth, MetricsDashboardOptions } from './metrics-dashboard.js';
+export { getProfile, mergeProfile, PROFILES, minimalProfile, standardProfile, richProfile } from './profiles.js';
+export type { ProfileName } from './profiles.js';
