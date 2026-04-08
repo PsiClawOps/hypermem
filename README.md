@@ -57,11 +57,13 @@ Most memory systems store what was said. hyper**mem** synthesizes what was learn
 
 When a topic goes quiet, hyper**mem** compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. This is classifier-driven — no LLM call required. Facts, episodes, and preferences written explicitly during the session are available immediately in structured storage. Per-turn automatic extraction from raw conversation text is on the roadmap. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay. The conversation is gone. The knowledge it produced is not.
 
-### Virtual Sessions
+### Topic-aware context
 
-Most memory systems treat a session as one flat stream. Long conversations drift — early context is trimmed, recent context dominates, and subject shifts create a blurry mix of conflicting state.
+Most memory systems treat a session as one flat stream. Long conversations drift, early context is trimmed, recent context dominates, and subject shifts create a blurry mix of conflicting state.
 
-hyper**mem** makes topics first-class. When a new subject takes over, the agent switches into a scoped context: its own Redis warming, its own history window, its own keystone set. Switching back restores that context cleanly. Natural language cues trigger transitions; ambiguous shifts get a soft confirmation before committing. Each topic behaves like its own isolated working session — searchable across the fleet, but focused in the window. These topic-scoped contexts are **Virtual Sessions** — each maintains its own Redis warming state, history window, and document index alongside the main session.
+hyper**mem** makes topics first-class. Topic detection, topic-scoped history recall, topic-aware Redis warming, and synthesized wiki recall are in place today. When a topic resurfaces, the agent gets the relevant topic summary and scoped recall instead of a flat raw replay.
+
+Full **Virtual Sessions** remain future work. Soft confirmation on ambiguous topic shifts, revert flow, and cross-agent topic search are planned for 0.6.0.
 
 ### History that remembers its highlights
 
@@ -154,7 +156,7 @@ L1 and L4 structured retrieval are sub-millisecond. After the first turn, query 
 
 hyper**mem** plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle.
 
-**L1: Redis** is the hot layer. Identity, compressed session history, cached embeddings, topic-scoped context, and fleet registry data. The compositor goes here first on every turn.
+**L1: Redis** is the hot layer. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and fleet registry data. The compositor goes here first on every turn.
 
 **L2: Messages DB** is the durable per-agent record. SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
 
@@ -329,37 +331,6 @@ All migration scripts default to dry-run. Nothing is written until you add `--ap
 Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 
 > **For agents:** See [docs/AGENT_MIGRATION.md](./docs/AGENT_MIGRATION.md) for hyper**mem**'s data model, field-level semantics, and mapping examples for each platform. The scripts are helpers — the doc gives you enough to handle any format, including ones without a script.
-
----
-
-## Roadmap
-
-- [x] Compiled knowledge synthesis — classifier-driven topic wiki pages; no LLM required
-- [x] Virtual Sessions — topic-scoped context isolation with independent Redis warming per thread
-- [x] Keystone history — significance scoring for recorded turns; preserved through pressure trimming and topic switches
-- [x] Live org registry — fleet agent registry with tier, org, and capability metadata in L4
-- [x] Budget downshift reshape — compositor adapts to smaller context window on the next turn after a model switch, no manual intervention
-- [x] Migration guide and scripts — dry-run-first migrations from OpenClaw built-in, ClawText, Mem0, Honcho, QMD, and Engram
-- [x] Nuclear compaction path — deep trim + JSONL truncation for sessions at ≥85% pressure
-- [x] Pressure-tiered tool-loop trim — measures runtime pressure before tool results land; trims both Redis and messages[] to prevent stripping on the current turn
-- [x] Runtime-baseline pressure measurement — accurate pressure signal after gateway restart when Redis is cold but JSONL is large
-- [x] Image pressure tracking — base64 image parts counted in pressure estimation, not silently omitted
-- [x] Tool result gradient on tool-loop path — large tool results compressed on every turn, not just during full compose
-- [x] FOS/MOD — fact-grounded response verification and action pre-check; confabulation guard; no LLM call
-- [x] Dreaming promoter — pointer-format MEMORY.md promotion from Redis hot layer; classifier-driven
-- [x] Model-aware token budget — resolves context window from model string when runtime omits tokenBudget
-- [x] Dynamic context window reserve — configurable headroom fraction based on observed avg turn cost
-- [x] Pre-ingestion wave guard — truncate/skip large tool payloads before they enter the ingest path
-- [x] Aggregate trigger budget cap — total token ceiling across all triggered collections per compose turn; prevents pathological prompts from overconsumming retrieval budget
-- [x] FOS output profiles — three-tier output normalization (light/standard/full); `outputProfile` config key; replaces `outputStandard`; backward-compat aliases retained
-- [x] Context presets — named profiles (light/standard/full) importable from the package; `extended` deprecated with compat redirect to `full`
-- [x] Configuration profiles — `minimal`, `standard`, `rich` compositor bundles for quick deployment
-- [x] Obsidian vault exporter — `exportToVault()` writes agent memory to an Obsidian-compatible vault directory
-- [x] Metrics dashboard — per-agent and fleet-wide memory health report via `getMetricsDashboard()`
-- [ ] Versioned atomic re-indexing
-- [ ] `hypermem seed --workspace` CLI
-- [ ] Embedding model hot-swap
-- [ ] Full per-turn fact and episode extraction
 
 ---
 
