@@ -179,6 +179,32 @@ hyper**mem** plugs into OpenClaw as a context engine and owns the full prompt co
 
 ---
 
+
+## Requirements
+
+| Requirement | Version | Notes |
+|---|---|---|
+| **Node.js** | `>=22.0.0` | Required for native `node:sqlite` module |
+| **Redis** | `>=6.0.0` | L1 hot cache; local or remote |
+| **ioredis** | `^5.4.1` | Installed automatically via npm |
+| **sqlite-vec** | `0.1.9` | Bundled; no separate install needed |
+
+**Runtime version constants** (importable from the package):
+```typescript
+import {
+  ENGINE_VERSION,        // '0.5.0'
+  MIN_NODE_VERSION,      // '22.0.0'
+  MIN_REDIS_VERSION,     // '6.0.0'
+  SQLITE_VEC_VERSION,    // '0.1.9'
+  MAIN_SCHEMA_VERSION,   // 6  (hypermem.db)
+  LIBRARY_SCHEMA_VERSION_EXPORT, // 12 (library.db)
+} from '@psiclawops/hypermem';
+```
+
+Schema versions are stamped into each database on startup and checked on open. A database created by an older engine version will be migrated forward automatically. A database created by a newer engine version will throw on open.
+
+---
+
 ## Installation
 
 **Let your OpenClaw agent install this.** The configuration varies by deployment shape, and there are enough moving parts that manual setup is error-prone. Hand this to your agent:

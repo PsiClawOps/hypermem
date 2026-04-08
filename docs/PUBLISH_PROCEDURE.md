@@ -30,7 +30,7 @@ git tag --sort=-creatordate | head -5
 npm test  # must be clean
 ```
 
-Note the tag you're publishing (e.g. `v0.4.0`). All steps below reference this tag.
+Note the tag you're publishing (e.g. `vX.Y.Z`). All steps below reference this tag.
 
 ---
 
@@ -43,7 +43,7 @@ Always work from a fresh clone of internal into a temp directory.
 WORK_DIR=$(mktemp -d -t hypermem-publish-XXXX)
 git clone git@github-psiclawops:PsiClawOps/hypermem-internal.git "$WORK_DIR"
 cd "$WORK_DIR"
-git checkout tags/v0.4.0  # pin to tag, not HEAD
+git checkout tags/vX.Y.Z  # pin to tag, not HEAD
 ```
 
 ---
@@ -239,7 +239,7 @@ npm run test:quick    # smoke + library + compositor — no Redis/Ollama require
 
 If build fails, fix before proceeding. Do not push a broken dist.
 
-> ⚠️ **Never manually edit files in `dist/`.** The dist is always a build artifact. Any hand-edit to `dist/` will be overwritten on the next build and may introduce mismatches (wrong module references, missing files, 0.5.0 content bleeding into a 0.4.x dist). If something in dist looks wrong, fix the source and rebuild.
+> ⚠️ **Never manually edit files in `dist/`.** The dist is always a build artifact. Any hand-edit to `dist/` will be overwritten on the next build and may introduce mismatches (wrong module references, missing files, current content bleeding into a stale dist). If something in dist looks wrong, fix the source and rebuild.
 
 ---
 
