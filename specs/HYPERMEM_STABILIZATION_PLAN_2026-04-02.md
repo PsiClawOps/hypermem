@@ -1,4 +1,4 @@
-# HyperMem Stabilization Plan — 2026-04-02
+# hypermem Stabilization Plan — 2026-04-02
 
 **Authors:** Forge + Pylon  
 **Status:** IN PROGRESS  
@@ -8,7 +8,7 @@
 
 ## Context
 
-Pylon's review confirmed: HyperMem has the right architecture direction but the main failure chain is not fully fixed. The repo has landed real fixes (Incidents 1, 2, 4), but the five-part stabilization needed to make the system trustworthy in production is not done.
+Pylon's review confirmed: hypermem has the right architecture direction but the main failure chain is not fully fixed. The repo has landed real fixes (Incidents 1, 2, 4), but the five-part stabilization needed to make the system trustworthy in production is not done.
 
 This plan defines what gets implemented right now, by whom, in what order.
 
@@ -116,7 +116,7 @@ Cold-start bootstrap should seed a reasonable context window (250 msgs), not the
 
 ### P1.5 — Plugin type unification
 - Remove duplicate type shims in `plugin/src/index.ts`
-- Import types from HyperMem core instead of re-declaring
+- Import types from hypermem core instead of re-declaring
 - This is what caused the `historyDepth` / `prompt` drift in the first place
 
 ---

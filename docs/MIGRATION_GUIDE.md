@@ -1,4 +1,4 @@
-# HyperMem Migration Guide
+# hypermem Migration Guide
 
 _One guide for all migration paths. Find your current system in the table below and jump to that section._
 
@@ -22,7 +22,7 @@ _One guide for all migration paths. Find your current system in the table below 
 
 ---
 
-## What HyperMem stores
+## What hypermem stores
 
 Understanding the data model sets expectations for what migrates and what doesn't.
 
@@ -33,7 +33,7 @@ Understanding the data model sets expectations for what migrates and what doesn'
 
 **Does not migrate (by design):**
 - The Redis hot cache — ephemeral, rebuilds automatically on first use
-- Embeddings — HyperMem regenerates these from imported text on the next indexer run
+- Embeddings — hypermem regenerates these from imported text on the next indexer run
 - Tool call payloads from sessions where only text content was stored (tool results preserved as prose where available)
 - Graph structure from graph databases (edges, weights, triplets) — these are flattened to facts on import
 
@@ -45,13 +45,13 @@ After any migration, the background indexer picks up imported content and builds
 
 Run this before any migration path.
 
-**1. Confirm HyperMem is installed and has initialized:**
+**1. Confirm hypermem is installed and has initialized:**
 ```bash
 openclaw plugins list | grep hypermem
 ls ~/.openclaw/hypermem/library.db   # must exist — send one message first if not
 ```
 
-If `library.db` doesn't exist yet, start the gateway with HyperMem enabled, send one message to any agent, then come back:
+If `library.db` doesn't exist yet, start the gateway with hypermem enabled, send one message to any agent, then come back:
 ```bash
 openclaw plugins install clawhub:hypermem
 openclaw gateway restart
@@ -73,7 +73,7 @@ cp -r ~/.cognee ~/.cognee.pre-hypermem 2>/dev/null || true
 
 **3. Every migration script defaults to dry-run.** Nothing is written until you add `--apply`. Read dry-run output before proceeding.
 
-**4. You do not need to stop the gateway** for import-only migrations. HyperMem uses WAL mode — live sessions and imports coexist safely.
+**4. You do not need to stop the gateway** for import-only migrations. hypermem uses WAL mode — live sessions and imports coexist safely.
 
 ---
 
@@ -86,17 +86,17 @@ openclaw plugins install clawhub:hypermem
 openclaw gateway restart
 ```
 
-HyperMem begins building context from your first conversation. The background indexer starts automatically.
+hypermem begins building context from your first conversation. The background indexer starts automatically.
 
 ---
 
 ## From OpenClaw memory.db
 
-OpenClaw's built-in memory system stores facts, preferences, and context entries in `~/.openclaw/memory.db`. This script imports those entries as facts into HyperMem's knowledge store.
+OpenClaw's built-in memory system stores facts, preferences, and context entries in `~/.openclaw/memory.db`. This script imports those entries as facts into hypermem's knowledge store.
 
 **What maps to what:**
 
-| memory.db | HyperMem |
+| memory.db | hypermem |
 |---|---|
 | Facts | `facts` table in `library.db` |
 | Preferences | `facts` table with `domain: preference` |
@@ -123,7 +123,7 @@ openclaw gateway restart
 ```
 --agent <id>          Agent to import facts for (default: main)
 --memory-db <path>    Path to memory.db (default: ~/.openclaw/memory.db)
---hypermem-dir <path> HyperMem data directory (default: ~/.openclaw/hypermem)
+--hypermem-dir <path> hypermem data directory (default: ~/.openclaw/hypermem)
 --limit <n>           Import only first N facts (useful for testing)
 --apply               Actually write data (default is dry-run)
 ```
@@ -134,20 +134,20 @@ openclaw gateway restart
 
 ## From QMD
 
-QMD is the OpenClaw local-first memory sidecar — it runs behind `plugins.slots.memory = "memory-core"` with `memory.backend = "qmd"`. HyperMem replaces the entire context engine, so this is a slot change: from `slots.memory` (memory-core/QMD) to `slots.contextEngine` (HyperMem).
+QMD is the OpenClaw local-first memory sidecar — it runs behind `plugins.slots.memory = "memory-core"` with `memory.backend = "qmd"`. hypermem replaces the entire context engine, so this is a slot change: from `slots.memory` (memory-core/QMD) to `slots.contextEngine` (hypermem).
 
-**Key difference:** QMD is additive — it augments what the agent receives. HyperMem is authoritative — it owns the entire context assembly pipeline. The scopes are different.
+**Key difference:** QMD is additive — it augments what the agent receives. hypermem is authoritative — it owns the entire context assembly pipeline. The scopes are different.
 
 **What maps to what:**
 
-| QMD | HyperMem |
+| QMD | hypermem |
 |---|---|
-| Workspace memory files (`MEMORY.md`, `memory/*.md`) | Still used — HyperMem reads these directly during bootstrap |
+| Workspace memory files (`MEMORY.md`, `memory/*.md`) | Still used — hypermem reads these directly during bootstrap |
 | Per-agent collections | Per-agent message stores + `library.db` facts |
 | BM25 + vector hybrid search | FTS5 + nomic-embed-text hybrid search |
 | Extra indexed paths (`memory.qmd.paths`) | Not yet supported — see capability gaps below |
 | Session transcript indexing | Covered natively — all message history is indexed |
-| Reranking (QMD cross-encoder) | Not implemented — HyperMem uses MMR diversification |
+| Reranking (QMD cross-encoder) | Not implemented — hypermem uses MMR diversification |
 
 **Pre-flight:**
 
@@ -158,14 +158,14 @@ ls ~/.openclaw/agents/<agentId>/qmd/
 
 If you used `memory.qmd.paths` to index extra directories, those paths are not picked up automatically. Copy key content into `MEMORY.md` or daily files before switching, or use the manual import script below.
 
-If you used QMD session indexing (`memory.qmd.sessions.enabled: true`), HyperMem handles sessions natively going forward. Historical transcripts are not auto-imported — add summaries of important historical sessions to a daily memory file if needed.
+If you used QMD session indexing (`memory.qmd.sessions.enabled: true`), hypermem handles sessions natively going forward. Historical transcripts are not auto-imported — add summaries of important historical sessions to a daily memory file if needed.
 
 **Switch:**
 ```bash
 # Disable memory-core + QMD
 openclaw config set plugins.slots.memory none
 
-# Enable HyperMem
+# Enable hypermem
 openclaw config set plugins.slots.contextEngine hypermem
 
 # Remove QMD backend config if set
@@ -176,12 +176,12 @@ openclaw gateway restart
 
 QMD collections at `~/.openclaw/agents/<agentId>/qmd/` are untouched. Delete them manually when satisfied the migration is complete.
 
-**After restart:** HyperMem bootstraps on first use and reads your workspace memory files. The background indexer builds facts and embeddings from `MEMORY.md` and daily files — no separate import step for file-based memory.
+**After restart:** hypermem bootstraps on first use and reads your workspace memory files. The background indexer builds facts and embeddings from `MEMORY.md` and daily files — no separate import step for file-based memory.
 
 **If you had content in extra QMD paths**, import it manually:
 ```js
 // import-qmd-extras.mjs
-import { createHyperMem } from '@psiclawops/hypermem';
+import { createhypermem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -196,7 +196,7 @@ if (!extraDir) {
   process.exit(1);
 }
 
-const hm = await createHyperMem({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await createhypermem({ dir: join(homedir(), '.openclaw/hypermem') });
 let imported = 0;
 const files = [];
 for await (const f of glob('**/*.md', { cwd: extraDir })) files.push(f);
@@ -224,13 +224,13 @@ if (dryRun) console.log('Run with --apply to write data.');
 
 **Capability gaps vs QMD:**
 
-| QMD feature | Status in HyperMem |
+| QMD feature | Status in hypermem |
 |---|---|
 | Reranking (cross-encoder) | Not implemented. Tracked for future release. |
 | Extra path indexing | Not implemented. Use manual fact import as workaround. |
 | Session transcript search | Covered natively. |
 | BM25 hybrid search | Covered — FTS5 + vector hybrid with configurable weights. |
-| Automatic fallback to builtin | Not applicable — HyperMem does not fall back. |
+| Automatic fallback to builtin | Not applicable — hypermem does not fall back. |
 
 ---
 
@@ -240,7 +240,7 @@ ClawText stores full conversation history in `session-intelligence.db`. This scr
 
 **What maps to what:**
 
-| ClawText | HyperMem |
+| ClawText | hypermem |
 |---|---|
 | Conversation history | Per-agent `messages.db` |
 | Identity anchors | Used to route messages to correct agent DB |
@@ -267,7 +267,7 @@ openclaw gateway restart
 --limit <n>           Import only first N conversations
 --clawtext-db <path>  Path to session-intelligence.db
                       (default: ~/.openclaw/workspace/.clawtext/session-intelligence.db)
---hypermem-dir <path> HyperMem data directory (default: ~/.openclaw/hypermem)
+--hypermem-dir <path> hypermem data directory (default: ~/.openclaw/hypermem)
 ```
 
 Conversations without a detectable agent identity are routed to `main`.
@@ -276,15 +276,15 @@ Conversations without a detectable agent identity are routed to `main`.
 
 ## From Cognee
 
-Cognee is a Python-based ECL (Extract, Cognify, Load) memory engine that stores knowledge in a graph database + vector store. HyperMem is a Node.js context engine native to OpenClaw. This is a data migration, not a drop-in swap — the architectures are parallel approaches to the same problem.
+Cognee is a Python-based ECL (Extract, Cognify, Load) memory engine that stores knowledge in a graph database + vector store. hypermem is a Node.js context engine native to OpenClaw. This is a data migration, not a drop-in swap — the architectures are parallel approaches to the same problem.
 
 **What maps to what:**
 
-| Cognee | HyperMem |
+| Cognee | hypermem |
 |---|---|
 | Knowledge graph nodes (entities) | Facts (`facts` table in `library.db`) |
 | Graph relationships / triplets | Knowledge entries (`knowledge` table) |
-| Vector embeddings | Regenerated automatically by the HyperMem indexer |
+| Vector embeddings | Regenerated automatically by the hypermem indexer |
 | Session memory | Per-agent message history (`messages.db` per agent) |
 | Permanent memory | Facts + knowledge in `library.db` |
 | User/tenant scoping | Agent scoping (`agent_id` on all records) |
@@ -318,11 +318,11 @@ For graph backends (Neo4j, Memgraph), export via their native query interfaces a
 
 **Step 2: Dry run**
 
-Save this as `import-from-cognee.mjs` in the HyperMem repo root:
+Save this as `import-from-cognee.mjs` in the hypermem repo root:
 
 ```js
 // import-from-cognee.mjs
-import { createHyperMem } from '@psiclawops/hypermem';
+import { createhypermem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -332,7 +332,7 @@ const exportPath = process.argv[3] ?? 'cognee_export.json';
 const dryRun = !process.argv.includes('--apply');
 
 const entries = JSON.parse(readFileSync(exportPath, 'utf-8'));
-const hm = await createHyperMem({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await createhypermem({ dir: join(homedir(), '.openclaw/hypermem') });
 
 let imported = 0;
 let skipped = 0;
@@ -369,7 +369,7 @@ node import-from-cognee.mjs main cognee_export.json
 node import-from-cognee.mjs main cognee_export.json --apply
 ```
 
-**Step 4: Disable Cognee and switch to HyperMem**
+**Step 4: Disable Cognee and switch to hypermem**
 
 Stop the Cognee process / MCP server if running, then:
 ```bash
@@ -377,7 +377,7 @@ openclaw config set plugins.slots.contextEngine hypermem
 openclaw gateway restart
 ```
 
-Cognee and HyperMem do not conflict at runtime (Cognee is a separate process), but there is no reason to run both.
+Cognee and hypermem do not conflict at runtime (Cognee is a separate process), but there is no reason to run both.
 
 **Verify imported facts:**
 ```bash
@@ -399,15 +399,15 @@ Mem0 is a managed memory service (with an OSS self-hosted variant) that stores d
 
 **What maps to what:**
 
-| Mem0 | HyperMem |
+| Mem0 | hypermem |
 |---|---|
 | Memory entries (`memory` field) | Facts in `library.db` |
 | `user_id` scoping | `agent_id` scoping |
-| `agent_id` / `app_id` filters | `agent_id` in HyperMem |
+| `agent_id` / `app_id` filters | `agent_id` in hypermem |
 | `metadata` | Stored as fact metadata / domain |
 | `created_at` | Preserved as fact timestamp |
 
-**What does not migrate:** Mem0's internal vector embeddings (regenerated automatically), category labels beyond what fits in HyperMem's domain field.
+**What does not migrate:** Mem0's internal vector embeddings (regenerated automatically), category labels beyond what fits in hypermem's domain field.
 
 **Step 1: Export from Mem0**
 
@@ -467,7 +467,7 @@ node scripts/migrate-mem0.mjs --agent main mem0_export.json
 Save this as `scripts/migrate-mem0.mjs`:
 ```js
 // scripts/migrate-mem0.mjs
-import { createHyperMem } from '@psiclawops/hypermem';
+import { createhypermem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -480,7 +480,7 @@ const raw = JSON.parse(readFileSync(exportPath, 'utf-8'));
 // handle both export job format {memories: [...]} and get_all format {results: [...]}
 const entries = raw.memories ?? raw.results ?? raw;
 
-const hm = await createHyperMem({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await createhypermem({ dir: join(homedir(), '.openclaw/hypermem') });
 let imported = 0, skipped = 0;
 
 for (const entry of entries) {
@@ -539,12 +539,12 @@ Zep stores conversation history per session and builds a per-user knowledge grap
 
 **What maps to what:**
 
-| Zep | HyperMem |
+| Zep | hypermem |
 |---|---|
 | Session messages (`role`, `role_type`, `content`) | Per-agent `messages.db` |
 | User-level knowledge graph facts | Facts in `library.db` |
 | Group data (shared org context) | Facts in `library.db` with `domain: group` |
-| `session_id` | HyperMem session key |
+| `session_id` | hypermem session key |
 | `user_id` | `agent_id` |
 
 **What does not migrate:** Zep's internal graph edges/weights, fact ratings, ingestion-derived entity relationships (flattened to text facts on import).
@@ -598,7 +598,7 @@ print(f"Exported {len(export['sessions'])} sessions, {len(export['facts'])} fact
 Save as `scripts/migrate-zep.mjs`:
 ```js
 // scripts/migrate-zep.mjs
-import { createHyperMem } from '@psiclawops/hypermem';
+import { createhypermem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -608,7 +608,7 @@ const exportPath = process.argv[3] ?? 'zep_export.json';
 const dryRun = !process.argv.includes('--apply');
 
 const { sessions = [], facts = [] } = JSON.parse(readFileSync(exportPath, 'utf-8'));
-const hm = await createHyperMem({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await createhypermem({ dir: join(homedir(), '.openclaw/hypermem') });
 
 let msgCount = 0, factCount = 0;
 
@@ -663,16 +663,16 @@ openclaw gateway restart
 
 ## From Honcho
 
-Honcho is an OpenClaw plugin (`@honcho-ai/openclaw-honcho`) that persists conversations to the Honcho service (hosted or self-hosted) and builds user/agent models over time. Because it is a plugin that runs alongside OpenClaw, migration to HyperMem is mostly a slot swap — the data that matters is already in your workspace files, and Honcho's conversation history lives in the Honcho service.
+Honcho is an OpenClaw plugin (`@honcho-ai/openclaw-honcho`) that persists conversations to the Honcho service (hosted or self-hosted) and builds user/agent models over time. Because it is a plugin that runs alongside OpenClaw, migration to hypermem is mostly a slot swap — the data that matters is already in your workspace files, and Honcho's conversation history lives in the Honcho service.
 
 **What maps to what:**
 
-| Honcho | HyperMem |
+| Honcho | hypermem |
 |---|---|
-| Workspace memory files (migrated on setup) | Still used — HyperMem reads these directly |
+| Workspace memory files (migrated on setup) | Still used — hypermem reads these directly |
 | Honcho session messages | Per-agent `messages.db` (going forward) |
 | Honcho user model / conclusions | Facts in `library.db` |
-| `honcho_context` / `honcho_ask` tools | `memory_search` + HyperMem context assembly |
+| `honcho_context` / `honcho_ask` tools | `memory_search` + hypermem context assembly |
 
 **What does not migrate automatically:** Honcho's cross-session conclusions and user model from the Honcho service — these require an API export step below.
 
@@ -715,7 +715,7 @@ print(f"Exported {len(export['conclusions'])} conclusions")
 Save as `scripts/migrate-honcho.mjs`:
 ```js
 // scripts/migrate-honcho.mjs
-import { createHyperMem } from '@psiclawops/hypermem';
+import { createhypermem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -725,7 +725,7 @@ const exportPath = process.argv[3] ?? 'honcho_export.json';
 const dryRun = !process.argv.includes('--apply');
 
 const { conclusions = [] } = JSON.parse(readFileSync(exportPath, 'utf-8'));
-const hm = await createHyperMem({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await createhypermem({ dir: join(homedir(), '.openclaw/hypermem') });
 let imported = 0, skipped = 0;
 
 for (const c of conclusions) {
@@ -753,7 +753,7 @@ node scripts/migrate-honcho.mjs main honcho_export.json
 node scripts/migrate-honcho.mjs main honcho_export.json --apply
 ```
 
-**Step 3: Uninstall Honcho plugin and enable HyperMem**
+**Step 3: Uninstall Honcho plugin and enable hypermem**
 
 ```bash
 openclaw plugins uninstall @honcho-ai/openclaw-honcho
@@ -761,24 +761,24 @@ openclaw config set plugins.slots.contextEngine hypermem
 openclaw gateway restart
 ```
 
-> **Note:** Your workspace memory files (`MEMORY.md`, `memory/*.md`) that Honcho migrated on setup are still in place and will be picked up by HyperMem automatically — no re-import needed for those.
+> **Note:** Your workspace memory files (`MEMORY.md`, `memory/*.md`) that Honcho migrated on setup are still in place and will be picked up by hypermem automatically — no re-import needed for those.
 
 ---
 
 ## From memory-lancedb
 
-`memory-lancedb` is an OpenClaw install-on-demand plugin (`plugins.slots.memory = "memory-lancedb"`) that provides long-term memory with auto-recall and capture using LanceDB as the backing store. Like memory-core, it occupies the `slots.memory` slot — separate from the context engine slot that HyperMem owns.
+`memory-lancedb` is an OpenClaw install-on-demand plugin (`plugins.slots.memory = "memory-lancedb"`) that provides long-term memory with auto-recall and capture using LanceDB as the backing store. Like memory-core, it occupies the `slots.memory` slot — separate from the context engine slot that hypermem owns.
 
 **What maps to what:**
 
-| memory-lancedb | HyperMem |
+| memory-lancedb | hypermem |
 |---|---|
 | LanceDB memory vectors | Facts in `library.db` (re-embedded automatically) |
 | Captured memory entries | Facts with domain inferred from content |
-| Auto-recall injection | HyperMem context assembly (built-in) |
+| Auto-recall injection | hypermem context assembly (built-in) |
 | Per-agent tables | Per-agent `library.db` facts |
 
-**What does not migrate:** LanceDB vector embeddings (regenerated automatically), auto-capture triggers (HyperMem handles recall natively).
+**What does not migrate:** LanceDB vector embeddings (regenerated automatically), auto-capture triggers (hypermem handles recall natively).
 
 **Step 1: Locate the LanceDB data directory**
 
@@ -823,7 +823,7 @@ Install lancedb if needed: `pip install lancedb`
 Save as `scripts/migrate-lancedb.mjs`:
 ```js
 // scripts/migrate-lancedb.mjs
-import { createHyperMem } from '@psiclawops/hypermem';
+import { createhypermem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -834,7 +834,7 @@ const exportPath = process.argv.find(a => a.endsWith('.json')) ?? 'lancedb_expor
 const dryRun = !process.argv.includes('--apply');
 
 const entries = JSON.parse(readFileSync(exportPath, 'utf-8'));
-const hm = await createHyperMem({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await createhypermem({ dir: join(homedir(), '.openclaw/hypermem') });
 let imported = 0, skipped = 0;
 
 for (const entry of entries) {
@@ -865,7 +865,7 @@ node scripts/migrate-lancedb.mjs main lancedb_export.json
 node scripts/migrate-lancedb.mjs lancedb_export.json --apply
 ```
 
-**Step 4: Disable memory-lancedb and enable HyperMem**
+**Step 4: Disable memory-lancedb and enable hypermem**
 
 ```bash
 # Uninstall or just disable the slot
@@ -911,7 +911,7 @@ openclaw gateway restart
 --agent <id>             Only import for this agent (default: all detected)
 --workspace-root <path>  Scan workspace directories under this path
                          (default: ~/.openclaw)
---hypermem-dir <path>    HyperMem data directory (default: ~/.openclaw/hypermem)
+--hypermem-dir <path>    hypermem data directory (default: ~/.openclaw/hypermem)
 --limit <n>              Import only first N facts
 --apply                  Actually write data (default is dry-run)
 ```
@@ -922,13 +922,13 @@ openclaw gateway restart
 
 ## From a custom system
 
-Use HyperMem's programmatic API to import directly.
+Use hypermem's programmatic API to import directly.
 
 **Import facts:**
 ```js
-import { createHyperMem } from '@psiclawops/hypermem';
+import { createhypermem } from '@psiclawops/hypermem';
 
-const hm = await createHyperMem({ dir: '~/.openclaw/hypermem' });
+const hm = await createhypermem({ dir: '~/.openclaw/hypermem' });
 
 await hm.addFact('your-agent-id', 'User prefers dark mode in all UIs', {
   domain: 'preference',
@@ -958,7 +958,7 @@ openclaw gateway restart
 
 ---
 
-## Enabling HyperMem
+## Enabling hypermem
 
 Once your data is imported, switch the context engine:
 
@@ -1011,10 +1011,10 @@ for (const agent of fs.readdirSync(agentsDir)) {
 
 ## Rollback
 
-HyperMem does not modify or delete any source data. To roll back from any path:
+hypermem does not modify or delete any source data. To roll back from any path:
 
 ```bash
-# Remove HyperMem context engine
+# Remove hypermem context engine
 openclaw config unset plugins.slots.contextEngine
 
 # Restore the memory slot if you disabled it
@@ -1035,7 +1035,7 @@ Original data (memory.db, ClawText database, QMD collections, Cognee data direct
 
 **"library.db not found" during migration**
 
-HyperMem hasn't initialized yet. Start the gateway with the plugin enabled, send one message, then re-run:
+hypermem hasn't initialized yet. Start the gateway with the plugin enabled, send one message, then re-run:
 ```bash
 openclaw gateway restart
 # wait a few seconds, send one message
@@ -1091,4 +1091,4 @@ If you don't have Python, the LanceDB files are Arrow IPC format — readable wi
 
 **QMD extra paths not appearing after migration**
 
-HyperMem does not pick up `memory.qmd.paths` automatically. Use the `import-qmd-extras.mjs` script from the [QMD section](#from-qmd) to import those directories manually.
+hypermem does not pick up `memory.qmd.paths` automatically. Use the `import-qmd-extras.mjs` script from the [QMD section](#from-qmd) to import those directories manually.

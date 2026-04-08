@@ -1,5 +1,5 @@
 /**
- * HyperMem Core Types
+ * hypermem Core Types
  *
  * Provider-neutral message format and compositor interfaces.
  * These types are the internal representation — never sent directly to an LLM.
@@ -15,7 +15,7 @@ export type MessageRole = 'user' | 'assistant' | 'system';
  * Stored as JSON in the tool_calls column.
  */
 export interface NeutralToolCall {
-  id: string;                    // HyperMem-assigned ID (hm_xxxx), never provider-format
+  id: string;                    // hypermem-assigned ID (hm_xxxx), never provider-format
   name: string;                  // tool/function name
   arguments: string;             // JSON string of arguments
 }
@@ -435,7 +435,7 @@ export interface CompositorConfig {
   warmHistoryBudgetFraction: number;
   /**
    * Fraction of the model context window to reserve for output tokens and
-   * HyperMem operational overhead. The compositor's effective input budget is
+   * hypermem operational overhead. The compositor's effective input budget is
    * (contextWindow × (1 - contextWindowReserve)).
    *
    * Higher values = more headroom for large operations, fewer turns before

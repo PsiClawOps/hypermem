@@ -1,4 +1,4 @@
-# HyperMem 0.5.0 Roadmap
+# hypermem 0.5.0 Roadmap
 
 _Working draft — updated 2026-04-06_
 
@@ -67,10 +67,10 @@ When a session compacts, write a before/after summary of what facts changed: new
 `hypermem export --agent <id> --format json` — dumps the full knowledge state for an agent in a portable format. Needed for backup, migration tooling, and eventually cross-instance sync.
 
 **Dreaming integration**
-OpenClaw's memory-core has a dreaming/promotion pipeline. With memory-core disabled, we've lost that promotion signal. Build a lightweight equivalent inside HyperMem: score facts by recall frequency and query diversity, surface promotion candidates to a `candidates.md` file for human review. No auto-promotion — keep the human gate.
+OpenClaw's memory-core has a dreaming/promotion pipeline. With memory-core disabled, we've lost that promotion signal. Build a lightweight equivalent inside hypermem: score facts by recall frequency and query diversity, surface promotion candidates to a `candidates.md` file for human review. No auto-promotion — keep the human gate.
 
 **Congee/Cognee migration script**
-Cognee uses an ECL pipeline with graph + vector dual storage (Python SDK, `topoteretes/cognee`). The data model is different enough that migration isn't a simple SQLite copy — need an export step from Cognee's graph store and a transform into HyperMem's fact/episode schema. Track as a 0.5.0 stretch goal; ship if Cognee adoption is real.
+Cognee uses an ECL pipeline with graph + vector dual storage (Python SDK, `topoteretes/cognee`). The data model is different enough that migration isn't a simple SQLite copy — need an export step from Cognee's graph store and a transform into hypermem's fact/episode schema. Track as a 0.5.0 stretch goal; ship if Cognee adoption is real.
 
 ---
 

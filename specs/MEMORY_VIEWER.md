@@ -1,10 +1,10 @@
-# HyperMem Memory Viewer
+# hypermem Memory Viewer
 
 ## Goal
 
 Restore operator visibility that `.md` memory systems gave us, without giving up SQLite/Redis runtime quality.
 
-Operators should be able to inspect what HyperMem knows, why it knows it, what is hot in Redis right now, and why a given item showed up in retrieval.
+Operators should be able to inspect what hypermem knows, why it knows it, what is hot in Redis right now, and why a given item showed up in retrieval.
 
 ## Problem
 
@@ -12,7 +12,7 @@ Flat markdown memory had two operator advantages:
 1. direct inspectability
 2. easy grep/debug loops
 
-HyperMem improved runtime behavior by moving memory into structured stores:
+hypermem improved runtime behavior by moving memory into structured stores:
 - `messages.db`
 - `vectors.db`
 - `library.db`
@@ -429,4 +429,4 @@ Operator can answer these without asking an agent:
 
 This restores the strongest property markdown memory had: inspectability.
 
-HyperMem should keep the runtime advantages of structured memory, but operators must be able to see inside the box.
+hypermem should keep the runtime advantages of structured memory, but operators must be able to see inside the box.

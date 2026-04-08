@@ -1,5 +1,5 @@
 /**
- * HyperMem — Agent-Centric Memory & Context Composition Engine
+ * hypermem — Agent-Centric Memory & Context Composition Engine
  *
  * @module @psiclawops/hypermem
  *
@@ -265,10 +265,10 @@ const DEFAULT_CONFIG: HyperMemConfig = {
 };
 
 /**
- * HyperMem — the main API facade.
+ * hypermem — the main API facade.
  *
  * Usage:
- *   const hm = await HyperMem.create({ dataDir: '~/.openclaw/hypermem' });
+ *   const hm = await hypermem.create({ dataDir: '~/.openclaw/hypermem' });
  *   await hm.record('forge', 'agent:forge:webchat:main', userMsg);
  *   const result = await hm.compose({ agentId: 'forge', sessionKey: '...', ... });
  */
@@ -298,7 +298,7 @@ export class HyperMem {
   }
 
   /**
-   * Create and initialize a HyperMem instance.
+   * Create and initialize a hypermem instance.
    */
   static async create(config?: Partial<HyperMemConfig>): Promise<HyperMem> {
     const merged: HyperMemConfig = {

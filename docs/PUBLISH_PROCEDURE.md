@@ -1,10 +1,10 @@
-# HyperMem Publishing Procedure — Internal → Public
+# hypermem Publishing Procedure — Internal → Public
 **Owner:** Helm
 **Source:** `PsiClawOps/hypermem-internal` (private)
 **Target:** `PsiClawOps/hypermem` (private, tester distribution)
 **Last updated:** 2026-04-06
 
-This is the canonical procedure for cutting a public release of HyperMem from internal. Run this in full every time. No shortcuts.
+This is the canonical procedure for cutting a public release of hypermem from internal. Run this in full every time. No shortcuts.
 
 ---
 
@@ -296,7 +296,7 @@ git commit -m "chore: strip internal artifacts for public distribution vX.Y.Z"
 git push origin main --force   # public repo is always a clean rewrite, not an incremental history
 
 # Tag — version confirmed by ragesaq before this step
-git tag -a vX.Y.Z -m "HyperMem vX.Y.Z — public distribution"
+git tag -a vX.Y.Z -m "hypermem vX.Y.Z — public distribution"
 git push origin vX.Y.Z --force
 ```
 

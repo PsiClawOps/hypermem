@@ -1,4 +1,4 @@
-# HyperMem Deferred Items
+# hypermem Deferred Items
 
 Items that are explicitly scoped out of current work but must be tracked for future action.
 Each entry documents the decision, the gate condition, and the implementation plan.
@@ -76,7 +76,7 @@ See lines 629-651 of `src/background-indexer.ts`.
 
 Done. Plugin now imports `NeutralMessage`, `ComposeRequest`, `ComposeResult`, etc. from
 `@psiclawops/hypermem`. Only plugin-specific types remain local (`InboundMessage` for
-OpenClaw SDK message shape, `HyperMemInstance` for dynamic import typing). No shadowed
+OpenClaw SDK message shape, `hypermemInstance` for dynamic import typing). No shadowed
 types remain.
 
 ---
@@ -110,7 +110,7 @@ Gate: additional plugins exist that need CI coverage.
 **Added:** prior  
 
 Housekeeping. Archive the first full council round from all council workspaces.
-Low memory impact now that HyperMem owns storage. Can be batched as a one-time run.
+Low memory impact now that hypermem owns storage. Can be batched as a one-time run.
 
 ---
 
@@ -122,13 +122,13 @@ Low memory impact now that HyperMem owns storage. Can be batched as a one-time r
 
 ### What
 
-Two-way sync between HyperMem's knowledge/fact stores and an Obsidian vault directory.
+Two-way sync between hypermem's knowledge/fact stores and an Obsidian vault directory.
 Agents can read from the vault as a knowledge source and write back structured knowledge
 as Obsidian markdown notes with YAML frontmatter.
 
 ### Shape (rough)
 
-**Ingest direction (vault → HyperMem):**
+**Ingest direction (vault → hypermem):**
 - Watch a configured vault directory for `.md` file changes
 - Parse frontmatter (`tags`, `type`, `domain`, `confidence`, `visibility`) to map to
   `knowledge` or `fact` table entries
@@ -136,7 +136,7 @@ as Obsidian markdown notes with YAML frontmatter.
 - File mtime used as `source_ref` for versioning
 - Configurable watch glob (e.g. `memory/**/*.md`, `decisions/*.md`)
 
-**Writeback direction (HyperMem → vault):**
+**Writeback direction (hypermem → vault):**
 - `exportKnowledge(domain)` serializes knowledge entries as Obsidian-formatted `.md`
 - YAML frontmatter includes `hypermem_id`, `agent_id`, `confidence`, `visibility`
 - Optional: populate `[[wikilinks]]` from knowledge graph links (supports/contradicts/related)
@@ -144,7 +144,7 @@ as Obsidian markdown notes with YAML frontmatter.
 
 ### Implementation plan
 
-1. Add `VaultConfig` to `HyperMemConfig` (optional, off by default):
+1. Add `VaultConfig` to `hypermemConfig` (optional, off by default):
    `{ path: string; watchGlob?: string; writeback?: boolean; domain?: string }`
 2. New module: `src/vault-sync.ts` — file watcher + ingest parser + writeback serializer
 3. Hook ingest into `BackgroundIndexer` startup if `vault.path` is configured

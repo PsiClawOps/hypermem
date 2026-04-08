@@ -1,6 +1,6 @@
-# Proposal: HyperMem Product Northstar
+# Proposal: hypermem Product Northstar
 
-_Spec: The architectural and product vision for HyperMem, the intelligence and memory substrate of the OpenClaw ecosystem._
+_Spec: The architectural and product vision for hypermem, the intelligence and memory substrate of the OpenClaw ecosystem._
 
 ---
 
@@ -21,17 +21,17 @@ Current LLM agent architectures rely on **accumulated context**. As a session pr
 2. **Siloed Sessions:** Knowledge gained in Session A is entirely invisible to Session B unless manually copied over.
 3. **Compaction Loss:** To prevent context overflow, transcripts are summarized and compacted, inevitably destroying high-resolution details and nuances.
 
-**HyperMem takes a different approach: the agent's context is composed, not accumulated.**
+**hypermem takes a different approach: the agent's context is composed, not accumulated.**
 
-Every turn, HyperMem reconstructs the optimal context window by retrieving only the exact facts, rules, and episodic memories relevant to the current user prompt, injecting them via a Compositor before the LLM generates a response.
+Every turn, hypermem reconstructs the optimal context window by retrieving only the exact facts, rules, and episodic memories relevant to the current user prompt, injecting them via a Compositor before the LLM generates a response.
 
 ---
 
 ## The L1-L4 Cognitive Architecture
 
-HyperMem maps to the CoALA (Cognitive Architectures for Language Agents) taxonomy using a four-layer model:
+hypermem maps to the CoALA (Cognitive Architectures for Language Agents) taxonomy using a four-layer model:
 
-| Layer | Type | HyperMem Concept | Description |
+| Layer | Type | hypermem Concept | Description |
 |---|---|---|---|
 | **L1** | Working Memory | **Working Context** | The active token window (prompt + Compositor payload + recent tail) |
 | **L2/L3** | Procedural Memory | **Workspace Files** | Agent instructions, skills, and tools (e.g., SOUL.md, TOOLS.md, SKILL.md) |
@@ -42,12 +42,12 @@ HyperMem maps to the CoALA (Cognitive Architectures for Language Agents) taxonom
 
 ## The Core Primitives: Engrams and Episodes
 
-HyperMem organizes L4 memory into a bipartite graph of two distinct primitives:
+hypermem organizes L4 memory into a bipartite graph of two distinct primitives:
 
 ### 1. Engrams (Facts / Knowledge)
 - **Definition:** Atomic, deduplicated, immutable (by convention) statements of truth or semantic knowledge.
 - **Nature:** Atemporal. An Engram represents *what* is true, independent of *when* it was learned.
-- **Examples:** User preferences ("ragesaq prefers CLI over GUI"), system rules ("Never use em dashes"), architectural facts ("HyperMem uses SQLite").
+- **Examples:** User preferences ("ragesaq prefers CLI over GUI"), system rules ("Never use em dashes"), architectural facts ("hypermem uses SQLite").
 - **Creation:** Automated extraction via ingest pipeline or manual write.
 - **Storage:** The `facts` table.
 
@@ -66,10 +66,10 @@ Episodes generate Engrams. When an Episode contains a durable truth, that truth 
 
 ## The Retrieval Architecture (The Compositor)
 
-Memory is useless if the agent has to explicitly ask for it. HyperMem relies on **Proactive Retrieval**.
+Memory is useless if the agent has to explicitly ask for it. hypermem relies on **Proactive Retrieval**.
 
 ### 1. The Salience & Activation Algorithm
-To prevent the agent from drowning in equally weighted facts, HyperMem uses an Activation/Salience algorithm:
+To prevent the agent from drowning in equally weighted facts, hypermem uses an Activation/Salience algorithm:
 - **Baseline Weight:** When an Engram is created, it receives a baseline salience weight.
 - **Activation Bump (Current):** Every time the Compositor retrieves an Engram, it receives a frequency bump (weight increases), ranking alongside KNN semantic similarity scores.
 - **Decay (Planned for V2 Engineering):** A time-based or access-based decay function for un-retrieved Engrams is design TBD. Do not claim "self-organizing memory" until the decay function is implemented and tuned.
@@ -89,7 +89,7 @@ To ensure the agent never loses the immediate thread while retrieving older memo
 
 ### 3. The Retrieval Pipeline
 1. **Trigger Matching:** The user's prompt is scanned against a Trigger Registry.
-2. **Hybrid Search:** If triggered, HyperMem executes a hybrid search:
+2. **Hybrid Search:** If triggered, hypermem executes a hybrid search:
    - **FTS5 (Keyword):** Exact matches on terminology.
    - **KNN (Semantic):** Vector similarity for conceptual matches.
 3. **Composition:** The retrieval engine pulls the top *K* relevant Engrams and highly relevant recent Episodes (up to the $T_{recent}$ and Tier 2 budget caps).
@@ -117,9 +117,9 @@ Composed context is superior to accumulated context only when retrieval succeeds
 
 ## Alignment with the ClawDash Workspace
 
-HyperMem is not a standalone app; it is the invisible substrate that powers ClawDash and ClawCanvas.
+hypermem is not a standalone app; it is the invisible substrate that powers ClawDash and ClawCanvas.
 
-- **For ClawDash (The Environment):** HyperMem ensures that the environment "remembers" the user across all blades and terminals.
-- **For ClawCanvas (The Workspace):** HyperMem powers the spatial intelligence. When an agent looks at an artifact on the Canvas, HyperMem instantly retrieves the Engrams related to that artifact's history and constraints.
-- **For ClawCouncil (Governance):** Governance artifacts (council proposals, decision records, post-execution reviews) stored in HyperMem follow the HyperMem Artifact Storage Standard (CP-2026-04-03-003), ensuring consistent metadata, naming, and retrieval across the fleet.
+- **For ClawDash (The Environment):** hypermem ensures that the environment "remembers" the user across all blades and terminals.
+- **For ClawCanvas (The Workspace):** hypermem powers the spatial intelligence. When an agent looks at an artifact on the Canvas, hypermem instantly retrieves the Engrams related to that artifact's history and constraints.
+- **For ClawCouncil (Governance):** Governance artifacts (council proposals, decision records, post-execution reviews) stored in hypermem follow the hypermem Artifact Storage Standard (CP-2026-04-03-003), ensuring consistent metadata, naming, and retrieval across the fleet.
 

@@ -1,7 +1,7 @@
 /**
- * HyperMem Context Engine Plugin
+ * hypermem Context Engine Plugin
  *
- * Implements OpenClaw's ContextEngine interface backed by HyperMem's
+ * Implements OpenClaw's ContextEngine interface backed by hypermem's
  * four-layer memory architecture:
  *
  *   L1 Redis    — hot session working memory
@@ -15,7 +15,7 @@
  *   compact()    → delegate to runtime (ownsCompaction: false)
  *   afterTurn()  → trigger background indexer (fire-and-forget)
  *   bootstrap()  → warm Redis session, register agent in fleet
- *   dispose()    → close HyperMem connections
+ *   dispose()    → close hypermem connections
  *
  * Session key format expected: "agent:<agentId>:<channel>:<name>"
  */
@@ -42,17 +42,17 @@ import { createRequire } from 'module';
 // Re-export core types for consumers (eliminates local shim drift)
 export type { NeutralMessage, NeutralToolCall, NeutralToolResult, ComposeRequest, ComposeResult };
 
-// ─── HyperMem singleton ────────────────────────────────────────
+// ─── hypermem singleton ────────────────────────────────────────
 
-// Runtime load is dynamic (HyperMem is a sibling package loaded from repo dist,
+// Runtime load is dynamic (hypermem is a sibling package loaded from repo dist,
 // not installed via npm). Types come from the core package devDependency.
 // This pattern keeps the runtime path stable while TypeScript resolves types
 // from the canonical source — no more local shim drift.
 const HYPERMEM_PATH = path.join(os.homedir(), '.openclaw/workspace/repo/hypermem/dist/index.js');
 const require = createRequire(import.meta.url);
 
-// HyperMemInstance is the resolved return type of HyperMem.create().
-// HyperMem has a private constructor (factory pattern), so we can't use
+// hypermemInstance is the resolved return type of hypermem.create().
+// hypermem has a private constructor (factory pattern), so we can't use
 // InstanceType<> directly. Awaited<ReturnType<...>> extracts the same type
 // without requiring constructor access. If core adds/changes a field, the
 // plugin type-errors at CI time instead of silently drifting.
@@ -68,7 +68,7 @@ let _generateEmbeddings: ((texts: string[]) => Promise<Float32Array[]>) | null =
 let _taskFlowRuntime: any | null = null;
 
 // ─── Eviction config cache ────────────────────────────────────
-// Populated from user config during HyperMem init. Stored here so
+// Populated from user config during hypermem init. Stored here so
 // assemble() (which can't await loadUserConfig) can read it without
 // re-reading disk on every turn.
 let _evictionConfig: {
@@ -80,7 +80,7 @@ let _evictionConfig: {
 } | undefined;
 
 // ─── Context window reserve cache ────────────────────────────
-// Populated from user config during HyperMem init. Ensures HyperMem leaves
+// Populated from user config during hypermem init. Ensures hypermem leaves
 // a guaranteed headroom fraction for system prompts, tool results, and
 // incoming data — preventing the trim tiers from firing too close to the edge.
 //
@@ -197,7 +197,7 @@ async function getHyperMem(): Promise<HyperMemInstance> {
   if (_hmInitPromise) return _hmInitPromise;
 
   _hmInitPromise = (async () => {
-    // Dynamic import — HyperMem is loaded from repo dist
+    // Dynamic import — hypermem is loaded from repo dist
     const mod = await import(HYPERMEM_PATH);
     const HyperMem = mod.HyperMem;
 
@@ -283,7 +283,7 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         },
         // Pass vector store so new facts/episodes are embedded at index time
         instance.getVectorStore() ?? undefined,
-        // Dreaming config — passed from HyperMem user config if set
+        // Dreaming config — passed from hypermem user config if set
         (userConfig as { dreaming?: Record<string, unknown> })?.dreaming ?? {}
       );
       _indexer.start();
@@ -334,7 +334,7 @@ type InboundMessage = {
 };
 
 /**
- * Convert an OpenClaw AgentMessage to HyperMem's NeutralMessage format.
+ * Convert an OpenClaw AgentMessage to hypermem's NeutralMessage format.
  */
 function toNeutralMessage(msg: InboundMessage): NeutralMessage {
   // Extract text content from string or array format
@@ -434,7 +434,7 @@ const _warmInFlight = new Map<string, Promise<void>>();
 
 /**
  * Estimate tokens for a string using the same ~4 chars/token heuristic
- * used by the HyperMem compositor. Fast and allocation-free — no tokenizer
+ * used by the hypermem compositor. Fast and allocation-free — no tokenizer
  * library needed for a budget guard.
  */
 function estimateTokens(text: string | null | undefined): number {
@@ -565,7 +565,7 @@ function createHyperMemEngine(): ContextEngine {
   return {
     info: {
       id: 'hypermem',
-      name: 'HyperMem Context Engine',
+      name: 'hypermem context engine',
       version: '0.1.0',
       // We own compaction — assemble() trims to budget via the compositor safety
       // valve, so runtime compaction is never needed. compact() handles any
@@ -743,7 +743,7 @@ function createHyperMemEngine(): ContextEngine {
     },
 
     /**
-     * Ingest a single message into HyperMem's message store.
+     * Ingest a single message into hypermem's message store.
      * Skip heartbeats — they're noise in the memory store.
      */
     async ingest({ sessionId, sessionKey, message, isHeartbeat }): ReturnType<ContextEngine['ingest']> {
@@ -786,11 +786,18 @@ function createHyperMemEngine(): ContextEngine {
           const redisPressure = redisTokens / effectiveBudget;
 
           if (redisPressure > 0.85) {
-            // Critical: skip recording — Redis is already overloaded
-            console.log(
-              `[hypermem] ingest wave-guard: skipping toolResult (Redis pressure ${(redisPressure * 100).toFixed(0)}% > 85%)`
-            );
-            return { ingested: false };
+            // FIX (Bug 4): Never skip a tool result entirely — that leaves an orphaned
+            // tool_call in Redis history (the assistant message was already recorded).
+            // Anthropic rejects assistant messages with tool_calls that have no matching result.
+            // Instead, record a compact stub that preserves pair integrity in history.
+            const stubbedResults = neutral.toolResults!.map(tr => ({
+              ...tr,
+              content: `[tool result omitted by wave-guard at ${(redisPressure * 100).toFixed(0)}% Redis pressure]`,
+            }));
+            const stubNeutral = { ...neutral, toolResults: stubbedResults };
+            console.log(`[hypermem] ingest wave-guard: stubbing toolResult (Redis pressure ${(redisPressure * 100).toFixed(0)}% > 85%) — preserving pair integrity`);
+            await hm.recordAssistantMessage(agentId, sk, stubNeutral);
+            return { ingested: true };
           } else if (redisPressure > 0.70) {
             // Elevated: store truncated stub to preserve tool call pairing in history
             const MAX_TOOL_RESULT_CHARS = 500;
@@ -821,7 +828,7 @@ function createHyperMemEngine(): ContextEngine {
     },
 
     /**
-     * Assemble model context from all four HyperMem layers.
+     * Assemble model context from all four hypermem layers.
      *
      * The `messages` param contains the current conversation history from the
      * runtime. We pass the prompt (latest user message) as the retrieval query,
@@ -898,11 +905,16 @@ function createHyperMemEngine(): ContextEngine {
             const textCost = estimateTokens(typeof msg.textContent === 'string' ? msg.textContent : null);
             const toolCallCost = msg.toolCalls ? Math.ceil(JSON.stringify(msg.toolCalls).length / 2) : 0;
             const toolResultCost = msg.toolResults ? Math.ceil(JSON.stringify(msg.toolResults).length / 2) : 0;
-            // Also count content arrays (OpenClaw native format)
+            // FIX (Bug 2): count content arrays in OpenClaw native format.
+            // Native tool result messages store content as c.content (not c.text).
+            // Old code always read c.text, returning 0 for native format — severe undercount.
             const contentCost = Array.isArray(msg.content)
               ? (msg.content as unknown[]).reduce((s: number, c: unknown) => {
                   const part = c as Record<string, unknown>;
-                  return s + estimateTokens(typeof part.text === 'string' ? part.text : null);
+                  const textVal = typeof part.text === 'string' ? part.text
+                    : typeof part.content === 'string' ? part.content
+                    : part.content != null ? JSON.stringify(part.content) : null;
+                  return s + estimateTokens(textVal);
                 }, 0)
               : 0;
             // Count image parts — base64 images are large and invisible to the text estimator
@@ -973,14 +985,46 @@ function createHyperMemEngine(): ContextEngine {
             // entirely. Replacing with a placeholder keeps the turn's metadata in context
             // while freeing the bulk of the tokens.
             const MAX_INLINE_TOOL_CHARS = 2000; // ~500 tokens
+            // FIX (Bug 3): handle both NeutralMessage format (m.toolResults) and
+            // OpenClaw native format (m.content array with type='tool_result' blocks).
+            // Old guard `if (!m.toolResults)` skipped every native-format message.
+            // Also fixed: replacement must be valid NeutralToolResult { callId, name, content },
+            // not { type, text } which breaks pair-integrity downstream.
             const processedConvMsgs = convMsgs.map(m => {
-              if (!m.toolResults) return m;
-              const resultStr = JSON.stringify(m.toolResults);
-              if (resultStr.length <= MAX_INLINE_TOOL_CHARS) return m;
-              return {
-                ...m,
-                toolResults: [{ type: 'text', text: `[tool result truncated: ${Math.ceil(resultStr.length / 4)} tokens]` }],
-              };
+              // NeutralMessage format
+              if (m.toolResults) {
+                const resultStr = JSON.stringify(m.toolResults);
+                if (resultStr.length <= MAX_INLINE_TOOL_CHARS) return m;
+                const firstResult = (m.toolResults as Array<Record<string,unknown>>)[0];
+                return {
+                  ...m,
+                  toolResults: [{
+                    callId: firstResult?.callId ?? 'unknown',
+                    name:   firstResult?.name   ?? 'tool',
+                    content: `[tool result truncated: ${Math.ceil(resultStr.length / 4)} tokens]`,
+                  }],
+                };
+              }
+              // OpenClaw native format
+              if (Array.isArray(m.content)) {
+                const content = m.content as Array<Record<string,unknown>>;
+                const hasLarge = content.some(c => {
+                  if (c.type !== 'tool_result') return false;
+                  const val = typeof c.content === 'string' ? c.content : JSON.stringify(c.content ?? '');
+                  return val.length > MAX_INLINE_TOOL_CHARS;
+                });
+                if (!hasLarge) return m;
+                return {
+                  ...m,
+                  content: content.map(c => {
+                    if (c.type !== 'tool_result') return c;
+                    const val = typeof c.content === 'string' ? c.content : JSON.stringify(c.content ?? '');
+                    if (val.length <= MAX_INLINE_TOOL_CHARS) return c;
+                    return { ...c, content: `[tool result truncated: ${Math.ceil(val.length / 4)} tokens]` };
+                  }),
+                };
+              }
+              return m;
             });
             // Fill from the back within budget
             let budget = trimBudget;
@@ -988,22 +1032,53 @@ function createHyperMemEngine(): ContextEngine {
             for (const sm of systemMsgs) {
               const t = estimateTokens(typeof sm.textContent === 'string' ? sm.textContent : null)
                 + (Array.isArray(sm.content) ? (sm.content as Array<Record<string,unknown>>).reduce(
-                    (s: number, c: Record<string,unknown>) => s + estimateTokens(typeof c.text === 'string' ? c.text : null), 0) : 0);
+                    (s: number, c: Record<string,unknown>) => {
+                      const textVal = typeof c.text === 'string' ? c.text
+                        : typeof c.content === 'string' ? c.content : null;
+                      return s + estimateTokens(textVal);
+                    }, 0) : 0);
               budget -= t;
             }
+            // FIX (Bug 1): Force-keep the LAST message (the current tool result) before
+            // the budget-fill loop. Without this, a large tool result skips the
+            // `budget - t >= 0` check, gets dropped, and the model sees an unpaired
+            // tool_call. Pre-deduct its cost and always append it.
+            const lastConvMsg = processedConvMsgs[processedConvMsgs.length - 1];
+            const lastMsgCost = lastConvMsg
+              ? estimateTokens(typeof lastConvMsg.textContent === 'string' ? lastConvMsg.textContent : null)
+                + (lastConvMsg.toolCalls ? Math.ceil(JSON.stringify(lastConvMsg.toolCalls).length / 2) : 0)
+                + (lastConvMsg.toolResults ? Math.ceil(JSON.stringify(lastConvMsg.toolResults).length / 2) : 0)
+                + (Array.isArray(lastConvMsg.content) ? (lastConvMsg.content as Array<Record<string,unknown>>).reduce(
+                    (s: number, c: Record<string,unknown>) => {
+                      const textVal = typeof c.text === 'string' ? c.text
+                        : typeof c.content === 'string' ? c.content
+                        : c.content != null ? JSON.stringify(c.content) : null;
+                      return s + estimateTokens(textVal);
+                    }, 0) : 0)
+              : 0;
+            budget -= lastMsgCost;
             const kept: Array<Record<string, unknown>> = [];
-            for (let i = processedConvMsgs.length - 1; i >= 0 && budget > 0; i--) {
+            // Fill remaining budget newest-to-oldest, skipping the last message (force-kept)
+            for (let i = processedConvMsgs.length - 2; i >= 0 && budget > 0; i--) {
               const m = processedConvMsgs[i];
               const t = estimateTokens(typeof m.textContent === 'string' ? m.textContent : null)
                 + (m.toolCalls ? Math.ceil(JSON.stringify(m.toolCalls).length / 2) : 0)
                 + (m.toolResults ? Math.ceil(JSON.stringify(m.toolResults).length / 2) : 0)
+                // FIX (Bug 2 — budget-fill estimator): read c.content, not just c.text
                 + (Array.isArray(m.content) ? (m.content as Array<Record<string,unknown>>).reduce(
-                    (s: number, c: Record<string,unknown>) => s + estimateTokens(typeof c.text === 'string' ? c.text : null), 0) : 0);
+                    (s: number, c: Record<string,unknown>) => {
+                      const textVal = typeof c.text === 'string' ? c.text
+                        : typeof c.content === 'string' ? c.content
+                        : c.content != null ? JSON.stringify(c.content) : null;
+                      return s + estimateTokens(textVal);
+                    }, 0) : 0);
               if (budget - t >= 0) {
                 kept.unshift(m);
                 budget -= t;
               }
             }
+            // Always append the force-kept last message
+            if (lastConvMsg) kept.push(lastConvMsg);
             const keptCount = processedConvMsgs.length - kept.length;
             if (keptCount > 0) {
               console.log(
@@ -1188,7 +1263,7 @@ function createHyperMemEngine(): ContextEngine {
       return {
         messages: outputMessages,
         estimatedTokens: result.tokenCount ?? 0,
-        // systemPromptAddition injects HyperMem context before the runtime system prompt.
+        // systemPromptAddition injects hypermem context before the runtime system prompt.
         // This is the facts/recall/episodes block assembled by the compositor.
         systemPromptAddition: result.contextBlock || undefined,
       };
@@ -1199,7 +1274,7 @@ function createHyperMemEngine(): ContextEngine {
     },
 
     /**
-     * Compact context. HyperMem owns compaction.
+     * Compact context. hypermem owns compaction.
      *
      * Strategy: assemble() already trims the composed message list to the token
      * budget via the compositor safety valve, so the model never receives an
@@ -1505,7 +1580,11 @@ function createHyperMemEngine(): ContextEngine {
               const contentCost = Array.isArray(msg.content)
                 ? (msg.content as unknown[]).reduce((s: number, c: unknown) => {
                     const part = c as Record<string, unknown>;
-                    return s + estimateTokens(typeof part.text === 'string' ? part.text : null);
+                    // FIX (Bug 2 — afterTurn estimator): read c.content for native format
+                    const textVal = typeof part.text === 'string' ? part.text
+                      : typeof part.content === 'string' ? part.content
+                      : part.content != null ? JSON.stringify(part.content) : null;
+                    return s + estimateTokens(textVal);
                   }, 0)
                 : 0;
               return sum + textCost + toolCallCost + toolResultCost + contentCost;
@@ -1619,7 +1698,7 @@ function createHyperMemEngine(): ContextEngine {
      * Dispose: intentionally a no-op.
      *
      * The runtime calls dispose() at the end of every request cycle, but
-     * HyperMem's Redis connection and SQLite handles are gateway-lifetime
+     * hypermem's Redis connection and SQLite handles are gateway-lifetime
      * singletons — not request-scoped. Closing and nulling _hm here causes
      * a full reconnect + re-init on every turn (~400-800ms latency per turn).
      *
@@ -1638,14 +1717,14 @@ function createHyperMemEngine(): ContextEngine {
 // ─── NeutralMessage → AgentMessage ─────────────────────────────
 
 /**
- * Convert HyperMem's NeutralMessage back to OpenClaw's AgentMessage format.
+ * Convert hypermem's NeutralMessage back to OpenClaw's AgentMessage format.
  *
  * The runtime expects messages conforming to pi-ai's Message union:
  *   UserMessage:       { role: 'user', content: string | ContentBlock[], timestamp }
  *   AssistantMessage:  { role: 'assistant', content: ContentBlock[], api, provider, model, usage, stopReason, timestamp }
  *   ToolResultMessage: { role: 'toolResult', toolCallId, toolName, content, isError, timestamp }
  *
- * HyperMem stores tool results as NeutralMessage with role='user' and toolResults[].
+ * hypermem stores tool results as NeutralMessage with role='user' and toolResults[].
  * These must be expanded into individual ToolResultMessage objects.
  *
  * For assistant messages with tool calls, NeutralToolCall.arguments is a JSON string
@@ -1737,7 +1816,7 @@ const engine = createHyperMemEngine();
 
 export default definePluginEntry({
   id: 'hypermem',
-  name: 'HyperMem Context Engine',
+  name: 'hypermem context engine',
   description: 'Four-layer memory architecture for OpenClaw agents: Redis hot cache, message history, vector search, and structured library.',
   kind: 'context-engine',
   configSchema: emptyPluginConfigSchema(),

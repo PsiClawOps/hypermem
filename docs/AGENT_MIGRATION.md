@@ -1,12 +1,12 @@
-# HyperMem: Agent Migration Reference
+# hypermem: Agent Migration Reference
 
-_Written for agents handling migration tasks. If your operator is asking "will I lose my memory data?" or "how do I move my existing setup to HyperMem?" — this is your reference._
+_Written for agents handling migration tasks. If your operator is asking "will I lose my memory data?" or "how do I move my existing setup to hypermem?" — this is your reference._
 
 ---
 
 ## What to understand first
 
-HyperMem has four storage layers. Migration maps an operator's existing data into one or more of them:
+hypermem has four storage layers. Migration maps an operator's existing data into one or more of them:
 
 ```
 L1  Redis         Hot cache — ephemeral, rebuilt automatically. Never migrated.
@@ -42,7 +42,7 @@ facts (
   created_at      TEXT    -- ISO 8601
   expires_at      TEXT    -- optional TTL. useful for time-sensitive facts.
   superseded_by   INT     -- FK to a newer fact that replaces this one
-  decay_score     REAL    -- managed by HyperMem. leave at 0.0 on import.
+  decay_score     REAL    -- managed by hypermem. leave at 0.0 on import.
 )
 ```
 
@@ -50,11 +50,11 @@ facts (
 
 **Content quality matters.** "dark mode" is a bad fact. "User prefers dark mode in all UIs and tool interfaces" is a good one. Complete sentences retrieve better than fragments because the vector embedding has more signal to work with.
 
-**confidence:** Use 0.8–0.9 for facts migrated from a system the operator actively maintained. Use 0.5–0.7 for inferred or low-signal entries. Don't import everything at 1.0 — that flattens the ranking signal HyperMem uses to decide what surfaces.
+**confidence:** Use 0.8–0.9 for facts migrated from a system the operator actively maintained. Use 0.5–0.7 for inferred or low-signal entries. Don't import everything at 1.0 — that flattens the ranking signal hypermem uses to decide what surfaces.
 
 **scope:** Almost everything should start as `agent`. Only use `org` for facts that genuinely apply fleet-wide — operator identity, shared constraints, org-level preferences. Broad `org`-scoped imports pollute every agent's context.
 
-**superseded_by:** You don't need to set this on import. It's used when HyperMem detects a newer fact that updates an older one. Leave null.
+**superseded_by:** You don't need to set this on import. It's used when hypermem detects a newer fact that updates an older one. Leave null.
 
 ---
 
@@ -335,12 +335,12 @@ For documentation files (markdown specs, architecture docs), use `DocChunkStore`
 
 ## The programmatic path
 
-For small migrations (< a few hundred entries) or custom formats without a script, use the HyperMem API directly:
+For small migrations (< a few hundred entries) or custom formats without a script, use the hypermem API directly:
 
 ```javascript
-import { createHyperMem } from '@psiclawops/hypermem';
+import { createhypermem } from '@psiclawops/hypermem';
 
-const hm = await createHyperMem();
+const hm = await createhypermem();
 
 // Import a fact
 await hm.addFact('agent-id', 'User prefers aggressive context pruning', {
@@ -372,14 +372,14 @@ Don't import noise to be safe. Low-signal entries raise the retrieval floor and 
 
 ## Common operator questions
 
-**"Will my agent forget everything when I switch to HyperMem?"**
-No. HyperMem doesn't touch existing memory data. The migration is additive — run the relevant script, restart the gateway, and the agent has access to both new HyperMem-native memory and the imported history.
+**"Will my agent forget everything when I switch to hypermem?"**
+No. hypermem doesn't touch existing memory data. The migration is additive — run the relevant script, restart the gateway, and the agent has access to both new hypermem-native memory and the imported history.
 
 **"Do I have to migrate everything at once?"**
-No. HyperMem starts building its own memory from the first session. Historical data can be migrated at any time, before or after the switch. The scripts are idempotent — re-running them won't duplicate data.
+No. hypermem starts building its own memory from the first session. Historical data can be migrated at any time, before or after the switch. The scripts are idempotent — re-running them won't duplicate data.
 
-**"What about my MEMORY.md files — does HyperMem replace them?"**
-For agents using HyperMem, MEMORY.md becomes a priming index only — a short file that orients the agent at session start. The actual facts and history live in HyperMem. The migration script extracts the substantive content from daily files and imports it as facts so nothing is lost.
+**"What about my MEMORY.md files — does hypermem replace them?"**
+For agents using hypermem, MEMORY.md becomes a priming index only — a short file that orients the agent at session start. The actual facts and history live in hypermem. The migration script extracts the substantive content from daily files and imports it as facts so nothing is lost.
 
 **"What if my memory format doesn't match any of these patterns?"**
 Read this doc, look at the operator's actual data, and write a short import script. The core pattern is always: open source, open target (library.db or messages.db), loop, insert with dedup check. The scripts in `scripts/` are all under 200 lines and follow the same structure.

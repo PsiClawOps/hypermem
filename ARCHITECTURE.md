@@ -1,4 +1,4 @@
-# HyperMem Architecture
+# hypermem Architecture
 
 _Agent-centric memory that outlives sessions._
 
@@ -164,7 +164,7 @@ This means:
 `plugin/src/index.ts` — OpenClaw context engine plugin (replaces basic hook integration):
 
 ```
-gateway:startup     → Init HyperMem, auto-rotate DBs, hydrate fleet cache
+gateway:startup     → Init hypermem, auto-rotate DBs, hydrate fleet cache
 agent:bootstrap     → Warm session (history, facts, profile → Redis)
 context:assemble    → Full four-layer prompt assembly within token budget
 agent:afterTurn     → Ingest new messages to SQLite + Redis, trigger background indexer
@@ -233,7 +233,7 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 
 ### Runtime Contract
 
-**Exclusive dispatch:** The OpenClaw runtime calls either `afterTurn()` OR `ingest()`/`ingestBatch()`, never both. Since HyperMem implements `afterTurn`, it must handle message ingestion there. `ingest()` exists for API compatibility but is never called by the runtime in practice.
+**Exclusive dispatch:** The OpenClaw runtime calls either `afterTurn()` OR `ingest()`/`ingestBatch()`, never both. Since hypermem implements `afterTurn`, it must handle message ingestion there. `ingest()` exists for API compatibility but is never called by the runtime in practice.
 
 **Provider translation:** The plugin sets `skipProviderTranslation: true` on compose requests. The compositor returns NeutralMessages; the plugin converts to AgentMessages. The runtime handles provider-specific translation. Two-stage translation (compositor → provider format → plugin → agent format) was the root cause of Incident 1 (silent tool call drops).
 

@@ -1,5 +1,5 @@
 /**
- * HyperMem FOS/MOD — Fleet Output Standard & Model Output Directives
+ * hypermem FOS/MOD — Fleet Output Standard & Model Output Directives
  *
  * Provides per-model output calibration injected into the context window.
  * Thread-safe: no module-scoped state. All functions take explicit db parameter.

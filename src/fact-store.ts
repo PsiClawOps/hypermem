@@ -1,5 +1,5 @@
 /**
- * HyperMem Fact Store
+ * hypermem Fact Store
  *
  * CRUD operations for facts (extracted knowledge that spans sessions).
  * Facts live in the central library DB, tagged by agent_id.

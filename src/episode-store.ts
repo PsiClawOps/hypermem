@@ -1,5 +1,5 @@
 /**
- * HyperMem Episode Store
+ * hypermem Episode Store
  *
  * Significant events in an agent's lifetime.
  * Lives in the central library DB.

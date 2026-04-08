@@ -1,5 +1,5 @@
 /**
- * HyperMem Proactive Passes
+ * hypermem Proactive Passes
  *
  * Background maintenance passes that run between indexer ticks to keep
  * message storage lean. Two passes:
@@ -17,7 +17,7 @@
  *   - Best-effort: catch all errors, log, and return a zero-change result
  *
  * Ported and adapted from ClawText proactive-pass.ts.
- * HyperMem schema differences vs ClawText:
+ * hypermem schema differences vs ClawText:
  *   - No content_type column — we classify on the fly via classifyContentType()
  *   - No external payload store — we truncate content inline in tool_results JSON
  *   - No ClawText-specific dependencies (payload-store, tool-tracker, etc.)

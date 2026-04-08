@@ -1,5 +1,5 @@
 /**
- * HyperMem Hybrid Retrieval — FTS5 + KNN Score Fusion
+ * hypermem Hybrid Retrieval — FTS5 + KNN Score Fusion
  *
  * Merges keyword (FTS5/BM25) and semantic (KNN/vector) results into a
  * single ranked list using Reciprocal Rank Fusion (RRF). This avoids

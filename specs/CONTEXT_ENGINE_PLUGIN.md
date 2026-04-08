@@ -1,10 +1,10 @@
-# HyperMem Context Engine Plugin — Implementation Spec
+# hypermem Context Engine Plugin — Implementation Spec
 
 _Written by Forge (opus) for implementation by Forge (sonnet) or subagent._
 
 ## Overview
 
-Wrap HyperMem's existing compositor into an OpenClaw context engine plugin.
+Wrap hypermem's existing compositor into an OpenClaw context engine plugin.
 Plugin replaces `plugins.slots.contextEngine: "legacy"` with `"hypermem"`.
 
 ## Plugin Structure
@@ -28,7 +28,7 @@ hypermem/plugin/
   "openclaw": {
     "plugin": {
       "id": "hypermem",
-      "name": "HyperMem Context Engine",
+      "name": "hypermem Context Engine",
       "kind": "context-engine"
     }
   }
@@ -49,14 +49,14 @@ export default function register(api) {
 ```typescript
 {
   id: "hypermem",
-  name: "HyperMem Context Engine",
+  name: "hypermem Context Engine",
   ownsCompaction: false,  // Delegate overflow to runtime initially
 }
 ```
 
 ### ingest({ sessionId, message, isHeartbeat })
 - Extract agentId from sessionId (parse `agent:<agentId>:...` format)
-- Call `hm.recordMessage(agentId, sessionKey, message)` on the singleton HyperMem instance
+- Call `hm.recordMessage(agentId, sessionKey, message)` on the singleton hypermem instance
 - Return `{ ingested: true }`
 - Skip recording if `isHeartbeat === true`
 
@@ -71,7 +71,7 @@ export default function register(api) {
   - `request.tier = agent tier from fleet store or 'standard'`
 - Return `{ messages: result.messages, estimatedTokens: result.totalTokens, systemPromptAddition: result.contextBlock }`
 - The `contextBlock` is the composed facts/recall/episodes/cross-session content
-- **Key question:** Does `assemble()` receive the full message history in `messages` param, or does HyperMem provide its own? Check OpenClaw docs — likely receives runtime messages, we augment with our composed context via `systemPromptAddition`.
+- **Key question:** Does `assemble()` receive the full message history in `messages` param, or does hypermem provide its own? Check OpenClaw docs — likely receives runtime messages, we augment with our composed context via `systemPromptAddition`.
 
 ### compact({ sessionId, force })
 - Since `ownsCompaction: false`, call `delegateCompactionToRuntime(...)` from `openclaw/plugin-sdk/core`
@@ -81,16 +81,16 @@ export default function register(api) {
 - Trigger background indexer for the agent: `indexer.processAgent(agentId)`
 - Fire-and-forget (don't block the response)
 
-## Singleton HyperMem Instance
+## Singleton hypermem Instance
 
-The plugin needs a single HyperMem instance shared across all sessions:
+The plugin needs a single hypermem instance shared across all sessions:
 
 ```typescript
-let hm: HyperMem | null = null;
+let hm: hypermem | null = null;
 
-async function getHyperMem(): Promise<HyperMem> {
+async function gethypermem(): Promise<hypermem> {
   if (!hm) {
-    hm = await HyperMem.create({
+    hm = await hypermem.create({
       dataDir: path.join(os.homedir(), '.openclaw/hypermem'),
       redis: { host: 'localhost', port: 6379, keyPrefix: 'hm:', sessionTTL: 86400 },
     });
@@ -148,7 +148,7 @@ openclaw plugins install -l /home/lumadmin/.openclaw/workspace/repo/hypermem/plu
    - From docs: "The engine returns an ordered set of messages" — so we likely need to return the full message set, not just additions.
    - Our compositor already builds the full message array. We return that directly.
 
-2. **How does the plugin access the existing HyperMem data directory?**
+2. **How does the plugin access the existing hypermem data directory?**
    - Hardcode to `~/.openclaw/hypermem` for now. Make configurable via plugin config later.
 
 3. **sessionId vs sessionKey format?**
@@ -158,7 +158,7 @@ openclaw plugins install -l /home/lumadmin/.openclaw/workspace/repo/hypermem/plu
 
 ## Testing Strategy
 
-1. Unit test the plugin registration and lifecycle methods with mocked HyperMem
+1. Unit test the plugin registration and lifecycle methods with mocked hypermem
 2. Integration test: install locally, flip the slot for Forge only, run a conversation
 3. Compare context output: old (legacy) vs new (hypermem) for same conversation
 4. Monitor token usage — should stay within budget

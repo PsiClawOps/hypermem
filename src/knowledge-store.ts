@@ -1,5 +1,5 @@
 /**
- * HyperMem Knowledge Store
+ * hypermem Knowledge Store
  *
  * Long-term structured knowledge — replaces MEMORY.md.
  * Lives in the central library DB.

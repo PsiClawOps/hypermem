@@ -1,5 +1,5 @@
 /**
- * HyperMem Agent Message Schema
+ * hypermem Agent Message Schema
  *
  * Per-agent database: ~/.openclaw/hypermem/agents/{agentId}/messages.db
  * Write-heavy, temporal, rotatable.

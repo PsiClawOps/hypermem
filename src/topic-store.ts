@@ -1,5 +1,5 @@
 /**
- * HyperMem Topic Store
+ * hypermem Topic Store
  *
  * Cross-session topic tracking. Topics are conversation threads that
  * can span multiple sessions and channels.

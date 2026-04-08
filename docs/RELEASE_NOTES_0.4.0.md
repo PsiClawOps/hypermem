@@ -1,4 +1,4 @@
-# HyperMem 0.4.0 Release Notes
+# hypermem 0.4.0 Release Notes
 
 _Released: 2026-04-06_
 
@@ -72,8 +72,8 @@ openclaw gateway restart
 Vector search requires embeddings. If you're upgrading an existing installation with history, run backfill after restart:
 
 ```js
-import { createHyperMem } from '@psiclawops/hypermem';
-const hm = await createHyperMem({ dir: '~/.openclaw/hypermem' });
+import { createhypermem } from '@psiclawops/hypermem';
+const hm = await createhypermem({ dir: '~/.openclaw/hypermem' });
 await hm.backfillEpisodeVectors('your-agent-id');
 ```
 

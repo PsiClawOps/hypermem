@@ -1,5 +1,5 @@
 /**
- * HyperMem Library Schema — Fleet-Wide Structured Knowledge
+ * hypermem Library Schema — Fleet-Wide Structured Knowledge
  *
  * Single database: ~/.openclaw/hypermem/library.db
  * The "crown jewel" — durable, backed up, low-write-frequency.

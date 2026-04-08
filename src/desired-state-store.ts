@@ -1,5 +1,5 @@
 /**
- * HyperMem Agent Desired State Store
+ * hypermem Agent Desired State Store
  *
  * Stores intended configuration for each agent and tracks drift.
  * Enables fleet-wide config visibility and enforcement.

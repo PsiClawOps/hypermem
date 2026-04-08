@@ -1,5 +1,5 @@
 /**
- * HyperMem Trigger Registry (W5)
+ * hypermem Trigger Registry (W5)
  *
  * Centralizes ACA collection trigger definitions with owner/category metadata.
  * Extracted from compositor.ts for independent testability and auditability.

@@ -1,14 +1,14 @@
-# HyperMem — Installation Guide
+# hypermem — Installation Guide
 
-_For agents and operators installing HyperMem into an OpenClaw instance._
+_For agents and operators installing hypermem into an OpenClaw instance._
 
 ---
 
 ## Before you start
 
-**Recommendation: let an agent do this installation.** HyperMem's configuration varies by deployment shape — solo agent vs. multi-agent fleet — and the config surface has enough moving parts that manual installation is error-prone. Hand this document to your primary OpenClaw agent and say:
+**Recommendation: let an agent do this installation.** hypermem's configuration varies by deployment shape — solo agent vs. multi-agent fleet — and the config surface has enough moving parts that manual installation is error-prone. Hand this document to your primary OpenClaw agent and say:
 
-> "Install HyperMem following INSTALL.md. I'm running a [solo / multi-agent] setup. Ask me if you hit a decision point."
+> "Install hypermem following INSTALL.md. I'm running a [solo / multi-agent] setup. Ask me if you hit a decision point."
 
 The agent can read your current `openclaw.json`, detect your deployment shape, clone the repo, wire the plugin, and validate the install — all without you touching config files directly.
 
@@ -16,9 +16,9 @@ If you're installing manually, read the full guide below.
 
 ---
 
-## What HyperMem does
+## What hypermem does
 
-HyperMem replaces OpenClaw's default context assembly with a four-layer memory system:
+hypermem replaces OpenClaw's default context assembly with a four-layer memory system:
 
 ```
 L1  Redis         Hot session cache — sub-millisecond reads for recent history and identity
@@ -27,15 +27,15 @@ L3  Vectors DB    Per-agent semantic search — finds relevant past context by m
 L4  Library DB    Structured knowledge — facts, episodes, preferences, fleet registry
 ```
 
-Every time an agent is about to reply, HyperMem rebuilds the context from these four layers within your token budget. Old tool output compresses by age. Relevant facts surface. Session restarts resume from where the agent left off.
+Every time an agent is about to reply, hypermem rebuilds the context from these four layers within your token budget. Old tool output compresses by age. Relevant facts surface. Session restarts resume from where the agent left off.
 
-The default OpenClaw context engine accumulates a raw transcript. HyperMem discards that model and assembles context fresh each turn.
+The default OpenClaw context engine accumulates a raw transcript. hypermem discards that model and assembles context fresh each turn.
 
 ---
 
 ## Deployment shapes
 
-HyperMem behaves differently depending on how many agents share an instance.
+hypermem behaves differently depending on how many agents share an instance.
 
 ### Solo agent
 
@@ -83,7 +83,7 @@ Multiple named agents sharing one OpenClaw gateway. Council setups, director/spe
 
 **Library DB:** Shared. Facts have a `scope` field (`agent` / `session` / `user` / `global`). Agent-scoped facts are only readable by the owning agent. Global-scoped facts are readable fleet-wide — see KNOWN_LIMITATIONS.md before using global scope.
 
-**Cross-agent visibility:** HyperMem enforces org-tier visibility on cross-agent queries (fleet / org / council / private). Agents are registered in `fleet_agents` on first bootstrap. Inter-agent fact queries respect this model automatically.
+**Cross-agent visibility:** hypermem enforces org-tier visibility on cross-agent queries (fleet / org / council / private). Agents are registered in `fleet_agents` on first bootstrap. Inter-agent fact queries respect this model automatically.
 
 **What to configure:** Register each agent in the fleet registry on first use. This happens automatically at bootstrap — each agent registers itself with `fleet_agents` when it first runs. No manual step required.
 
@@ -97,9 +97,9 @@ Multiple named agents sharing one OpenClaw gateway. Council setups, director/spe
 | OpenClaw | **Yes** | Any version that supports context engine plugins |
 | Redis 7+ | **Yes** | L1 hot layer — session history, identity slots, fleet cache |
 | Ollama | **Yes** | L3 vector layer — semantic search and recall. Install: https://ollama.ai |
-| nomic-embed-text | **Yes** | The embedding model HyperMem uses. Pull with: `ollama pull nomic-embed-text` |
+| nomic-embed-text | **Yes** | The embedding model hypermem uses. Pull with: `ollama pull nomic-embed-text` |
 
-Redis and Ollama are not optional. Redis is the hot session layer — without it, every bootstrap re-reads from SQLite and the fleet cache doesn't exist. Ollama with `nomic-embed-text` is the vector layer — without it, semantic recall is completely disabled and retrieval degrades to keyword-only FTS5 matching. HyperMem will start without them but it will not be working correctly.
+Redis and Ollama are not optional. Redis is the hot session layer — without it, every bootstrap re-reads from SQLite and the fleet cache doesn't exist. Ollama with `nomic-embed-text` is the vector layer — without it, semantic recall is completely disabled and retrieval degrades to keyword-only FTS5 matching. hypermem will start without them but it will not be working correctly.
 
 ---
 
@@ -130,7 +130,7 @@ Use the OpenClaw CLI. **Do not edit `openclaw.json` directly** — the CLI valid
 # Add the plugin load path
 openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin"]' --strict-json
 
-# Set HyperMem as the active context engine
+# Set hypermem as the active context engine
 openclaw config set plugins.slots.contextEngine hypermem
 
 # Enable the plugin
@@ -146,9 +146,9 @@ openclaw config get plugins.load.paths
 
 ### Step 3 — Review and apply OpenClaw setting changes
 
-HyperMem takes over context assembly from OpenClaw's default pipeline. Several OpenClaw defaults that existed to manage the JSONL transcript or control summarization compaction become either irrelevant or counterproductive once HyperMem is active.
+hypermem takes over context assembly from OpenClaw's default pipeline. Several OpenClaw defaults that existed to manage the JSONL transcript or control summarization compaction become either irrelevant or counterproductive once hypermem is active.
 
-**Why it matters:** OpenClaw's built-in engine reads the JSONL transcript and summarizes it when it gets long. HyperMem replaces that entire pipeline — context is assembled from SQLite and Redis, never from a growing transcript. A bloated JSONL is now just overhead: it causes the runtime to estimate high token counts, trigger unnecessary compaction checks, and add latency on every turn.
+**Why it matters:** OpenClaw's built-in engine reads the JSONL transcript and summarizes it when it gets long. hypermem replaces that entire pipeline — context is assembled from SQLite and Redis, never from a growing transcript. A bloated JSONL is now just overhead: it causes the runtime to estimate high token counts, trigger unnecessary compaction checks, and add latency on every turn.
 
 **An installing agent should discuss each of these changes with you before applying them.** The tradeoffs differ depending on your setup.
 
@@ -156,21 +156,21 @@ HyperMem takes over context assembly from OpenClaw's default pipeline. Several O
 
 #### Change 1 — Lower OpenClaw's compaction threshold
 
-OpenClaw's default compaction fires LLM-powered summarization when the context approaches `contextWindow - reserveTokens`. HyperMem already owns compaction (`ownsCompaction: true`) and trims the JSONL and Redis window itself. If OpenClaw's compaction fires alongside HyperMem's, it attempts to summarize context HyperMem has already managed, producing double-compaction artifacts and unnecessary model calls.
+OpenClaw's default compaction fires LLM-powered summarization when the context approaches `contextWindow - reserveTokens`. hypermem already owns compaction (`ownsCompaction: true`) and trims the JSONL and Redis window itself. If OpenClaw's compaction fires alongside hypermem's, it attempts to summarize context hypermem has already managed, producing double-compaction artifacts and unnecessary model calls.
 
 ```bash
 openclaw config set agents.defaults.compaction.reserveTokens 1000 --strict-json
 ```
 
-**OpenClaw default:** `reserveTokensFloor: 24000`. At 24K reserved, compaction fires much earlier than needed and races HyperMem's own budget management.
+**OpenClaw default:** `reserveTokensFloor: 24000`. At 24K reserved, compaction fires much earlier than needed and races hypermem's own budget management.
 
-**Tradeoff to discuss:** Setting this to 1000 means OpenClaw's compaction is effectively a last-resort safety net that never fires in normal operation. HyperMem is the sole backstop. That is the correct design — but your agent should confirm you understand HyperMem is now responsible for keeping context in budget.
+**Tradeoff to discuss:** Setting this to 1000 means OpenClaw's compaction is effectively a last-resort safety net that never fires in normal operation. hypermem is the sole backstop. That is the correct design — but your agent should confirm you understand hypermem is now responsible for keeping context in budget.
 
 ---
 
 #### Change 2 — Trim the JSONL session store
 
-OpenClaw retains JSONL transcript files and `sessions.json` metadata for 30 days by default, with up to 500 sessions tracked. For agents with frequent sessions, this accumulates quickly. With HyperMem active, the JSONL is not your agent's memory — SQLite and Redis are. Retaining large JSONLs provides no memory benefit and slows session store lookups.
+OpenClaw retains JSONL transcript files and `sessions.json` metadata for 30 days by default, with up to 500 sessions tracked. For agents with frequent sessions, this accumulates quickly. With hypermem active, the JSONL is not your agent's memory — SQLite and Redis are. Retaining large JSONLs provides no memory benefit and slows session store lookups.
 
 ```bash
 # Prune session store entries after 14 days instead of 30
@@ -182,7 +182,7 @@ openclaw config set sessions.maintenance.maxEntries 200 --strict-json
 
 **OpenClaw defaults:** `pruneAfter: 30d`, `maxEntries: 500`.
 
-**Tradeoff to discuss:** If you use ClawDash or `sessions_list` to browse conversation history older than 14 days, you still need those entries in `sessions.json`. HyperMem's SQLite store is the durable record — session metadata in `sessions.json` is just an index. Ask your agent: "Does anything I use depend on sessions older than 14 days being in the session store?"
+**Tradeoff to discuss:** If you use ClawDash or `sessions_list` to browse conversation history older than 14 days, you still need those entries in `sessions.json`. hypermem's SQLite store is the durable record — session metadata in `sessions.json` is just an index. Ask your agent: "Does anything I use depend on sessions older than 14 days being in the session store?"
 
 ---
 
@@ -239,9 +239,9 @@ openclaw config set sessions.maxAgeHours 168 --strict-json
 
 ## Token budget tuning
 
-HyperMem actively loads context: recent history, facts, semantic recall, doc chunks, and library data all get tokens each turn. For most users on subscription models this is the point — richer context, better responses. But if you want to reduce token burn, every major context slot has a knob.
+hypermem actively loads context: recent history, facts, semantic recall, doc chunks, and library data all get tokens each turn. For most users on subscription models this is the point — richer context, better responses. But if you want to reduce token burn, every major context slot has a knob.
 
-These settings live in `~/.openclaw/hypermem/config.json`. Create the file if it doesn't exist — HyperMem loads it at startup and merges it over the defaults. A gateway restart is required after changes.
+These settings live in `~/.openclaw/hypermem/config.json`. Create the file if it doesn't exist — hypermem loads it at startup and merges it over the defaults. A gateway restart is required after changes.
 
 **An installing agent should discuss these tradeoffs with you before setting them.** Cutting the budget too aggressively produces an agent that forgets things mid-conversation. Cutting individual slots (facts, history depth) is lower-risk than cutting the total budget.
 
@@ -272,7 +272,7 @@ All fields are optional — omit any you don't want to change.
 #### `defaultTokenBudget` — total context ceiling
 **Default:** `90000`
 
-The hard cap on tokens HyperMem will assemble per turn. Everything else is a fraction of this. Reducing it compresses all slots proportionally — history gets fewer messages, fewer facts surface, semantic recall shrinks.
+The hard cap on tokens hypermem will assemble per turn. Everything else is a fraction of this. Reducing it compresses all slots proportionally — history gets fewer messages, fewer facts surface, semantic recall shrinks.
 
 **Tradeoff:** Reduces token spend directly but degrades recall quality across the board. Don't go below `40000` without testing — below that, history depth drops to the point where the agent loses conversational thread mid-session.
 
@@ -283,7 +283,7 @@ The hard cap on tokens HyperMem will assemble per turn. Everything else is a fra
 #### `maxHistoryMessages` — how many past messages to consider
 **Default:** `250`
 
-The maximum messages pulled from SQLite/Redis before budget trimming. Budget trimming then cuts this down further based on `defaultTokenBudget`. This knob is the ceiling before budget math runs — lowering it reduces the pool HyperMem picks from.
+The maximum messages pulled from SQLite/Redis before budget trimming. Budget trimming then cuts this down further based on `defaultTokenBudget`. This knob is the ceiling before budget math runs — lowering it reduces the pool hypermem picks from.
 
 **Tradeoff:** Low values cause the agent to lose older context even when the token budget has room. `100` is a reasonable reduction for lightweight use.
 
@@ -337,7 +337,7 @@ The fraction of `defaultTokenBudget` allocated to conversation history. At the d
 #### `keystoneHistoryFraction` — older recalled messages
 **Default:** `0.2` (20% of history budget)
 
-HyperMem injects "keystone" messages — older significant turns from earlier in the session — into the history slot to maintain long-range continuity. This fraction controls how many history tokens go to keystones vs. recent messages. Set to `0` to disable keystones entirely.
+hypermem injects "keystone" messages — older significant turns from earlier in the session — into the history slot to maintain long-range continuity. This fraction controls how many history tokens go to keystones vs. recent messages. Set to `0` to disable keystones entirely.
 
 **Tradeoff:** Disabling keystones saves tokens but the agent loses long-range session continuity. For short-session or task-focused agents this is fine. For persistent agents running multi-hour sessions it degrades noticeably.
 
@@ -384,7 +384,7 @@ openclaw logs --limit 50 | grep hypermem
 
 You should see lines like:
 ```
-[hypermem] HyperMem initialized — dataDir=/home/.../.openclaw/hypermem
+[hypermem] hypermem initialized — dataDir=/home/.../.openclaw/hypermem
 [hypermem:compose] agent=main triggers=0 fallback=true facts=3 semantic=2 chunks=0 scopeFiltered=0 mode=fallback_knn
 ```
 
@@ -420,13 +420,13 @@ If `nomic-embed-text` is not pulled yet:
 ollama pull nomic-embed-text
 ```
 
-Do not proceed until both return the expected output. A gateway restart with either service missing will leave HyperMem in a degraded state that is easy to confuse with a misconfiguration.
+Do not proceed until both return the expected output. A gateway restart with either service missing will leave hypermem in a degraded state that is easy to confuse with a misconfiguration.
 
 ---
 
 ## Data directory
 
-HyperMem stores all data in `~/.openclaw/hypermem/` by default. This is created automatically on first run.
+hypermem stores all data in `~/.openclaw/hypermem/` by default. This is created automatically on first run.
 
 ```
 ~/.openclaw/hypermem/
@@ -452,7 +452,7 @@ openclaw config set plugins.slots.contextEngine legacy
 openclaw gateway restart
 ```
 
-Your data in `~/.openclaw/hypermem/` is untouched. You can re-enable HyperMem at any time by switching back to `hypermem`.
+Your data in `~/.openclaw/hypermem/` is untouched. You can re-enable hypermem at any time by switching back to `hypermem`.
 
 ---
 
@@ -481,7 +481,7 @@ Then restart the gateway.
 
 ## Session key format
 
-HyperMem expects session keys in the format:
+hypermem expects session keys in the format:
 ```
 agent:{agentId}:{channel}:{name}
 ```
@@ -491,13 +491,13 @@ Examples:
 - `agent:forge:discord:main`
 - `agent:sentinel:webchat:scratchpad`
 
-OpenClaw sets this automatically. If you're calling the HyperMem API directly, follow this format — the compositor uses it to scope history and facts correctly.
+OpenClaw sets this automatically. If you're calling the hypermem API directly, follow this format — the compositor uses it to scope history and facts correctly.
 
 ---
 
 ## What happens on first boot
 
-1. HyperMem creates `~/.openclaw/hypermem/` and all DB files.
+1. hypermem creates `~/.openclaw/hypermem/` and all DB files.
 2. The context engine registers with OpenClaw.
 3. On your agent's first session, `bootstrap()` runs: creates `agents/{agentId}/messages.db` and `vectors.db`, registers the agent in `library.db fleet_agents`.
 4. Redis is warmed from SQLite (empty on first boot — nothing to warm).

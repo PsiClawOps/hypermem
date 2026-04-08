@@ -7,7 +7,7 @@
  * runs less often.
  *
  * Works on the raw OpenClaw message format (AgentMessage / content arrays),
- * not on HyperMem's internal NeutralMessage format.
+ * not on hypermem's internal NeutralMessage format.
  *
  * What gets evicted:
  *   - Base64 image blocks (OpenAI image_url / Anthropic image source) older than imageAgeTurns

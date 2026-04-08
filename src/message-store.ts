@@ -1,5 +1,5 @@
 /**
- * HyperMem Message Store
+ * hypermem Message Store
  *
  * CRUD operations for conversations and messages in SQLite.
  * All messages are stored in provider-neutral format.

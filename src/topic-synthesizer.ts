@@ -4,7 +4,7 @@
  * Synthesizes compiled knowledge pages (wiki-style) from stale topics.
  * Heuristic-only: no LLM calls. Uses content-type classifier + keystone scoring.
  *
- * Architecture: Karpathy LLM Wiki Pattern adapted for HyperMem.
+ * Architecture: Karpathy LLM Wiki Pattern adapted for hypermem.
  * Raw sources (messages.db) → Wiki (knowledge table) → Compositor (compose-time)
  */
 

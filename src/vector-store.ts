@@ -1,5 +1,5 @@
 /**
- * HyperMem Vector Store — Semantic Search via sqlite-vec
+ * hypermem Vector Store — Semantic Search via sqlite-vec
  *
  * Provides embedding-backed KNN search over facts, knowledge, episodes,
  * and session registry entries. Uses Ollama (local) for embeddings,

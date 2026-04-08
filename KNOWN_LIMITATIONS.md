@@ -1,4 +1,4 @@
-# HyperMem — Known Limitations
+# hypermem — Known Limitations
 
 _Last updated: 2026-04-05. Reviewed by Sentinel (W9 trust-boundary review)._
 
@@ -54,7 +54,7 @@ The `scopeFiltered` counter in compose diagnostics aggregates two distinct cases
 **Affects:** 0.3.0 and earlier  
 **Reviewed by:** Sentinel (W9)
 
-`Compositor` accepts an optional `triggerRegistry` at construction time. A caller who constructs a `Compositor` instance with a malicious registry controls what collections get queried. In the current architecture, compositor construction is internal to HyperMem and not reachable from the conversation layer — this surface is not exposed to agent-controlled input.
+`Compositor` accepts an optional `triggerRegistry` at construction time. A caller who constructs a `Compositor` instance with a malicious registry controls what collections get queried. In the current architecture, compositor construction is internal to hypermem and not reachable from the conversation layer — this surface is not exposed to agent-controlled input.
 
 The `TRIGGER_REGISTRY_HASH` in startup logs provides an audit signal: a substituted registry will produce a divergent hash.
 

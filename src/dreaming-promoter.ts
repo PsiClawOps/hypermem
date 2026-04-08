@@ -1,7 +1,7 @@
 /**
  * dreaming-promoter.ts
  *
- * HyperMem-native dreaming promotion pass.
+ * hypermem-native dreaming promotion pass.
  *
  * Unlike the stock memory-core dreaming feature (which appends raw content to
  * MEMORY.md), this promoter generates pointer-format entries that match the

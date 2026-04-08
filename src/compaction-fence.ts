@@ -1,5 +1,5 @@
 /**
- * HyperMem Compaction Fence
+ * hypermem Compaction Fence
  *
  * Protects the recent conversation tail from being compacted.
  *

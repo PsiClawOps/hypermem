@@ -8,7 +8,7 @@ Your agent forgets. Not because the model is broken — because nothing in the d
 
 Context accumulates, gets summarized, loses specifics. Sessions end and the agent wakes up empty. Tool output crowds out reasoning. The wrong history is in the window at the wrong time. These are not edge cases. They are the natural failure modes of treating memory as an afterthought.
 
-OpenClaw already gives agents a solid baseline: workspace memory files, hybrid file search, and compaction safeguards. HyperMem goes deeper. It replaces transcript accumulation with a context engine that assembles prompts fresh from storage on every turn — purpose-built to eliminate each failure mode at the source.
+OpenClaw already gives agents a solid baseline: workspace memory files, hybrid file search, and compaction safeguards. hyper**mem** goes deeper. It replaces transcript accumulation with a context engine that assembles prompts fresh from storage on every turn — purpose-built to eliminate each failure mode at the source.
 
 ```text
 L1  Redis         Hot session cache, identity, compressed recent history
@@ -25,13 +25,13 @@ L4  Library DB    Fleet-wide structured knowledge, facts, episodes, registry
 
 When an agent restarts, it wakes up empty. Decisions made, preferences established, work in progress — gone. Operators re-explain context. Agents ask questions they have already asked. The work is real. The memory is not.
 
-HyperMem warms sessions from SQLite and Redis before the first turn. The agent picks up mid-conversation. Session continuity is no longer a function of uptime — it is a property of the architecture.
+hyper**mem** warms sessions from SQLite and Redis before the first turn. The agent picks up mid-conversation. Session continuity is no longer a function of uptime — it is a property of the architecture.
 
 ### Context that never collapses
 
 Transcripts grow. Windows fill. Runtimes compact history into a summary — and specifics, tool detail, and work state get lost in the process. The agent keeps going, but degraded.
 
-HyperMem never reaches that cliff. It assembles context fresh on every turn inside a strict token budget. History, facts, recall, and library data compete for tokens intentionally. If the model window changes mid-session, the compositor adapts on the next turn. There is no accumulated transcript to compress.
+hyper**mem** never reaches that cliff. It assembles context fresh on every turn inside a strict token budget. History, facts, recall, and library data compete for tokens intentionally. If the model window changes mid-session, the compositor adapts on the next turn. There is no accumulated transcript to compress.
 
 ### Retrieval that actually finds things
 
@@ -49,25 +49,25 @@ Tool Context Tuning compresses by turn age. T0 turns stay verbatim. T1 turns bec
 
 Long sessions drift. An agent deep in a database migration does not need deployment context from two hours ago competing for tokens.
 
-HyperMem detects topic shifts with heuristics: explicit subject changes, long gaps, entity overlap between recent turns. When a shift is detected, history scopes to the active topic. Past context does not disappear — **keystone retrieval** pulls high-signal moments back in when they are relevant. Keystone scoring weighs turn age and content density: decisions, artifact references, and conclusions surface regardless of how many sessions ago they happened.
+hyper**mem** detects topic shifts with heuristics: explicit subject changes, long gaps, entity overlap between recent turns. When a shift is detected, history scopes to the active topic. Past context does not disappear — **keystone retrieval** pulls high-signal moments back in when they are relevant. Keystone scoring weighs turn age and content density: decisions, artifact references, and conclusions surface regardless of how many sessions ago they happened.
 
 ### Knowledge that outlasts the conversation
 
-Most memory systems store what was said. HyperMem synthesizes what was learned.
+Most memory systems store what was said. hyper**mem** synthesizes what was learned.
 
-When a topic goes quiet, HyperMem compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. This is classifier-driven — no LLM call required. Facts, episodes, and preferences written explicitly during the session are available immediately in structured storage. Per-turn automatic extraction from raw conversation text is on the roadmap. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay. The conversation is gone. The knowledge it produced is not.
+When a topic goes quiet, hyper**mem** compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. This is classifier-driven — no LLM call required. Facts, episodes, and preferences written explicitly during the session are available immediately in structured storage. Per-turn automatic extraction from raw conversation text is on the roadmap. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay. The conversation is gone. The knowledge it produced is not.
 
 ### Virtual Sessions
 
 Most memory systems treat a session as one flat stream. Long conversations drift — early context is trimmed, recent context dominates, and subject shifts create a blurry mix of conflicting state.
 
-HyperMem makes topics first-class. When a new subject takes over, the agent switches into a scoped context: its own Redis warming, its own history window, its own keystone set. Switching back restores that context cleanly. Natural language cues trigger transitions; ambiguous shifts get a soft confirmation before committing. Each topic behaves like its own isolated working session — searchable across the fleet, but focused in the window. These topic-scoped contexts are **Virtual Sessions** — each maintains its own Redis warming state, history window, and document index alongside the main session.
+hyper**mem** makes topics first-class. When a new subject takes over, the agent switches into a scoped context: its own Redis warming, its own history window, its own keystone set. Switching back restores that context cleanly. Natural language cues trigger transitions; ambiguous shifts get a soft confirmation before committing. Each topic behaves like its own isolated working session — searchable across the fleet, but focused in the window. These topic-scoped contexts are **Virtual Sessions** — each maintains its own Redis warming state, history window, and document index alongside the main session.
 
 ### History that remembers its highlights
 
 Context trimming is a blunt instrument. When a session fills up, recent messages survive and old ones go — regardless of which turns actually mattered. A decision from three hours ago gets dropped. Tool noise from five minutes ago stays.
 
-HyperMem scores turns for significance as they are recorded. High-signal moments — decisions, blockers, artifacts, established facts — are marked as keystones. When pressure trims the history window, keystones are preserved ahead of ordinary turns. When a topic shift occurs and history scopes to the new thread, keystones from past contexts are still eligible for recall — the agent keeps its landmarks even when the surrounding conversation is gone.
+hyper**mem** scores turns for significance as they are recorded. High-signal moments — decisions, blockers, artifacts, established facts — are marked as keystones. When pressure trims the history window, keystones are preserved ahead of ordinary turns. When a topic shift occurs and history scopes to the new thread, keystones from past contexts are still eligible for recall — the agent keeps its landmarks even when the surrounding conversation is gone.
 
 ### Outputs you can verify
 
@@ -85,7 +85,7 @@ Spawned subagents start cold. They don't know what the parent was doing, which f
 
 ## Pressure management
 
-HyperMem assembles context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript and Redis window. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
+hyper**mem** assembles context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript and Redis window. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
 
 | Path | Trigger | Action |
 |---|---|---|
@@ -150,7 +150,7 @@ L1 and L4 structured retrieval are sub-millisecond. After the first turn, query 
 
 ## Architecture
 
-HyperMem plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle.
+hyper**mem** plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle.
 
 **L1: Redis** is the hot layer. Identity, compressed session history, cached embeddings, topic-scoped context, and fleet registry data. The compositor goes here first on every turn.
 
@@ -173,7 +173,7 @@ HyperMem plugs into OpenClaw as a context engine and owns the full prompt compos
 | Session Registry | Session lifecycle tracking |
 | Desired State | Per-agent config targets; compares running config against desired at gateway startup and surfaces drift for operator review |
 
-**Secret scanner** — Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, HyperMem scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected — the write succeeds without the content reaching fleet-visible storage.
+**Secret scanner** — Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, hyper**mem** scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected — the write succeeds without the content reaching fleet-visible storage.
 
 **The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and assembles a provider-format context block. A safety valve catches estimation drift and trims post-assembly. Because the budget is computed from the model's actual context window at compose time — resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly — a mid-session model swap is absorbed on the next turn with no manual intervention. T0 (the current turn's tool output) is always preserved verbatim; compression starts at T1.
 
@@ -183,7 +183,7 @@ HyperMem plugs into OpenClaw as a context engine and owns the full prompt compos
 
 **Let your OpenClaw agent install this.** The configuration varies by deployment shape, and there are enough moving parts that manual setup is error-prone. Hand this to your agent:
 
-> "Install HyperMem following INSTALL.md. I'm running a [solo / multi-agent] setup."
+> "Install hyper**mem** following INSTALL.md. I'm running a [solo / multi-agent] setup."
 
 Full guide: **[INSTALL.md](./INSTALL.md)**
 
@@ -228,9 +228,9 @@ This profile targets ~35-45% token reduction for smaller context windows. Full t
 ## API
 
 ```typescript
-import { HyperMem, buildSpawnContext, DocChunkStore, MessageStore } from '@psiclawops/hypermem';
+import { hyper**mem**, buildSpawnContext, DocChunkStore, MessageStore } from '@psiclawops/hypermem';
 
-const hm = await HyperMem.create({
+const hm = await hyper**mem**.create({
   dataDir: '~/.openclaw/hypermem',
   redis: { host: 'localhost', port: 6379 },
   embedding: { ollamaUrl: 'http://localhost:11434', model: 'nomic-embed-text' },
@@ -287,7 +287,7 @@ const spawn = await buildSpawnContext(
 
 ## Migration
 
-HyperMem doesn't touch your existing memory data. Install it, switch the context engine, and migrate historical data on your own timeline — before or after switching.
+hyper**mem** doesn't touch your existing memory data. Install it, switch the context engine, and migrate historical data on your own timeline — before or after switching.
 
 Migrations are supported from any memory platform. Worked examples are included in the migration documentation for: **OpenClaw built-in memory, ClawText, Mem0, Honcho, QMD session exports, and Engram**.
 
@@ -295,7 +295,7 @@ All migration scripts default to dry-run. Nothing is written until you add `--ap
 
 Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 
-> **For agents:** See [docs/AGENT_MIGRATION.md](./docs/AGENT_MIGRATION.md) for HyperMem's data model, field-level semantics, and mapping examples for each platform. The scripts are helpers — the doc gives you enough to handle any format, including ones without a script.
+> **For agents:** See [docs/AGENT_MIGRATION.md](./docs/AGENT_MIGRATION.md) for hyper**mem**'s data model, field-level semantics, and mapping examples for each platform. The scripts are helpers — the doc gives you enough to handle any format, including ones without a script.
 
 ---
 

@@ -1,4 +1,4 @@
-# HyperMem 0.2.0 — Public Alpha Release Notes
+# hypermem 0.2.0 — Public Alpha Release Notes
 
 **Tag:** `v0.2.0`  
 **Date:** 2026-04-04  
@@ -125,7 +125,7 @@ No breaking changes from 0.1.x. The `ComposeResult` shape gains:
 - `diagnostics.zeroResultReason` — new optional field, union type extended with `'unknown'`
 - `diagnostics.retrievalMode` — was already present, now includes `'fallback_knn'` value
 
-Plugin hooks unchanged. HyperMem facade API unchanged.
+Plugin hooks unchanged. hypermem facade API unchanged.
 
 ---
 

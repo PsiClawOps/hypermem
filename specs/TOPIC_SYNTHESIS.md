@@ -9,7 +9,7 @@
 
 ## Problem
 
-HyperMem *extracts* facts from conversation (pattern matching on paths, services, config).
+hypermem *extracts* facts from conversation (pattern matching on paths, services, config).
 It does not *synthesize* knowledge. When a topic closes or goes stale, the decisions,
 context, and cross-references from that conversation are only retrievable via raw message
 search or individual fact lookup. There's no compiled summary that captures the state of
@@ -20,7 +20,7 @@ query time (compose) compounds knowledge instead of re-deriving it every turn.
 
 ## Architecture Mapping
 
-| Karpathy Layer | HyperMem Layer | Current State |
+| Karpathy Layer | hypermem Layer | Current State |
 |---|---|---|
 | Raw sources (immutable) | `messages.db` per agent | ✅ Live |
 | Wiki (compiled, LLM-maintained) | `knowledge` table in `library.db` | Schema exists, zero rows |

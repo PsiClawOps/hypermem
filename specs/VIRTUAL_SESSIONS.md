@@ -11,7 +11,7 @@
 ## Problem
 
 Agents handle multiple concurrent threads of work within a single session. When a user shifts
-from "HyperMem indexer quality" to "ClawDash deployment" and back, the agent loses working
+from "hypermem indexer quality" to "ClawDash deployment" and back, the agent loses working
 context for the first topic. Today the compositor scopes history to the active topic (P3.4),
 but there's no warming, no state preservation, and no cross-agent topic discovery.
 
@@ -71,7 +71,7 @@ layer — between cross-session context and facts.
 
 Format in the composed prompt:
 ```
-## Topic Context: HyperMem indexer quality
+## Topic Context: hypermem indexer quality
 [wiki synthesis content — summary, key decisions, open questions, artifacts]
 ```
 
@@ -129,7 +129,7 @@ Topics in library.db are already agent-scoped but visible fleet-wide (`visibilit
 Add a search interface:
 
 ```typescript
-// In HyperMem public API
+// In hypermem public API
 searchTopics(query: string, opts?: {
   agentId?: string;        // filter to specific agent (null = all agents)
   limit?: number;          // default 10
@@ -201,7 +201,7 @@ All topic names are normalized before storage and search:
 4. Truncated to 40 chars (existing behavior)
 
 Normalization runs in `SessionTopicMap.createTopic()` and `searchTopics()` query
-path. This ensures "HyperMem Indexer" and "hypermem-indexer" resolve to the same
+path. This ensures "hypermem Indexer" and "hypermem-indexer" resolve to the same
 topic for matching and deduplication.
 
 **Dedup on create (Anvil):** `createTopic` checks for an existing topic with the same

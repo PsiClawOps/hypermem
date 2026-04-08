@@ -1,5 +1,5 @@
 /**
- * HyperMem Retrieval Policy
+ * hypermem Retrieval Policy
  *
  * Single enforced policy layer for scope-based access control during retrieval.
  * Called by the compositor to filter items before they are injected into context.

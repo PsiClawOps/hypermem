@@ -1,4 +1,4 @@
-# HyperMem Roadmap — 2026-04-02
+# hypermem Roadmap — 2026-04-02
 
 **Author:** Forge  
 **Status:** Active  
@@ -16,7 +16,7 @@ _Close out all P1 items from the April 2 stabilization plan. These are stability
 **Effort:** Small  
 
 ### P1.2 — Plugin type unification
-**Problem:** `plugin/src/index.ts` re-declares types that exist in HyperMem core (e.g. `historyDepth`, `prompt`). Drift between the two caused real bugs (Incidents 3, 6). The plugin should import from core, not shadow it.  
+**Problem:** `plugin/src/index.ts` re-declares types that exist in hypermem core (e.g. `historyDepth`, `prompt`). Drift between the two caused real bugs (Incidents 3, 6). The plugin should import from core, not shadow it.  
 **Fix:** Remove duplicate type shims in plugin. Import `CompositorConfig`, `ComposeRequest`, `NeutralMessage`, etc. directly from `@psiclawops/hypermem`.  
 **Owner:** Forge  
 **Effort:** Small-medium  
@@ -43,7 +43,7 @@ _Close out all P1 items from the April 2 stabilization plan. These are stability
 **Effort:** Small (verify) or Small-medium (improve triggers if needed)
 
 ### P1.7 — Background indexer TaskFlow integration
-**What:** Register HyperMem's background indexer as a managed OpenClaw TaskFlow via `api.runtime.taskFlow`. Currently the indexer runs as a fire-and-forget timer — invisible, unmonitorable, unrecoverable.
+**What:** Register hypermem's background indexer as a managed OpenClaw TaskFlow via `api.runtime.taskFlow`. Currently the indexer runs as a fire-and-forget timer — invisible, unmonitorable, unrecoverable.
 **Why:** Operational observability. `openclaw tasks list` will show indexer runs, stuck detection will surface hangs, and `openclaw tasks flow show` gives state between runs. Cancel/recovery primitives if it gets into a bad state.
 **Scope:** Plugin only — `plugin/src/index.ts`. No changes to indexer logic itself.
 **Secondary use case:** Long-running ops (full re-index, org registry audit) can be spawned as managed tasks instead of fire-and-forget subagents.
@@ -68,14 +68,14 @@ _Builds on stable Phase 1 foundation. Focused on making the context window smart
 **Effort:** Full day including tests
 
 ### P2.2 — Port content type / durability classifier from ClawText
-**What:** ClawText has `content-type-classifier.ts` and `durability-classifier.ts` — classifies messages by signal value (decision, question, acknowledgment, tool result, etc.). Keystone scoring (P2.1) needs this to assign decisional weight without pure keyword heuristics. Port to HyperMem, adapt to `NeutralMessage` interface.  
+**What:** ClawText has `content-type-classifier.ts` and `durability-classifier.ts` — classifies messages by signal value (decision, question, acknowledgment, tool result, etc.). Keystone scoring (P2.1) needs this to assign decisional weight without pure keyword heuristics. Port to hypermem, adapt to `NeutralMessage` interface.  
 **Owner:** Forge  
 **Effort:** Medium  
 **Dependency:** P2.1 (keystone uses it immediately)
 
 ### P2.3 — Port proactive passes from ClawText
-**What:** ClawText runs noise sweep + tool decay passes in the background between turns, not just at compose time. HyperMem currently does all cleanup at compose time — which is correct but means storage accumulates noise until compose. Background passes keep storage lean and compose fast.  
-**Port:** `proactive-pass.ts` (noise sweep + tool decay) adapted to HyperMem's message schema and background indexer scheduling.  
+**What:** ClawText runs noise sweep + tool decay passes in the background between turns, not just at compose time. hypermem currently does all cleanup at compose time — which is correct but means storage accumulates noise until compose. Background passes keep storage lean and compose fast.  
+**Port:** `proactive-pass.ts` (noise sweep + tool decay) adapted to hypermem's message schema and background indexer scheduling.  
 **Owner:** Forge  
 **Effort:** Medium
 
@@ -97,7 +97,7 @@ _The architecturally significant work. Turns sessions into conversation topics. 
 **Dependency:** P3.1
 
 ### P3.3 — Port session-topic-map + topic-anchors from ClawText
-**What:** ClawText has working code for binding sessions to named topics (`session-topic-map.ts`) and maintaining durable per-topic state files with key decisions, history, and current status (`topic-anchor.ts`). Port to HyperMem, adapt storage to use `topics` table in library.db instead of flat files.  
+**What:** ClawText has working code for binding sessions to named topics (`session-topic-map.ts`) and maintaining durable per-topic state files with key decisions, history, and current status (`topic-anchor.ts`). Port to hypermem, adapt storage to use `topics` table in library.db instead of flat files.  
 **Owner:** Forge  
 **Effort:** Medium  
 **Dependency:** P3.2
@@ -112,7 +112,7 @@ _The architecturally significant work. Turns sessions into conversation topics. 
 
 ### P3.5 — Cross-topic keystone retrieval
 **Status:** Done (2026-04-05)  
-**What:** Keystone slot (P2.1) extended to pull high-value messages from OTHER topics when their content is referenced in the current topic. A decision made in the "HyperMem stabilization" topic that's relevant to the current "sessionless architecture" topic surfaces automatically.  
+**What:** Keystone slot (P2.1) extended to pull high-value messages from OTHER topics when their content is referenced in the current topic. A decision made in the "hypermem stabilization" topic that's relevant to the current "sessionless architecture" topic surfaces automatically.  
 **Owner:** Forge  
 **Effort:** Medium  
 **Dependency:** P2.1, P3.4

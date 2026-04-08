@@ -1,5 +1,5 @@
 /**
- * HyperMem Provider Translator
+ * hypermem Provider Translator
  *
  * Converts between provider-neutral (NeutralMessage) and provider-specific formats.
  * This is the ONLY place where provider-specific formatting exists.
@@ -87,7 +87,7 @@ import { createHash } from 'node:crypto';
 let idCounter = 0;
 
 /**
- * Generate a HyperMem-native tool call ID.
+ * Generate a hypermem-native tool call ID.
  * These are provider-neutral and deterministic within a session.
  */
 export function generateToolCallId(): string {
@@ -98,7 +98,7 @@ export function generateToolCallId(): string {
 }
 
 /**
- * Convert a provider-specific tool call ID to a HyperMem ID.
+ * Convert a provider-specific tool call ID to a hypermem ID.
  * Deterministic: same input always produces same output.
  */
 export function normalizeToolCallId(providerId: string): string {

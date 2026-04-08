@@ -1,5 +1,5 @@
 /**
- * HyperMem Background Indexer
+ * hypermem Background Indexer
  *
  * Processes message history to extract structured knowledge:
  *   - Facts: atomic pieces of learned information
@@ -1165,7 +1165,7 @@ export class BackgroundIndexer {
 // ─── Standalone runner ──────────────────────────────────────────
 
 /**
- * Create and start a background indexer connected to HyperMem databases.
+ * Create and start a background indexer connected to hypermem databases.
  * Used by the hook or a standalone daemon.
  */
 export function createIndexer(

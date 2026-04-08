@@ -1,6 +1,6 @@
-# HyperMem Tuning Registry
+# hypermem Tuning Registry
 
-Tracks before/after values for tunable parameters across HyperMem and ClawText compositor layers.
+Tracks before/after values for tunable parameters across hypermem and ClawText compositor layers.
 Each entry records the change, rationale, and date — so we can track drift over time and revert if needed.
 
 ---
@@ -91,11 +91,11 @@ Each entry records the change, rationale, and date — so we can track drift ove
 - **Status:** active
 
 ### TUNE-008 — Compositor token budget: reduce to prevent tool-loop overflow
-- **File:** `src/index.ts` — `DEFAULT_CONFIG.compositor.defaultTokenBudget`; `context-engine.js` — `HyperMem.create()` call
+- **File:** `src/index.ts` — `DEFAULT_CONFIG.compositor.defaultTokenBudget`; `context-engine.js` — `hypermem.create()` call
 - **Parameter:** `defaultTokenBudget` passed to the Compositor at initialization
 - **Before:** 100,000 tokens
 - **After:** 65,000 tokens
-- **Rationale:** The OpenClaw runtime preemptive overflow guard fires at `contextWindowTokens × 4 × 0.9` chars. For cp-sonnet (120k window) that's ~108k tokens. HyperMem was assembling up to 100k at start-of-turn; tool loops accumulate additional chars in the session file each turn. Heavy tool-call sessions (10+ calls with large results) push the live session past 108k, triggering compaction failure and session restart. Dropping assembly budget to 65k leaves ~43k headroom for tool accumulation. The context-engine.js plugin init now explicitly passes `compositor: { defaultTokenBudget: 65000 }` to HyperMem.create() so it survives hook reinstalls without requiring a source rebuild.
+- **Rationale:** The OpenClaw runtime preemptive overflow guard fires at `contextWindowTokens × 4 × 0.9` chars. For cp-sonnet (120k window) that's ~108k tokens. hypermem was assembling up to 100k at start-of-turn; tool loops accumulate additional chars in the session file each turn. Heavy tool-call sessions (10+ calls with large results) push the live session past 108k, triggering compaction failure and session restart. Dropping assembly budget to 65k leaves ~43k headroom for tool accumulation. The context-engine.js plugin init now explicitly passes `compositor: { defaultTokenBudget: 65000 }` to hypermem.create() so it survives hook reinstalls without requiring a source rebuild.
 - **Date:** 2026-04-02
 - **Status:** superseded by TUNE-010 (budget raised to 90k)
 
@@ -156,8 +156,8 @@ Each entry records the change, rationale, and date — so we can track drift ove
 - **Changes:**
   - `Compositor.vectorStore`: changed from `readonly` to mutable; added `setVectorStore()` setter
   - `DatabaseManager.getSharedVectorDb()`: new method — opens/creates `vectors.db` at dataDir root with `allowExtension: true`, loads sqlite-vec, caches handle
-  - `HyperMem.create()`: calls `getSharedVectorDb()` + wires VectorStore to compositor after Redis init. Non-fatal — FTS5 fallback if sqlite-vec unavailable
-  - `HyperMem.getVectorStore()`: public getter so plugin can pass VS to indexer
+  - `hypermem.create()`: calls `getSharedVectorDb()` + wires VectorStore to compositor after Redis init. Non-fatal — FTS5 fallback if sqlite-vec unavailable
+  - `hypermem.getVectorStore()`: public getter so plugin can pass VS to indexer
   - `BackgroundIndexer.setVectorStore()`: new method; `createIndexer()` accepts optional 6th arg for VS
   - New facts/episodes are embedded at index time (best-effort, fire-and-forget)
   - `scripts/embed-existing.mjs`: one-time bulk migration — embeds all clean facts + high-sig episodes

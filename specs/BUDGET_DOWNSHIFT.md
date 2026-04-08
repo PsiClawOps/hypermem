@@ -1,4 +1,4 @@
-# HyperMem: Budget Downshift / Model Switch Reshaping
+# hypermem: Budget Downshift / Model Switch Reshaping
 
 **Status:** Proposed  
 **Priority:** P1  
@@ -8,7 +8,7 @@
 
 ## Problem
 
-When an agent switches from a high-context model to a lower-context model mid-session (or across sessions), the Redis history window was sized for the old budget. HyperMem's existing mechanisms handle this *eventually* but not *smoothly*:
+When an agent switches from a high-context model to a lower-context model mid-session (or across sessions), the Redis history window was sized for the old budget. hypermem's existing mechanisms handle this *eventually* but not *smoothly*:
 
 1. `trimHistoryToTokenBudget` in `assemble()` trims the window but only by message count walking newest→oldest. It does not apply tool gradient logic — so a few large tool result payloads can consume a disproportionate share of the new budget.
 2. The tool gradient runs inside the compositor safety valve, but by that point we've already fed the compositor a window that may be over-budget in token estimation terms.

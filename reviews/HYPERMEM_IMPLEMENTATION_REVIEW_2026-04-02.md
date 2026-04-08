@@ -1,4 +1,4 @@
-# HyperMem Implementation Review — 2026-04-02
+# hypermem Implementation Review — 2026-04-02
 
 Prepared by Pylon
 
@@ -60,7 +60,7 @@ I ran three direct reproductions against the current code:
 
 ## Executive summary
 
-HyperMem has landed several important fixes from the incident chain: the provider translation seam is corrected, `afterTurn()` now handles ingestion, Redis retention is no longer aggressively destructive, and the compositor has a safety valve. Those are real improvements.
+hypermem has landed several important fixes from the incident chain: the provider translation seam is corrected, `afterTurn()` now handles ingestion, Redis retention is no longer aggressively destructive, and the compositor has a safety valve. Those are real improvements.
 
 But the main “put this to bed” issues are **not** actually put to bed yet.
 
@@ -74,13 +74,13 @@ The current working tree does **not** implement the queue-split P0s described in
 
 More importantly, I found one additional seam bug that is **not** covered cleanly by the current spec stack:
 
-> The plugin forwards `prompt`, but HyperMem core `ComposeRequest` does not define or use it. In practice, prompt-driven retrieval/doc-chunk selection is one turn stale.
+> The plugin forwards `prompt`, but hypermem core `ComposeRequest` does not define or use it. In practice, prompt-driven retrieval/doc-chunk selection is one turn stale.
 
 That matters because the entire long-term ACA/governance offload strategy depends on prompt-aware retrieval working on the live turn, not only after the prompt has already been written to history.
 
 My bottom line:
 
-- **Do not treat HyperMem as stabilized yet**
+- **Do not treat hypermem as stabilized yet**
 - **Do not begin the next architectural layer (ACA offload / more doc seeding) until the P0 stabilizers land**
 - **The next pass should be a focused seam-hardening pass, not more feature surface**
 
@@ -210,7 +210,7 @@ OpenClaw calls `bootstrap()` when the session file already exists:
 - `hadSessionFile` computed from `fs.stat(sessionFile)` Source: `/home/lumadmin/.openclaw/workspace/dev/openclaw/src/agents/pi-embedded-runner/run/attempt.ts#2018-2021`
 - `if (hadSessionFile && (params.contextEngine?.bootstrap || ...)) { ... bootstrap(...) }` Source: `/home/lumadmin/.openclaw/workspace/dev/openclaw/src/agents/pi-embedded-runner/run/attempt.ts#2039-2046`
 
-### HyperMem plugin behavior
+### hypermem plugin behavior
 
 Bootstrap still does:
 
@@ -251,7 +251,7 @@ Assessment: **Incident 7 is still structurally live.**
 
 ---
 
-## 4) New critical seam bug: runtime/plugin prompt is forwarded, but HyperMem core ignores it
+## 4) New critical seam bug: runtime/plugin prompt is forwarded, but hypermem core ignores it
 
 This is the most important new finding from this review.
 
@@ -266,15 +266,15 @@ OpenClaw explicitly supports prompt-aware assemble calls:
 
 The plugin also forwards `prompt` into its local `ComposeRequest` object. Source: `plugin/src/index.ts#325-355`
 
-### HyperMem core behavior
+### hypermem core behavior
 
-But HyperMem core `ComposeRequest` does **not** define `prompt`, and the compositor does not use it:
+But hypermem core `ComposeRequest` does **not** define `prompt`, and the compositor does not use it:
 
 - Core `ComposeRequest` has no `prompt` field. Source: `src/types.ts#196-214`
 - Semantic recall uses `getLastUserMessage(messages)` instead. Source: `src/compositor.ts#382-388`
 - Doc chunk trigger logic also uses `getLastUserMessage(messages)` instead of current prompt. Source: `src/compositor.ts#410-482`
 
-The plugin also ignores the runtime-provided `messages` array for composition purposes; it rebuilds from HyperMem state instead. Source: `plugin/src/index.ts#325-355`
+The plugin also ignores the runtime-provided `messages` array for composition purposes; it rebuilds from hypermem state instead. Source: `plugin/src/index.ts#325-355`
 
 ### Reproduction
 
@@ -381,7 +381,7 @@ That makes the repo look further along than it is.
 
 ### P0.1 — Fix the prompt/query contract first
 
-Add prompt support to HyperMem core and use it for retrieval.
+Add prompt support to hypermem core and use it for retrieval.
 
 Minimum shape:
 
@@ -522,7 +522,7 @@ Do proceed with a short stabilization sprint focused on:
 4. dedupe
 5. warm cap
 
-That is the shortest path to getting HyperMem from “promising but still seam-fragile” to “operationally trustworthy.”
+That is the shortest path to getting hypermem from “promising but still seam-fragile” to “operationally trustworthy.”
 
 ---
 

@@ -1,5 +1,5 @@
 # TOOL_GRADIENT_COMPOSITOR.md
-## HyperMem — Gradient Tool Treatment + Transform-First Assembly
+## hypermem — Gradient Tool Treatment + Transform-First Assembly
 
 **Status:** Approved  
 **Author:** Forge  
@@ -238,4 +238,4 @@ The prose string becomes `textContent` on the transformed message. `toolCalls` a
 
 - Model-based summarization of tool results (future pass if prose stubs prove insufficient)
 - Cross-turn summarization / conversation compression (separate concern)
-- Changes to OpenClaw core (this is entirely HyperMem-owned)
+- Changes to OpenClaw core (this is entirely hypermem-owned)

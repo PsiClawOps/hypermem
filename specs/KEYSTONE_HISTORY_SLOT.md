@@ -1,4 +1,4 @@
-# HyperMem — Keystone History Slot (Phase 2)
+# hypermem — Keystone History Slot (Phase 2)
 
 **Status:** Spec  
 **Author:** Forge  

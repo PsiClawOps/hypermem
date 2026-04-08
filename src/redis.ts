@@ -1,5 +1,5 @@
 /**
- * HyperMem Redis Layer
+ * hypermem Redis Layer
  *
  * Manages the hot-state compositor cache.
  * Per-agent, per-session keyspace with TTL management.

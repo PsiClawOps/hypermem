@@ -1,5 +1,5 @@
 /**
- * HyperMem Compositor
+ * hypermem Compositor
  *
  * Assembles context for LLM calls by orchestrating all four memory layers:
  *   L1 Redis    — hot session working memory (system, identity, recent msgs)
@@ -83,7 +83,7 @@ const MODEL_CONTEXT_WINDOWS: Array<{ pattern: string; tokens: number }> = [
 /**
  * Resolve effective token budget from model string.
  * Returns the context window for the model, minus the configured reserve fraction
- * for output tokens and HyperMem operational overhead.
+ * for output tokens and hypermem operational overhead.
  * Default reserve: 25% (leaves 75% for input context).
  * Falls back to defaultTokenBudget if no model match.
  */
@@ -811,7 +811,7 @@ export class Compositor {
 
   /**
    * Set or replace the vector store after construction.
-   * Called by HyperMem.create() once sqlite-vec is confirmed available.
+   * Called by hypermem.create() once sqlite-vec is confirmed available.
    */
   setVectorStore(vs: VectorStore): void {
     this.vectorStore = vs;

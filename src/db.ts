@@ -1,5 +1,5 @@
 /**
- * HyperMem Database Manager
+ * hypermem Database Manager
  *
  * Three-file architecture per agent:
  *   agents/{agentId}/messages.db  — write-heavy conversation log (rotatable)
