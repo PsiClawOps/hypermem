@@ -57,6 +57,17 @@ export class FactStore {
     const now = nowIso();
     const scope = opts?.scope || 'agent';
 
+    // KL-01: global scope is not yet supported — write gate is deferred to 1.0.
+    // Log a warning if a caller somehow passes scope='global' (e.g. direct DB
+    // access bypassing TypeScript types or a future FactScope addition).
+    if ((scope as string) === 'global') {
+      console.warn(
+        `[hypermem] WARNING: agent '${agentId}' attempted to write a fact with scope='global'. ` +
+        `Global-scope facts are not yet gated — this write will succeed but may propagate ` +
+        `to all agents sharing library.db. See KL-01 in KNOWN_LIMITATIONS.md.`
+      );
+    }
+
     // Secret gate: if requested visibility is shared, verify content is clean.
     // Downgrade to 'private' rather than reject — matches episode-store pattern.
     let resolvedVisibility = opts?.visibility || 'private';

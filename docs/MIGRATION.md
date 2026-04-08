@@ -18,6 +18,27 @@ All migration scripts default to **dry-run**. Add `--apply` to write data.
 
 ---
 
+## Multi-operator deployments (breaking change warning)
+
+> ⚠️ **KL-01: No global-scope write gate (0.5.0)**
+>
+> hypermem 0.5.0 ships without a write gate for `scope='global'` facts. In a
+> **single-operator deployment** (one user, one fleet sharing `library.db`), this
+> is acceptable — agents share context intentionally.
+>
+> In a **multi-operator deployment** (multiple users or tenants sharing one
+> `library.db`), this is a **breaking isolation risk**: a global-scope write from
+> one operator's agent propagates to all other operators' agents.
+>
+> **Do not run hypermem 0.5.0 in a multi-operator deployment without an external
+> write gate at the application layer.** The write gate is deferred to 1.0.0
+> where it will be enforced at the library DB level.
+>
+> A runtime warning is logged whenever `scope='global'` is written — monitor
+> for this in production: `[hypermem] WARNING: ... scope='global'`
+
+---
+
 ## Schema compatibility map
 
 | hypermem version | Main DB schema | Library DB schema | Min Node | Min Redis |
