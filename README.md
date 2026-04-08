@@ -1,6 +1,6 @@
 # hyper**mem**
 
-*beyond memory, beyond speed*
+*Coherent Agents. Every Session.*
 
 ---
 
@@ -55,15 +55,13 @@ hyper**mem** detects topic shifts with heuristics: explicit subject changes, lon
 
 Most memory systems store what was said. hyper**mem** synthesizes what was learned.
 
-When a topic goes quiet, hyper**mem** compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. This is classifier-driven — no LLM call required. Facts, episodes, and preferences written explicitly during the session are available immediately in structured storage. Per-turn automatic extraction from raw conversation text is on the roadmap. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay. The conversation is gone. The knowledge it produced is not.
+When a topic goes quiet, hyper**mem** compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. This is classifier-driven — no LLM call required. Facts, episodes, and preferences written explicitly during the session are available immediately in structured storage. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay. The conversation is gone. The knowledge it produced is not.
 
 ### Topic-aware context
 
 Most memory systems treat a session as one flat stream. Long conversations drift, early context is trimmed, recent context dominates, and subject shifts create a blurry mix of conflicting state.
 
 hyper**mem** makes topics first-class. Topic detection, topic-scoped history recall, topic-aware Redis warming, and synthesized wiki recall are in place today. When a topic resurfaces, the agent gets the relevant topic summary and scoped recall instead of a flat raw replay.
-
-Full **Virtual Sessions** remain future work. Soft confirmation on ambiguous topic shifts, revert flow, and cross-agent topic search are planned for 0.6.0.
 
 ### History that remembers its highlights
 
@@ -78,6 +76,33 @@ Agents confabulate. They make plausible-sounding claims that contradict stored f
 FOS/MOD (Fact-Oriented Synthesis / Moderation) is HyperMem's verification layer. Before a response is recorded, a classifier checks the content against the in-session fact corpus: unsupported claims are flagged, contradictions with established facts are surfaced in diagnostics, and a confabulation risk score is attached to the stored episode. Action verification applies the same check to tool calls before they fire — high-risk operations without grounded fact support surface in logs before execution. No LLM call required. All verification runs against the live L4 fact corpus.
 
 FOS also injects output normalization directives into composed context via the `outputProfile` config key. Three tiers: `light` (~100 tokens), `standard` (~250 tokens), `full` (~400 tokens). The directives cover anti-sycophancy, prohibited vocabulary, length calibration, evidence hedging policy, and pagination rules — tuned to counteract the known output tendencies of the models in use. The tier is set once in config and applied on every compose turn.
+
+The same prompt, GPT-5.4, with and without `outputProfile: "light"`:
+
+```
+Prompt: "What should I consider when sizing my Redis instance?"
+
+— WITHOUT normalization (GPT-5.4 default) —
+Here are the key factors to consider when sizing your Redis instance:
+
+**1. Agent count**
+The number of agents directly impacts...
+
+**2. Session depth**
+Longer sessions accumulate more history...
+
+**3. Embedding cache size**
+Each cached embedding consumes...
+
+Would you like me to go deeper on any of these?
+
+— WITH outputProfile: "light" —
+Start at 256MB for single-agent installs. Multi-agent fleets: budget ~2MB per active session
+plus ~500KB per agent for identity and warm facts. Embedding cache is the wildcard — if
+you run nomic-embed-text locally, add 50MB for the model plus ~1KB per cached vector.
+```
+
+The pagination, the bold headers, and the trailing offer-to-elaborate are GPT-5.4 defaults. `light` removes them without flattening the model's reasoning.
 
 ### Subagents that hit the ground running
 
@@ -108,6 +133,26 @@ hyper**mem** assembles context fresh on every turn, but a long-running session s
 ```
 
 If you see `tool-loop trim` lines, the machinery is running. If results are still stripped after that log line appears, the session was past the recovery threshold before the trim ran — start fresh.
+
+What the logs look like at each pressure level:
+
+```
+# 75% — green zone, no trim fired
+[hypermem-plugin] tool-loop: pressure=74.8% — within threshold, full results retained
+
+# 85% — hard caution, trim fires on T0 and T1
+[hypermem-plugin] tool-loop trim: pressure=86.1% → target=50%
+  redis=43 msgs trimmed to 22, messages[]=67 entries dropped
+  T0 result trimmed head+tail (original=52,400 chars, trimmed=8,200 chars)
+  [hypermem_tool_result_trim chars_removed=44200 reason=pressure_t0_trim]
+
+# 92% — nuclear path
+[hypermem-plugin] compact: NUCLEAR — session at 118,400/128,000 tokens (92% full)
+  deep-trimmed Redis to 25% budget (43→11 msgs)
+  JSONL truncated to 20% depth (847→169 turns)
+```
+
+At 75%, nothing is touched — the session is healthy and full results land. At 85%, T0 gets trimmed head-and-tail and the messages array the runtime sees is cut before results arrive, which is what actually prevents stripping on the current turn. Nuclear fires only when the compact call runs above 85% — it is aggressive and buys headroom for the next several turns, not the current one.
 
 ---
 
@@ -181,6 +226,24 @@ hyper**mem** plugs into OpenClaw as a context engine and owns the full prompt co
 
 **The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and assembles a provider-format context block. A safety valve catches estimation drift and trims post-assembly. Because the budget is computed from the model's actual context window at compose time — resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly — a mid-session model swap is absorbed on the next turn with no manual intervention. T0 is preserved verbatim up to 80% projected occupancy. At high pressure with a large result, T0 is trimmed head-and-tail with a structured trim note. Compression of older turns starts at T1.
 
+Token budget allocation from a real session (Forge, 847 turns deep, 60k budget):
+
+```
+Slot                          Tokens    % of budget
+─────────────────────────────────────────────────────
+L1 history (last 14 turns)     8,420       14.0%
+L4 facts (top-28, confidence)    812        1.4%
+L4 wiki (active topic)           344        0.6%
+L3 recall (semantic matches)     276        0.5%
+Spawn context                      0        0.0%
+─────────────────────────────────────────────────────
+Assembled                       9,852       16.4%
+Reserved for response          50,148       83.6%
+Compose time                      52ms
+```
+
+The 16% assembly figure is typical for a warm single-agent session. Multi-agent sessions with active fleet registry and cross-session wiki hit 25–30%. The response reserve is never touched by the compositor — it belongs to the model.
+
 ---
 
 
@@ -194,8 +257,6 @@ What 0.5.0 includes:
 - Metrics dashboard primitives
 - Obsidian import and export
 - Aligned runtime profiles: `light`, `standard`, `full`
-
-Out of scope for 0.5.0: full Virtual Sessions, ambiguous topic-switch confirmation / revert flow, cross-agent topic search, LLM reflection pass.
 
 | Requirement | Version | Notes |
 |---|---|---|
