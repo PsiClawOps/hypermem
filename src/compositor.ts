@@ -46,6 +46,7 @@ import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './
 import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderLightFOS, resolveOutputTier, buildActionVerificationSummary } from './fos-mod.js';
 import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
+import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
 
 /**
  * Model context window sizes by provider/model string (or partial match).
@@ -1335,6 +1336,53 @@ export class Compositor {
           }
         } catch {
           // Temporal index not yet available (migration pending) — skip silently
+        }
+      }
+
+      // ── Open-domain FTS retrieval (L4: Library) ──────────────────
+      // Fires when the query looks broad/exploratory with no topical anchor.
+      // Searches raw messages_fts — bypasses isQualityFact() quality gate so
+      // content filtered from library.db is still reachable for open-domain
+      // questions. Primary fix for LoCoMo open-domain F1 gap (0.133 baseline).
+      if (queryText && isOpenDomainQuery(queryText) && db && remaining > 300) {
+        try {
+          const existingContent = contextParts.join('\n');
+          const odResults = searchOpenDomain(db, queryText, existingContent, 10);
+
+          if (odResults.length > 0) {
+            const odBlock = odResults
+              .map(r => {
+                const ts = r.createdAt
+                  ? new Date(r.createdAt).toISOString().slice(0, 10)
+                  : '';
+                const prefix = ts ? `[${ts}] ` : '';
+                const snippet = r.content.length > 300
+                  ? r.content.slice(0, 300) + '…'
+                  : r.content;
+                return `${prefix}${snippet}`;
+              })
+              .join('\n');
+
+            const odSection = `## Open Domain Context\n${odBlock}`;
+            const odTokens = estimateTokens(odSection);
+            const odBudget = Math.floor(remaining * 0.20); // Cap at 20% of remaining
+
+            if (odTokens <= odBudget) {
+              contextParts.push(odSection);
+              contextTokens += odTokens;
+              remaining -= odTokens;
+              slots.facts = (slots.facts ?? 0) + odTokens;
+            } else {
+              const truncated = this.truncateToTokens(odSection, odBudget);
+              const truncTokens = estimateTokens(truncated);
+              contextParts.push(truncated);
+              contextTokens += truncTokens;
+              remaining -= truncTokens;
+              slots.facts = (slots.facts ?? 0) + truncTokens;
+            }
+          }
+        } catch {
+          // Open-domain FTS unavailable — skip silently
         }
       }
     }

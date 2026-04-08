@@ -62,6 +62,15 @@ if (PROVIDER === 'openai' && !OPENAI_API_KEY) {
   } catch { /* no auth file */ }
 }
 if (PROVIDER === 'openai' && !OPENAI_API_KEY) {
+  // Fall back to openclaw.json env vars (gateway stores keys there)
+  try {
+    const oclawPath = path.join(process.env.HOME || '/home/lumadmin', '.openclaw', 'openclaw.json');
+    const oclawCfg = JSON.parse(fs.readFileSync(oclawPath, 'utf8'));
+    const envVars = oclawCfg?.env?.vars ?? {};
+    OPENAI_API_KEY = envVars.OPENROUTER_API_KEY ?? envVars.OPENAI_API_KEY ?? null;
+  } catch { /* no openclaw config */ }
+}
+if (PROVIDER === 'openai' && !OPENAI_API_KEY) {
   // Fall back to environment variables
   OPENAI_API_KEY = process.env.OPENROUTER_API_KEY
     ?? process.env.OPENAI_API_KEY
