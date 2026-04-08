@@ -21,3 +21,20 @@ export const MAIN_SCHEMA_VERSION = 6;
  * Re-exported here for convenience; authoritative value lives in library-schema.ts.
  */
 export const LIBRARY_SCHEMA_VERSION_EXPORT = 12;
+
+/**
+ * Compatibility version — the single number operators and consumers check.
+ * Maps to: main schema v6, library schema v12.
+ * Matches ENGINE_VERSION for the 0.5.0 release.
+ */
+export const HYPERMEM_COMPAT_VERSION = '0.5.0';
+
+/**
+ * Schema compatibility map — machine-readable version requirements.
+ * Use this to verify DB schemas match the running engine.
+ */
+export const SCHEMA_COMPAT = {
+  compatVersion: '0.5.0',
+  mainSchema: 6,
+  librarySchema: 12,
+} as const;

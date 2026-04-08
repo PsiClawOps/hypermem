@@ -10,7 +10,7 @@
  *   L4: library.db  — fleet-wide structured knowledge (crown jewel)
  */
 
-export { ENGINE_VERSION, MIN_NODE_VERSION, MIN_REDIS_VERSION, SQLITE_VEC_VERSION, MAIN_SCHEMA_VERSION, LIBRARY_SCHEMA_VERSION_EXPORT } from './version.js';
+export { ENGINE_VERSION, MIN_NODE_VERSION, MIN_REDIS_VERSION, SQLITE_VEC_VERSION, MAIN_SCHEMA_VERSION, LIBRARY_SCHEMA_VERSION_EXPORT, HYPERMEM_COMPAT_VERSION, SCHEMA_COMPAT } from './version.js';
 
 export { DatabaseManager } from './db.js';
 export type { DatabaseManagerConfig } from './db.js';
