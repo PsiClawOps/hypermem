@@ -127,10 +127,15 @@ async function generateOpenAIEmbeddings(
   texts: string[],
   config: EmbeddingConfig
 ): Promise<Float32Array[]> {
-  if (!config.openaiApiKey) {
+  // Resolve API key: config > environment
+  const apiKey = config.openaiApiKey
+    ?? process.env.OPENROUTER_API_KEY
+    ?? process.env.OPENAI_API_KEY
+    ?? null;
+  if (!apiKey) {
     throw new Error(
-      '[hypermem] OpenAI embedding provider requires openaiApiKey in embedding config. ' +
-      'Set it in hypermem.json or fall back to provider: "ollama".'
+      '[hypermem] OpenAI embedding provider requires an API key. ' +
+      'Set openaiApiKey in hypermem config, or set OPENROUTER_API_KEY / OPENAI_API_KEY env var.'
     );
   }
 
@@ -149,7 +154,7 @@ async function generateOpenAIEmbeddings(
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.openaiApiKey}`,
+          'Authorization': `Bearer ${apiKey}`,
         },
         body: JSON.stringify({ model, input: batch }),
         signal: controller.signal,
