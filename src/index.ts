@@ -1505,3 +1505,6 @@ export class HyperMem {
 }
 
 export default HyperMem;
+
+export { SessionFlusher, flushSession } from './session-flusher.js';
+export type { FlushSessionOptions, FlushSessionResult } from './session-flusher.js';
