@@ -108,21 +108,52 @@ The **embedding layer** (L3 vector semantic search) requires either Ollama runni
 
 ## Embedding Providers
 
-hypermem supports two embedding paths. Pick one based on your infrastructure.
+Pick a tier based on your hardware and setup:
 
-### Option A — Local (Ollama)
+| Tier | Best for | Quality | Cost | Setup |
+|---|---|---|---|---|
+| Minimal | Very low-powered systems, no spare RAM/CPU | Keyword-only (no semantic recall) | Free | None |
+| Local | Systems with 4GB+ free RAM | Good (nomic-embed-text, 768d) | Free | Ollama required |
+| Hosted | Any system, no local compute needed | Best (Qwen3 8B, 4096d, MTEB #1) | ~pennies/day | OpenRouter API key |
 
-Requires Ollama installed and running locally. Good for installs where local compute is available.
+---
+
+### Tier 1 — Minimal (no embedder)
+
+For very low-powered systems where running a local model isn't an option and you'd rather not set up an API key. hypermem starts and runs without an embedder — L3 semantic search is replaced by FTS5 full-text keyword matching. You lose semantic recall ("find facts about X even if X isn't mentioned literally") but everything else works: history, facts, fleet registry, temporal indexing.
+
+**No config needed.** Simply don't configure an embedding provider. hypermem detects the missing embedder at startup and falls back to keyword search automatically.
+
+You'll see this in the logs:
+```
+[hypermem] No embedding provider configured — semantic search disabled, using FTS5 fallback
+```
+
+This is a valid production configuration if keyword search meets your needs. You can upgrade to a higher tier later without losing any stored data.
+
+---
+
+### Tier 2 — Local (Ollama + nomic-embed-text)
+
+For systems with enough headroom to run a small embedding model locally. Requires [Ollama](https://ollama.ai) installed and running.
 
 ```bash
 ollama pull nomic-embed-text
 ```
 
-No additional config needed — Ollama on `localhost:11434` is the default.
+No additional config needed — Ollama on `localhost:11434` with `nomic-embed-text` is the default. hypermem detects it automatically on startup.
 
-### Option B — Hosted (OpenRouter) — Recommended
+**Minimum headroom:** ~1GB RAM for the model, plus Ollama itself. Embedding runs in the background (async, not blocking agent responses) so CPU spikes won't affect response latency.
 
-No local model required. Uses [OpenRouter](https://openrouter.ai) as the embedding API. The recommended model is **Qwen3 Embedding 8B** — it tops the MTEB leaderboard for retrieval tasks and is available via OpenRouter.
+---
+
+### Tier 3 — Hosted (OpenRouter + Qwen3 Embedding 8B) — Recommended
+
+For any system — including low-powered ones. No local model required. Embedding calls go to [OpenRouter](https://openrouter.ai) in the background, so the latency (200–400ms per batch) has zero impact on agent response time.
+
+**Cost:** Qwen3 Embedding 8B is an open model. At typical agent usage volumes (a few thousand facts embedded per day), the cost is pennies per day — often less than a cent.
+
+**Quality:** Qwen3 Embedding 8B tops the MTEB leaderboard for retrieval tasks. It produces 4096-dimensional vectors vs nomic's 768d — meaningfully better semantic recall, especially for technical and governance content.
 
 Create `~/.openclaw/hypermem/config.json` (or add to your existing config):
 
@@ -139,11 +170,17 @@ Create `~/.openclaw/hypermem/config.json` (or add to your existing config):
 }
 ```
 
-Get an OpenRouter API key at https://openrouter.ai. The embedding cost at typical agent usage volumes is negligible (open model, sub-cent per day).
+Get an OpenRouter API key at https://openrouter.ai.
 
-**Alternative hosted model:** `openai/text-embedding-3-large` (3072d) if you prefer OpenAI's model — requires a standard OpenAI API key, not a Codex subscription.
+**Alternative hosted model:** `openai/text-embedding-3-large` (3072d) if you prefer an OpenAI model — requires a standard OpenAI API key (not a Codex subscription).
 
-**Note:** switching embedding providers after vectors have been built requires a re-index — existing vectors use different dimensions and are incompatible. For fresh installs this is not an issue.
+---
+
+**Switching providers:** if you switch tiers after vectors have already been built, existing vectors are incompatible (different dimensions). Re-index with:
+```bash
+node ~/.openclaw/workspace/repo/hypermem/scripts/embed-existing.mjs
+```
+For fresh installs this is never an issue.
 
 ---
 
@@ -445,16 +482,20 @@ openclaw status
 
 ---
 
-## Verify Redis and Ollama before proceeding
+## Verify Redis before proceeding
 
-Before wiring the plugin, confirm both services are up:
+Redis is always required regardless of embedding tier:
 
 ```bash
-# Redis
 redis-cli ping
 # Expected: PONG
+```
 
-# Ollama
+Do not proceed until Redis returns `PONG`. hypermem's L1 hot layer does not function without it.
+
+**If using Tier 2 (Ollama)**, also confirm Ollama is up with the model pulled:
+
+```bash
 curl -s http://localhost:11434/api/tags | grep nomic
 # Expected: a line containing nomic-embed-text
 ```
@@ -464,7 +505,7 @@ If `nomic-embed-text` is not pulled yet:
 ollama pull nomic-embed-text
 ```
 
-Do not proceed until both return the expected output. A gateway restart with either service missing will leave hypermem in a degraded state that is easy to confuse with a misconfiguration.
+**Tier 1 (minimal) and Tier 3 (OpenRouter)** users do not need Ollama running.
 
 ---
 
@@ -506,7 +547,7 @@ Your data in `~/.openclaw/hypermem/` is untouched. You can re-enable hypermem at
 Redis must be running: `redis-cli ping` should return `PONG`. If Redis is down, start it before restarting the gateway. Check that `~/.openclaw/hypermem/agents/{agentId}/messages.db` exists — if missing, the agent hasn't bootstrapped yet and will create it on first session.
 
 **Semantic search not working / no vector results**
-Ollama must be running with `nomic-embed-text` pulled. Run `ollama list` to confirm. If missing, `ollama pull nomic-embed-text` and restart the gateway. The background indexer runs on a 5-minute interval — after the first interval you should see embedding activity in `openclaw logs | grep embed`.
+Check which embedding tier you configured. For Tier 2 (Ollama): confirm Ollama is running with `ollama list` — if `nomic-embed-text` is missing, `ollama pull nomic-embed-text` and restart. For Tier 3 (OpenRouter): confirm your `openaiApiKey` in `~/.openclaw/hypermem/config.json` is valid and the `openaiBaseUrl` is set to `https://openrouter.ai/api/v1`. For Tier 1 (minimal): semantic search is intentionally disabled — FTS5 keyword fallback is active, this is expected. The background indexer runs on a 5-minute interval — after the first interval you should see embedding activity in `openclaw logs | grep embed`.
 
 **`[hypermem:compose]` shows `facts=0 semantic=0` every turn**
 Your library DB is empty — this is expected on a fresh install. Facts and episodes accumulate over real conversations. After a few sessions you'll see these numbers grow. You can also seed workspace files manually using the seeder API.
