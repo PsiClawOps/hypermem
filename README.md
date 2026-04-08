@@ -273,7 +273,7 @@ hypermem plugs into OpenClaw as a context engine and owns the full prompt compos
 
 **L2: Messages DB** is the durable per-agent record. SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
 
-**L3: Vectors DB** is the semantic index. Per-agent sqlite-vec database with 768-dimensional embeddings from `nomic-embed-text`. KNN search over prior turns and indexed workspace documents. Reconstructable from L2 if lost.
+**L3: Vectors DB** is the semantic index. Per-agent sqlite-vec database with KNN search over prior turns and indexed workspace documents. Reconstructable from L2 if lost. Supports two embedding providers: Ollama (local, default `nomic-embed-text`) or hosted via OpenRouter (recommended: `qwen/qwen3-embedding-8b`, 4096d, top of MTEB retrieval leaderboard).
 
 **L4: Library DB** is the fleet-wide knowledge layer. One shared SQLite database:
 
@@ -365,7 +365,7 @@ openclaw gateway restart
 
 Run `session_status` after your next conversation. You'll see compositor stats: token budget, pressure level, slot allocations. That's the engine running.
 
-**Requirements:** Node.js 22+, OpenClaw with context engine plugin support, Redis 7+, Ollama with `nomic-embed-text`.
+**Requirements:** Node.js 22+, OpenClaw with context engine plugin support, Redis 7+, and either Ollama (local) or an OpenRouter API key (hosted) for embeddings.
 
 Full guide with deployment-specific options: **[INSTALL.md](./INSTALL.md)**
 
@@ -429,7 +429,10 @@ import { HyperMem, buildSpawnContext, DocChunkStore, MessageStore } from '@psicl
 const hm = await HyperMem.create({
   dataDir: '~/.openclaw/hypermem',
   redis: { host: 'localhost', port: 6379 },
+  // Local (Ollama):
   embedding: { ollamaUrl: 'http://localhost:11434', model: 'nomic-embed-text' },
+  // Hosted (OpenRouter) — recommended for installs without local GPU/CPU:
+  // embedding: { provider: 'openai', openaiApiKey: 'sk-or-...', openaiBaseUrl: 'https://openrouter.ai/api/v1', model: 'qwen/qwen3-embedding-8b', dimensions: 4096, batchSize: 128 },
 });
 
 // Record and compose

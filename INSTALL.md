@@ -96,10 +96,54 @@ Multiple named agents sharing one OpenClaw gateway. Council setups, director/spe
 | Node.js 22+ | **Yes** | Uses built-in `node:sqlite` — no native module needed |
 | OpenClaw | **Yes** | Any version that supports context engine plugins |
 | Redis 7+ | **Yes** | L1 hot layer — session history, identity slots, fleet cache |
-| Ollama | **Yes** | L3 vector layer — semantic search and recall. Install: https://ollama.ai |
-| nomic-embed-text | **Yes** | The embedding model hypermem uses. Pull with: `ollama pull nomic-embed-text` |
+| Ollama | **Local embeddings only** | L3 vector layer — required if using local embedding. Install: https://ollama.ai |
+| nomic-embed-text | **Local embeddings only** | Default local embedding model. Pull with: `ollama pull nomic-embed-text` |
+| OpenRouter API key | **Hosted embeddings only** | Alternative to Ollama — no local GPU/CPU required. See [Embedding Providers](#embedding-providers) below. |
 
-Redis and Ollama are not optional. Redis is the hot session layer — without it, every bootstrap re-reads from SQLite and the fleet cache doesn't exist. Ollama with `nomic-embed-text` is the vector layer — without it, semantic recall is completely disabled and retrieval degrades to keyword-only FTS5 matching. hypermem will start without them but it will not be working correctly.
+Redis is not optional. It is the hot session layer — without it, every bootstrap re-reads from SQLite and the fleet cache doesn't exist.
+
+The **embedding layer** (L3 vector semantic search) requires either Ollama running locally or a hosted embedding provider via OpenRouter. Without one of these, semantic recall is completely disabled and retrieval degrades to keyword-only FTS5 matching. hypermem will start without an embedder configured but it will not be working correctly.
+
+---
+
+## Embedding Providers
+
+hypermem supports two embedding paths. Pick one based on your infrastructure.
+
+### Option A — Local (Ollama)
+
+Requires Ollama installed and running locally. Good for installs where local compute is available.
+
+```bash
+ollama pull nomic-embed-text
+```
+
+No additional config needed — Ollama on `localhost:11434` is the default.
+
+### Option B — Hosted (OpenRouter) — Recommended
+
+No local model required. Uses [OpenRouter](https://openrouter.ai) as the embedding API. The recommended model is **Qwen3 Embedding 8B** — it tops the MTEB leaderboard for retrieval tasks and is available via OpenRouter.
+
+Create `~/.openclaw/hypermem/config.json` (or add to your existing config):
+
+```json
+{
+  "embedding": {
+    "provider": "openai",
+    "openaiApiKey": "sk-or-YOUR_OPENROUTER_KEY",
+    "openaiBaseUrl": "https://openrouter.ai/api/v1",
+    "model": "qwen/qwen3-embedding-8b",
+    "dimensions": 4096,
+    "batchSize": 128
+  }
+}
+```
+
+Get an OpenRouter API key at https://openrouter.ai. The embedding cost at typical agent usage volumes is negligible (open model, sub-cent per day).
+
+**Alternative hosted model:** `openai/text-embedding-3-large` (3072d) if you prefer OpenAI's model — requires a standard OpenAI API key, not a Codex subscription.
+
+**Note:** switching embedding providers after vectors have been built requires a re-index — existing vectors use different dimensions and are incompatible. For fresh installs this is not an issue.
 
 ---
 
