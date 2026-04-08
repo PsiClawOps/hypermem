@@ -1476,12 +1476,14 @@ function createHyperMemEngine(): ContextEngine {
           if (m.role === 'system') continue;
           const neutral = toNeutralMessage(m);
           if (neutral.role === 'user') {
-            // SKIP: handler.js onMessageReceived() already records user messages via the
-            // message:received hook event (clean bare content, fires before LLM call).
-            // Recording here too caused dual-write: bare in handler.js + envelope in afterTurn.
-            // Fix: handler.js owns user message recording. afterTurn owns assistant/tool.
-            // See: ANVIL_FULL_ANALYSIS_dual_record_bug.md
-            continue;
+            // Record user messages here and strip transport envelope metadata before
+            // storage so prompt wrappers like:
+            //   Sender (untrusted metadata): { ... }
+            // never enter messages.db / Redis history / downstream facts.
+            //
+            // recordUserMessage() also strips defensively at core level, but we do
+            // it here too so the intended behavior is explicit at the plugin boundary.
+            await hm.recordUserMessage(agentId, sk, stripMessageMetadata(neutral.textContent ?? ''));
           } else {
             await hm.recordAssistantMessage(agentId, sk, neutral);
           }

@@ -10,7 +10,7 @@
  *   - Message count increments on new topic creation (plugin bug fix)
  */
 
-import { stripMessageMetadata, detectTopicShift } from '../dist/index.js';
+import { stripMessageMetadata, detectTopicShift, Hypermem } from '../dist/index.js';
 import { RedisLayer } from '../dist/redis.js';
 import { DatabaseSync } from 'node:sqlite';
 import { migrate } from '../dist/schema.js';
@@ -130,6 +130,21 @@ console.log('── VS-5: stripMessageMetadata ──');
   const clean = 'Can you help me debug the Redis connection issue?';
   const stripped = stripMessageMetadata(clean);
   assert(stripped === clean, 'Returns clean message unchanged');
+}
+
+{
+  // recordUserMessage() should also strip metadata before persistence
+  const hm = await Hypermem.create({
+    dbDir: '/tmp/hypermem-vs5-record-user',
+    redis: { enabled: false },
+  });
+  const stored = await hm.recordUserMessage(
+    'test-vs5-agent',
+    'agent:test-vs5-agent:webchat:main',
+    'Sender (untrusted metadata):\n```json\n{"label":"ragesaq (gateway-client)","id":"gateway-client"}\n```\n\nPlease review the deploy plan.'
+  );
+  assert(!stored.textContent.includes('Sender (untrusted metadata)'), 'recordUserMessage strips sender metadata before storage');
+  assert(stored.textContent.includes('Please review the deploy plan.'), 'recordUserMessage preserves user content after stripping metadata');
 }
 
 {

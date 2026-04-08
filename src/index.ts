@@ -208,6 +208,7 @@ import { RedisLayer } from './redis.js';
 import { Compositor } from './compositor.js';
 import { VectorStore, type VectorSearchResult, type VectorIndexStats } from './vector-store.js';
 import { userMessageToNeutral, fromProviderFormat } from './provider-translator.js';
+import { stripMessageMetadata } from './topic-detector.js';
 import { DocChunkStore, type DocChunkRow, type ChunkQuery, type IndexResult } from './doc-chunk-store.js';
 import { WorkspaceSeeder, type SeedOptions, type SeedResult } from './seed.js';
 import { chunkMarkdown, chunkFile, inferCollection, type DocChunk, type ChunkOptions } from './doc-chunker.js';
@@ -377,7 +378,7 @@ export class HyperMem {
       model: opts?.model,
     });
 
-    const neutral = userMessageToNeutral(content);
+    const neutral = userMessageToNeutral(stripMessageMetadata(content));
     const stored = store.recordMessage(conversation.id, agentId, neutral, {
       tokenCount: opts?.tokenCount,
       isHeartbeat: opts?.isHeartbeat,
