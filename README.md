@@ -53,14 +53,38 @@ This is the core claim: hyper**mem** is not transcript replay. It is context man
   afterTurn ──► write back to all 4 layers
 ```
 
-OpenClaw already gives agents a solid baseline: workspace memory files, hybrid file search, and compaction safeguards. hyper**mem** goes deeper. It replaces transcript accumulation with a context engine that assembles prompts fresh from storage on every turn, purpose-built to eliminate each failure mode at the source.
+This is what context management looks like. Not a growing transcript, but a budget:
+
+```
+What the model sees (9,852 of 60,000 tokens):
+
+  ┌────────┬───────┬─────┬───────────────────────────┬───────┬───────┬─────┐
+  │identity│ facts │wiki │    history (14 turns)      │recall │ tools │ FOS │
+  │  312   │  812  │ 344 │         8,420              │  276  │ stubs │ 100 │
+  └────────┴───────┴─────┴───────────────────────────┴───────┴───────┴─────┘
+   ◄──────────────────── 16% of budget ────────────────────►
+
+What's in storage, not in this prompt:
+
+  L2  833 older turns           retrievable if topic shifts back
+  L3  19,853 indexed episodes   available via semantic search
+  L4  3,482 facts               ranked by confidence × decay, top 28 selected
+  L4  47 wiki pages             active topic's page selected, rest on standby
+
+  Nothing is lost. The compositor picks what's relevant right now.
+  Change the topic, and the next turn pulls different content from the same storage.
+```
+
+OpenClaw gives agents a solid baseline: workspace memory files, hybrid file search, and compaction safeguards. hyper**mem** goes deeper. It replaces transcript accumulation with a context engine that assembles prompts fresh from storage on every turn.
 
 ### How a prompt gets built: standard vs. HyperCompositor
 
-Most context engines accumulate a transcript, trim from the top when it fills up, and hope the important parts survive. The HyperCompositor never accumulates. Each turn is assembled fresh from storage.
+Two problems kill agent sessions. **New-session amnesia:** the agent restarts and everything is gone. Decisions, preferences, work state, context. The operator re-explains. The agent re-asks. **Compaction crunch:** long sessions fill the context window, the runtime summarizes to make room, and specifics are lost. Tool output, exact decisions, file paths. The agent keeps running but degraded, confident about things it no longer actually knows.
+
+Most context engines address amnesia with storage and address compaction with summarization. Both are lossy. The compositor solves both at the source: every turn is assembled fresh from four storage layers within a fixed token budget. Nothing is accumulated. Nothing is summarized away. Content that doesn't fit this turn stays in storage and comes back when relevant.
 
 ```
-Standard                                HyperCompositor
+Standard                                Compositor
 ────────────────────────────────        ────────────────────────────────
 message → append to transcript          message → detect active topic
 transcript full → trim oldest           query 4 storage layers in parallel
@@ -78,7 +102,7 @@ When it fills:                          When budget is exceeded:
   no recovery path                        change topic back → retrieved again
 ```
 
-| | Standard | HyperCompositor |
+| | Standard | Compositor |
 |---|---|---|
 | Context source | Growing transcript | 4 independent storage layers |
 | When context fills | Trim + summarize (lossy) | Budget allocation (lossless storage) |
@@ -475,7 +499,6 @@ All migration scripts default to dry-run. Nothing is written until you add `--ap
 
 Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 
-> **For agents:** See [docs/AGENT_MIGRATION.md](./docs/AGENT_MIGRATION.md) for hyper**mem**'s data model, field-level semantics, and mapping examples for each platform. The scripts are helpers; the doc gives you enough to handle any format, including ones without a script.
 
 ---
 
