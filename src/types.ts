@@ -489,6 +489,21 @@ export interface CompositorConfig {
    * Default: 0.5
    */
   keystoneMinSignificance?: number;
+  /**
+   * Enable Fleet Output Standard (FOS) injection.
+   * FOS injects shared output rules (no em dashes, lead with answer, etc.) into
+   * every composed context. Disable if the operator manages output standards
+   * externally (e.g. via system prompt) to avoid redundancy.
+   * Default: true
+   */
+  enableFOS?: boolean;
+  /**
+   * Enable Model Output Directive (MOD) injection.
+   * MOD injects per-model calibration corrections (verbosity, list length, etc.).
+   * Disable if you want raw model behavior without hypermem calibration.
+   * Default: true
+   */
+  enableMOD?: boolean;
   // Note: assembly order is fixed in compose() — system, identity, history,
   // facts, knowledge, preferences, semanticRecall, cross-session, library.
   //

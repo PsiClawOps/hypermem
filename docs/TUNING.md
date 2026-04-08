@@ -75,7 +75,31 @@ Controls how aggressively tool call output is compressed as it ages.
 
 ---
 
-## Promotion / Dreaming
+## FOS / MOD
+
+Fleet Output Standard (FOS) and Model Output Directive (MOD) inject output calibration into every composed context. FOS applies shared rules (lead with answer, no em dashes, list caps). MOD applies per-model corrections (verbosity, list length, preamble suppression).
+
+| Knob | Default | What it does |
+|---|---|---|
+| `compositor.enableFOS` | `true` | Inject Fleet Output Standard rules into context |
+| `compositor.enableMOD` | `true` | Inject per-model calibration corrections into context |
+
+**When to disable:**
+- `enableFOS: false` — if you manage output standards entirely via system prompt and want to avoid duplication
+- `enableMOD: false` — if you want raw model behavior without hypermem calibration (useful for benchmarking)
+- Disable both — minimal-footprint deploys, embedding-only usage, or agents with highly custom system prompts
+
+```typescript
+const compositor = new Compositor(redis, db, libDb, {
+  // ... other config ...
+  enableFOS: false,  // no output standard injection
+  enableMOD: false,  // no per-model calibration
+});
+```
+
+> **Note:** Disabling FOS/MOD reduces token usage by ~250–400 tokens per compose pass. Useful for high-volume or cost-sensitive deployments.
+
+---
 
 The dreaming promoter runs periodically and promotes high-value facts to your agent's `MEMORY.md`. Disabled by default.
 

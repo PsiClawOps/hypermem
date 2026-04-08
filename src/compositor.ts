@@ -1526,7 +1526,10 @@ export class Compositor {
         }
       }
 
-      const fos = getActiveFOS(libDb);
+      const fosEnabled = this.config?.enableFOS !== false;
+      const modEnabled = this.config?.enableMOD !== false;
+
+      const fos = fosEnabled ? getActiveFOS(libDb) : null;
       if (fos) {
         const fosLines = renderFOS(fos, taskContext);
         if (fosLines.length > 0) {
@@ -1541,7 +1544,7 @@ export class Compositor {
         }
       }
 
-      const mod = matchMOD(assemblyModelId, libDb);
+      const mod = modEnabled ? matchMOD(assemblyModelId, libDb) : null;
       if (mod && fos && remaining > 50) {
         const modLines = renderMOD(mod, fos, assemblyModelId || '', taskContext);
         if (modLines.length > 0) {
