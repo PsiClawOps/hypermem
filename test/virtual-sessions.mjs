@@ -10,7 +10,7 @@
  *   - Message count increments on new topic creation (plugin bug fix)
  */
 
-import { stripMessageMetadata, detectTopicShift, Hypermem } from '../dist/index.js';
+import { stripMessageMetadata, detectTopicShift, HyperMem as Hypermem } from '../dist/index.js';
 import { RedisLayer } from '../dist/redis.js';
 import { DatabaseSync } from 'node:sqlite';
 import { migrate } from '../dist/schema.js';
