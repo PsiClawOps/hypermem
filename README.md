@@ -47,7 +47,7 @@ OpenClaw addresses both failure modes with structured guidance files injected in
 
 These are powerful for identity and preferences. But the retry logic decision from last week? If nobody manually captured it into `MEMORY.md`, that session boundary erased it. The system is only as strong as its last manual update.
 
-OpenClaw also ships compaction safeguards and hybrid file search. That's a solid baseline. It has limits.
+OpenClaw also ships compaction safeguards and hybrid file search. That's a solid baseline. It has limits. hypermem closes both gaps.
 
 ---
 
@@ -131,7 +131,7 @@ When it fills:                          When budget is exceeded:
 | When context fills | Trim + summarize (lossy) | Budget allocation (lossless storage) |
 | Old decisions | Lost after compaction | Retrievable via keystones + semantic recall |
 | Topic changes | All history competes equally | Scoped retrieval by active topic |
-| Tool output | Stays until trimmed | Compressed by turn age (T0/T1/T2/T3) |
+| Tool output | Stays until trimmed | Compressed by turn age |
 | Model swap mid-session | Re-count, hope it fits | Budget recomputed from new window size next turn |
 
 High-signal turns are marked as keystones and survive pressure trimming ahead of ordinary history.
@@ -248,7 +248,7 @@ Benchmarked against a production database: 5,104 facts, 28,441 episodes, 847 kno
 
 > Query planner uses compound indexes on agentId + sort key; FTS5 performance improved 25% from baseline after index additions despite a 47% increase in stored data.
 
-L1 and L4 structured retrieval are sub-millisecond. After the first turn, query embeddings are computed in the background and cached in the in-memory layer. The cold session p95 of 1,592ms happens exactly once per new session, then never again. The async embed cost is paid after the assistant replies; users never wait for it.
+L1 and L4 structured retrieval are sub-millisecond. After the first turn, query embeddings are computed in the background and cached in the in-memory layer. The first turn of a new session is the only slow one; after that, query embeddings are computed in the background and cached. The async embed cost is paid after the assistant replies; users never wait for it.
 
 ---
 
@@ -409,14 +409,13 @@ Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes
   "compositor": {
     "defaultTokenBudget": 60000,
     "maxFacts": 18,
-    "maxCrossSessionContext": 3000,
-    "maxRecentToolPairs": 2,
-    "maxProseToolPairs": 6,
     "contextWindowReserve": 0.25,
     "outputProfile": "standard"
   }
 }
 ```
+
+Additional compositor knobs: `maxCrossSessionContext`, `maxRecentToolPairs`, `maxProseToolPairs` — see INSTALL.md for full descriptions.
 
 `deferToolPruning: true` tells hypermem to skip its own T0/T1/T2/T3 gradient when OpenClaw's native `contextPruning` extension is active (Anthropic and Google providers). On those providers, OpenClaw's pruner handles tool result trimming: ratio-driven at >30% context fill, soft-trim head+tail for results over 4,000 chars, hard-clear above 50k total, with the last 3 assistant turns always protected. HyperMem's gradient remains active as fallback for other providers (GPT-5.4, etc.). Default: `true` for Anthropic installs.
 
@@ -435,7 +434,7 @@ Pass to `HyperMem.create()` as the base config. Full tuning notes are in INSTALL
 ## API
 
 ```typescript
-import { HyperMem, buildSpawnContext, DocChunkStore, MessageStore } from '@psiclawops/hypermem';
+import { HyperMem } from '@psiclawops/hypermem';
 
 const hm = await HyperMem.create({
   dataDir: '~/.openclaw/hypermem',
@@ -459,8 +458,13 @@ const composed = await hm.compose({
 
 // Refresh tool compression after each turn
 await hm.refreshCacheGradient('forge', 'agent:forge:webchat:main');
+```
 
-// Spawn a subagent with parent context
+Spawning a subagent with parent context:
+
+```typescript
+import { buildSpawnContext, MessageStore, DocChunkStore } from '@psiclawops/hypermem';
+
 const spawn = await buildSpawnContext(
   new MessageStore(hm.dbManager.getMessageDb('forge')),
   new DocChunkStore(hm.dbManager.getLibraryDb()),
