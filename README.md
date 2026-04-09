@@ -53,7 +53,7 @@ OpenClaw also ships compaction safeguards and hybrid file search. That's a solid
 
 ## hypermem
 
-Four storage layers, sub-millisecond retrieval, zero required external services. Runs entirely in-process with local Nomic embeddings; external embedding providers (OpenRouter, etc.) are optional upgrades for installs without a local GPU/CPU.
+Four storage layers, sub-millisecond retrieval, no external database services required. Runs entirely in-process with local Nomic embeddings; embeddings can run locally or via hosted providers.
 
 | Layer | What it holds | Speed |
 |---|---|---|
@@ -64,7 +64,7 @@ Four storage layers, sub-millisecond retrieval, zero required external services.
 
 Everything is retained. Nothing is lost at the session boundary. The retry logic decision from last week, the deployment preferences from last month, the architecture choices from day one: all queryable, all available for composition.
 
-**Session warming.** Before the first turn fires, hypermem pre-loads the agent's full working state from SQLite and Redis: recent history, facts ranked by confidence and recency, active topic context, cached embeddings for fast semantic recall. The agent's first reply draws from everything that was in scope at the end of the last session. To the agent, the session boundary never happened.
+**Session warming.** Before the first turn fires, hypermem pre-loads the agent's full working state from the in-memory SQLite cache: recent history, facts ranked by confidence and recency, active topic context, cached embeddings for fast semantic recall. The agent's first reply draws from everything that was in scope at the end of the last session. To the agent, the session boundary never happened.
 
 ---
 
@@ -87,23 +87,30 @@ Every other system hits a wall when context fills up. Summarize, truncate, lose 
 
 ### What the model actually sees
 
-Token budget allocation from a real session (847 turns deep, 60k budget):
+Token budget allocation from a mature session (847 turns deep, 128k budget):
 
 ```
-What the model sees (9,852 of 60,000 tokens):
+What the model sees (92k of 128k tokens, 72% utilization):
 
-  ┌────────┬───────┬─────┬───────────────────────────┬───────┬───────┬─────┐
-  │identity│ facts │wiki │    history (14 turns)      │recall │ tools │ FOS │
-  │  312   │  812  │ 344 │         8,420              │  276  │ stubs │ 100 │
-  └────────┴───────┴─────┴───────────────────────────┴───────┴───────┴─────┘
-   ◄──────────────────── 16% of budget ────────────────────►
+  ┌────────────────────────┬────────┐
+  │ identity/sys/tools     │ 14,000 │
+  │ history (65-90 turns)  │ 46,000 │
+  │ recent tools           │ 10,000 │
+  │ keystones              │  3,600 │
+  │ wiki / knowledge       │  2,600 │
+  │ facts (top ~28)        │  2,200 │
+  │ recall / semantic      │  1,600 │
+  │ allocator reserve      │ 12,000 │
+  ├────────────────────────┼────────┤
+  │ total composed         │ 92,000 │
+  └────────────────────────┴────────┘
 
 What's in storage, not in this prompt:
 
-  L2  833 older turns           retrievable if topic shifts back
+  L2  847 turns stored          top 65-120 shown depending on turn density
   L3  28,441 indexed episodes   available via semantic search
-  L4  5,104 facts               ranked by confidence × decay, top 28 selected
-  L4  47 wiki pages             active topic's page selected, rest on standby
+  L4  5,104 facts               ranked by confidence × decay, top ~28 selected
+  L4  847 knowledge entries     active-topic subset shown, rest on standby
 
   Nothing is lost. The compositor picks what's relevant right now.
   Change the topic, and the next turn pulls different content from the same storage.
@@ -285,7 +292,7 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
 
 **Secret scanner:** Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, hypermem scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected; the write succeeds without the content reaching fleet-visible storage.
 
-**The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and composes a provider-format context block. A safety valve catches estimation drift and trims post-composition. Because the budget is computed from the model's actual context window at compose time (resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly), a mid-session model swap is absorbed on the next turn with no manual intervention. T0 is preserved verbatim up to 80% projected occupancy. At high pressure with a large result, T0 is trimmed head-and-tail with a structured trim note. Compression of older turns starts at T1.
+**The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and composes a provider-format context block. A safety valve catches estimation drift and trims post-composition. Because the budget is computed from the model's actual context window at compose time (resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly), a mid-session model swap triggers a budget recompute on the next turn. Structured tool history is guarded from destructive persistence during a budget downshift. T0 is preserved verbatim up to 80% projected occupancy. At high pressure with a large result, T0 is trimmed head-and-tail with a structured trim note. Compression of older turns starts at T1.
 
 ```
   user message
@@ -315,22 +322,25 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
   afterTurn ──► write back to all 4 layers
 ```
 
-Token budget allocation from a real session (847 turns deep, 60k budget):
+Token budget allocation from a mature session (847 turns deep, 128k budget):
 
 ```
-Slot                          Tokens    % of budget
------------------------------------------------------
-L1 history (last 14 turns)     8,420       14.0%
-L4 facts (top-28, confidence)    812        1.4%
-L4 wiki (active topic)           344        0.6%
-L3 recall (semantic matches)     276        0.5%
-Spawn context                      0        0.0%
------------------------------------------------------
-Assembled                       9,852       16.4%
-Reserved for response          50,148       83.6%
+Slot                               Tokens    % of budget
+---------------------------------------------------------
+identity / system / user / tools   14,000       10.9%
+history (65-90 tool-heavy turns)   46,000       35.9%
+recent tools                       10,000        7.8%
+keystones                           3,600        2.8%
+wiki / knowledge                    2,600        2.0%
+facts (top ~28, conf × decay)       2,200        1.7%
+recall / semantic                   1,600        1.3%
+allocator reserve                  12,000        9.4%
+---------------------------------------------------------
+Total composed                     92,000       71.9%
+Available for response             36,000       28.1%
 ```
 
-The 16% composition figure is typical for a warm single-agent session. Multi-agent sessions with active registry and cross-session wiki hit 25-30%. The response reserve is never touched by the compositor; it belongs to the model.
+The 72% composition figure is typical for a warm mature session. Multi-agent sessions with active registry and cross-session wiki may run slightly higher. The response reserve belongs to the model.
 
 ---
 
@@ -429,7 +439,7 @@ Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes
     "maxCrossSessionContext": 3000,
     "maxRecentToolPairs": 2,
     "maxProseToolPairs": 6,
-    "contextWindowReserveFraction": 0.25,
+    "contextWindowReserve": 0.25,
     "outputProfile": "standard"
   }
 }
