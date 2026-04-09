@@ -17,7 +17,7 @@ openclaw config set plugins.slots.contextEngine hypermem
 Start a conversation. Run `session_status`. You'll see compositor stats: token budget, pressure level, slot allocations. That's the engine running.
 
 ```text
-L1  Redis         Hot session cache, identity, compressed recent history
+L1  SQLite mem     Hot session cache, identity, compressed recent history
 L2  Messages DB   Per-agent conversation history in SQLite
 L3  Vectors DB    Per-agent semantic search with sqlite-vec embeddings
 L4  Library DB    Fleet-wide structured knowledge, facts, episodes, registry
@@ -33,7 +33,7 @@ This is the core claim: hypermem is not transcript replay. It is context managem
   ┌────┴────────────────────────────────────────────┐
   │              query 4 layers (parallel)           │
   │                                                  │
-  │  L1 Redis     L2 History    L3 Vectors  L4 Library │
+  │  L1 SQLite mem L2 History    L3 Vectors  L4 Library │
   │  hot state    durable       semantic    facts/wiki │
   │  0.1ms        0.16ms        0.29ms      0.08ms     │
   └────┬────────────────────────────────────────────┘
@@ -120,7 +120,7 @@ When it fills:                          When budget is exceeded:
 
 When an agent restarts, it wakes up empty. Decisions made, preferences established, work in progress: gone. Operators re-explain context. Agents ask questions they have already asked. The work is real. The memory is not.
 
-hypermem warms sessions from SQLite and Redis before the first turn. The agent picks up mid-conversation. Session continuity is no longer a function of uptime; it is a property of the architecture.
+hypermem warms sessions from SQLite before the first turn. The agent picks up mid-conversation. Session continuity is no longer a function of uptime; it is a property of the architecture.
 
 ### Context that never collapses
 
@@ -138,7 +138,7 @@ FTS5 full-text search catches exact matches. KNN vector search catches semantic 
 
 Long agentic sessions generate a lot of tool output. Left unmanaged, old results crowd out current reasoning.
 
-Tool Context Tuning compresses by turn age. T0 turns stay verbatim under normal pressure. At projected occupancy above 80% with a large result (>40k chars), T0 is trimmed head-and-tail with a structured `[hypermem_tool_result_trim ... reason=oversize_turn0_trim]` note. T1 turns become short prose stubs: `Read /src/foo.ts (1.2KB)`, `Ran npm test -- exit 0`. T2 and T3 turns drop payloads entirely, keeping message text. Large results keep the head and tail and cut the middle. For multi-agent teams, compression is tier-aware: director and council agents preserve more context per pass, reflecting their coordination scope; specialists use a tighter cap to stay focused. The live Redis cache is refreshed from SQLite after each turn so it never drifts from the source of truth.
+Tool Context Tuning compresses by turn age. T0 turns stay verbatim under normal pressure. At projected occupancy above 80% with a large result (>40k chars), T0 is trimmed head-and-tail with a structured `[hypermem_tool_result_trim ... reason=oversize_turn0_trim]` note. T1 turns become short prose stubs: `Read /src/foo.ts (1.2KB)`, `Ran npm test -- exit 0`. T2 and T3 turns drop payloads entirely, keeping message text. Large results keep the head and tail and cut the middle. For multi-agent teams, compression is tier-aware: director and council agents preserve more context per pass, reflecting their coordination scope; specialists use a tighter cap to stay focused. The in-memory cache is refreshed from SQLite after each turn so it never drifts from the source of truth.
 
 ### Knowledge that outlasts the conversation
 
@@ -210,13 +210,13 @@ Spawned subagents start cold. They don't know what the parent was doing, which f
 
 ## Pressure management
 
-hypermem assembles context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript and Redis window. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
+hypermem assembles context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
 
 | Path | Trigger | Action |
 |---|---|---|
 | **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures projected occupancy before results land. Plans against a 120k baseline window regardless of actual provider context size. 75%: green zone, keep full. 80%: defensive -- trim large results (>40k chars) head+tail with structured note. 85%: hard caution zone -- trim on turn 0 and turn 1. Also trims the messages[] array returned to the runtime; this is what actually prevents stripping on the current turn, not just the next one |
 | **AfterTurn trim** | Every turn at >80% | Pre-emptive headroom cut after the assistant replies, before the next turn arrives |
-| **Nuclear compaction** | compact() at >85% | Cuts Redis to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
+| **Nuclear compaction** | compact() at >85% | Cuts in-memory cache to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
 | **Density-aware JSONL truncation** | compact() | Counts tokens per message, not message count. Catches large-message sessions that looked fine by count but were full by volume |
 | **Pre-ingestion wave guard** | Any toolResult payload before recording | Truncates or skips large tool payloads before they enter the ingest path, preventing the ingest itself from adding pressure during high-volume agentic runs |
 
@@ -226,7 +226,7 @@ hypermem assembles context fresh on every turn, but a long-running session still
 
 ## How it works
 
-1. **Record** each turn into SQLite and mirror hot session state into Redis.
+1. **Record** each turn into SQLite and mirror hot session state into the in-memory cache.
 2. **Index** conversations and workspace files for exact and semantic recall.
 3. **Assemble** a fresh prompt from history, facts, document chunks, and library data within a strict budget.
 4. **Tune** tool-heavy history by turn age so old payloads don't crowd out current work.
@@ -238,7 +238,7 @@ hypermem assembles context fresh on every turn, but a long-running session still
 No configuration required for any of these:
 
 - **Semantic indexer:** indexes each session's turns for recall after activity drops off, pre-embeds new content so compose calls hit cache on subsequent turns
-- **Topic synthesis:** compiles stale topics into structured wiki pages and promotes high-signal facts from the hot Redis layer to pointer-format entries in MEMORY.md; both classifier-driven, no LLM call
+- **Topic synthesis:** compiles stale topics into structured wiki pages and promotes high-signal facts from the hot cache to pointer-format entries in MEMORY.md; both classifier-driven, no LLM call
 - **Noise sweep:** removes low-signal or expired facts on a rolling basis
 - **Tool decay:** compresses older tool history to free budget for current work
 - **Keystone scoring:** evaluates each recorded turn for historical significance; high-signal turns are marked for preservation ahead of ordinary history during pressure trimming
@@ -251,15 +251,15 @@ Benchmarked against a production database: 3,482 facts, 19,853 episodes.
 
 | Operation | avg | p50 | p95 |
 |---|---|---|---|
-| Redis single slot GET | 0.10ms | 0.086ms | 0.16ms |
-| Redis history LRANGE (100 messages) | 0.16ms | 0.13ms | 0.22ms |
+| L1 single slot GET (SQLite in-memory) | 0.10ms | 0.086ms | 0.16ms |
+| L1 history window (100 messages) | 0.16ms | 0.13ms | 0.22ms |
 | L4 facts query (top-28 by confidence x decay) | 0.29ms | 0.28ms | 0.31ms |
 | L4 FTS5 keyword search | 0.08ms | 0.076ms | 0.11ms |
 | Full 4-layer compose, warm session | 52ms | 52ms | 57ms |
 | Full 4-layer compose, cold session (first turn) | 249ms | 54ms | 1,592ms |
 | Async pre-embed (background, not user-facing) | 302ms | 146ms | 725ms |
 
-L1 and L4 structured retrieval are sub-millisecond. After the first turn, query embeddings are computed in the background and cached in Redis. Warm compose averages 52ms with a p95 of 57ms. The cold p95 of 1,592ms happens exactly once per new session, then never again. The async embed cost is paid after the assistant replies; users never wait for it.
+L1 and L4 structured retrieval are sub-millisecond. After the first turn, query embeddings are computed in the background and cached in the in-memory layer. Warm compose averages 52ms with a p95 of 57ms. The cold p95 of 1,592ms happens exactly once per new session, then never again. The async embed cost is paid after the assistant replies; users never wait for it.
 
 ---
 
@@ -267,7 +267,7 @@ L1 and L4 structured retrieval are sub-millisecond. After the first turn, query 
 
 hypermem plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle.
 
-**L1: Redis** is the hot layer. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and fleet registry data. The compositor goes here first on every turn.
+**L1: SQLite in-memory** is the hot layer. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and fleet registry data. No TCP, no connection timeouts, no retry backoff. The compositor goes here first on every turn.
 
 **L2: Messages DB** is the durable per-agent record. SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
 
@@ -326,18 +326,17 @@ What 0.5.0 includes:
 | Requirement | Version | Notes |
 |---|---|---|
 | **Node.js** | `>=22.0.0` | Required for native `node:sqlite` module |
-| **Redis >= 7.0.0** | | L1 hot cache; local or remote |
-| **ioredis** | `^5.4.1` | Installed automatically via npm |
+| **better-sqlite3** | `^11.x` | Installed automatically via npm; powers L1 in-memory and L4 library |
 | **sqlite-vec** | `0.1.9` | Bundled; no separate install needed |
 
-Redis adds ~5MB of memory. SQLite is a library, not a service. The nomic embedder on Ollama is the heaviest component, and it is lighter than pgvector or any hosted vector database.
+SQLite is a library, not a service. All four layers run in-process with no external daemons. The nomic embedder on Ollama is the heaviest component, and it is lighter than pgvector or any hosted vector database.
 
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
   ENGINE_VERSION,        // '0.5.0'
   MIN_NODE_VERSION,      // '22.0.0'
-  MIN_REDIS_VERSION,     // '6.0.0'
+  MIN_SQLITE_VERSION,    // '3.35.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
   MAIN_SCHEMA_VERSION,   // 6  (hypermem.db)
   LIBRARY_SCHEMA_VERSION_EXPORT, // 12 (library.db)
@@ -363,7 +362,7 @@ openclaw gateway restart
 
 Run `session_status` after your next conversation. You'll see compositor stats: token budget, pressure level, slot allocations. That's the engine running.
 
-**Requirements:** Node.js 22+, OpenClaw with context engine plugin support, Redis 7+, and either Ollama (local) or an OpenRouter API key (hosted) for embeddings.
+**Requirements:** Node.js 22+, OpenClaw with context engine plugin support, and either Ollama (local) or an OpenRouter API key (hosted) for embeddings.
 
 Full guide with deployment-specific options: **[INSTALL.md](./INSTALL.md)**
 
@@ -426,7 +425,7 @@ import { HyperMem, buildSpawnContext, DocChunkStore, MessageStore } from '@psicl
 
 const hm = await HyperMem.create({
   dataDir: '~/.openclaw/hypermem',
-  redis: { host: 'localhost', port: 6379 },
+  cache: { maxEntries: 10000 },
   // Local (Ollama):
   embedding: { ollamaUrl: 'http://localhost:11434', model: 'nomic-embed-text' },
   // Hosted (OpenRouter) — recommended for installs without local GPU/CPU:
@@ -445,7 +444,7 @@ const composed = await hm.compose({
 });
 
 // Refresh tool compression after each turn
-await hm.refreshRedisGradient('forge', 'agent:forge:webchat:main');
+await hm.refreshCacheGradient('forge', 'agent:forge:webchat:main');
 
 // Spawn a subagent with parent context
 const spawn = await buildSpawnContext(
