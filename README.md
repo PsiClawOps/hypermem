@@ -60,10 +60,10 @@ Four storage layers, sub-millisecond retrieval, zero external services.
 
 | Layer | What it holds | Speed |
 |---|---|---|
-| **L1 In-memory** | What the agent needs right now. Identity, recent history, active state. | 0.1ms |
-| **L2 History** | Every conversation, queryable and concurrent-safe. Per-agent. | 0.16ms |
+| **L1 In-memory** | What the agent needs right now. Identity, recent history, active state. | 0.08ms |
+| **L2 History** | Every conversation, queryable and concurrent-safe. Per-agent. | 0.13ms |
 | **L3 Semantic** | Finds related content even when the words don't match. | 0.29ms |
-| **L4 Knowledge** | Facts, wiki pages, episodes, preferences. Shared across agents. | 0.08ms |
+| **L4 Knowledge** | Facts, wiki pages, episodes, preferences. Shared across agents. | 0.09ms |
 
 Everything is retained. Nothing is lost at the session boundary. When an agent restarts, it warms from storage before the first turn. The retry logic decision from last week, the deployment preferences from last month, the architecture choices from day one: all queryable, all available for composition.
 
@@ -102,8 +102,8 @@ What the model sees (9,852 of 60,000 tokens):
 What's in storage, not in this prompt:
 
   L2  833 older turns           retrievable if topic shifts back
-  L3  19,853 indexed episodes   available via semantic search
-  L4  3,482 facts               ranked by confidence × decay, top 28 selected
+  L3  28,441 indexed episodes   available via semantic search
+  L4  5,104 facts               ranked by confidence × decay, top 28 selected
   L4  47 wiki pages             active topic's page selected, rest on standby
 
   Nothing is lost. The compositor picks what's relevant right now.
@@ -275,17 +275,23 @@ No configuration required for any of these:
 
 ## Speed
 
-Benchmarked against a production database: 3,482 facts, 19,853 episodes.
+Benchmarked against a production database: 5,104 facts, 28,441 episodes, 847 knowledge entries, 42MB. 1,000 iterations, 50 warmup discarded, single-process isolation.
 
 | Operation | avg | p50 | p95 |
 |---|---|---|---|
-| L1 single slot GET (SQLite in-memory) | 0.10ms | 0.086ms | 0.16ms |
-| L1 history window (100 messages) | 0.16ms | 0.13ms | 0.22ms |
-| L4 facts query (top-28 by confidence x decay) | 0.29ms | 0.28ms | 0.31ms |
-| L4 FTS5 keyword search | 0.08ms | 0.076ms | 0.11ms |
+| L1 slot GET (SQLite in-memory) | 0.08ms | 0.07ms | 0.13ms |
+| L1 history window (100 messages) | 0.13ms | 0.11ms | 0.19ms |
+| L4 facts (top-28, confidence × decay) | 0.28ms | 0.26ms | 0.36ms |
+| L4 facts + agentId filter | 0.31ms | 0.29ms | 0.40ms |
+| L4 FTS5 keyword search | 0.06ms | 0.05ms | 0.08ms |
+| L4 FTS5 + agentId filter | 0.07ms | 0.06ms | 0.10ms |
+| L4 knowledge query | 0.09ms | 0.08ms | 0.14ms |
+| Recency decay scoring (28 rows, in JS) | 0.003ms | 0.002ms | 0.005ms |
 | Full 4-layer compose, warm session | 52ms | 52ms | 57ms |
 | Full 4-layer compose, cold session (first turn) | 249ms | 54ms | 1,592ms |
 | Async pre-embed (background, not user-facing) | 302ms | 146ms | 725ms |
+
+> Query planner uses compound indexes on agentId + sort key; FTS5 performance improved 25% from baseline after index additions despite a 47% increase in stored data.
 
 L1 and L4 structured retrieval are sub-millisecond. After the first turn, query embeddings are computed in the background and cached in the in-memory layer. Warm compose averages 52ms with a p95 of 57ms. The cold p95 of 1,592ms happens exactly once per new session, then never again. The async embed cost is paid after the assistant replies; users never wait for it.
 
@@ -293,7 +299,7 @@ L1 and L4 structured retrieval are sub-millisecond. After the first turn, query 
 
 ## Architecture
 
-hypermem plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle.
+hypermem plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle. It registers as both `contextEngine` and `memory`, providing the standard memory slot interface alongside full prompt composition: `memory_search` routes through the official slot and shows correctly in `openclaw plugins list`.
 
 **L1: SQLite in-memory.** Sub-millisecond hot reads, no network dependency, no daemon, no retry logic. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and fleet registry data. The compositor hits this first on every turn.
 
@@ -315,6 +321,8 @@ hypermem plugs into OpenClaw as a context engine and owns the full prompt compos
 | Work Items | Work queue with status transitions and FTS5 |
 | Session Registry | Session lifecycle tracking |
 | Desired State | Per-agent config targets; compares running config against desired at gateway startup and surfaces drift for operator review |
+
+Facts are ranked by `confidence × recencyDecay`, where decay is exponential with a configurable half-life: recent, high-confidence facts float to the top while stale entries yield budget to newer knowledge.
 
 **Secret scanner:** Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, hypermem scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected; the write succeeds without the content reaching fleet-visible storage.
 
@@ -411,6 +419,7 @@ npm install && npm run build
 npm --prefix plugin install && npm --prefix plugin run build
 
 openclaw config set plugins.slots.contextEngine hypermem
+openclaw config set plugins.slots.memory hypermem
 openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin"]' --strict-json
 openclaw gateway restart
 ```
@@ -449,6 +458,7 @@ Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes
 
 ```json
 {
+  "deferToolPruning": true,
   "compositor": {
     "defaultTokenBudget": 60000,
     "maxFacts": 18,
@@ -460,6 +470,8 @@ Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes
   }
 }
 ```
+
+`deferToolPruning: true` tells hypermem to skip its own T0/T1/T2/T3 gradient when OpenClaw's native `contextPruning` extension is active (Anthropic and Google providers). On those providers, OpenClaw's pruner handles tool result trimming: ratio-driven at >30% context fill, soft-trim head+tail for results over 4,000 chars, hard-clear above 50k total, with the last 3 assistant turns always protected. HyperMem's gradient remains active as fallback for other providers (GPT-5.4, etc.). Default: `true` for Anthropic installs.
 
 `outputProfile` valid values: `"light"` (~100 tokens: anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration), `"standard"` (~250 tokens: full directive set plus pagination and hedging rules), `"full"` (~400 tokens: complete output normalization for high-stakes or multi-agent deployments). Default: `"standard"`.
 
