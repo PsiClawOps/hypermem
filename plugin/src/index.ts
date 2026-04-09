@@ -34,6 +34,7 @@ import type {
 } from '@psiclawops/hypermem';
 import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow, canPersistReshapedHistory } from '@psiclawops/hypermem';
 import { evictStaleContent } from '@psiclawops/hypermem/image-eviction';
+import { repairToolPairs } from '@psiclawops/hypermem';
 import os from 'os';
 import path from 'path';
 import fs from 'fs/promises';
@@ -1399,6 +1400,12 @@ function createHyperMemEngine(): ContextEngine {
           }
           } // end deferToolPruning gate
 
+          // Repair orphaned tool pairs in the trimmed message list.
+          // In-memory trim (cluster drop) can strand tool_result messages whose
+          // paired tool_use was in a dropped cluster.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          trimmedMessages = repairToolPairs(trimmedMessages as unknown as any[]) as unknown as typeof trimmedMessages;
+
           const windowTokens = await estimateWindowTokens(hm, agentId, sk);
           const overhead = _overheadCache.get(sk) ?? getOverheadFallback();
           return {
@@ -1573,7 +1580,7 @@ function createHyperMemEngine(): ContextEngine {
       // neutralToAgentMessage can return a single message or an array (tool results
       // expand to individual ToolResultMessage objects), so we flatMap.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const outputMessages = result.messages
+      let outputMessages = result.messages
         .filter(m => m.role != null)
         .flatMap(m => neutralToAgentMessage(m as unknown as NeutralMessage)) as unknown as any[];
 
@@ -1611,6 +1618,12 @@ function createHyperMemEngine(): ContextEngine {
           `synthetic=${agentPairStats.syntheticNoResultCount}`
         );
       }
+
+      // Repair orphaned tool pairs before returning to provider.
+      // compaction/trim passes can remove tool_use blocks without removing their
+      // paired tool_result messages — Anthropic and Gemini reject these with 400.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      outputMessages = repairToolPairs(outputMessages as any) as typeof outputMessages;
 
       // Cache overhead for tool-loop turns: contextBlock tokens (chars/4) +
       // tier-aware estimate for runtime system prompt (SOUL.md, identity,

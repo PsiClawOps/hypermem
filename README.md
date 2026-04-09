@@ -42,7 +42,7 @@ OpenClaw addresses both failure modes with structured guidance files injected in
 |---|---|---|
 | `SOUL.md` | Agent identity, voice, principles | ✅ always injected |
 | `USER.md` | User preferences, working style | ✅ always injected |
-| `JOB.md` / `AGENT.md` | Task focus, project instructions | ✅ always injected |
+| Task and workspace instruction files (for example AGENTS.md, job files, and related guidance) | ✅ always injected |
 | `MEMORY.md` | Hand-curated decisions, facts, patterns | ✅ if manually maintained |
 
 These are powerful for identity and preferences. But the retry logic decision from last week? If nobody manually captured it into `MEMORY.md`, that session boundary erased it. The system is only as strong as its last manual update.
@@ -53,7 +53,7 @@ OpenClaw also ships compaction safeguards and hybrid file search. That's a solid
 
 ## hypermem
 
-Four storage layers, sub-millisecond retrieval, no external database services required. Runs entirely in-process with local Nomic embeddings.
+Four storage layers, sub-millisecond retrieval, no external database services required. Runs in-process with local SQLite storage and local Nomic embeddings by default, with optional hosted embeddings for L3.
 
 | Layer | What it holds | Speed |
 |---|---|---|
@@ -183,7 +183,7 @@ automatically -- set contextWindowReserve to your preferred floor and let the co
 
 ### Tool output that doesn't take over
 
-Agentic sessions generate massive tool output. Left unmanaged, old results crowd out current reasoning. hypermem compresses tool history by age: recent results stay full, older results become stubs, the oldest become one-line summaries. The budget goes to current work, not last hour's npm test output.
+Agentic sessions generate massive tool output. Left unmanaged, old results crowd out current reasoning. hypermem compresses tool history by age: recent clusters stay full, older clusters are capped, and the oldest collapse to short stubs while preserving tool call/result integrity. The budget goes to current work, not last hour's npm test output.
 
 ### Knowledge that outlasts the conversation
 

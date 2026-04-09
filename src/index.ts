@@ -1524,3 +1524,4 @@ export { getProfile, mergeProfile, PROFILES, lightProfile, standardProfile, full
 export type { ProfileName } from './profiles.js';
 export { renderStarterFOS, resolveOutputTier } from './fos-mod.js';
 export type { OutputStandardTier } from './fos-mod.js';
+export { repairToolPairs } from './repair-tool-pairs.js';
