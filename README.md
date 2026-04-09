@@ -384,7 +384,7 @@ Or use the one-line installer:
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-**Requirements:** Node.js 22+, OpenClaw with context engine plugin support, and either Ollama (local) or an OpenRouter API key (hosted) for embeddings.
+**Requirements:** Node.js 22+, OpenClaw with context engine plugin support, and either Ollama (local) or an OpenRouter API key (hosted) for embeddings. No standalone SQLite install is required for the documented repo install: hypermem uses the SQLite bundled with Node 22 via `node:sqlite`, and `sqlite-vec` provides the platform-specific extension through npm dependencies.
 
 Full guide with deployment-specific options: **[INSTALL.md](./INSTALL.md)**
 

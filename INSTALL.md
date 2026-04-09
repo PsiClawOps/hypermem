@@ -102,6 +102,8 @@ Multiple named agents sharing one OpenClaw gateway. Council setups, director/spe
 
 Redis is not optional. It is the hot session layer — without it, every bootstrap re-reads from SQLite and the fleet cache doesn't exist.
 
+No standalone SQLite install is required for the documented repo install. hypermem uses the SQLite bundled with Node 22 via `node:sqlite`, and `sqlite-vec` provides the platform-specific extension through npm dependencies.
+
 The **embedding layer** (L3 vector semantic search) requires either Ollama running locally or a hosted embedding provider via OpenRouter. Without one of these, semantic recall is completely disabled and retrieval degrades to keyword-only FTS5 matching. hypermem will start without an embedder configured but it will not be working correctly.
 
 ---
@@ -213,6 +215,9 @@ openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/pl
 
 # Set hypermem as the active context engine
 openclaw config set plugins.slots.contextEngine hypermem
+
+# Set hypermem as the active memory provider for memory_search and related slot calls
+openclaw config set plugins.slots.memory hypermem
 
 # Enable the plugin
 openclaw config set plugins.allow '["hypermem"]' --strict-json
@@ -476,6 +481,9 @@ If you see `[hypermem]` lines, the plugin is active and assembling context.
 openclaw config get plugins.slots.contextEngine
 # Should return: hypermem
 
+openclaw config get plugins.slots.memory
+# Should return: hypermem
+
 openclaw status
 # Look for hypermem in the plugins section
 ```
@@ -534,6 +542,7 @@ To return to OpenClaw's default context engine:
 
 ```bash
 openclaw config set plugins.slots.contextEngine legacy
+openclaw config unset plugins.slots.memory
 openclaw gateway restart
 ```
 
