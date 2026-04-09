@@ -53,7 +53,7 @@ OpenClaw also ships compaction safeguards and hybrid file search. That's a solid
 
 ## hypermem
 
-Four storage layers, sub-millisecond retrieval, no external database services required. Runs entirely in-process with local Nomic embeddings; embeddings can run locally or via hosted providers.
+Four storage layers, sub-millisecond retrieval, no external database services required. Runs entirely in-process with local Nomic embeddings.
 
 | Layer | What it holds | Speed |
 |---|---|---|
@@ -142,7 +142,7 @@ High-signal turns are marked as keystones and survive pressure trimming ahead of
 
 ### Tool output that doesn't take over
 
-Agentic sessions generate massive tool output. Left unmanaged, old results crowd out current reasoning. hypermem groups tool calls with their results into atomic clusters: the call and its response are never split. Clusters compress by age: recent clusters stay full (T0), older clusters cap at 6k (T1), then 800 chars (T2), then 150-char stubs (T3). A pair integrity guard ensures call-result pairs survive or drop together. The budget goes to current work, not last hour's npm test output.
+Agentic sessions generate massive tool output. Left unmanaged, old results crowd out current reasoning. hypermem compresses tool history by age: recent results stay full, older results become stubs, the oldest become one-line summaries. The budget goes to current work, not last hour's npm test output.
 
 ### Knowledge that outlasts the conversation
 
@@ -160,7 +160,7 @@ Agents confabulate and drift toward the defaults baked into their training. GPT-
 |---|---|---|
 | `light` | ~100 | Anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration |
 | `standard` | ~250 | Full directive set plus pagination rules and hedging policy |
-| `full` | ~400 | Complete normalization for high-stakes or multi-agent deployments |
+| `full` | ~400 | Complete normalization with full directive set and model-specific calibration |
 
 The same prompt, GPT-5.4, with and without `outputProfile: "light"`:
 
@@ -365,12 +365,6 @@ Schema versions are stamped into each database on startup and checked on open. A
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
-```
-
-Or manually:
-
-```bash
 git clone https://github.com/PsiClawOps/hypermem.git ~/.openclaw/workspace/repo/hypermem
 cd ~/.openclaw/workspace/repo/hypermem
 npm install && npm run build
@@ -382,6 +376,11 @@ openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/pl
 openclaw gateway restart
 ```
 
+Or use the one-line installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
+```
 
 **Requirements:** Node.js 22+, OpenClaw with context engine plugin support, and either Ollama (local) or an OpenRouter API key (hosted) for embeddings.
 
@@ -425,11 +424,11 @@ Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes
 }
 ```
 
-Additional compositor knobs: `maxCrossSessionContext`, `maxRecentToolPairs`, `maxProseToolPairs` — see INSTALL.md for full descriptions.
+Additional compositor knobs: `maxCrossSessionContext`, `maxRecentToolPairs`, `maxProseToolPairs`, see INSTALL.md for full descriptions.
 
-`deferToolPruning: true` tells hypermem to skip its own T0/T1/T2/T3 gradient when OpenClaw's native `contextPruning` extension is active (Anthropic and Google providers). On those providers, OpenClaw's pruner handles tool result trimming: ratio-driven at >30% context fill, soft-trim head+tail for results over 4,000 chars, hard-clear above 50k total, with the last 3 assistant turns always protected. HyperMem's gradient remains active as fallback for other providers (GPT-5.4, etc.). Default: `true` for Anthropic installs.
+`deferToolPruning: true` tells hypermem to skip its own T0/T1/T2/T3 gradient when OpenClaw's native `contextPruning` extension is active (Anthropic and Google providers). On those providers, OpenClaw's pruner handles tool result trimming: ratio-driven at >30% context fill, soft-trim head+tail for results over 4,000 chars, hard-clear above 50k total, with the last 3 assistant turns always protected. hypermem's gradient remains active as fallback for other providers (GPT-5.4, etc.). Default: `true` for Anthropic installs.
 
-`outputProfile` valid values: `"light"` (~100 tokens: anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration), `"standard"` (~250 tokens: full directive set plus pagination and hedging rules), `"full"` (~400 tokens: complete output normalization for high-stakes or multi-agent deployments). Default: `"standard"`.
+`outputProfile` valid values: `"light"` (~100 tokens: anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration), `"standard"` (~250 tokens: full directive set plus pagination and hedging rules), `"full"` (~400 tokens: complete normalization with full directive set and model-specific calibration). Default: `"standard"`.
 
 Context presets ship as named profiles importable from the package:
 
@@ -501,26 +500,22 @@ const spawn = await buildSpawnContext(
 
 ## Migration
 
-hypermem doesn't touch your existing memory data. Install it, switch the context engine, and migrate historical data on your own timeline, before or after switching.
+hypermem doesn't touch your existing memory data. Install it, switch the context engine, and migrate historical data on your own timeline.
 
-Migrations are supported from any memory platform. Worked examples are included in the migration documentation for: **OpenClaw built-in memory, Mem0, Honcho, QMD session exports, and Engram**.
+The migration guide includes worked examples showing how to bring data from OpenClaw built-in memory, Mem0, Honcho, QMD session exports, and Engram. Each example walks through the data model mapping, transformation steps, and validation. Adapt them to your setup.
 
-All migration scripts default to dry-run. Nothing is written until you add `--apply`.
+All examples default to dry-run. Nothing is written until you add `--apply`.
 
 Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 
 
 ---
 
-## Take it further with the Agentic Cognitive Architecture
+## Identity layer
 
-hypermem's output normalization corrects model tendencies after they appear: sycophancy, hedging, pagination. The Agentic Cognitive Architecture prevents them from appearing in the first place.
+hypermem handles context and output normalization. The Agentic Cognitive Architecture handles identity: self-authored SOUL files, structured communication contracts, and coherence anchoring across sessions. Same team, complementary layers.
 
-The Agentic Cognitive Architecture is a design guide for building agents that stay coherent across sessions without constant prompt engineering. It covers identity self-authorship (SOUL.md), structured memory contracts, and agent-to-agent communication protocols. The same FOS/MOD profiles that normalize output in hypermem are derived from Agentic Cognitive Architecture patterns.
-
-When your agent's identity, memory, and communication are architected rather than prompted, the compositor has better material to work with: cleaner facts, more consistent voice, fewer confabulations to catch. The Agentic Cognitive Architecture makes hypermem's output normalization cheaper because the agent needs less correction.
-
-Read the Agentic Cognitive Architecture design guide: [PsiClawOps/AgenticCognitiveArchitecture](https://github.com/PsiClawOps/AgenticCognitiveArchitecture/)
+Design guide: [PsiClawOps/AgenticCognitiveArchitecture](https://github.com/PsiClawOps/AgenticCognitiveArchitecture/)
 
 ---
 
