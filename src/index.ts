@@ -1,5 +1,5 @@
 /**
- * HyperMem — Agent-Centric Memory & Context Composition Engine
+ * hypermem — Agent-Centric Memory & Context Composition Engine
  *
  * @module @psiclawops/hypermem
  *
@@ -9,6 +9,8 @@
  *   L3: vectors.db  — per-agent semantic search index (reconstructable)
  *   L4: library.db  — fleet-wide structured knowledge (crown jewel)
  */
+
+export { ENGINE_VERSION, MIN_NODE_VERSION, MIN_REDIS_VERSION, SQLITE_VEC_VERSION, MAIN_SCHEMA_VERSION, LIBRARY_SCHEMA_VERSION_EXPORT, HYPERMEM_COMPAT_VERSION, SCHEMA_COMPAT } from './version.js';
 
 export { DatabaseManager } from './db.js';
 export type { DatabaseManagerConfig } from './db.js';
@@ -28,6 +30,8 @@ export type { SystemState, SystemEvent } from './system-store.js';
 export { WorkStore } from './work-store.js';
 export type { WorkItem, WorkEvent, WorkStatus } from './work-store.js';
 export { DesiredStateStore } from './desired-state-store.js';
+export { evictStaleContent, DEFAULT_EVICTION_CONFIG } from './image-eviction.js';
+export type { ImageEvictionConfig, EvictionStats, EvictionResult } from './image-eviction.js';
 export { KnowledgeGraph } from './knowledge-graph.js';
 export type { EntityType, KnowledgeLink, GraphNode, TraversalResult } from './knowledge-graph.js';
 
@@ -35,15 +39,17 @@ export { RateLimiter, createRateLimitedEmbedder } from './rate-limiter.js';
 export type { RateLimiterConfig, Priority } from './rate-limiter.js';
 export type { DesiredStateEntry, ConfigEvent, DriftStatus } from './desired-state-store.js';
 
-export { RedisLayer } from './redis.js';
+export type { ModelState } from './cache.js';
+export { CacheLayer } from './cache.js';
 
-export { Compositor, type CompositorDeps } from './compositor.js';
+export { Compositor, type CompositorDeps, applyToolGradientToWindow, canPersistReshapedHistory } from './compositor.js';
 
 export {
   type CollectionTrigger,
   TRIGGER_REGISTRY,
   TRIGGER_REGISTRY_VERSION,
   TRIGGER_REGISTRY_HASH,
+  DEFAULT_TRIGGERS,
   matchTriggers,
 } from './trigger-registry.js';
 
@@ -70,6 +76,7 @@ export {
   normalizeToolCallId,
   generateToolCallId,
   detectProvider,
+  repairToolCallPairs,
 } from './provider-translator.js';
 
 export { migrate, SCHEMA_VERSION } from './schema.js';
@@ -95,11 +102,30 @@ export {
   visibilityFilter,
   defaultOrgRegistry,
   buildOrgRegistryFromDb,
+  loadOrgRegistryFromDb,
 } from './cross-agent.js';
 export type { OrgRegistry } from './cross-agent.js';
 
 export { BackgroundIndexer, createIndexer, type CursorFetcher } from './background-indexer.js';
+export {
+  runDreamingPromoter,
+  runDreamingPassForFleet,
+  resolveAgentWorkspacePath,
+  type DreamerConfig,
+  type DreamerResult,
+  type PromotionEntry,
+  DEFAULT_DREAMER_CONFIG,
+} from './dreaming-promoter.js';
 export type { IndexerStats, WatermarkState } from './background-indexer.js';
+
+export { TopicSynthesizer } from './topic-synthesizer.js';
+export type { SynthesisResult, SynthesisConfig } from './topic-synthesizer.js';
+
+export { WikiPageEmitter } from './wiki-page-emitter.js';
+export type { WikiPage, WikiLink, WikiPageSummary } from './wiki-page-emitter.js';
+
+export { lintKnowledge } from './knowledge-lint.js';
+export type { LintResult } from './knowledge-lint.js';
 
 export { buildSpawnContext } from './spawn-context.js';
 export type { SpawnContextOptions, SpawnContext } from './spawn-context.js';
@@ -144,6 +170,28 @@ export type { ProviderType } from './provider-translator.js';
 export { classifyContentType, signalWeight, isSignalBearing, SIGNAL_WEIGHT } from './content-type-classifier.js';
 export type { ContentType, ContentTypeResult } from './content-type-classifier.js';
 
+export { detectTopicShift, stripMessageMetadata } from './topic-detector.js';
+export type { TopicSignal } from './topic-detector.js';
+
+export { SessionTopicMap } from './session-topic-map.js';
+
+export {
+  getActiveFOS,
+  matchMOD,
+  renderFOS,
+  renderMOD,
+  recordOutputMetrics,
+} from './fos-mod.js';
+export type {
+  FOSRecord,
+  MODRecord,
+  FOSDirectives,
+  FOSTaskVariant,
+  MODCorrection,
+  MODCalibration,
+  OutputMetricsRow,
+} from './fos-mod.js';
+
 import { DatabaseManager } from './db.js';
 import { MessageStore } from './message-store.js';
 import { FactStore } from './fact-store.js';
@@ -156,10 +204,11 @@ import { SystemStore, type SystemState, type SystemEvent } from './system-store.
 import { WorkStore, type WorkItem, type WorkStatus } from './work-store.js';
 import { KnowledgeGraph, type EntityType, type KnowledgeLink, type GraphNode, type TraversalResult } from './knowledge-graph.js';
 import { DesiredStateStore, type DesiredStateEntry, type DriftStatus } from './desired-state-store.js';
-import { RedisLayer } from './redis.js';
+import { CacheLayer } from './cache.js';
 import { Compositor } from './compositor.js';
 import { VectorStore, type VectorSearchResult, type VectorIndexStats } from './vector-store.js';
 import { userMessageToNeutral, fromProviderFormat } from './provider-translator.js';
+import { stripMessageMetadata } from './topic-detector.js';
 import { DocChunkStore, type DocChunkRow, type ChunkQuery, type IndexResult } from './doc-chunk-store.js';
 import { WorkspaceSeeder, type SeedOptions, type SeedResult } from './seed.js';
 import { chunkMarkdown, chunkFile, inferCollection, type DocChunk, type ChunkOptions } from './doc-chunker.js';
@@ -172,20 +221,17 @@ import type {
   Conversation,
   ChannelType,
 } from './types.js';
-import { crossAgentQuery, defaultOrgRegistry, buildOrgRegistryFromDb, type OrgRegistry } from './cross-agent.js';
+import { crossAgentQuery, defaultOrgRegistry, buildOrgRegistryFromDb, loadOrgRegistryFromDb, type OrgRegistry } from './cross-agent.js';
 import path from 'node:path';
 import os from 'node:os';
 
 const DEFAULT_CONFIG: HyperMemConfig = {
   enabled: true,
   dataDir: path.join(process.env.HOME || os.homedir(), '.openclaw', 'hypermem'),
-  redis: {
-    host: 'localhost',
-    port: 6379,
+  cache: {
     keyPrefix: 'hm:',
     sessionTTL: 14400,      // 4 hours — system/identity/meta slots
-    historyTTL: 86400,      // 24 hours — history list outlives other slots
-    flushInterval: 1000,
+    historyTTL: 604800,     // 7 days — extended for ClawCanvas display
   },
   compositor: {
     // TUNE-010 (2026-04-02): Raised from 65000 → 90000.
@@ -194,7 +240,7 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     // re-run composition, so 90k is safe — leaves ~30k headroom for in-flight
     // tool results on a 120k window. Budget is better spent on context quality.
     defaultTokenBudget: 90000,
-    maxHistoryMessages: 250,
+    maxHistoryMessages: 1000,
     maxFacts: 28,
     maxCrossSessionContext: 6000,
     maxRecentToolPairs: 3,
@@ -209,6 +255,8 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     factDecayRate: 0.01,
     episodeSignificanceThreshold: 0.5,
     periodicInterval: 300000,
+    batchSize: 128,
+    maxMessagesPerTick: 500,
   },
   embedding: {
     ollamaUrl: 'http://localhost:11434',
@@ -220,25 +268,25 @@ const DEFAULT_CONFIG: HyperMemConfig = {
 };
 
 /**
- * HyperMem — the main API facade.
+ * hypermem — the main API facade.
  *
  * Usage:
- *   const hm = await HyperMem.create({ dataDir: '~/.openclaw/hypermem' });
+ *   const hm = await hypermem.create({ dataDir: '~/.openclaw/hypermem' });
  *   await hm.record('forge', 'agent:forge:webchat:main', userMsg);
  *   const result = await hm.compose({ agentId: 'forge', sessionKey: '...', ... });
  */
 export class HyperMem {
   readonly dbManager: DatabaseManager;
-  readonly redis: RedisLayer;
+  readonly cache: CacheLayer;
   readonly compositor: Compositor;
   private readonly config: HyperMemConfig;
 
   private constructor(config: HyperMemConfig) {
     this.config = config;
     this.dbManager = new DatabaseManager({ dataDir: config.dataDir });
-    this.redis = new RedisLayer(config.redis);
+    this.cache = new CacheLayer(config.cache);
     this.compositor = new Compositor({
-      redis: this.redis,
+      cache: this.cache,
       vectorStore: null,  // Set after create() when vector DB is available
       libraryDb: null,    // Set after create() when library DB is available
     }, config.compositor);
@@ -253,13 +301,13 @@ export class HyperMem {
   }
 
   /**
-   * Create and initialize a HyperMem instance.
+   * Create and initialize a hypermem instance.
    */
   static async create(config?: Partial<HyperMemConfig>): Promise<HyperMem> {
     const merged: HyperMemConfig = {
       ...DEFAULT_CONFIG,
       ...config,
-      redis: { ...DEFAULT_CONFIG.redis, ...config?.redis },
+      cache: { ...DEFAULT_CONFIG.cache, ...config?.cache },
       compositor: { ...DEFAULT_CONFIG.compositor, ...config?.compositor },
       indexer: { ...DEFAULT_CONFIG.indexer, ...config?.indexer },
       embedding: {
@@ -270,11 +318,11 @@ export class HyperMem {
 
     const hm = new HyperMem(merged);
 
-    const redisOk = await hm.redis.connect();
-    if (redisOk) {
-      console.log('[hypermem] Redis connected');
+    const cacheOk = await hm.cache.connect();
+    if (cacheOk) {
+      console.log('[hypermem] Cache connected');
     } else {
-      console.warn('[hypermem] Redis unavailable — running in SQLite-only mode');
+      console.warn('[hypermem] Cache unavailable — running in SQLite-only mode');
     }
 
     // ── Vector store init ─────────────────────────────────────
@@ -289,7 +337,10 @@ export class HyperMem {
         const vs = new VectorStore(vectorDb, merged.embedding, hm.dbManager.getLibraryDb());
         vs.ensureTables();
         hm.compositor.setVectorStore(vs);
-        console.log('[hypermem] Vector store initialized (sqlite-vec + nomic-embed-text)');
+        const embeddingDesc = merged.embedding.provider === 'openai'
+          ? `${merged.embedding.openaiBaseUrl?.includes('openrouter') ? 'openrouter' : 'openai'}/${merged.embedding.model ?? 'text-embedding-3-small'}`
+          : `ollama/${merged.embedding.model ?? 'nomic-embed-text'}`;
+        console.log(`[hypermem] Vector store initialized (sqlite-vec + ${embeddingDesc})`);
       } else {
         console.warn('[hypermem] sqlite-vec unavailable — semantic recall in FTS5-only mode');
       }
@@ -329,14 +380,14 @@ export class HyperMem {
       model: opts?.model,
     });
 
-    const neutral = userMessageToNeutral(content);
+    const neutral = userMessageToNeutral(stripMessageMetadata(content));
     const stored = store.recordMessage(conversation.id, agentId, neutral, {
       tokenCount: opts?.tokenCount,
       isHeartbeat: opts?.isHeartbeat,
     });
 
-    await this.redis.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
-    await this.redis.touchSession(agentId, sessionKey);
+    await this.cache.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
+    await this.cache.touchSession(agentId, sessionKey);
 
     return stored;
   }
@@ -362,8 +413,8 @@ export class HyperMem {
       tokenCount: opts?.tokenCount,
     });
 
-    await this.redis.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
-    await this.redis.touchSession(agentId, sessionKey);
+    await this.cache.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
+    await this.cache.touchSession(agentId, sessionKey);
 
     return stored;
   }
@@ -402,6 +453,14 @@ export class HyperMem {
     const db = this.dbManager.getMessageDb(agentId);
     const libraryDb = this.dbManager.getLibraryDb();
     await this.compositor.warmSession(agentId, sessionKey, db, { ...opts, libraryDb });
+  }
+
+  /**
+   * Recompute the Redis hot history view from SQLite and re-apply tool gradient.
+   */
+  async refreshRedisGradient(agentId: string, sessionKey: string, tokenBudget?: number): Promise<void> {
+    const db = this.dbManager.getMessageDb(agentId);
+    await this.compositor.refreshRedisGradient(agentId, sessionKey, db, tokenBudget);
   }
 
   /**
@@ -600,7 +659,7 @@ export class HyperMem {
     const store = new FleetStore(db);
     const result = store.upsertAgent(id, data);
     // Invalidate cache — fire and forget
-    this.redis.invalidateFleetAgent(id).catch(() => {});
+    this.cache.invalidateFleetAgent(id).catch(() => {});
     return result;
   }
 
@@ -609,14 +668,14 @@ export class HyperMem {
    */
   async getFleetAgentCached(id: string): Promise<FleetAgent | null> {
     // Try cache first
-    const cached = await this.redis.getCachedFleetAgent(id);
+    const cached = await this.cache.getCachedFleetAgent(id);
     if (cached) return cached as unknown as FleetAgent;
 
     // Fall back to SQLite
     const agent = this.getFleetAgent(id);
     if (agent) {
       // Warm cache — fire and forget
-      this.redis.cacheFleetAgent(id, agent as unknown as Record<string, unknown>).catch(() => {});
+      this.cache.cacheFleetAgent(id, agent as unknown as Record<string, unknown>).catch(() => {});
     }
     return agent;
   }
@@ -820,7 +879,7 @@ export class HyperMem {
     const store = new DesiredStateStore(db);
     const result = store.setDesired(agentId, configKey, desiredValue, opts);
     // Invalidate cache — desired state change affects fleet view
-    this.redis.invalidateFleetAgent(agentId).catch(() => {});
+    this.cache.invalidateFleetAgent(agentId).catch(() => {});
     return result;
   }
 
@@ -831,7 +890,7 @@ export class HyperMem {
     const db = this.dbManager.getLibraryDb();
     const store = new DesiredStateStore(db);
     const result = store.reportActual(agentId, configKey, actualValue);
-    this.redis.invalidateFleetAgent(agentId).catch(() => {});
+    this.cache.invalidateFleetAgent(agentId).catch(() => {});
     return result;
   }
 
@@ -842,7 +901,7 @@ export class HyperMem {
     const db = this.dbManager.getLibraryDb();
     const store = new DesiredStateStore(db);
     const result = store.reportActualBulk(agentId, actuals);
-    this.redis.invalidateFleetAgent(agentId).catch(() => {});
+    this.cache.invalidateFleetAgent(agentId).catch(() => {});
     return result;
   }
 
@@ -1062,7 +1121,7 @@ export class HyperMem {
    */
   async getSessionCursor(agentId: string, sessionKey: string): Promise<import('./types.js').SessionCursor | null> {
     // Try Redis first (hot path)
-    const redisCursor = await this.redis.getCursor(agentId, sessionKey);
+    const redisCursor = await this.cache.getCursor(agentId, sessionKey);
     if (redisCursor) return redisCursor;
 
     // Fallback to SQLite
@@ -1087,7 +1146,7 @@ export class HyperMem {
 
     // Re-warm Redis so subsequent reads are fast
     try {
-      await this.redis.setCursor(agentId, sessionKey, cursor);
+      await this.cache.setCursor(agentId, sessionKey, cursor);
     } catch {
       // Best-effort re-warm
     }
@@ -1382,7 +1441,7 @@ export class HyperMem {
    *  - Fleet summary (counts, drift status)
    */
   async hydrateFleetCache(): Promise<{ agents: number; summary: boolean }> {
-    if (!this.redis.isConnected) return { agents: 0, summary: false };
+    if (!this.cache.isConnected) return { agents: 0, summary: false };
 
     const db = this.dbManager.getLibraryDb();
     const fleetStore = new FleetStore(db);
@@ -1410,7 +1469,7 @@ export class HyperMem {
           desiredConfig,
         };
 
-        await this.redis.cacheFleetAgent(agent.id, composite as unknown as Record<string, unknown>);
+        await this.cache.cacheFleetAgent(agent.id, composite as unknown as Record<string, unknown>);
         hydrated++;
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1432,7 +1491,7 @@ export class HyperMem {
         drift: driftSummary,
         hydratedAt: new Date().toISOString(),
       };
-      await this.redis.cacheFleetSummary(summary);
+      await this.cache.cacheFleetSummary(summary);
     } catch {
       return { agents: hydrated, summary: false };
     }
@@ -1446,9 +1505,23 @@ export class HyperMem {
    * Clean shutdown.
    */
   async close(): Promise<void> {
-    await this.redis.disconnect();
+    await this.cache.disconnect();
     this.dbManager.close();
   }
 }
 
 export default HyperMem;
+
+export { SessionFlusher, flushSession } from './session-flusher.js';
+export type { FlushSessionOptions, FlushSessionResult } from './session-flusher.js';
+export { importVault, watchVault, parseObsidianNote, parseFrontmatter, extractWikilinks, extractTags, cleanObsidianMarkdown } from './obsidian-watcher.js';
+export type { ObsidianConfig, ObsidianNote, ObsidianImportResult, ObsidianWikiLink, VaultChangeCallback } from './obsidian-watcher.js';
+export { exportToVault } from './obsidian-exporter.js';
+export type { ObsidianExportConfig, ObsidianExportResult } from './obsidian-exporter.js';
+export { collectMetrics, formatMetricsSummary } from './metrics-dashboard.js';
+export type { HyperMemMetrics, FactMetrics, WikiMetrics, EpisodeMetrics, VectorMetrics, CompositionMetrics, IngestionMetrics, SystemHealth, MetricsDashboardOptions } from './metrics-dashboard.js';
+export { getProfile, mergeProfile, PROFILES, lightProfile, standardProfile, fullProfile, extendedProfile, minimalProfile, richProfile } from './profiles.js';
+export type { ProfileName } from './profiles.js';
+export { renderStarterFOS, resolveOutputTier } from './fos-mod.js';
+export type { OutputStandardTier } from './fos-mod.js';
+export { repairToolPairs } from './repair-tool-pairs.js';

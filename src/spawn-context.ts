@@ -1,5 +1,5 @@
 /**
- * HyperMem Spawn Context — Subagent Context Inheritance
+ * hypermem Spawn Context — Subagent Context Inheritance
  *
  * Provides tools to snapshot a parent session's working context and make it
  * available to a spawned subagent at compose time.

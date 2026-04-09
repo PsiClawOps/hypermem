@@ -33,7 +33,7 @@ async function run() {
   console.log('  HyperMem Plugin Pipeline Validation');
   console.log('═══════════════════════════════════════════════════\n');
 
-  const repoRoot = '/home/lumadmin/.openclaw/workspace/repo/hypermem';
+  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
   const realHome = process.env.HOME;
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-plugin-home-'));
   const dataDir = path.join(tmpHome, '.openclaw', 'hypermem');
@@ -57,7 +57,6 @@ async function run() {
 
     hm = await HyperMem.create({
       dataDir,
-      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm:' },
     });
 
     hm.dbManager.ensureAgent(agentId, { displayName: 'Plugin Test Agent', tier: 'council' });

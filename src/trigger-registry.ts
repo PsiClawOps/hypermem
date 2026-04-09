@@ -1,5 +1,5 @@
 /**
- * HyperMem Trigger Registry (W5)
+ * hypermem Trigger Registry (W5)
  *
  * Centralizes ACA collection trigger definitions with owner/category metadata.
  * Extracted from compositor.ts for independent testability and auditability.
@@ -137,6 +137,32 @@ export const TRIGGER_REGISTRY: CollectionTrigger[] = [
     owner: 'forge',
     category: 'memory',
     description: 'Decision history: past choices, previously agreed approaches, recalled context',
+  },
+  {
+    collection: 'identity/soul',
+    keywords: [
+      'who are you', 'your role', 'your purpose', 'your domain', 'your job',
+      'identity', 'soul', 'persona', 'what do you do', 'how do you work',
+      'your principles', 'your values', 'your seat',
+    ],
+    maxTokens: 1200,
+    maxChunks: 2,
+    owner: 'council',
+    category: 'identity',
+    description: 'Agent soul and persona: role definition, domain ownership, core principles',
+  },
+  {
+    collection: 'operations/tools',
+    keywords: [
+      'tool', 'config', 'command', 'cli', 'path', 'deploy', 'restart',
+      'openclaw', 'session_status', 'model', 'plugin', 'workspace path',
+      'how to', 'where is', 'which command', 'quick ref',
+    ],
+    maxTokens: 1200,
+    maxChunks: 3,
+    owner: 'forge',
+    category: 'operations',
+    description: 'Agent tooling reference: CLI commands, config paths, deployment procedures, quick reference',
   },
 ];
 

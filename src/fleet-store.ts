@@ -1,5 +1,5 @@
 /**
- * HyperMem Fleet Registry Store
+ * hypermem Fleet Registry Store
  *
  * Agent roster, org structure, roles, capabilities.
  * Lives in the central library DB.

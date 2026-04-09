@@ -1,5 +1,5 @@
 /**
- * HyperMem Document Chunker
+ * hypermem Document Chunker
  *
  * Splits markdown documents into semantically coherent chunks for L3 indexing.
  *

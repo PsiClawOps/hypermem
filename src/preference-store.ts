@@ -1,5 +1,5 @@
 /**
- * HyperMem Preference Store
+ * hypermem Preference Store
  *
  * Behavioral patterns observed about people, systems, and workflows.
  * Lives in the central library DB.

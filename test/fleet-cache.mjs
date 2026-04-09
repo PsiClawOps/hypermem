@@ -38,9 +38,7 @@ async function run() {
   try {
     hm = await HyperMem.create({
       dataDir: tmpDir,
-      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm-fc:', sessionTTL: 60 },
     });
-    await hm.redis.flushPrefix();
   } catch (err) {
     console.log(`  ❌ Failed to create HyperMem: ${err.message}`);
     process.exit(1);
@@ -49,40 +47,40 @@ async function run() {
   // ── Test 1: Redis fleet cache basics ──
   console.log('── Redis Fleet Cache Basics ──');
 
-  await hm.redis.setFleetCache('test:key', 'hello world');
-  const val = await hm.redis.getFleetCache('test:key');
+  await hm.cache.setFleetCache('test:key', 'hello world');
+  const val = await hm.cache.getFleetCache('test:key');
   assert(val === 'hello world', 'Set and get fleet cache');
 
-  await hm.redis.delFleetCache('test:key');
-  const deleted = await hm.redis.getFleetCache('test:key');
+  await hm.cache.delFleetCache('test:key');
+  const deleted = await hm.cache.getFleetCache('test:key');
   assert(deleted === null, 'Delete fleet cache');
 
   // ── Test 2: Agent cache operations ──
   console.log('\n── Agent Cache Operations ──');
 
-  await hm.redis.cacheFleetAgent('forge', {
+  await hm.cache.cacheFleetAgent('forge', {
     id: 'forge', tier: 'council', status: 'active', domains: ['infra'],
   });
-  const cached = await hm.redis.getCachedFleetAgent('forge');
+  const cached = await hm.cache.getCachedFleetAgent('forge');
   assert(cached !== null, 'Cached fleet agent');
   assert(cached.id === 'forge', 'Agent ID matches');
   assert(cached.tier === 'council', 'Agent tier matches');
 
-  await hm.redis.invalidateFleetAgent('forge');
-  const invalidated = await hm.redis.getCachedFleetAgent('forge');
+  await hm.cache.invalidateFleetAgent('forge');
+  const invalidated = await hm.cache.getCachedFleetAgent('forge');
   assert(invalidated === null, 'Invalidation clears agent cache');
 
   // ── Test 3: Fleet summary cache ──
   console.log('\n── Fleet Summary Cache ──');
 
-  await hm.redis.cacheFleetSummary({ totalAgents: 6, drift: { ok: 4, drifted: 2 } });
-  const summary = await hm.redis.getCachedFleetSummary();
+  await hm.cache.cacheFleetSummary({ totalAgents: 6, drift: { ok: 4, drifted: 2 } });
+  const summary = await hm.cache.getCachedFleetSummary();
   assert(summary !== null, 'Cached fleet summary');
   assert(summary.totalAgents === 6, 'Summary total matches');
 
   // Invalidation of any agent should clear summary
-  await hm.redis.invalidateFleetAgent('any');
-  const summaryAfter = await hm.redis.getCachedFleetSummary();
+  await hm.cache.invalidateFleetAgent('any');
+  const summaryAfter = await hm.cache.getCachedFleetSummary();
   assert(summaryAfter === null, 'Agent invalidation clears summary');
 
   // ── Test 4: Fleet hydration ──
@@ -112,7 +110,6 @@ async function run() {
   hm.reportActualState('forge', 'thinkingDefault', 'medium'); // drift!
 
   // Flush cache first
-  await hm.redis.flushPrefix();
 
   // Hydrate
   const result = await hm.hydrateFleetCache();
@@ -120,7 +117,7 @@ async function run() {
   assert(result.summary === true, 'Summary hydrated');
 
   // Verify cached agents
-  const forgeCache = await hm.redis.getCachedFleetAgent('forge');
+  const forgeCache = await hm.cache.getCachedFleetAgent('forge');
   assert(forgeCache !== null, 'Forge in cache after hydration');
   assert(forgeCache.tier === 'council', 'Forge tier correct');
   assert(Array.isArray(forgeCache.desiredState), 'Desired state included');
@@ -132,7 +129,7 @@ async function run() {
   assert(driftedEntries[0].configKey === 'thinkingDefault', 'Correct drifted key');
 
   // Verify summary
-  const fleetSummary = await hm.redis.getCachedFleetSummary();
+  const fleetSummary = await hm.cache.getCachedFleetSummary();
   assert(fleetSummary !== null, 'Fleet summary in cache');
   assert(fleetSummary.totalAgents === 3, 'Summary total agents');
   assert(fleetSummary.drift.drifted === 1, 'Summary drift count');
@@ -140,7 +137,6 @@ async function run() {
   // ── Test 5: Cache-aside on getFleetAgentCached ──
   console.log('\n── Cache-Aside Pattern ──');
 
-  await hm.redis.flushPrefix();
 
   // First call — cache miss, should fall through to SQLite
   const first = await hm.getFleetAgentCached('forge');
@@ -164,7 +160,7 @@ async function run() {
   // Small delay for async invalidation
   await new Promise(r => setTimeout(r, 50));
 
-  const afterMutation = await hm.redis.getCachedFleetAgent('forge');
+  const afterMutation = await hm.cache.getCachedFleetAgent('forge');
   assert(afterMutation === null, 'Cache invalidated after mutation');
 
   // Mutate desired state — should invalidate
@@ -172,7 +168,7 @@ async function run() {
   hm.setDesiredState('forge', 'model', 'anthropic/claude-sonnet-4-6');
   await new Promise(r => setTimeout(r, 50));
 
-  const afterDesired = await hm.redis.getCachedFleetAgent('forge');
+  const afterDesired = await hm.cache.getCachedFleetAgent('forge');
   assert(afterDesired === null, 'Cache invalidated after desired state change');
 
   // ── Test 7: Hook handler dispatch ──
@@ -228,7 +224,6 @@ async function run() {
 
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
-  await hm.redis.flushPrefix();
   await hm.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
   assert(true, 'Cleaned up');

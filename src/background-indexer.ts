@@ -1,5 +1,5 @@
 /**
- * HyperMem Background Indexer
+ * hypermem Background Indexer
  *
  * Processes message history to extract structured knowledge:
  *   - Facts: atomic pieces of learned information
@@ -19,14 +19,53 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { StoredMessage, IndexerConfig, EpisodeType, SessionCursor } from './types.js';
+import { lintKnowledge } from './knowledge-lint.js';
 import { MessageStore } from './message-store.js';
 import { runNoiseSweep, runToolDecay } from './proactive-pass.js';
+import { TopicSynthesizer } from './topic-synthesizer.js';
+import { runDreamingPassForFleet, type DreamerConfig } from './dreaming-promoter.js';
 import { FactStore } from './fact-store.js';
 import { EpisodeStore } from './episode-store.js';
 import { TopicStore } from './topic-store.js';
 import { KnowledgeStore } from './knowledge-store.js';
+import { TemporalStore } from './temporal-store.js';
 import { isSafeForSharedVisibility } from './secret-scanner.js';
 import type { VectorStore } from './vector-store.js';
+
+// ─── Agent-to-Domain Map ────────────────────────────────────────
+// Maps well-known agent IDs to their primary domain.
+// Used to populate the `domain` column on extracted facts so that
+// domain-scoped retrieval (e.g. getActiveFacts({ domain: 'infrastructure' }))
+// returns results. New agents default to 'general'.
+const AGENT_DOMAIN_MAP: Record<string, string> = {
+  forge:        'infrastructure',
+  vigil:        'infrastructure',
+  pylon:        'infrastructure',
+  plane:        'infrastructure',
+  compass:      'product',
+  helm:         'product',
+  chisel:       'product',
+  facet:        'product',
+  sentinel:     'security',
+  bastion:      'security',
+  gauge:        'security',
+  clarity:      'ux',
+  anvil:        'governance',
+  vanguard:     'strategy',
+  crucible:     'development',
+  relay:        'communications',
+  main:         'general',
+  'channel-mini': 'general',
+};
+
+/**
+ * Derive a domain label for a fact based on agent ID.
+ * Falls back to 'general' for unknown agents.
+ */
+function domainForAgent(agentId: string): string {
+  return AGENT_DOMAIN_MAP[agentId] ?? 'general';
+}
+
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -137,6 +176,30 @@ function extractFactCandidates(content: string): FactCandidate[] {
  * Rejects pattern matches that are code, table fragments, questions,
  * or too short to be meaningful facts.
  */
+/**
+ * Operational boilerplate phrases that appear frequently across sessions
+ * but carry zero signal value. High knn similarity makes them *worse*
+ * retrieval candidates — they match everything and contaminate episodes.
+ */
+const OPERATIONAL_BOILERPLATE: RegExp[] = [
+  /timed?\s*out\s*waiting/i,
+  /message\s*was\s*delivered/i,
+  /no\s*reply\s*(back\s*)?yet/i,
+  /picked?\s*it\s*up\s*on\s*(next\s*)?heartbeat/i,
+  /session\s*not\s*found/i,
+  /\bretrying\b/i,
+  /tool\s*call\s*failed/i,
+  /exec\s*completed/i,
+  /no\s*reply\s*needed/i,
+  /still\s*waiting/i,
+  /will\s*pick\s*(it\s*)?up\s*(on\s*(next|the))?/i,
+  /message\s*is\s*in\s*(his|her|their|the)\s*queue/i,
+  /sent\s+to\s+(anvil|compass|clarity|sentinel|vanguard|forge)/i,
+  /dispatched\s+(it\s+)?to/i,
+  /timed\s*out\s*after/i,
+  /\bNO_REPLY\b/,
+];
+
 function isQualityFact(content: string): boolean {
   // Too short — sentence fragments
   if (content.length < 40) return false;
@@ -180,6 +243,29 @@ function isQualityFact(content: string): boolean {
   // High non-alpha ratio indicates code/data, not natural language
   const alphaChars = (content.match(/[a-zA-Z]/g) || []).length;
   if (alphaChars / content.length < 0.5) return false;
+
+  // TUNE-013: External/untrusted content markers — web search excerpts,
+  // external doc pulls, and injected context blocks should never become facts.
+  if (/<<<\s*(END_EXTERNAL|BEGIN_EXTERNAL|EXTERNAL_UNTRUSTED|UNTRUSTED_CONTENT)/i.test(content)) return false;
+  if (/EXTERNAL_UNTRUSTED_CONTENT\s+id=/.test(content)) return false;
+
+  // TUNE-013: Multi-paragraph content — real extracted facts are single sentences.
+  // More than 2 newlines means we captured a paragraph or structured block, not a fact.
+  const newlineCount = (content.match(/\n/g) || []).length;
+  if (newlineCount > 2) return false;
+
+  // TUNE-013: URL-heavy content — external source snippets, not actionable facts
+  const urlMatches = content.match(/https?:\/\/\S+/g) || [];
+  if (urlMatches.length >= 2) return false;  // one URL in a fact is ok; multiple = source snippet
+
+  // TUNE-013: Content starting with a markdown heading is section text, not a fact
+  if (/^#{1,4}\s/.test(content.trim())) return false;
+
+  // TUNE-014: Operational boilerplate — phrases common across sessions that produce
+  // high knn similarity scores but carry zero signal. They cross-contaminate episodes.
+  for (const pattern of OPERATIONAL_BOILERPLATE) {
+    if (pattern.test(content)) return false;
+  }
 
   return true;
 }
@@ -393,17 +479,35 @@ function detectTopic(content: string): string | null {
 
 export class BackgroundIndexer {
   private readonly config: IndexerConfig;
+  private readonly dreamerConfig: Partial<DreamerConfig>;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private vectorStore: VectorStore | null = null;
+  private synthesizer: TopicSynthesizer | null = null;
+  private tickCount: number = 0;
 
   constructor(
     config?: Partial<IndexerConfig>,
     private getMessageDb?: (agentId: string) => DatabaseSync,
     private getLibraryDb?: () => DatabaseSync,
     private listAgents?: () => string[],
-    private getCursor?: CursorFetcher
+    private getCursor?: CursorFetcher,
+    dreamerConfig?: Partial<DreamerConfig>
   ) {
+    // Initialize synthesizer if libraryDb accessor is available
+    if (getLibraryDb) {
+      const libDb = getLibraryDb();
+      if (libDb) {
+        this.synthesizer = new TopicSynthesizer(
+          libDb,
+          (agentId: string) => {
+            if (!getMessageDb) return null;
+            try { return getMessageDb(agentId); } catch { return null; }
+          }
+        );
+      }
+    }
+
     this.config = {
       enabled: config?.enabled ?? true,
       factExtractionMode: config?.factExtractionMode ?? 'tiered',
@@ -411,8 +515,11 @@ export class BackgroundIndexer {
       topicClosedAfter: config?.topicClosedAfter ?? '7d',
       factDecayRate: config?.factDecayRate ?? 0.01,
       episodeSignificanceThreshold: config?.episodeSignificanceThreshold ?? 0.5,
-      periodicInterval: config?.periodicInterval ?? 300000, // 5 minutes
+      periodicInterval: config?.periodicInterval ?? 60000,  // 1 minute
+      batchSize: config?.batchSize ?? 128,
+      maxMessagesPerTick: config?.maxMessagesPerTick ?? 500,
     };
+    this.dreamerConfig = dreamerConfig ?? {};
   }
 
   /**
@@ -435,6 +542,13 @@ export class BackgroundIndexer {
       console.error('[indexer] Initial tick failed:', err);
     });
 
+    // Run episode vector backfill once at startup (no-op if already done)
+    if (this.vectorStore && this.getLibraryDb) {
+      this.backfillEpisodeVectors().catch(err => {
+        console.error('[indexer] Episode backfill failed:', err);
+      });
+    }
+
     // Then periodically
     this.intervalHandle = setInterval(() => {
       this.tick().catch(err => {
@@ -442,7 +556,7 @@ export class BackgroundIndexer {
       });
     }, this.config.periodicInterval);
 
-    console.log(`[indexer] Started with interval ${this.config.periodicInterval}ms`);
+    console.log(`[indexer] Started with interval ${this.config.periodicInterval}ms, batchSize ${this.config.batchSize}, maxPerTick ${this.config.maxMessagesPerTick}`);
   }
 
   /**
@@ -475,10 +589,16 @@ export class BackgroundIndexer {
 
       const agents = this.listAgents();
       const libraryDb = this.getLibraryDb();
+      let tickTotal = 0;
 
       for (const agentId of agents) {
+        if (tickTotal >= this.config.maxMessagesPerTick) {
+          console.log(`[indexer] maxMessagesPerTick (${this.config.maxMessagesPerTick}) reached — deferring remaining agents`);
+          break;
+        }
         try {
           const stats = await this.processAgent(agentId, libraryDb);
+          tickTotal += stats.messagesProcessed;
           if (stats.messagesProcessed > 0 || stats.tombstoned > 0) {
             results.push(stats);
           }
@@ -501,6 +621,55 @@ export class BackgroundIndexer {
 
       // Run decay on every tick
       this.applyDecay(libraryDb);
+
+      // Topic synthesis — run for each agent after main indexer tick
+      if (this.synthesizer) {
+        for (const agentId of agents) {
+          try {
+            const synthResult = this.synthesizer.tick(agentId);
+            if (synthResult.topicsSynthesized > 0) {
+              console.log(`[indexer] Synthesized ${synthResult.topicsSynthesized} topics for ${agentId}, ${synthResult.knowledgeEntriesWritten} knowledge entries`);
+            }
+          } catch {
+            // Non-fatal
+          }
+        }
+      }
+
+      // Knowledge lint — every LINT_FREQUENCY ticks
+      this.tickCount++;
+      if (this.tickCount % 10 === 0 && this.getLibraryDb) {
+        try {
+          const libDb = this.getLibraryDb();
+          if (libDb) {
+            const lint = lintKnowledge(libDb);
+            if (lint.staleDecayed > 0 || lint.coverageGaps.length > 0) {
+              console.log(`[indexer] Lint: ${lint.staleDecayed} stale decayed, ${lint.orphansFound} orphans, ${lint.coverageGaps.length} coverage gaps`);
+            }
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
+
+      // Dreaming promotion pass — every tickInterval ticks (default 12 = ~1hr)
+      const dreamerEnabled = this.dreamerConfig.enabled ?? false;
+      const dreamerTickInterval = this.dreamerConfig.tickInterval ?? 12;
+      if (dreamerEnabled && this.tickCount % dreamerTickInterval === 0 && this.getLibraryDb) {
+        try {
+          const libDb = this.getLibraryDb();
+          if (libDb) {
+            const dreamResults = await runDreamingPassForFleet(agents, libDb, this.dreamerConfig);
+            const totalPromoted = dreamResults.reduce((s, r) => s + r.promoted, 0);
+            if (totalPromoted > 0) {
+              console.log(`[indexer] Dreaming: promoted ${totalPromoted} facts across ${dreamResults.length} agents`);
+            }
+          }
+        } catch (err) {
+          // Non-fatal — dreaming failures never block indexing
+          console.warn('[indexer] Dreaming pass failed (non-fatal):', (err as Error).message);
+        }
+      }
 
       // Run proactive passes on each agent's message DB
       for (const agentId of agents) {
@@ -556,13 +725,14 @@ export class BackgroundIndexer {
     const episodeStore = new EpisodeStore(libraryDb);
     const topicStore = new TopicStore(libraryDb);
     const knowledgeStore = new KnowledgeStore(libraryDb);
+    const temporalStore = new TemporalStore(libraryDb);
 
     // Get watermark — last processed message ID for this agent
     const watermark = this.getWatermark(libraryDb, agentId);
     const lastProcessedId = watermark?.lastMessageId ?? 0;
 
-    // Fetch unindexed messages (batch size: 100)
-    const messages = this.getUnindexedMessages(messageDb, agentId, lastProcessedId, 100);
+    // Fetch unindexed messages (batch size from config)
+    const messages = this.getUnindexedMessages(messageDb, agentId, lastProcessedId, this.config.batchSize);
 
     if (messages.length === 0) {
       // Even with no new messages, run tombstone cleanup in case supersedes
@@ -630,6 +800,7 @@ export class BackgroundIndexer {
         try {
           const fact = factStore.addFact(agentId, factContent, {
             scope: 'agent',
+            domain: domainForAgent(agentId),
             confidence: factConfidence,
             sourceType: 'indexer',
             sourceSessionKey: this.getSessionKeyForMessage(messageDb, msg.conversationId),
@@ -642,6 +813,9 @@ export class BackgroundIndexer {
           // A supersede is detected when an existing active fact shares the
           // same 60-char prefix (same topic, different phrasing/update).
           if (fact.id) {
+            // Index into temporal store (ingest_at as proxy, confidence=0.5)
+            temporalStore.indexFact(fact.id, agentId, fact.createdAt);
+
             const oldFactId = factStore.findSupersedableByContent(agentId, factContent);
             if (oldFactId !== null && oldFactId !== fact.id) {
               const didSupersede = factStore.markSuperseded(oldFactId, fact.id);
@@ -679,8 +853,9 @@ export class BackgroundIndexer {
             sourceMessageId: msg.id,
           });
           episodesRecorded++;
-          // Embed high-significance episodes (decisions, incidents, deployments)
-          if (this.vectorStore && recorded?.id && episode.significance >= 0.7) {
+          // Embed episodes at sig>=0.5 (lowered from 0.7 — discovery/config_change events
+          // at sig=0.5 are real operational events, not noise).
+          if (this.vectorStore && recorded?.id && episode.significance >= 0.5) {
             this.vectorStore.indexItem('episodes', recorded.id, episode.summary, episode.type)
               .catch(() => { /* embedding failure is non-fatal */ });
           }
@@ -853,23 +1028,26 @@ export class BackgroundIndexer {
     // Mark dormant topics
     const dormantThreshold = this.parseDuration(this.config.topicDormantAfter);
     if (dormantThreshold > 0) {
+      // Compute threshold timestamp in JS and pass as parameter — avoids SQL template interpolation.
+      const dormantBefore = new Date(Date.now() - dormantThreshold * 1000).toISOString();
       libraryDb.prepare(`
         UPDATE topics
         SET status = 'dormant'
         WHERE status = 'active'
-          AND updated_at < datetime('now', '-${dormantThreshold} seconds')
-      `).run();
+          AND updated_at < ?
+      `).run(dormantBefore);
     }
 
     // Close old dormant topics
     const closedThreshold = this.parseDuration(this.config.topicClosedAfter);
     if (closedThreshold > 0) {
+      const closedBefore = new Date(Date.now() - closedThreshold * 1000).toISOString();
       libraryDb.prepare(`
         UPDATE topics
         SET status = 'closed'
         WHERE status = 'dormant'
-          AND updated_at < datetime('now', '-${closedThreshold} seconds')
-      `).run();
+          AND updated_at < ?
+      `).run(closedBefore);
     }
   }
 
@@ -887,6 +1065,94 @@ export class BackgroundIndexer {
       case 'd': return val * 86400;
       default: return 0;
     }
+  }
+
+  /**
+   * One-time backfill: embed episodes with sig>=0.5 that were missed by the
+   * old >=0.7 vectorization threshold.
+   *
+   * Gated by a system_state flag 'indexer:episode_backfill_v1' so it runs
+   * exactly once even across gateway restarts. Safe to re-run manually
+   * (delete the flag row first) if re-backfill is ever needed.
+   */
+  async backfillEpisodeVectors(): Promise<void> {
+    if (!this.vectorStore || !this.getLibraryDb) return;
+
+    const libraryDb = this.getLibraryDb();
+    const BACKFILL_FLAG = 'episode_backfill_v1';
+
+    // Ensure system_state table exists (schema may not have been applied yet)
+    try {
+      libraryDb.prepare(`
+        CREATE TABLE IF NOT EXISTS system_state (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          category TEXT NOT NULL,
+          key TEXT NOT NULL,
+          value TEXT,
+          updated_at TEXT NOT NULL,
+          updated_by TEXT,
+          ttl TEXT,
+          UNIQUE(category, key)
+        )
+      `).run();
+    } catch {
+      // Table already exists — safe to ignore
+    }
+
+    // Check if backfill already completed
+    const existing = libraryDb.prepare(
+      "SELECT value FROM system_state WHERE category = 'indexer' AND key = ?"
+    ).get(BACKFILL_FLAG) as { value: string } | undefined;
+
+    if (existing) {
+      // Already done
+      return;
+    }
+
+    console.log('[indexer] Starting episode vector backfill (sig>=0.5, not yet vectorized)...');
+
+    // Find episodes with sig>=0.5 that have no vec_index_map entry.
+    // We join against vec_index_map using a fallback: if the table is in a
+    // separate DB (vectors.db), we query it directly via the VectorStore.
+    let episodes: Array<{ id: number; summary: string; event_type: string }>;
+    try {
+      episodes = libraryDb.prepare(`
+        SELECT id, summary, event_type
+        FROM episodes
+        WHERE significance >= 0.5
+        ORDER BY created_at DESC
+      `).all() as Array<{ id: number; summary: string; event_type: string }>;
+    } catch {
+      console.warn('[indexer] Backfill: could not query episodes table');
+      return;
+    }
+
+    let queued = 0;
+    let skipped = 0;
+
+    for (const ep of episodes) {
+      // Check if already vectorized
+      if (this.vectorStore.hasItem('episodes', ep.id)) {
+        skipped++;
+        continue;
+      }
+      try {
+        await this.vectorStore.indexItem('episodes', ep.id, ep.summary, ep.event_type);
+        queued++;
+      } catch {
+        // Non-fatal — keep going
+      }
+    }
+
+    // Mark backfill complete
+    const now = new Date().toISOString();
+    libraryDb.prepare(`
+      INSERT INTO system_state (category, key, value, updated_at, updated_by)
+      VALUES ('indexer', ?, ?, ?, 'indexer')
+      ON CONFLICT(category, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(BACKFILL_FLAG, JSON.stringify({ completedAt: now, queued, skipped }), now);
+
+    console.log(`[indexer] Episode backfill complete: ${queued} queued, ${skipped} already vectorized`);
   }
 
   /**
@@ -912,7 +1178,7 @@ export class BackgroundIndexer {
 // ─── Standalone runner ──────────────────────────────────────────
 
 /**
- * Create and start a background indexer connected to HyperMem databases.
+ * Create and start a background indexer connected to hypermem databases.
  * Used by the hook or a standalone daemon.
  */
 export function createIndexer(
@@ -921,9 +1187,10 @@ export function createIndexer(
   listAgents: () => string[],
   config?: Partial<IndexerConfig>,
   getCursor?: CursorFetcher,
-  vectorStore?: VectorStore
+  vectorStore?: VectorStore,
+  dreamerConfig?: Partial<DreamerConfig>
 ): BackgroundIndexer {
-  const indexer = new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor);
+  const indexer = new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor, dreamerConfig);
   if (vectorStore) indexer.setVectorStore(vectorStore);
   return indexer;
 }

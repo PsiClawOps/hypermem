@@ -46,6 +46,9 @@ jobs:
       - name: Plugin typecheck
         run: npm --prefix plugin run typecheck
 
+      - name: Build plugin
+        run: npm --prefix plugin run build
+
       - name: Run tests
         run: npm test
         env:

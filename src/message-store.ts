@@ -1,5 +1,5 @@
 /**
- * HyperMem Message Store
+ * hypermem Message Store
  *
  * CRUD operations for conversations and messages in SQLite.
  * All messages are stored in provider-neutral format.
@@ -290,6 +290,24 @@ export class MessageStore {
       ORDER BY message_index DESC
       LIMIT ?
     `).all(conversationId, limit) as Record<string, unknown>[];
+
+    // Reverse to get chronological order
+    return rows.reverse().map(parseMessageRow);
+  }
+
+  /**
+   * Get recent messages scoped to a topic (P3.4, Option B).
+   * Returns messages matching the topic_id OR with topic_id IS NULL
+   * (legacy messages created before topic tracking was introduced).
+   * This is transition-safe: no legacy messages are silently dropped.
+   */
+  getRecentMessagesByTopic(conversationId: number, topicId: string, limit: number = 50): StoredMessage[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM messages
+      WHERE conversation_id = ? AND (topic_id = ? OR topic_id IS NULL)
+      ORDER BY message_index DESC
+      LIMIT ?
+    `).all(conversationId, topicId, limit) as Record<string, unknown>[];
 
     // Reverse to get chronological order
     return rows.reverse().map(parseMessageRow);

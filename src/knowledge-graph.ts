@@ -1,5 +1,5 @@
 /**
- * HyperMem Knowledge Graph
+ * hypermem Knowledge Graph
  *
  * DAG traversal over knowledge_links in library.db.
  * Links connect entities across collections:

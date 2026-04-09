@@ -1,5 +1,5 @@
 /**
- * HyperMem Work Item Store
+ * hypermem Work Item Store
  *
  * Fleet kanban board in SQL. Replaces WORKQUEUE.md.
  * Lives in the central library DB.

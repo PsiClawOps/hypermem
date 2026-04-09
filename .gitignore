@@ -3,5 +3,8 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+*.db.bak*
 .DS_Store
 .npmrc
+tmp/
+bench/results/

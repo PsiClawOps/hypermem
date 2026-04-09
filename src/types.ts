@@ -1,5 +1,5 @@
 /**
- * HyperMem Core Types
+ * hypermem Core Types
  *
  * Provider-neutral message format and compositor interfaces.
  * These types are the internal representation — never sent directly to an LLM.
@@ -15,7 +15,7 @@ export type MessageRole = 'user' | 'assistant' | 'system';
  * Stored as JSON in the tool_calls column.
  */
 export interface NeutralToolCall {
-  id: string;                    // HyperMem-assigned ID (hm_xxxx), never provider-format
+  id: string;                    // hypermem-assigned ID (hm_xxxx), never provider-format
   name: string;                  // tool/function name
   arguments: string;             // JSON string of arguments
 }
@@ -242,6 +242,13 @@ export interface ComposeRequest {
    * returns messages to the OpenClaw runtime for its own provider translation.
    */
   skipProviderTranslation?: boolean;
+  /**
+   * When set, history fetching is scoped to this topic (Option B: also includes
+   * legacy messages with topic_id IS NULL for transition safety).
+   * If not provided, full session history is returned (no behavior change).
+   * P3.4: topic-aware compositor.
+   */
+  topicId?: string;
 }
 
 export interface SlotTokenCounts {
@@ -278,6 +285,16 @@ export interface ComposeDiagnostics {
   zeroResultReason?: 'no_trigger_no_fallback' | 'empty_corpus' | 'budget_exhausted' | 'scope_filtered_all' | 'unknown';
   /** The retrieval path that was used for doc chunks */
   retrievalMode: 'triggered' | 'fallback_knn' | 'fallback_fts' | 'none';
+  /** Number of cross-topic keystone messages injected (P3.5) */
+  crossTopicKeystones?: number;
+  /** Actual reserve fraction used this compose (base or dynamic) */
+  reserveFraction?: number;
+  /** Estimated average turn cost (tokens) used in dynamic reserve calc */
+  avgTurnCostTokens?: number;
+  /** True if dynamic reserve exceeded floor and is actively adjusting budget */
+  dynamicReserveActive?: boolean;
+  /** True if dynamic reserve was clamped at dynamicReserveMax and SESSION_PRESSURE_HIGH emitted */
+  sessionPressureHigh?: boolean;
 }
 
 export interface ComposeResult {
@@ -361,40 +378,80 @@ export interface SessionMeta {
 export interface HyperMemConfig {
   enabled: boolean;
   dataDir: string;
-  redis: RedisConfig;
+  cache: CacheConfig;
   compositor: CompositorConfig;
   indexer: IndexerConfig;
   embedding: EmbeddingProviderConfig;
+  /** Optional dreaming/promotion config. Default: disabled. */
+  dreaming?: import('./dreaming-promoter.js').DreamerConfig;
+  /** Optional Obsidian vault integration. Default: disabled. */
+  obsidian?: import('./obsidian-watcher.js').ObsidianConfig;
+  /**
+   * Cache replay threshold (ms). When > 0, assemble() returns a cached
+   * contextBlock (systemPromptAddition) for sessions active within this
+   * window, producing byte-identical prompts and hitting provider prefix cache
+   * (Anthropic / OpenAI). Set to 0 to disable.
+   * Default: 900_000 (15 minutes).
+   */
+  warmCacheReplayThresholdMs?: number;
 }
 
 export interface EmbeddingProviderConfig {
+  /**
+   * Embedding provider. Default: 'ollama'.
+   * - 'ollama': local Ollama (nomic-embed-text or any pulled model)
+   * - 'openai': OpenAI Embeddings API (text-embedding-3-small / 3-large)
+   */
+  provider?: 'ollama' | 'openai';
   /** Ollama base URL. Default: http://localhost:11434 */
   ollamaUrl: string;
-  /** Embedding model name. Default: nomic-embed-text */
+  /** OpenAI API key. Required when provider is 'openai'. */
+  openaiApiKey?: string;
+  /** OpenAI base URL. Default: https://api.openai.com/v1 */
+  openaiBaseUrl?: string;
+  /**
+   * Embedding model name.
+   * - ollama default: nomic-embed-text (768d)
+   * - openai default: text-embedding-3-small (1536d)
+   */
   model: string;
-  /** Embedding dimensions. Default: 768 */
+  /**
+   * Embedding dimensions. Must match the model.
+   * - nomic-embed-text: 768
+   * - text-embedding-3-small: 1536
+   * - text-embedding-3-large: 3072
+   * WARNING: changing providers requires a full re-index (dimensions are incompatible).
+   */
   dimensions: number;
   /** Request timeout ms. Default: 10000 */
   timeout: number;
-  /** Max texts per batch request. Default: 32 */
+  /** Max texts per batch request. Default: 32 (ollama) or 128 (openai) */
   batchSize: number;
 }
 
-export interface RedisConfig {
-  host: string;
-  port: number;
-  password?: string;
+export interface CacheConfig {
   keyPrefix: string;
-  sessionTTL: number;        // seconds — TTL for non-history slots (system, identity, etc.)
-  historyTTL: number;        // seconds — TTL for history list (longer than session, data ages out)
-  flushInterval: number;     // milliseconds
+  sessionTTL: number;        // seconds — TTL for non-history slots
+  historyTTL: number;        // seconds — TTL for history list
 }
+
+/** @deprecated Use CacheConfig */
+export type RedisConfig = CacheConfig;
 
 export interface CompositorConfig {
   defaultTokenBudget: number;
   maxHistoryMessages: number;
   maxFacts: number;
   maxCrossSessionContext: number;  // tokens
+  /**
+   * Aggregate token ceiling across all trigger-fired doc chunk collections in a
+   * single compose pass. When unset, hypermem uses a dynamic ceiling of 40% of
+   * the remaining budget at the start of trigger retrieval.
+   *
+   * This prevents pathological prompts from firing many trigger collections at
+   * once and starving the rest of the prompt budget.
+   */
+  maxTotalTriggerTokens?: number;
   /**
    * How many recent tool call/result pairs to keep verbatim in history.
    * Tool call/result content beyond this threshold gets prose-stub treatment.
@@ -415,6 +472,36 @@ export interface CompositorConfig {
    */
   warmHistoryBudgetFraction: number;
   /**
+   * Fraction of the model context window to reserve for output tokens and
+   * hypermem operational overhead. The compositor's effective input budget is
+   * (contextWindow × (1 - contextWindowReserve)).
+   *
+   * Higher values = more headroom for large operations, fewer turns before
+   * session break. Lower values = more context available, higher saturation risk.
+   *
+   * Default: 0.25 (25% reserve — leaves 75% for input context)
+   * Previous default was 0.10 (10% reserve).
+   */
+  contextWindowReserve?: number;
+  /**
+   * Number of turns to project forward when computing dynamic reserve.
+   * safety_tokens = avg_turn_cost × dynamicReserveTurnHorizon
+   * Default: 5
+   */
+  dynamicReserveTurnHorizon?: number;
+  /**
+   * Hard ceiling on the dynamic reserve fraction. When the projected safety
+   * tokens would push reserve above this, SESSION_PRESSURE_HIGH is emitted
+   * in diagnostics and reserve is clamped here.
+   * Default: 0.50
+   */
+  dynamicReserveMax?: number;
+  /**
+   * Kill switch for dynamic reserve. Set false to use fixed contextWindowReserve only.
+   * Default: true
+   */
+  dynamicReserveEnabled?: boolean;
+  /**
    * Fraction of history token budget to allocate for keystone (recalled older) messages.
    * Range: 0.0–0.5. Default: 0.2 (20% of history budget).
    * Set to 0 to disable keystone injection.
@@ -431,6 +518,59 @@ export interface CompositorConfig {
    * Default: 0.5
    */
   keystoneMinSignificance?: number;
+  /**
+   * Fraction of the effective token budget to target for context assembly.
+   * The compositor fills slots until this fraction is consumed, leaving the
+   * remainder for conversation history and response headroom.
+   *
+   * Lower values = lighter context, faster turns, less memory surfaced.
+   * Higher values = richer context, more memory, higher saturation risk.
+   *
+   * Range: 0.3–0.85. Default: 0.65
+   * Typical lightweight config: 0.45
+   * Typical fleet/multi-agent config: 0.65
+   */
+  targetBudgetFraction?: number;
+  /**
+   * Enable Fleet Output Standard (FOS) injection.
+   * FOS injects shared output rules (no em dashes, lead with answer, etc.) into
+   * every composed context. Disable if the operator manages output standards
+   * externally (e.g. via system prompt) to avoid redundancy.
+   * Default: true
+   */
+  enableFOS?: boolean;
+  /**
+   * Enable Model Output Directive (MOD) injection.
+   * MOD injects per-model calibration corrections (verbosity, list length, etc.).
+   * Disable if you want raw model behavior without hypermem calibration.
+   * Default: true
+   */
+  enableMOD?: boolean;
+  /**
+   * Output profile tier. Controls what FOS content is injected.
+   *
+   * 'light'    — ~100 token standalone directives. No MOD, no fleet concepts.
+   *             Works on any single-agent 64k setup. No DB required.
+   * 'standard' — Full FOS: density targets, format rules, compression ratios,
+   *              task-context scoping. No MOD.
+   * 'full'     — FOS + MOD. Cross-agent coordination, full spec.
+   *
+   * Backward compat: 'starter' maps to 'light', 'fleet' maps to 'full'.
+   * Default: 'full' (backward-compatible). New install default: 'light'.
+   */
+  outputProfile?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
+  /** @deprecated Use outputProfile */
+  outputStandard?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
+  /**
+   * Hard token ceiling for wiki page injection per compose pass.
+   * Limits how much synthesized topic knowledge is inserted into context.
+   * Lower values keep context lighter; higher values surface more topic depth.
+   *
+   * Default: 600 tokens
+   * Light preset: 300 tokens
+   * Extended preset: 800 tokens
+   */
+  wikiTokenCap?: number;
   // Note: assembly order is fixed in compose() — system, identity, history,
   // facts, knowledge, preferences, semanticRecall, cross-session, library.
   //
@@ -448,4 +588,6 @@ export interface IndexerConfig {
   factDecayRate: number;
   episodeSignificanceThreshold: number;
   periodicInterval: number;    // milliseconds
+  batchSize: number;           // messages per indexer tick
+  maxMessagesPerTick: number;  // total messages processed per tick (all agents)
 }
