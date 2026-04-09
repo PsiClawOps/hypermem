@@ -177,23 +177,26 @@ Agents confabulate and drift toward the defaults baked into their training. GPT-
 The same prompt, GPT-5.4, with and without `outputProfile: "light"`:
 
 ```
-Prompt: "What should I consider when sizing my Redis instance?"
+Prompt: "How should I size my context window budget for a long-running agent session?"
 
 WITHOUT normalization (GPT-5.4 default):
-Here are the key factors to consider when sizing your Redis instance:
+Here are the key factors to consider when sizing your context window budget:
 
-**1. Agent count**
-The number of agents directly impacts...
-
-**2. Session depth**
+**1. Session depth**
 Longer sessions accumulate more history...
+
+**2. Tool output volume**
+Agentic sessions generate significant tool output...
+
+**3. Fact corpus size**
+More stored facts means more retrieval candidates...
 
 Would you like me to go deeper on any of these?
 
 WITH outputProfile: "light":
-Start at 256MB for single-agent installs. Multi-agent teams: budget ~2MB per active session
-plus ~500KB per agent for identity and warm facts. Embedding cache is the wildcard -- if
-you run nomic-embed-text locally, add 50MB for the model plus ~1KB per cached vector.
+For a 128k window: reserve 14k for identity/system, target 46k for history, 10k for recent
+tool context, and leave ~30k as allocator reserve. hypermem handles slot competition
+automatically -- set contextWindowReserve to your preferred floor and let the compositor fill.
 ```
 
 FOS/MOD (Moderation) checks every response against the live L4 fact corpus before it is recorded. Unsupported claims are flagged, contradictions with established facts surface in diagnostics, and a confabulation risk score is attached to the stored episode.
