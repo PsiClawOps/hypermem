@@ -1,6 +1,6 @@
 {
   "name": "@psiclawops/hypermem",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Agent-centric memory and context composition engine for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
@@ -48,7 +48,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/PsiClawOps/hypermem-internal.git"
+    "url": "https://github.com/PsiClawOps/hypermem.git"
   },
   "publishConfig": {
     "access": "public",
