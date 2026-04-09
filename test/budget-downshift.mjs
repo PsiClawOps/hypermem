@@ -11,7 +11,7 @@
  *   - Downshift threshold: 15% reduction DOES trigger reshape
  */
 
-import { applyToolGradientToWindow } from '../dist/compositor.js';
+import { applyToolGradientToWindow, canPersistReshapedHistory } from '../dist/compositor.js';
 
 let passed = 0;
 let failed = 0;
@@ -99,6 +99,37 @@ console.log('── applyToolGradientToWindow ──');
   const result = applyToolGradientToWindow(messages, 100);
   assert(result.length === 1, `Tool payload budget-fit trims older prose when toolResults carry the real weight (got ${result.length})`);
   assert(result[0].toolResults?.[0]?.content?.length > 0, 'Newest tool payload is preserved after oldest prose is dropped');
+}
+
+{
+  // Test 5: structured tool history must not be persisted after reshape.
+  // The view may flatten old tool turns, but canonical cache/history must stay lossless.
+  const longResult = 'R'.repeat(2000);
+  const messages = [
+    { role: 'user', textContent: 'Initial request', toolCalls: null, toolResults: null },
+    {
+      role: 'assistant',
+      textContent: 'Working on it',
+      toolCalls: [{ id: 'tc_100', name: 'read', arguments: '{"path":"README.md"}' }],
+      toolResults: [{ callId: 'tc_100', name: 'read', content: longResult, isError: false }],
+    },
+    { role: 'user', textContent: 'Turn 1', toolCalls: null, toolResults: null },
+    { role: 'assistant', textContent: 'Ack 1', toolCalls: null, toolResults: null },
+    { role: 'user', textContent: 'Turn 2', toolCalls: null, toolResults: null },
+    { role: 'assistant', textContent: 'Ack 2', toolCalls: null, toolResults: null },
+    { role: 'user', textContent: 'Turn 3', toolCalls: null, toolResults: null },
+    { role: 'assistant', textContent: 'Ack 3', toolCalls: null, toolResults: null },
+    { role: 'user', textContent: 'Turn 4', toolCalls: null, toolResults: null },
+    { role: 'assistant', textContent: 'Ack 4', toolCalls: null, toolResults: null },
+    { role: 'user', textContent: 'Newest turn', toolCalls: null, toolResults: null },
+  ];
+
+  const reshaped = applyToolGradientToWindow(messages, 100);
+
+  assert(canPersistReshapedHistory(messages) === false, 'Structured tool history disables destructive persistence');
+  assert(messages[1].toolCalls?.length === 1, 'Canonical input retains tool call structure');
+  assert(messages[1].toolResults?.length === 1, 'Canonical input retains tool result structure');
+  assert(Array.isArray(reshaped) && reshaped.length > 0, 'View-only reshape still produces a compose-time window');
 }
 
 // ─── Downshift threshold math tests (no Redis required) ─────────────────────

@@ -42,7 +42,7 @@ export type { DesiredStateEntry, ConfigEvent, DriftStatus } from './desired-stat
 export type { ModelState } from './cache.js';
 export { CacheLayer } from './cache.js';
 
-export { Compositor, type CompositorDeps, applyToolGradientToWindow } from './compositor.js';
+export { Compositor, type CompositorDeps, applyToolGradientToWindow, canPersistReshapedHistory } from './compositor.js';
 
 export {
   type CollectionTrigger,

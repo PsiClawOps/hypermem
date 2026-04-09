@@ -252,6 +252,18 @@ export function applyToolGradientToWindow(
 }
 
 /**
+ * Canonical history must remain lossless for tool turns.
+ *
+ * If a window contains any structured tool calls or tool results, the caller
+ * should treat applyToolGradientToWindow() as a view-only transform for the
+ * current compose pass and avoid writing the reshaped messages back into the
+ * canonical cache/history store.
+ */
+export function canPersistReshapedHistory(messages: NeutralMessage[]): boolean {
+  return !messages.some(msg => hasToolContent(msg));
+}
+
+/**
  * Rough token estimation: ~4 chars per token for English text.
  * This is a heuristic — actual tokenization varies by model.
  * Good enough for budget management; exact count comes from the provider.

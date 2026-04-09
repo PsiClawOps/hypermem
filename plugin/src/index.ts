@@ -32,7 +32,7 @@ import type {
   BackgroundIndexer,
   FleetStore,
 } from '@psiclawops/hypermem';
-import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow } from '@psiclawops/hypermem';
+import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow, canPersistReshapedHistory } from '@psiclawops/hypermem';
 import { evictStaleContent } from '@psiclawops/hypermem/image-eviction';
 import os from 'os';
 import path from 'path';
@@ -1284,11 +1284,26 @@ function createHyperMemEngine(): ContextEngine {
           if (currentHistory && currentHistory.length > 0) {
             const reshaped = applyToolGradientToWindow(currentHistory, effectiveBudget);
             if (reshaped.length < currentHistory.length) {
-              // Write to history list (compose() input), then invalidate the
-              // stale window cache so compose() rebuilds from the new history.
-              await hm.cache.replaceHistory(agentId, sk, reshaped);
-              await hm.cache.invalidateWindow(agentId, sk);
               const reshapedAt = new Date().toISOString();
+              if (canPersistReshapedHistory(currentHistory)) {
+                // No structured tool turns in canonical history, safe to persist
+                // the reshaped window back to cache/history.
+                await hm.cache.replaceHistory(agentId, sk, reshaped);
+                await hm.cache.invalidateWindow(agentId, sk);
+                console.log(
+                  `[hypermem-plugin] budget-downshift: ${agentId}/${sk} ` +
+                  `${lastState.tokenBudget}→${effectiveBudget} tokens, ` +
+                  `reshaped ${currentHistory.length}→${reshaped.length} messages`
+                );
+              } else {
+                // Tool-bearing history must remain canonical. Use the reshaped
+                // window only as a compose-time view and leave hot history lossless.
+                console.log(
+                  `[hypermem-plugin] budget-downshift: ${agentId}/${sk} ` +
+                  `${lastState.tokenBudget}→${effectiveBudget} tokens, ` +
+                  `view-only reshape ${currentHistory.length}→${reshaped.length} messages (structured tool history preserved)`
+                );
+              }
               await hm.cache.setModelState(agentId, sk, {
                 model: model ?? 'unknown',
                 tokenBudget: effectiveBudget,
@@ -1296,11 +1311,6 @@ function createHyperMemEngine(): ContextEngine {
                 historyDepth,
                 reshapedAt,
               });
-              console.log(
-                `[hypermem-plugin] budget-downshift: ${agentId}/${sk} ` +
-                `${lastState.tokenBudget}→${effectiveBudget} tokens, ` +
-                `reshaped ${currentHistory.length}→${reshaped.length} messages, tool-gradient-applied`
-              );
             }
           }
         }
