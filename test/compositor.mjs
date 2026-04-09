@@ -799,22 +799,29 @@ Every council response includes:
     assert(evicted[0].toolResults[0].content === payload, 'T0/T1 eviction guard: age-1 large result not stubbed out');
   }
 
-  // ── T1: turn age 2-4 - payload capped at 6K/result ──
+  // ── T1: turn age 3-4 - payload capped at 6K/result ──
   {
     const payload8k = 'Y'.repeat(8_000); // > 6K T1 cap
-    const msgs = buildConvoWithTurnAge('user', payload8k, 2); // turn age = 2 (first T1 with T0_TURNS=1)
+    const msgs = buildConvoWithTurnAge('user', payload8k, 3); // turn age = 3 (first T1 with T0_TURNS=2)
     const out = applyToolGradient(msgs);
     const content = out[0].toolResults[0].content;
-    assert(out[0].toolResults !== null, 'T1: toolResults present at turn age 2');
-    assert(content.length < payload8k.length, 'T1: per-result cap applied at turn age 2');
+    assert(out[0].toolResults !== null, 'T1: toolResults present at turn age 3');
+    assert(content.length < payload8k.length, 'T1: per-result cap applied at turn age 3');
     assert(content.length <= 6_000 + 100, 'T1: result capped at ~6K');
 
-    // Turn age 1 is now T0 — should get 16K cap, not 6K
-    const msgsT0 = buildConvoWithTurnAge('user', payload8k, 1);
+    // Turn age 2 is now T0 — should stay full (protected)
+    const msgsT0 = buildConvoWithTurnAge('user', payload8k, 2);
     const outT0 = applyToolGradient(msgsT0);
     const contentT0 = outT0[0].toolResults[0].content;
-    assert(outT0[0].toolResults !== null, 'T0: toolResults present at turn age 1');
-    assert(contentT0.length === payload8k.length, 'T0/T1: 8K payload stays full in the protected recent-turn window');
+    assert(outT0[0].toolResults !== null, 'T0: toolResults present at turn age 2');
+    assert(contentT0.length === payload8k.length, 'T0: 8K payload stays full in the protected recent-turn window');
+
+    // Turn age 1 is also T0 — full fidelity
+    const msgsT0b = buildConvoWithTurnAge('user', payload8k, 1);
+    const outT0b = applyToolGradient(msgsT0b);
+    const contentT0b = outT0b[0].toolResults[0].content;
+    assert(outT0b[0].toolResults !== null, 'T0: toolResults present at turn age 1');
+    assert(contentT0b.length === payload8k.length, 'T0: 8K payload stays full at turn age 1');
 
     // Turn age 4 is T1 boundary (T1_TURNS=4)
     const msgs4b = buildConvoWithTurnAge('user', 'short payload', 4);
@@ -844,14 +851,15 @@ Every council response includes:
     });
 
     const msgs3 = [
-      asstToolMsg(payload7k),  // index 0: turn age = 2 (T1), processed last
-      asstToolMsg(payload7k),  // index 1: turn age = 2 (T1), processed 2nd
-      asstToolMsg(payload7k),  // index 2: turn age = 2 (T1), processed 1st
+      asstToolMsg(payload7k),  // index 0: turn age = 3 (T1), processed last
+      asstToolMsg(payload7k),  // index 1: turn age = 3 (T1), processed 2nd
+      asstToolMsg(payload7k),  // index 2: turn age = 3 (T1), processed 1st
       textMsg('user', 'q1'),
       textMsg('user', 'q2'),
+      textMsg('user', 'q3'),
     ];
     const age0b = getTurnAge(msgs3, 0);
-    assert(age0b === 2, `T1 downgrade (3msg) setup: index 0 has turn age 2 (got ${age0b})`);
+    assert(age0b === 3, `T1 downgrade (3msg) setup: index 0 has turn age 3 (got ${age0b})`);
 
     const out3 = applyToolGradient(msgs3);
     const newest = out3[2]; // processed first, 6K fits (usage: 0→6K)

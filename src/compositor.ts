@@ -190,7 +190,7 @@ const DEFAULT_CONFIG: CompositorConfig = {
 // Recent-turn policy (2026-04-07): protect turn 0 + turn 1, budget against a
 // conservative 120k planning window, and only head+tail trim large (>40k)
 // recent results when projected occupancy crosses the orange zone.
-const TOOL_GRADIENT_T0_TURNS = 1;   // current + last completed turn: full fidelity (was 0 — caused silent T1 truncation of immediately preceding tool results)
+const TOOL_GRADIENT_T0_TURNS = 2;   // current + 2 prior completed turns: full fidelity (matches OpenClaw keepLastAssistants: 3)
 const TOOL_GRADIENT_T1_TURNS = 4;   // turns 2-4: moderate truncation (was 3)
 const TOOL_GRADIENT_T2_TURNS = 7;   // turns 4-7: aggressive truncation (was 12)
 // T3 = turns 8+: one-liner stub
