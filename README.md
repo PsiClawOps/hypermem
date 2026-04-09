@@ -17,7 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh
 
 ## The problem
 
-Every LLM conversation is assembled at runtime. The model sees only what's in the prompt. It has no memory of prior sessions, no access to decisions made last week, no awareness of work that happened before this context window opened.
+Every LLM conversation is composed at runtime. The model sees only what's in the prompt. It has no memory of prior sessions, no access to decisions made last week, no awareness of work that happened before this context window opened.
 
 Two questions make this concrete:
 
@@ -72,13 +72,13 @@ Every memory system stores. Almost none compose.
 
 Your agent has four layers of stored context, but what shows up in the prompt? How much of the token budget goes to stale content? Who decides what's relevant to this specific turn?
 
-The hypercompositor queries all four layers in parallel on every turn and assembles context within a fixed token budget. No transcript accumulates. No summary is ever needed.
+The hypercompositor queries all four layers in parallel on every turn and composes context within a fixed token budget. No transcript accumulates. No summary is ever needed.
 
 **Session amnesia isn't a storage problem.**
-The memories exist. They're in the database. The agent wakes up blank anyway because nobody assembled them into a coherent prompt. The hypercompositor queries four layers in parallel, allocates budget by priority, scopes to the active topic, and assembles a prompt that reads like the agent never left.
+The memories exist. They're in the database. The agent wakes up blank anyway because nobody composed them into a coherent prompt. The hypercompositor queries four layers in parallel, allocates budget by priority, scopes to the active topic, and composes a prompt that reads like the agent never left.
 
 **Compaction isn't inevitable.**
-Every other system hits a wall when context fills up. Summarize, truncate, lose specifics. The hypercompositor never accumulates a transcript to compress. Every turn is built from storage within a fixed budget. When the budget is tight, lower-priority content stays in storage instead of being destroyed. Change the topic back and it returns.
+Every other system hits a wall when context fills up. Summarize, truncate, lose specifics. The hypercompositor never accumulates a transcript to compress. Every turn is composed from storage within a fixed budget. When the budget is tight, lower-priority content stays in storage instead of being destroyed. Change the topic back and it returns.
 
 **Bigger context windows don't help if you fill them with garbage.**
 128k tokens of stale history and irrelevant memory is worse than 32k of precisely selected content. 10 budget categories, priority-ordered, greedy-fill. Every token in the prompt earned its spot.
@@ -117,7 +117,7 @@ transcript full → trim oldest           query 4 storage layers in parallel
 trimmed content → summarize (lossy)     budget allocator: 10 slots, fixed cap
 send transcript to model                tool compression by turn age
 model responds → append again           keystone guard + FOS profile
-                                        assembled prompt → model
+                                        composed prompt → model
      ┌──────────────────┐               model responds → afterTurn ingest
      │  loop until full  │               → write back to all 4 layers
      └──────────────────┘
@@ -151,7 +151,7 @@ hypermem warms sessions from SQLite before the first turn. The agent picks up mi
 
 Transcripts grow. Windows fill. Runtimes compact history into a summary, and specifics, tool detail, and work state get lost in the process. The agent keeps going, but degraded.
 
-hypermem never reaches that cliff. It assembles context fresh on every turn inside a strict token budget. History, facts, recall, and library data compete for tokens intentionally. If the model window changes mid-session, the compositor adapts on the next turn. There is no accumulated transcript to compress.
+hypermem never reaches that cliff. It composes context fresh on every turn inside a strict token budget. History, facts, recall, and library data compete for tokens intentionally. If the model window changes mid-session, the compositor adapts on the next turn. There is no accumulated transcript to compress.
 
 ### Retrieval that actually finds things
 
@@ -235,7 +235,7 @@ Spawned subagents start cold. They don't know what the parent was doing, which f
 
 ## Pressure management
 
-hypermem assembles context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
+hypermem composes context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
 
 | Path | Trigger | Action |
 |---|---|---|
@@ -323,7 +323,7 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
 
 **Secret scanner:** Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, hypermem scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected; the write succeeds without the content reaching fleet-visible storage.
 
-**The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and assembles a provider-format context block. A safety valve catches estimation drift and trims post-assembly. Because the budget is computed from the model's actual context window at compose time (resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly), a mid-session model swap is absorbed on the next turn with no manual intervention. T0 is preserved verbatim up to 80% projected occupancy. At high pressure with a large result, T0 is trimmed head-and-tail with a structured trim note. Compression of older turns starts at T1.
+**The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and composes a provider-format context block. A safety valve catches estimation drift and trims post-composition. Because the budget is computed from the model's actual context window at compose time (resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly), a mid-session model swap is absorbed on the next turn with no manual intervention. T0 is preserved verbatim up to 80% projected occupancy. At high pressure with a large result, T0 is trimmed head-and-tail with a structured trim note. Compression of older turns starts at T1.
 
 ```
   user message
@@ -346,7 +346,7 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
        │
   FOS profile ──► output normalization directives
        │
-  assembled prompt
+  composed prompt
        │
   model response
        │
@@ -368,7 +368,7 @@ Assembled                       9,852       16.4%
 Reserved for response          50,148       83.6%
 ```
 
-The 16% assembly figure is typical for a warm single-agent session. Multi-agent sessions with active registry and cross-session wiki hit 25-30%. The response reserve is never touched by the compositor; it belongs to the model.
+The 16% composition figure is typical for a warm single-agent session. Multi-agent sessions with active registry and cross-session wiki hit 25-30%. The response reserve is never touched by the compositor; it belongs to the model.
 
 ---
 
@@ -452,7 +452,7 @@ hypermem ships three aligned operating profiles: `light`, `standard`, and `full`
 
 Primary tuning knobs:
 
-- **`targetBudgetFraction`**: caps total non-history context weight. Lower values force lighter assembly.
+- **`targetBudgetFraction`**: caps total non-history context weight. Lower values force lighter composition.
 - **`wikiTokenCap`**: caps compiled-knowledge/wiki contribution.
 - **`outputProfile`**: `light`, `standard`, or `full`. Controls how much FOS/MOD guidance is injected per turn.
 
