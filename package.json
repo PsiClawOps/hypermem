@@ -48,7 +48,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/PsiClawOps/hypermem-internal.git"
+    "url": "https://github.com/PsiClawOps/hypermem.git"
   },
   "publishConfig": {
     "access": "public",
