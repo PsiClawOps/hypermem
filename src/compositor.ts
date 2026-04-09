@@ -1093,23 +1093,27 @@ export class Compositor {
       // Current-turn results (turn age 0) are never evicted.
       const evictedHistory = evictLargeToolResults(transformedHistory);
 
-      // ── Budget-fit: walk newest→oldest, drop until it fits ──────────────
-      // No transformation happens here — only include/exclude decisions.
+      // ── Budget-fit: walk newest→oldest, drop whole clusters ─────────────
+      // Group tool_use + tool_result messages into clusters so they are kept
+      // or dropped as a unit. Breaking mid-cluster creates orphaned tool
+      // pairs that repairToolPairs has to strip downstream — wasting budget
+      // and leaving gaps in conversation continuity.
+      const budgetClusters = clusterNeutralMessages(evictedHistory);
       let historyTokens = 0;
-      const includedHistory: NeutralMessage[] = [];
+      const includedClusters: NeutralMessageCluster<NeutralMessage>[] = [];
 
-      for (let i = evictedHistory.length - 1; i >= 0; i--) {
-        const msg = evictedHistory[i];
-        const msgTokens = estimateMessageTokens(msg);
-
-        if (historyTokens + msgTokens > remaining) {
-          warnings.push(`History truncated at message ${i + 1}/${historyMessages.length}`);
+      for (let i = budgetClusters.length - 1; i >= 0; i--) {
+        const cluster = budgetClusters[i];
+        if (historyTokens + cluster.tokenCost > remaining && includedClusters.length > 0) {
+          const droppedMsgCount = budgetClusters.slice(0, i + 1).reduce((s, c) => s + c.messages.length, 0);
+          warnings.push(`History truncated at cluster ${i + 1}/${budgetClusters.length} (${droppedMsgCount} messages dropped)`);
           break;
         }
-
-        includedHistory.unshift(msg);
-        historyTokens += msgTokens;
+        includedClusters.unshift(cluster);
+        historyTokens += cluster.tokenCost;
       }
+
+      const includedHistory: NeutralMessage[] = includedClusters.flatMap(c => c.messages);
 
       // ── Keystone History Slot (P2.1) ──────────────────────────────────
       // For long conversations (≥30 messages), inject high-signal older messages
