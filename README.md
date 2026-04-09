@@ -226,7 +226,7 @@ hypermem composes context fresh on every turn, but a long-running session still 
 
 No configuration required for any of these:
 
-- **Semantic indexer:** indexes each session's turns for recall after activity drops off, pre-embeds new content so compose calls hit cache on subsequent turns
+- **Semantic indexer:** indexes each session's turns for recall after activity drops off. Embeddings are computed asynchronously after the assistant replies and cached for subsequent turns, so compose calls hit cache rather than computing on demand
 - **Topic synthesis:** compiles stale topics into structured wiki pages and promotes high-signal facts from the hot cache to pointer-format entries in MEMORY.md; both classifier-driven, no LLM call
 - **Noise sweep:** removes low-signal or expired facts on a rolling basis
 - **Tool decay:** compresses older tool history to free budget for current work
@@ -248,11 +248,9 @@ Benchmarked against a production database: 5,104 facts, 28,441 episodes, 847 kno
 | L4 FTS5 + agentId filter | 0.07ms | 0.06ms | 0.10ms |
 | L4 knowledge query | 0.09ms | 0.08ms | 0.14ms |
 | Recency decay scoring (28 rows, in JS) | 0.003ms | 0.002ms | 0.005ms |
-| Async pre-embed (background, not user-facing) | 302ms | 146ms | 725ms |
-
 > Query planner uses compound indexes on agentId + sort key; FTS5 performance improved 25% from baseline after index additions despite a 47% increase in stored data.
 
-L1 and L4 structured retrieval are sub-millisecond. After the first turn, query embeddings are computed in the background and cached in the in-memory layer. The first turn of a new session is the only slow one; after that, query embeddings are computed in the background and cached. The async embed cost is paid after the assistant replies; users never wait for it.
+L1 and L4 structured retrieval are sub-millisecond. Vector embeddings are computed asynchronously after the assistant replies and cached in the in-memory layer, not on the primary composition call path. Users never wait for an embedding computation.
 
 ---
 
