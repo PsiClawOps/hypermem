@@ -100,7 +100,7 @@ What's in storage, not in this prompt:
   L4  5,104 facts               ranked by confidence × decay, top ~28 selected
   L4  847 knowledge entries     active-topic subset shown, rest on standby
 
-  Nothing is lost. The compositor picks what's relevant right now.
+  Everything stays in storage. The compositor picks what's relevant right now.
   Change the topic, and the next turn pulls different content from the same storage.
 ```
 
@@ -300,7 +300,7 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
        │
   budget allocator ──► 10 slots, fixed token cap
        │
-  tool compression ──► T0 verbatim, T1 stubs, T2+ dropped
+  tool compression ──► progressive, recent stays full
        │
   keystone guard ──► high-signal turns survive pressure
        │
@@ -500,7 +500,13 @@ Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 
 ## Take it further with the ACA
 
-Output normalization handles model tendencies. Self-authored identity handles voice. You don't write your agents' personalities. They do. The ACA holds them to it.
+hypermem's output normalization corrects model tendencies after they appear: sycophancy, hedging, pagination. The Agentic Cognitive Architecture prevents them from appearing in the first place.
+
+The ACA is a design guide for building agents that stay coherent across sessions without constant prompt engineering. It covers identity self-authorship (SOUL.md), structured memory contracts, and agent-to-agent communication protocols. The same FOS/MOD profiles that normalize output in hypermem are derived from ACA patterns.
+
+When your agent's identity, memory, and communication are architected rather than prompted, the compositor has better material to work with: cleaner facts, more consistent voice, fewer confabulations to catch. The ACA makes hypermem's output normalization cheaper because the agent needs less correction.
+
+Read the ACA design guide: [PsiClawOps/ACA-internal](https://github.com/PsiClawOps/ACA-internal)
 
 ---
 
