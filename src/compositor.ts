@@ -222,6 +222,52 @@ export { CollectionTrigger, DEFAULT_TRIGGERS, matchTriggers } from './trigger-re
 // These are exported solely for unit testing. Do not use in production code.
 export { getTurnAge, applyToolGradient, appendToolSummary, truncateWithHeadTail, applyTierPayloadCap, evictLargeToolResults };
 
+
+interface NeutralMessageCluster<T extends NeutralMessage> {
+  messages: T[];
+  tokenCost: number;
+}
+
+function clusterNeutralMessages<T extends NeutralMessage>(messages: T[]): NeutralMessageCluster<T>[] {
+  const clusters: NeutralMessageCluster<T>[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const current = messages[i];
+    const cluster: T[] = [current];
+
+    if (current.toolCalls && current.toolCalls.length > 0) {
+      const callIds = new Set(current.toolCalls.map(tc => tc.id).filter(Boolean));
+      let j = i + 1;
+      while (j < messages.length) {
+        const candidate = messages[j];
+        if (!candidate.toolResults || candidate.toolResults.length === 0) break;
+        const resultIds = candidate.toolResults.map(tr => tr.callId).filter(Boolean);
+        if (callIds.size > 0 && resultIds.length > 0 && !resultIds.some(id => callIds.has(id))) break;
+        cluster.push(candidate);
+        j++;
+      }
+      i = j - 1;
+    } else if (current.toolResults && current.toolResults.length > 0) {
+      let j = i + 1;
+      while (j < messages.length) {
+        const candidate = messages[j];
+        if (!candidate.toolResults || candidate.toolResults.length === 0 || (candidate.toolCalls && candidate.toolCalls.length > 0)) break;
+        cluster.push(candidate);
+        j++;
+      }
+      i = j - 1;
+    }
+
+    clusters.push({
+      messages: cluster,
+      tokenCost: cluster.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0),
+    });
+  }
+
+  return clusters;
+}
+
+
 /**
  * Public reshape helper: apply tool gradient then trim to fit within a token budget.
  *
@@ -241,14 +287,15 @@ export function applyToolGradientToWindow(
 ): NeutralMessage[] {
   const reshaped = applyToolGradient(messages, { totalWindowTokens });
   const targetTokens = Math.floor(tokenBudget * 0.65);
-  let totalTokens = reshaped.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
+  const clusters = clusterNeutralMessages(reshaped);
+  let totalTokens = clusters.reduce((sum, cluster) => sum + cluster.tokenCost, 0);
   let start = 0;
   // walk oldest to newest, drop until we fit
-  while (totalTokens > targetTokens && start < reshaped.length - 1) {
-    totalTokens -= estimateMessageTokens(reshaped[start]);
+  while (totalTokens > targetTokens && start < clusters.length - 1) {
+    totalTokens -= clusters[start].tokenCost;
     start++;
   }
-  return reshaped.slice(start);
+  return clusters.slice(start).flatMap(cluster => cluster.messages);
 }
 
 /**
@@ -516,7 +563,10 @@ function appendToolSummary(textContent: string | null, summary: string): string 
 function getTurnAge(messages: NeutralMessage[], index: number): number {
   let turnAge = 0;
   for (let i = messages.length - 1; i > index; i--) {
-    if (messages[i]?.role === 'user') turnAge++;
+    const candidate = messages[i];
+    if (candidate?.role === 'user' && (!candidate.toolResults || candidate.toolResults.length === 0)) {
+      turnAge++;
+    }
   }
   return turnAge;
 }
@@ -2068,19 +2118,23 @@ export class Compositor {
     if (tokenBudget && tokenBudget > 0) {
       const budgetCap = Math.floor(tokenBudget * 0.8);
       let runningTokens = 0;
-      const capped: NeutralMessage[] = [];
-      // Walk newest-first, keep until we hit the budget
-      for (let i = transformedHistory.length - 1; i >= 0; i--) {
-        const msg = transformedHistory[i];
-        const msgTokens =
-          Math.ceil((msg.textContent?.length ?? 0) / 4) +
-          Math.ceil((msg.toolCalls ? JSON.stringify(msg.toolCalls).length : 0) / 2) +
-          Math.ceil((msg.toolResults ? JSON.stringify(msg.toolResults).length : 0) / 2);
-        if (runningTokens + msgTokens > budgetCap) break;
-        runningTokens += msgTokens;
-        capped.unshift(msg);
+      const clusters = clusterNeutralMessages(transformedHistory);
+      const cappedClusters: NeutralMessageCluster<NeutralMessage>[] = [];
+      // Walk newest-first, keep whole clusters so tool-call/result pairs survive together.
+      for (let i = clusters.length - 1; i >= 0; i--) {
+        const cluster = clusters[i];
+        if (runningTokens + cluster.tokenCost > budgetCap && cappedClusters.length > 0) break;
+        cappedClusters.unshift(cluster);
+        runningTokens += cluster.tokenCost;
+        if (runningTokens >= budgetCap) break;
       }
-      historyToWrite = capped;
+      historyToWrite = cappedClusters.flatMap(cluster => cluster.messages);
+      if (historyToWrite.length < transformedHistory.length) {
+        console.log(
+          `[hypermem] refreshRedisGradient: cluster-capped ${transformedHistory.length}→${historyToWrite.length} messages ` +
+          `for ${agentId}/${sessionKey} (budgetCap=${budgetCap}, tokenCost=${runningTokens})`
+        );
+      }
     }
 
     await this.cache.replaceHistory(agentId, sessionKey, historyToWrite, this.config.maxHistoryMessages);

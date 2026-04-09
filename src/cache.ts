@@ -250,39 +250,87 @@ export class CacheLayer {
     const rows = this.stmtGetAllHistoryDesc.all(agentId, sessionKey) as { seq: number; message: string }[];
     if (rows.length <= 10) return 0;
 
-    let tokenSum = 0;
-    let cutSeq: number | null = null;
+    const estimateMessageTokens = (msg: StoredMessage): number => {
+      let msgTokens = Math.ceil((msg.textContent?.length ?? 0) / 4);
+      if (msg.toolCalls) msgTokens += Math.ceil(JSON.stringify(msg.toolCalls).length / 2);
+      if (msg.toolResults) msgTokens += Math.ceil(JSON.stringify(msg.toolResults).length / 2);
+      return msgTokens;
+    };
 
-    for (const row of rows) {
-      try {
-        const msg: StoredMessage = JSON.parse(row.message);
-        let msgTokens = Math.ceil((msg.textContent?.length ?? 0) / 4);
-        if (msg.toolCalls) msgTokens += Math.ceil(JSON.stringify(msg.toolCalls).length / 2);
-        if (msg.toolResults) msgTokens += Math.ceil(JSON.stringify(msg.toolResults).length / 2);
-        tokenSum += msgTokens;
-        if (tokenSum > tokenBudget) {
-          cutSeq = row.seq;
-          break;
+    const chronological = rows
+      .slice()
+      .reverse()
+      .map(row => {
+        try {
+          return { seq: row.seq, msg: JSON.parse(row.message) as StoredMessage, fallback: false };
+        } catch {
+          return { seq: row.seq, msg: null as StoredMessage | null, fallback: true };
         }
-      } catch {
-        tokenSum += 500;
-        if (tokenSum > tokenBudget) {
-          cutSeq = row.seq;
-          break;
-        }
+      });
+
+    const clusters: Array<{ startSeq: number; endSeq: number; tokenCost: number }> = [];
+    for (let i = 0; i < chronological.length; i++) {
+      const current = chronological[i];
+      if (current.fallback || !current.msg) {
+        clusters.push({ startSeq: current.seq, endSeq: current.seq, tokenCost: 500 });
+        continue;
       }
+
+      let endSeq = current.seq;
+      let tokenCost = estimateMessageTokens(current.msg);
+
+      if (current.msg.toolCalls && current.msg.toolCalls.length > 0) {
+        const callIds = new Set(current.msg.toolCalls.map(tc => tc.id).filter(Boolean));
+        let j = i + 1;
+        while (j < chronological.length) {
+          const candidate = chronological[j];
+          if (candidate.fallback || !candidate.msg || !candidate.msg.toolResults || candidate.msg.toolResults.length === 0) break;
+          const resultIds = candidate.msg.toolResults.map(tr => tr.callId).filter(Boolean);
+          if (callIds.size > 0 && resultIds.length > 0 && !resultIds.some(id => callIds.has(id))) break;
+          tokenCost += estimateMessageTokens(candidate.msg);
+          endSeq = candidate.seq;
+          j++;
+        }
+        i = j - 1;
+      } else if (current.msg.toolResults && current.msg.toolResults.length > 0) {
+        let j = i + 1;
+        while (j < chronological.length) {
+          const candidate = chronological[j];
+          if (candidate.fallback || !candidate.msg || !candidate.msg.toolResults || candidate.msg.toolResults.length === 0 || (candidate.msg.toolCalls && candidate.msg.toolCalls.length > 0)) break;
+          tokenCost += estimateMessageTokens(candidate.msg);
+          endSeq = candidate.seq;
+          j++;
+        }
+        i = j - 1;
+      }
+
+      clusters.push({ startSeq: current.seq, endSeq, tokenCost });
     }
 
-    if (cutSeq === null) return 0;
+    let tokenSum = 0;
+    let keepFromSeq: number | null = null;
+    for (let i = clusters.length - 1; i >= 0; i--) {
+      const cluster = clusters[i];
+      if (tokenSum + cluster.tokenCost > tokenBudget) break;
+      tokenSum += cluster.tokenCost;
+      keepFromSeq = cluster.startSeq;
+    }
 
-    // Delete everything before (and including) cutSeq
-    // rows is DESC so cutSeq is the oldest message that pushed us over
+    if (keepFromSeq === null) {
+      keepFromSeq = clusters[clusters.length - 1]?.startSeq ?? null;
+    }
+    if (keepFromSeq === null) return 0;
+
+    const oldestSeq = clusters[0]?.startSeq ?? keepFromSeq;
+    if (keepFromSeq <= oldestSeq) return 0;
+
+    const cutSeq = keepFromSeq - 1;
     const stmt = this.db!.prepare(
       "DELETE FROM cache.history WHERE agent_id=? AND session_key=? AND topic_id='' AND seq<=?"
     );
     stmt.run(agentId, sessionKey, cutSeq);
 
-    const trimmed = rows.filter(r => r.seq <= cutSeq!).length;
+    const trimmed = rows.filter(r => r.seq <= cutSeq).length;
     console.log(`[hypermem-cache] trimHistoryToTokenBudget: trimmed ${trimmed} messages from ${agentId}/${sessionKey}`);
     return trimmed;
   }

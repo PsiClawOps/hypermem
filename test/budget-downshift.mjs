@@ -11,7 +11,7 @@
  *   - Downshift threshold: 15% reduction DOES trigger reshape
  */
 
-import { applyToolGradientToWindow, canPersistReshapedHistory } from '../dist/compositor.js';
+import { applyToolGradientToWindow, canPersistReshapedHistory, getTurnAge } from '../dist/compositor.js';
 
 let passed = 0;
 let failed = 0;
@@ -132,12 +132,42 @@ console.log('── applyToolGradientToWindow ──');
   assert(Array.isArray(reshaped) && reshaped.length > 0, 'View-only reshape still produces a compose-time window');
 }
 
+{
+  // Test 6: cluster trim must not keep a tool result after dropping its tool call.
+  const messages = [
+    { role: 'user', textContent: 'older prose', toolCalls: null, toolResults: null },
+    { role: 'assistant', textContent: 'calling tool', toolCalls: [{ id: 'tc_cluster', name: 'read', arguments: '{\"path\":\"README.md\"}' }], toolResults: null },
+    { role: 'user', textContent: null, toolCalls: null, toolResults: [{ callId: 'tc_cluster', name: 'read', content: 'X'.repeat(120), isError: false }] },
+    { role: 'assistant', textContent: 'newest prose', toolCalls: null, toolResults: null },
+  ];
+
+  const reshaped = applyToolGradientToWindow(messages, 60);
+  const hasOrphanResult = reshaped.some((msg, idx) =>
+    msg.toolResults?.length && !(idx > 0 && reshaped[idx - 1].toolCalls?.some(tc => tc.id === 'tc_cluster'))
+  );
+
+  assert(!hasOrphanResult, 'Cluster-aware trim never leaves a tool result without its preceding tool call');
+  assert(!reshaped.some(msg => msg.toolCalls?.some(tc => tc.id === 'tc_cluster')), 'Over-budget cluster drops both halves together when the pair no longer fits');
+}
+
+{
+  // Test 7: toolResult carriers must not count as a new user turn for gradient aging.
+  const messages = [
+    { role: 'assistant', textContent: 'calling tool', toolCalls: [{ id: 'tc_age', name: 'read', arguments: '{\"path\":\"README.md\"}' }], toolResults: null },
+    { role: 'user', textContent: null, toolCalls: null, toolResults: [{ callId: 'tc_age', name: 'read', content: 'ok', isError: false }] },
+    { role: 'user', textContent: 'actual human follow-up', toolCalls: null, toolResults: null },
+  ];
+
+  assert(getTurnAge(messages, 0) === 1, 'Assistant tool call ignores its matching tool-result carrier when computing turn age');
+  assert(getTurnAge(messages, 1) === 1, 'Tool-result carrier shares the same turn age as its assistant tool call');
+}
+
 // ─── Downshift threshold math tests (no Redis required) ─────────────────────
 
 console.log('\n── Downshift threshold logic ──');
 
 {
-  // Test 6: 9% reduction does NOT trigger reshape (below 10% threshold)
+  // Test 8: 9% reduction does NOT trigger reshape (below 10% threshold)
   const prevBudget = 100_000;
   const newBudget = 91_000; // 9% less
   const DOWNSHIFT_THRESHOLD = 0.10;
@@ -147,7 +177,7 @@ console.log('\n── Downshift threshold logic ──');
 }
 
 {
-  // Test 7: 15% reduction DOES trigger reshape
+  // Test 9: 15% reduction DOES trigger reshape
   const prevBudget = 100_000;
   const newBudget = 85_000; // 15% less
   const DOWNSHIFT_THRESHOLD = 0.10;

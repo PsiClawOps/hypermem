@@ -402,6 +402,144 @@ type InboundMessage = {
   [key: string]: unknown;
 };
 
+const SYNTHETIC_MISSING_TOOL_RESULT_TEXT = 'No result provided';
+
+type ToolPairStats = {
+  toolCallCount: number;
+  toolResultCount: number;
+  missingToolResultCount: number;
+  orphanToolResultCount: number;
+  syntheticNoResultCount: number;
+  missingToolResultIds: string[];
+  orphanToolResultIds: string[];
+};
+
+type ToolPairMetrics = {
+  composeCount?: number;
+  syntheticNoResultIngested?: number;
+  preBridgeMissingToolResults?: number;
+  preBridgeOrphanToolResults?: number;
+  postBridgeMissingToolResults?: number;
+  postBridgeOrphanToolResults?: number;
+  lastUpdatedAt?: string;
+  lastAnomaly?: Record<string, unknown>;
+};
+
+function extractTextFromInboundContent(content: InboundMessage['content']): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((part): part is { type: string; text?: string } => Boolean(part && typeof part.type === 'string'))
+    .filter(part => part.type === 'text' && typeof part.text === 'string')
+    .map(part => part.text ?? '')
+    .join('\n');
+}
+
+function collectNeutralToolPairStats(messages: NeutralMessage[]): ToolPairStats {
+  const callIds = new Set<string>();
+  const resultIds = new Set<string>();
+  let toolCallCount = 0;
+  let toolResultCount = 0;
+  let syntheticNoResultCount = 0;
+
+  for (const msg of messages) {
+    for (const tc of msg.toolCalls ?? []) {
+      toolCallCount++;
+      if (tc.id) callIds.add(tc.id);
+    }
+    for (const tr of msg.toolResults ?? []) {
+      toolResultCount++;
+      if (tr.callId) resultIds.add(tr.callId);
+      if ((tr.content ?? '').trim() === SYNTHETIC_MISSING_TOOL_RESULT_TEXT) syntheticNoResultCount++;
+    }
+  }
+
+  const missingToolResultIds = [...callIds].filter(id => !resultIds.has(id));
+  const orphanToolResultIds = [...resultIds].filter(id => !callIds.has(id));
+
+  return {
+    toolCallCount,
+    toolResultCount,
+    missingToolResultCount: missingToolResultIds.length,
+    orphanToolResultCount: orphanToolResultIds.length,
+    syntheticNoResultCount,
+    missingToolResultIds,
+    orphanToolResultIds,
+  };
+}
+
+function collectAgentToolPairStats(messages: InboundMessage[]): ToolPairStats {
+  const callIds = new Set<string>();
+  const resultIds = new Set<string>();
+  let toolCallCount = 0;
+  let toolResultCount = 0;
+  let syntheticNoResultCount = 0;
+
+  for (const msg of messages) {
+    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'toolCall' || block.type === 'toolUse') {
+          toolCallCount++;
+          if (typeof block.id === 'string' && block.id.length > 0) callIds.add(block.id);
+        }
+      }
+    }
+
+    if (msg.role === 'toolResult') {
+      toolResultCount++;
+      const toolCallId = typeof msg.toolCallId === 'string' ? msg.toolCallId : '';
+      if (toolCallId) resultIds.add(toolCallId);
+      if (extractTextFromInboundContent(msg.content).trim() === SYNTHETIC_MISSING_TOOL_RESULT_TEXT) {
+        syntheticNoResultCount++;
+      }
+    }
+  }
+
+  const missingToolResultIds = [...callIds].filter(id => !resultIds.has(id));
+  const orphanToolResultIds = [...resultIds].filter(id => !callIds.has(id));
+
+  return {
+    toolCallCount,
+    toolResultCount,
+    missingToolResultCount: missingToolResultIds.length,
+    orphanToolResultCount: orphanToolResultIds.length,
+    syntheticNoResultCount,
+    missingToolResultIds,
+    orphanToolResultIds,
+  };
+}
+
+async function bumpToolPairMetrics(
+  hm: HyperMemInstance,
+  agentId: string,
+  sessionKey: string,
+  delta: ToolPairMetrics,
+  anomaly?: Record<string, unknown>,
+): Promise<void> {
+  const slot = 'toolPairMetrics';
+
+  let stored: ToolPairMetrics = {};
+  try {
+    const raw = await hm.cache.getSlot(agentId, sessionKey, slot);
+    if (raw) stored = JSON.parse(raw) as ToolPairMetrics;
+  } catch {
+    stored = {};
+  }
+
+  const next: ToolPairMetrics = {
+    composeCount: (stored.composeCount ?? 0) + (delta.composeCount ?? 0),
+    syntheticNoResultIngested: (stored.syntheticNoResultIngested ?? 0) + (delta.syntheticNoResultIngested ?? 0),
+    preBridgeMissingToolResults: (stored.preBridgeMissingToolResults ?? 0) + (delta.preBridgeMissingToolResults ?? 0),
+    preBridgeOrphanToolResults: (stored.preBridgeOrphanToolResults ?? 0) + (delta.preBridgeOrphanToolResults ?? 0),
+    postBridgeMissingToolResults: (stored.postBridgeMissingToolResults ?? 0) + (delta.postBridgeMissingToolResults ?? 0),
+    postBridgeOrphanToolResults: (stored.postBridgeOrphanToolResults ?? 0) + (delta.postBridgeOrphanToolResults ?? 0),
+    lastUpdatedAt: new Date().toISOString(),
+    lastAnomaly: anomaly ?? stored.lastAnomaly,
+  };
+
+  await hm.cache.setSlot(agentId, sessionKey, slot, JSON.stringify(next));
+}
+
 /**
  * Convert an OpenClaw AgentMessage to hypermem's NeutralMessage format.
  */
@@ -510,6 +648,86 @@ function estimateTokens(text: string | null | undefined): number {
   if (!text) return 0;
   return Math.ceil(text.length / 4);
 }
+
+
+function hasStructuredToolCallMessage(msg: Record<string, unknown>): boolean {
+  if (Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0) return true;
+  if (!Array.isArray(msg.content)) return false;
+  return (msg.content as Array<Record<string, unknown>>).some(part => part.type === 'toolCall' || part.type === 'tool_use');
+}
+
+function hasStructuredToolResultMessage(msg: Record<string, unknown>): boolean {
+  if (Array.isArray(msg.toolResults) && msg.toolResults.length > 0) return true;
+  if (msg.role === 'toolResult' || msg.role === 'tool' || msg.role === 'tool_result') return true;
+  if (!Array.isArray(msg.content)) return false;
+  return (msg.content as Array<Record<string, unknown>>).some(part => part.type === 'tool_result' || part.type === 'toolResult');
+}
+
+function getToolCallIds(msg: Record<string, unknown>): string[] {
+  const ids: string[] = [];
+  if (Array.isArray(msg.toolCalls)) {
+    ids.push(...(msg.toolCalls as Array<Record<string, unknown>>).map(tc => tc.id).filter((id): id is string => typeof id === 'string' && id.length > 0));
+  }
+  if (Array.isArray(msg.content)) {
+    for (const part of msg.content as Array<Record<string, unknown>>) {
+      if ((part.type === 'toolCall' || part.type === 'tool_use') && typeof part.id === 'string' && part.id.length > 0) {
+        ids.push(part.id);
+      }
+    }
+  }
+  return ids;
+}
+
+function getToolResultIds(msg: Record<string, unknown>): string[] {
+  const ids: string[] = [];
+  if (Array.isArray(msg.toolResults)) {
+    ids.push(...(msg.toolResults as Array<Record<string, unknown>>).map(tr => tr.callId).filter((id): id is string => typeof id === 'string' && id.length > 0));
+  }
+  if (typeof msg.toolCallId === 'string' && msg.toolCallId.length > 0) {
+    ids.push(msg.toolCallId);
+  }
+  if (typeof msg.tool_call_id === 'string' && msg.tool_call_id.length > 0) {
+    ids.push(msg.tool_call_id as string);
+  }
+  return ids;
+}
+
+function clusterTranscriptMessages<T extends Record<string, unknown>>(messages: T[]): T[][] {
+  const clusters: T[][] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const current = messages[i];
+    const cluster: T[] = [current];
+
+    if (hasStructuredToolCallMessage(current)) {
+      const callIds = new Set(getToolCallIds(current));
+      let j = i + 1;
+      while (j < messages.length) {
+        const candidate = messages[j];
+        if (!hasStructuredToolResultMessage(candidate)) break;
+        const resultIds = getToolResultIds(candidate);
+        if (callIds.size > 0 && resultIds.length > 0 && !resultIds.some(id => callIds.has(id))) break;
+        cluster.push(candidate);
+        j++;
+      }
+      i = j - 1;
+    } else if (hasStructuredToolResultMessage(current)) {
+      let j = i + 1;
+      while (j < messages.length) {
+        const candidate = messages[j];
+        if (!hasStructuredToolResultMessage(candidate) || hasStructuredToolCallMessage(candidate)) break;
+        cluster.push(candidate);
+        j++;
+      }
+      i = j - 1;
+    }
+
+    clusters.push(cluster);
+  }
+
+  return clusters;
+}
+
 
 /**
  * Estimate total token cost of the current Redis history window for a session.
@@ -1111,61 +1329,39 @@ function createHyperMemEngine(): ContextEngine {
                     }, 0) : 0);
               budget -= t;
             }
-            // FIX (Bug 1 — extended): Force-keep ALL current-turn tool results, not just
-            // the last one. When parallel tool calls fire, each result arrives as a separate
-            // role='user'/toolResults message. The original fix only protected the last
-            // message, leaving N-1 parallel results vulnerable to compaction, which produced
-            // "No result provided" for those tool calls.
-            //
-            // Algorithm:
-            // 1. Walk backwards from tail collecting consecutive toolResults messages.
-            // 2. Also collect the immediately preceding assistant toolCalls message so
-            //    we don't leave orphaned tool_use blocks.
-            // 3. Pre-deduct all force-kept costs from budget.
-            // 4. Fill remaining budget oldest-to-newest for everything before them.
             const msgCost = (m: Record<string, unknown>): number =>
               estimateTokens(typeof m.textContent === 'string' ? m.textContent : null)
               + (m.toolCalls ? Math.ceil(JSON.stringify(m.toolCalls).length / 2) : 0)
               + (m.toolResults ? Math.ceil(JSON.stringify(m.toolResults).length / 2) : 0)
               + (Array.isArray(m.content) ? (m.content as Array<Record<string,unknown>>).reduce(
                   (s: number, c: Record<string,unknown>) => {
+                    if (c.type === 'toolCall' || c.type === 'tool_use') {
+                      return s + Math.ceil(JSON.stringify(c).length / 2);
+                    }
                     const textVal = typeof c.text === 'string' ? c.text
                       : typeof c.content === 'string' ? c.content
                       : c.content != null ? JSON.stringify(c.content) : null;
                     return s + estimateTokens(textVal);
                   }, 0) : 0);
 
-            // Collect tail tool-result messages (current turn)
-            const forceKept: Array<Record<string, unknown>> = [];
-            let tailIdx = processedConvMsgs.length - 1;
-            while (tailIdx >= 0 && (processedConvMsgs[tailIdx] as Record<string,unknown>).toolResults) {
-              forceKept.unshift(processedConvMsgs[tailIdx] as Record<string,unknown>);
-              tailIdx--;
+            const clusters = clusterTranscriptMessages(processedConvMsgs as Array<Record<string, unknown>>);
+            const keptClusters: Array<Array<Record<string, unknown>>> = [];
+            const tailCluster = clusters.length > 0 ? clusters[clusters.length - 1] : [];
+            if (tailCluster.length > 0) {
+              budget -= tailCluster.reduce((sum, msg) => sum + msgCost(msg), 0);
+              keptClusters.unshift(tailCluster);
             }
-            // Also force-keep the preceding assistant toolCalls message to avoid orphaned tool_use
-            if (tailIdx >= 0 && (processedConvMsgs[tailIdx] as Record<string,unknown>).toolCalls) {
-              forceKept.unshift(processedConvMsgs[tailIdx] as Record<string,unknown>);
-              tailIdx--;
-            }
-            // If nothing looks like a tool-result tail, fall back to keeping the last message
-            if (forceKept.length === 0 && processedConvMsgs.length > 0) {
-              forceKept.push(processedConvMsgs[processedConvMsgs.length - 1] as Record<string,unknown>);
-              tailIdx = processedConvMsgs.length - 2;
-            }
-            for (const fk of forceKept) budget -= msgCost(fk);
 
-            const kept: Array<Record<string, unknown>> = [];
-            // Fill remaining budget newest-to-oldest for messages before the force-kept tail
-            for (let i = tailIdx; i >= 0 && budget > 0; i--) {
-              const m = processedConvMsgs[i] as Record<string, unknown>;
-              const t = msgCost(m);
-              if (budget - t >= 0) {
-                kept.unshift(m);
-                budget -= t;
+            for (let i = clusters.length - 2; i >= 0 && budget > 0; i--) {
+              const cluster = clusters[i];
+              const clusterCost = cluster.reduce((sum, msg) => sum + msgCost(msg), 0);
+              if (budget - clusterCost >= 0) {
+                keptClusters.unshift(cluster);
+                budget -= clusterCost;
               }
             }
-            // Always append the force-kept tail (assistant toolCalls + all parallel tool results)
-            for (const fk of forceKept) kept.push(fk);
+
+            const kept = keptClusters.flat();
             const keptCount = processedConvMsgs.length - kept.length;
             if (keptCount > 0) {
               console.log(
@@ -1380,6 +1576,41 @@ function createHyperMemEngine(): ContextEngine {
       const outputMessages = result.messages
         .filter(m => m.role != null)
         .flatMap(m => neutralToAgentMessage(m as unknown as NeutralMessage)) as unknown as any[];
+
+      const neutralPairStats = collectNeutralToolPairStats(result.messages as unknown as NeutralMessage[]);
+      const agentPairStats = collectAgentToolPairStats(outputMessages as InboundMessage[]);
+      const toolPairAnomaly =
+        neutralPairStats.missingToolResultCount > 0 ||
+        neutralPairStats.orphanToolResultCount > 0 ||
+        agentPairStats.missingToolResultCount > 0 ||
+        agentPairStats.orphanToolResultCount > 0 ||
+        agentPairStats.syntheticNoResultCount > 0
+          ? {
+              stage: 'assemble',
+              neutralMissingToolResultIds: neutralPairStats.missingToolResultIds.slice(0, 10),
+              neutralOrphanToolResultIds: neutralPairStats.orphanToolResultIds.slice(0, 10),
+              agentMissingToolResultIds: agentPairStats.missingToolResultIds.slice(0, 10),
+              agentOrphanToolResultIds: agentPairStats.orphanToolResultIds.slice(0, 10),
+              syntheticNoResultCount: agentPairStats.syntheticNoResultCount,
+            }
+          : undefined;
+
+      await bumpToolPairMetrics(hm, agentId, sk, {
+        composeCount: 1,
+        preBridgeMissingToolResults: neutralPairStats.missingToolResultCount,
+        preBridgeOrphanToolResults: neutralPairStats.orphanToolResultCount,
+        postBridgeMissingToolResults: agentPairStats.missingToolResultCount,
+        postBridgeOrphanToolResults: agentPairStats.orphanToolResultCount,
+      }, toolPairAnomaly);
+
+      if (toolPairAnomaly) {
+        console.warn(
+          `[hypermem-plugin] tool-pair-integrity: ${agentId}/${sk} ` +
+          `neutralMissing=${neutralPairStats.missingToolResultCount} neutralOrphan=${neutralPairStats.orphanToolResultCount} ` +
+          `agentMissing=${agentPairStats.missingToolResultCount} agentOrphan=${agentPairStats.orphanToolResultCount} ` +
+          `synthetic=${agentPairStats.syntheticNoResultCount}`
+        );
+      }
 
       // Cache overhead for tool-loop turns: contextBlock tokens (chars/4) +
       // tier-aware estimate for runtime system prompt (SOUL.md, identity,
@@ -1611,6 +1842,21 @@ function createHyperMemEngine(): ContextEngine {
           const m = msg as unknown as InboundMessage;
           // Skip system messages — they come from the runtime, not the conversation
           if (m.role === 'system') continue;
+
+          if (m.role === 'toolResult' && extractTextFromInboundContent(m.content).trim() === SYNTHETIC_MISSING_TOOL_RESULT_TEXT) {
+            const toolCallId = typeof m.toolCallId === 'string' ? m.toolCallId : 'unknown';
+            const toolName = typeof m.toolName === 'string' ? m.toolName : 'unknown';
+            await bumpToolPairMetrics(hm, agentId, sk, { syntheticNoResultIngested: 1 }, {
+              stage: 'afterTurn',
+              toolCallId,
+              toolName,
+            });
+            console.warn(
+              `[hypermem-plugin] tool-pair-integrity: observed synthetic missing tool result for ${agentId}/${sk} ` +
+              `tool=${toolName} callId=${toolCallId}`
+            );
+          }
+
           const neutral = toNeutralMessage(m);
           if (neutral.role === 'user') {
             // Record user messages here and strip transport envelope metadata before
