@@ -137,53 +137,27 @@ When it fills:                          When budget is exceeded:
 | Tool output | Stays until trimmed | Compressed by turn age (T0/T1/T2/T3) |
 | Model swap mid-session | Re-count, hope it fits | Budget recomputed from new window size next turn |
 
+High-signal turns are marked as keystones and survive pressure trimming ahead of ordinary history.
+
 ---
 
 ## What it solves
 
-### Agents that never forget
-
-When an agent restarts, it wakes up empty. Decisions made, preferences established, work in progress: gone. Operators re-explain context. Agents ask questions they have already asked. The work is real. The memory is not.
-
-hypermem warms sessions from SQLite before the first turn. The agent picks up mid-conversation. Session continuity is no longer a function of uptime; it is a property of the architecture.
-
-### Context that never collapses
-
-Transcripts grow. Windows fill. Runtimes compact history into a summary, and specifics, tool detail, and work state get lost in the process. The agent keeps going, but degraded.
-
-hypermem never reaches that cliff. It composes context fresh on every turn inside a strict token budget. History, facts, recall, and library data compete for tokens intentionally. If the model window changes mid-session, the compositor adapts on the next turn. There is no accumulated transcript to compress.
-
-### Retrieval that actually finds things
-
-Storing everything is not the same as being able to find anything.
-
-FTS5 full-text search catches exact matches. KNN vector search catches semantic matches. Reciprocal Rank Fusion merges both into one ranked result. Trigger-based retrieval handles known patterns. When no trigger matches, bounded semantic fallback keeps the memory slot from coming back empty.
-
 ### Tool output that doesn't take over
 
-Long agentic sessions generate a lot of tool output. Left unmanaged, old results crowd out current reasoning.
-
-Tool Context Tuning compresses by turn age. T0 turns stay verbatim under normal pressure. At projected occupancy above 80% with a large result (>40k chars), T0 is trimmed head-and-tail with a structured `[hypermem_tool_result_trim ... reason=oversize_turn0_trim]` note. T1 turns become short prose stubs: `Read /src/foo.ts (1.2KB)`, `Ran npm test -- exit 0`. T2 and T3 turns drop payloads entirely, keeping message text. Large results keep the head and tail and cut the middle. For multi-agent teams, compression is tier-aware: director and council agents preserve more context per pass, reflecting their coordination scope; specialists use a tighter cap to stay focused. The in-memory cache is refreshed from SQLite after each turn so it never drifts from the source of truth. Image content blocks inside tool results are treated as oversized payloads: evicted at T2 regardless of projected occupancy and cleared entirely at T3. Token-optimizer tools like ClawSqueezer remain fully compatible — hypermem's image eviction and ClawSqueezer's output compression address different pressure surfaces and do not conflict.
+Agentic sessions generate massive tool output. Left unmanaged, old results crowd out current reasoning. hypermem compresses tool history by age: recent results stay full, older results become stubs, the oldest drop payloads entirely. The budget goes to current work, not last hour's `npm test` output.
 
 ### Knowledge that outlasts the conversation
 
 Most memory systems store what was said. hypermem synthesizes what was learned.
 
-When a topic goes quiet, hypermem compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. This is classifier-driven; no LLM call required. Facts, episodes, and preferences written explicitly during the session are available immediately in structured storage. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay. The conversation is gone. The knowledge it produced is not.
+When a topic goes quiet, hypermem compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay.
 
-OpenClaw 2026.4.7 ships memory wiki for structured storage. hypermem goes further: wiki pages are synthesized by topic classifier and injected by the compositor within token budget.
+OpenClaw 2026.4.7 ships memory wiki for structured storage. hypermem goes further: wiki pages are synthesized automatically and injected by the compositor within token budget.
 
-### History that remembers its highlights
+### Output normalization and verification
 
-Context trimming is a blunt instrument. When a session fills up, recent messages survive and old ones go, regardless of which turns actually mattered. A decision from three hours ago gets dropped. Tool noise from five minutes ago stays.
-
-hypermem scores turns for significance as they are recorded. High-signal moments (decisions, blockers, artifacts, established facts) are marked as keystones. When pressure trims the history window, keystones are preserved ahead of ordinary turns. When a topic shift occurs and history scopes to the new thread, keystones from past contexts are still eligible for recall. The agent keeps its landmarks even when the surrounding conversation is gone.
-
-### Output normalization
-
-Agents confabulate and drift toward the defaults baked into their training. GPT-5.4 paginates and offers to elaborate. Sonnet over-lists. Gemini hedges. These are model tendencies, not instructions. Without an active correction layer, every response compounds them.
-
-FOS (Fact-Oriented Synthesis) injects output normalization directives into composed context via the `outputProfile` config key. Three tiers:
+Agents confabulate and drift toward the defaults baked into their training. GPT-5.4 paginates and offers to elaborate. Sonnet over-lists. Gemini hedges. FOS (Fact-Oriented Synthesis) injects output normalization directives into composed context via the `outputProfile` config key. Three tiers:
 
 | Profile | Tokens | Covers |
 |---|---|---|
@@ -213,23 +187,11 @@ plus ~500KB per agent for identity and warm facts. Embedding cache is the wildca
 you run nomic-embed-text locally, add 50MB for the model plus ~1KB per cached vector.
 ```
 
-The pagination, bold headers, and trailing offer-to-elaborate are GPT-5.4 defaults. `light` removes them without flattening the model's reasoning. For fact verification and confabulation detection, see [Outputs you can verify](#outputs-you-can-verify) below.
-
-### Outputs you can verify
-
-Every response is checked against the fact corpus before it is recorded. No LLM call. FOS/MOD (Fact-Oriented Synthesis / Moderation) runs a classifier against the live L4 fact corpus on each turn: unsupported claims are flagged, contradictions with established facts surface in diagnostics, and a confabulation risk score is attached to the stored episode.
-
-Action verification applies the same check to tool calls before they fire. High-risk operations without grounded fact support surface in logs before execution.
-
-Without this, agents make plausible-sounding claims that contradict stored facts, or execute tool calls without grounded basis. Neither failure is obvious from the transcript. FOS/MOD makes both visible.
-
-Output normalization directives (the `outputProfile` setting) are also part of the FOS layer. See [Output normalization](#output-normalization) above for profiles and examples.
+FOS/MOD (Moderation) checks every response against the live L4 fact corpus before it is recorded. Unsupported claims are flagged, contradictions with established facts surface in diagnostics, and a confabulation risk score is attached to the stored episode.
 
 ### Subagents that hit the ground running
 
-Spawned subagents start cold. They don't know what the parent was doing, which files were in scope, or what decisions preceded the spawn.
-
-`buildSpawnContext()` snapshots recent parent turns, indexes session-scoped documents, and gives the spawned agent a bounded context block at compose time. Useful context carries forward. Session documents stay isolated from the shared library and are cleaned up when the spawn completes.
+Spawned subagents inherit a bounded context block: recent parent turns, session-scoped documents, and relevant facts. Scope is isolated from the shared library. Documents are cleaned up on completion.
 
 ---
 
@@ -239,11 +201,9 @@ hypermem composes context fresh on every turn, but a long-running session still 
 
 | Path | Trigger | Action |
 |---|---|---|
-| **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures projected occupancy before results land. Plans against a 120k baseline window regardless of actual provider context size. 75%: green zone, keep full. 80%: defensive -- trim large results (>40k chars) head+tail with structured note. 85%: hard caution zone -- trim on turn 0 and turn 1. Also trims the messages[] array returned to the runtime; this is what actually prevents stripping on the current turn, not just the next one |
+| **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures projected occupancy before results land; trims large results at 80%+ and truncates the messages[] array for the current turn |
 | **AfterTurn trim** | Every turn at >80% | Pre-emptive headroom cut after the assistant replies, before the next turn arrives |
 | **Deep compaction** | compact() at >85% | Cuts in-memory cache to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
-| **Density-aware JSONL truncation** | compact() | Counts tokens per message, not message count. Catches large-message sessions that looked fine by count but were full by volume |
-| **Pre-ingestion wave guard** | Any toolResult payload before recording | Truncates or skips large tool payloads before they enter the ingest path, preventing the ingest itself from adding pressure during high-volume agentic runs |
 
 **The one thing these paths cannot fix:** a session whose JSONL transcript on disk is already at 98% when the gateway restarts. The JSONL loads into runtime context before any compaction runs. Check `session_status` on startup. If you're above 85%, start a fresh session.
 
@@ -284,13 +244,11 @@ Benchmarked against a production database: 5,104 facts, 28,441 episodes, 847 kno
 | L4 FTS5 + agentId filter | 0.07ms | 0.06ms | 0.10ms |
 | L4 knowledge query | 0.09ms | 0.08ms | 0.14ms |
 | Recency decay scoring (28 rows, in JS) | 0.003ms | 0.002ms | 0.005ms |
-| Full 4-layer compose, warm session | 52ms | 52ms | 57ms |
-| Full 4-layer compose, cold session (first turn) | 249ms | 54ms | 1,592ms |
 | Async pre-embed (background, not user-facing) | 302ms | 146ms | 725ms |
 
 > Query planner uses compound indexes on agentId + sort key; FTS5 performance improved 25% from baseline after index additions despite a 47% increase in stored data.
 
-L1 and L4 structured retrieval are sub-millisecond. After the first turn, query embeddings are computed in the background and cached in the in-memory layer. Warm compose averages 52ms with a p95 of 57ms. The cold p95 of 1,592ms happens exactly once per new session, then never again. The async embed cost is paid after the assistant replies; users never wait for it.
+L1 and L4 structured retrieval are sub-millisecond. After the first turn, query embeddings are computed in the background and cached in the in-memory layer. The cold session p95 of 1,592ms happens exactly once per new session, then never again. The async embed cost is paid after the assistant replies; users never wait for it.
 
 ---
 
@@ -303,6 +261,8 @@ hypermem plugs into OpenClaw as a context engine and owns the full prompt compos
 **L2: Messages DB.** A single `MEMORY.md` file doesn't hold per-agent conversation history at scale. Thousands of turns across dozens of agents need queryable, concurrent-safe storage. Per-agent SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
 
 **L3: Vectors DB.** Keyword search alone misses semantically related content. The retry logic decision won't surface on a search for "what did we decide" unless the original turn used those exact words. Per-agent sqlite-vec database with KNN search over prior turns and indexed workspace documents. Reconstructable from L2 if lost. Supports two embedding providers: Ollama (local, default `nomic-embed-text`) or hosted via OpenRouter (recommended: `qwen/qwen3-embedding-8b`, 4096d, top of MTEB retrieval leaderboard).
+
+Retrieval combines FTS5 full-text search (exact matches), KNN vector search (semantic matches), and Reciprocal Rank Fusion to merge both into one ranked result. Trigger-based retrieval handles known patterns; when no trigger matches, bounded semantic fallback keeps the memory slot from returning empty.
 
 **L4: Library DB.** Per-agent storage can't hold shared knowledge. Facts established by one agent, wiki pages synthesized from cross-agent topics, fleet registry state: these belong to the system, not one agent. One shared SQLite database:
 
