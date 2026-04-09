@@ -62,9 +62,9 @@ Four storage layers, sub-millisecond retrieval, no external database services re
 | **L3 Semantic** | Finds related content even when the words don't match. | 0.29ms |
 | **L4 Knowledge** | Facts, wiki pages, episodes, preferences. Shared across agents. | 0.09ms |
 
-Everything is retained. Nothing is lost at the session boundary. The retry logic decision from last week, the deployment preferences from last month, the architecture choices from day one: all queryable, all available for composition.
+Everything is retained. Storage survives session boundaries. The retry logic decision from last week, the deployment preferences from last month, the architecture choices from day one: all queryable, all available for composition.
 
-**Session warming.** Before the first turn fires, hypermem pre-loads the agent's full working state from the in-memory SQLite cache: recent history, facts ranked by confidence and recency, active topic context, cached embeddings for fast semantic recall. The agent's first reply draws from everything that was in scope at the end of the last session. To the agent, the session boundary never happened.
+**Session warming.** Before the first turn fires, hypermem pre-loads the agent's full working state from the in-memory SQLite cache: recent history, facts ranked by confidence and recency, active topic context, cached embeddings for fast semantic recall. The agent's first reply draws from everything that was in scope at the end of the last session. The agent picks up where it left off.
 
 ---
 
@@ -74,15 +74,9 @@ Every memory system stores. Almost none compose.
 
 Your agent has four layers of stored context, but what shows up in the prompt? How much of the token budget goes to stale content? Who decides what's relevant to this specific turn?
 
-The hypercompositor queries all four layers in parallel on every turn and composes context within a fixed token budget. No transcript accumulates. No summary is ever needed.
+The hypercompositor queries all four layers in parallel on every turn and composes context within a fixed token budget. No transcript accumulates. No summary is ever needed. Amnesia isn't a storage problem; the memories exist, but nobody composed them into a coherent prompt. Compaction isn't inevitable; content that doesn't fit this turn stays in storage instead of being destroyed.
 
-**Session amnesia isn't a storage problem.**
-The memories exist. They're in the database. The agent wakes up blank anyway because nobody composed them into a coherent prompt. The hypercompositor queries four layers in parallel, allocates budget by priority, scopes to the active topic, and composes a prompt that reads like the agent never left.
-
-**Compaction isn't inevitable.**
-Every other system hits a wall when context fills up. Summarize, truncate, lose specifics. The hypercompositor never accumulates a transcript to compress. Every turn is composed from storage within a fixed budget. When the budget is tight, lower-priority content stays in storage instead of being destroyed. Change the topic back and it returns.
-
-**Bigger context windows don't help if you fill them with garbage.**
+**Bigger context windows don't help if you fill them with stale history.**
 128k tokens of stale history and irrelevant memory is worse than 32k of precisely selected content. 10 budget categories, priority-ordered, greedy-fill. Every token in the prompt earned its spot.
 
 ### What the model actually sees
@@ -266,7 +260,7 @@ hypermem plugs into OpenClaw as a context engine and owns the full prompt compos
 
 **L2: Messages DB.** A single `MEMORY.md` file doesn't hold per-agent conversation history at scale. Thousands of turns across dozens of agents need queryable, concurrent-safe storage. Per-agent SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
 
-**L3: Vectors DB.** Keyword search alone misses semantically related content. The retry logic decision won't surface on a search for "what did we decide" unless the original turn used those exact words. Per-agent sqlite-vec database with KNN search over prior turns and indexed workspace documents. Reconstructable from L2 if lost. Supports two embedding providers: Ollama (local, default `nomic-embed-text`) or hosted via OpenRouter (recommended: `qwen/qwen3-embedding-8b`, 4096d, top of MTEB retrieval leaderboard).
+**L3: Vectors DB.** Keyword search alone misses semantically related content. A decision recorded as "we chose exponential backoff" won't match a search for "what was the retry strategy" without vector similarity. Per-agent sqlite-vec database with KNN search over prior turns and indexed workspace documents. Reconstructable from L2 if lost. Supports two embedding providers: Ollama (local, default `nomic-embed-text`) or hosted via OpenRouter (recommended: `qwen/qwen3-embedding-8b`, 4096d, top of MTEB retrieval leaderboard).
 
 Retrieval combines FTS5 full-text search (exact matches), KNN vector search (semantic matches), and Reciprocal Rank Fusion to merge both into one ranked result. Trigger-based retrieval handles known patterns; when no trigger matches, bounded semantic fallback keeps the memory slot from returning empty.
 
@@ -319,25 +313,7 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
   afterTurn ──► write back to all 4 layers
 ```
 
-Token budget allocation from a mature session (847 turns deep, 128k budget):
-
-```
-Slot                               Tokens    % of budget
----------------------------------------------------------
-identity / system / user / tools   14,000       10.9%
-history (65-90 tool-heavy turns)   46,000       35.9%
-recent tools                       10,000        7.8%
-keystones                           3,600        2.8%
-wiki / knowledge                    2,600        2.0%
-facts (top ~28, conf × decay)       2,200        1.7%
-recall / semantic                   1,600        1.3%
-allocator reserve                  12,000        9.4%
----------------------------------------------------------
-Total composed                     92,000       71.9%
-Available for response             36,000       28.1%
-```
-
-The 72% composition figure is typical for a warm mature session. Multi-agent sessions with active registry and cross-session wiki may run slightly higher. The response reserve belongs to the model.
+Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the-model-actually-sees) above. The 72% composition figure is typical for a warm mature session. Multi-agent sessions with active registry and cross-session wiki may run slightly higher.
 
 ---
 
