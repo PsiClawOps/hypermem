@@ -201,3 +201,48 @@ as Obsidian markdown notes with YAML frontmatter.
 
 Shipped: `importVault()` + `watchVault()` (vault → hypermem), `exportToVault()` (hypermem → vault).
 Full frontmatter, `[[wikilinks]]`, tag extraction, secret scanner, skip-unchanged. See `src/obsidian-watcher.ts` and `src/obsidian-exporter.ts`.
+
+---
+
+## D-009: Cross-Slot Dedup Pass in Compositor
+
+**Status:** 🟡 DEFERRED  
+**Added:** 2026-04-09  
+**Target:** v0.6.0  
+**Relates to:** compositor.ts, slot assembly, budget utilization
+
+### What
+
+After slot assembly and before budget-fit walking, run a dedup pass to remove redundant
+content across slots. The same concept can appear as a fact, a wiki entry, AND a history
+turn simultaneously — three representations of identical information consuming budget.
+
+### Why it matters
+
+The 0.5.0 README claims ~71% budget utilization. An unknown fraction of that is redundant
+cross-slot content. Without dedup, the utilization number is inflated and the "intelligent
+selection" pitch is partially undercut.
+
+### Shape
+
+**Phase 1 — Exact dedup (cheap):**
+- After slot assembly, hash each content block (stripped of slot metadata)
+- Drop any block whose hash matches a higher-priority block already in the set
+- Priority: identity > facts > wiki > keystone > history > tools
+
+**Phase 2 — Near-dedup (requires embeddings):**
+- Embed each assembled block
+- Cosine similarity threshold (e.g. 0.95) — drop lower-priority near-duplicate
+- Only viable at T2+ embedding tier (MiniLM or better)
+- Gate behind `composer.dedup: true` config flag (off by default until benchmarked)
+
+### Gate condition
+
+Phase 1: any time — no external deps.
+Phase 2: after T2 embedding tier is live in production and benchmarked for latency impact.
+
+### Known tradeoff
+
+Aggressive dedup can drop context that looks redundant but provides signal through
+repetition (e.g., a fact reinforced by appearing in multiple history turns). Phase 2
+threshold should be tunable.
