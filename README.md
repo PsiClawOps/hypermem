@@ -92,22 +92,16 @@ Token budget allocation from a mature session (847 turns deep, 128k budget):
 ```
 What the model sees (92k of 128k tokens, 72% utilization):
 
-  ┌────────────────────────┬────────┐
-  │ identity/sys/tools     │ 14,000 │
-  │ history (65-90 turns)  │ 46,000 │
-  │ recent tools           │ 10,000 │
-  │ keystones              │  3,600 │
-  │ wiki / knowledge       │  2,600 │
-  │ facts (top ~28)        │  2,200 │
-  │ recall / semantic      │  1,600 │
-  │ allocator reserve      │ 12,000 │
-  ├────────────────────────┼────────┤
-  │ total composed         │ 92,000 │
-  └────────────────────────┴────────┘
+  ┌────────────────┬──────────────────────────┬──────────────┬───────────┬────────────┬────────────┬──────────────┬──────────┐
+  │ id/sys/user    │ history                  │ recent tools │ keystones │ wiki/know. │ facts      │ recall/sem.  │ reserve  │
+  │ tools 14,000   │ 46,000                   │ 10,000       │ 3,600     │ 2,600      │ 2,200      │ 1,600        │ 12,000   │
+  │                │ 65-90 tool or 120-160    │              │           │            │ top ~28    │              │          │
+  └────────────────┴──────────────────────────┴──────────────┴───────────┴────────────┴────────────┴──────────────┴──────────┘
+   ◄────────────────────────────────────────────── 72% composed ──────────────────────────────────────────────►
 
 What's in storage, not in this prompt:
 
-  L2  847 turns stored          top 65-120 shown depending on turn density
+  L2  847 turns stored          top 70-120 shown depending on turn density
   L3  28,441 indexed episodes   available via semantic search
   L4  5,104 facts               ranked by confidence × decay, top ~28 selected
   L4  847 knowledge entries     active-topic subset shown, rest on standby
