@@ -11,7 +11,7 @@
  * It will re-warm naturally on the next session bootstrap.
  */
 
-import type { RedisLayer } from './redis.js';
+import type { CacheLayer } from './cache.js';
 
 export interface FlushSessionOptions {
   /** If true, also clears topic-level Redis keys for this session */
@@ -30,19 +30,19 @@ export interface FlushSessionResult {
 }
 
 /**
- * Flush a session's Redis hot cache.
+ * Flush a session's cache hot layer.
  *
  * Safe to call at any time. Long-term stores (SQLite facts, vectors, episodes,
  * knowledge graph) are not touched. The next session bootstrap will re-warm
  * from those stores naturally.
  *
- * @param redis   Connected RedisLayer instance
+ * @param cache   Connected CacheLayer instance
  * @param agentId Agent identifier (e.g. "forge")
  * @param sessionKey  Full session key (e.g. "agent:forge:webchat:scratchpad")
  * @param opts    Optional flags
  */
 export async function flushSession(
-  redis: RedisLayer,
+  cache: CacheLayer,
   agentId: string,
   sessionKey: string,
   opts: FlushSessionOptions = {}
@@ -52,7 +52,7 @@ export async function flushSession(
   try {
     // Core eviction — clears: system, identity, history, window, cursor,
     // context, facts, tools, meta — and removes from active sessions set
-    await redis.evictSession(agentId, sessionKey);
+    await cache.evictSession(agentId, sessionKey);
     cleared.push('system', 'identity', 'history', 'window', 'cursor', 'context', 'facts', 'tools', 'meta', 'active-sessions');
 
     return {
@@ -80,7 +80,7 @@ export async function flushSession(
  */
 export class SessionFlusher {
   constructor(
-    private readonly redis: RedisLayer,
+    private readonly cache: CacheLayer,
     private readonly agentId: string
   ) {}
 
@@ -88,6 +88,6 @@ export class SessionFlusher {
    * Flush the hot cache for a specific session.
    */
   async flush(sessionKey: string, opts?: FlushSessionOptions): Promise<FlushSessionResult> {
-    return flushSession(this.redis, this.agentId, sessionKey, opts);
+    return flushSession(this.cache, this.agentId, sessionKey, opts);
   }
 }

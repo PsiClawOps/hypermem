@@ -34,7 +34,6 @@ let hm;
 async function setup() {
   hm = await HyperMem.create({
     dataDir: tmpDir,
-    redis: { host: '127.0.0.1', port: 6379, keyPrefix: 'hm_proactive_test:', sessionTTL: 60, flushInterval: 100 },
   });
 }
 

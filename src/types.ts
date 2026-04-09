@@ -378,7 +378,7 @@ export interface SessionMeta {
 export interface HyperMemConfig {
   enabled: boolean;
   dataDir: string;
-  redis: RedisConfig;
+  cache: CacheConfig;
   compositor: CompositorConfig;
   indexer: IndexerConfig;
   embedding: EmbeddingProviderConfig;
@@ -429,15 +429,14 @@ export interface EmbeddingProviderConfig {
   batchSize: number;
 }
 
-export interface RedisConfig {
-  host: string;
-  port: number;
-  password?: string;
+export interface CacheConfig {
   keyPrefix: string;
-  sessionTTL: number;        // seconds — TTL for non-history slots (system, identity, etc.)
-  historyTTL: number;        // seconds — TTL for history list (longer than session, data ages out)
-  flushInterval: number;     // milliseconds
+  sessionTTL: number;        // seconds — TTL for non-history slots
+  historyTTL: number;        // seconds — TTL for history list
 }
+
+/** @deprecated Use CacheConfig */
+export type RedisConfig = CacheConfig;
 
 export interface CompositorConfig {
   defaultTokenBudget: number;

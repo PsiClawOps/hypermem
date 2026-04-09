@@ -39,8 +39,8 @@ export { RateLimiter, createRateLimitedEmbedder } from './rate-limiter.js';
 export type { RateLimiterConfig, Priority } from './rate-limiter.js';
 export type { DesiredStateEntry, ConfigEvent, DriftStatus } from './desired-state-store.js';
 
-export { RedisLayer } from './redis.js';
-export type { ModelState } from './redis.js';
+export type { ModelState } from './cache.js';
+export { CacheLayer } from './cache.js';
 
 export { Compositor, type CompositorDeps, applyToolGradientToWindow } from './compositor.js';
 
@@ -204,7 +204,7 @@ import { SystemStore, type SystemState, type SystemEvent } from './system-store.
 import { WorkStore, type WorkItem, type WorkStatus } from './work-store.js';
 import { KnowledgeGraph, type EntityType, type KnowledgeLink, type GraphNode, type TraversalResult } from './knowledge-graph.js';
 import { DesiredStateStore, type DesiredStateEntry, type DriftStatus } from './desired-state-store.js';
-import { RedisLayer } from './redis.js';
+import { CacheLayer } from './cache.js';
 import { Compositor } from './compositor.js';
 import { VectorStore, type VectorSearchResult, type VectorIndexStats } from './vector-store.js';
 import { userMessageToNeutral, fromProviderFormat } from './provider-translator.js';
@@ -228,13 +228,10 @@ import os from 'node:os';
 const DEFAULT_CONFIG: HyperMemConfig = {
   enabled: true,
   dataDir: path.join(process.env.HOME || os.homedir(), '.openclaw', 'hypermem'),
-  redis: {
-    host: 'localhost',
-    port: 6379,
+  cache: {
     keyPrefix: 'hm:',
     sessionTTL: 14400,      // 4 hours — system/identity/meta slots
-    historyTTL: 604800,     // 7 days — extended for ClawCanvas Redis-first display
-    flushInterval: 1000,
+    historyTTL: 604800,     // 7 days — extended for ClawCanvas display
   },
   compositor: {
     // TUNE-010 (2026-04-02): Raised from 65000 → 90000.
@@ -280,16 +277,16 @@ const DEFAULT_CONFIG: HyperMemConfig = {
  */
 export class HyperMem {
   readonly dbManager: DatabaseManager;
-  readonly redis: RedisLayer;
+  readonly cache: CacheLayer;
   readonly compositor: Compositor;
   private readonly config: HyperMemConfig;
 
   private constructor(config: HyperMemConfig) {
     this.config = config;
     this.dbManager = new DatabaseManager({ dataDir: config.dataDir });
-    this.redis = new RedisLayer(config.redis);
+    this.cache = new CacheLayer(config.cache);
     this.compositor = new Compositor({
-      redis: this.redis,
+      cache: this.cache,
       vectorStore: null,  // Set after create() when vector DB is available
       libraryDb: null,    // Set after create() when library DB is available
     }, config.compositor);
@@ -310,7 +307,7 @@ export class HyperMem {
     const merged: HyperMemConfig = {
       ...DEFAULT_CONFIG,
       ...config,
-      redis: { ...DEFAULT_CONFIG.redis, ...config?.redis },
+      cache: { ...DEFAULT_CONFIG.cache, ...config?.cache },
       compositor: { ...DEFAULT_CONFIG.compositor, ...config?.compositor },
       indexer: { ...DEFAULT_CONFIG.indexer, ...config?.indexer },
       embedding: {
@@ -321,11 +318,11 @@ export class HyperMem {
 
     const hm = new HyperMem(merged);
 
-    const redisOk = await hm.redis.connect();
-    if (redisOk) {
-      console.log('[hypermem] Redis connected');
+    const cacheOk = await hm.cache.connect();
+    if (cacheOk) {
+      console.log('[hypermem] Cache connected');
     } else {
-      console.warn('[hypermem] Redis unavailable — running in SQLite-only mode');
+      console.warn('[hypermem] Cache unavailable — running in SQLite-only mode');
     }
 
     // ── Vector store init ─────────────────────────────────────
@@ -389,8 +386,8 @@ export class HyperMem {
       isHeartbeat: opts?.isHeartbeat,
     });
 
-    await this.redis.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
-    await this.redis.touchSession(agentId, sessionKey);
+    await this.cache.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
+    await this.cache.touchSession(agentId, sessionKey);
 
     return stored;
   }
@@ -416,8 +413,8 @@ export class HyperMem {
       tokenCount: opts?.tokenCount,
     });
 
-    await this.redis.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
-    await this.redis.touchSession(agentId, sessionKey);
+    await this.cache.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
+    await this.cache.touchSession(agentId, sessionKey);
 
     return stored;
   }
@@ -662,7 +659,7 @@ export class HyperMem {
     const store = new FleetStore(db);
     const result = store.upsertAgent(id, data);
     // Invalidate cache — fire and forget
-    this.redis.invalidateFleetAgent(id).catch(() => {});
+    this.cache.invalidateFleetAgent(id).catch(() => {});
     return result;
   }
 
@@ -671,14 +668,14 @@ export class HyperMem {
    */
   async getFleetAgentCached(id: string): Promise<FleetAgent | null> {
     // Try cache first
-    const cached = await this.redis.getCachedFleetAgent(id);
+    const cached = await this.cache.getCachedFleetAgent(id);
     if (cached) return cached as unknown as FleetAgent;
 
     // Fall back to SQLite
     const agent = this.getFleetAgent(id);
     if (agent) {
       // Warm cache — fire and forget
-      this.redis.cacheFleetAgent(id, agent as unknown as Record<string, unknown>).catch(() => {});
+      this.cache.cacheFleetAgent(id, agent as unknown as Record<string, unknown>).catch(() => {});
     }
     return agent;
   }
@@ -882,7 +879,7 @@ export class HyperMem {
     const store = new DesiredStateStore(db);
     const result = store.setDesired(agentId, configKey, desiredValue, opts);
     // Invalidate cache — desired state change affects fleet view
-    this.redis.invalidateFleetAgent(agentId).catch(() => {});
+    this.cache.invalidateFleetAgent(agentId).catch(() => {});
     return result;
   }
 
@@ -893,7 +890,7 @@ export class HyperMem {
     const db = this.dbManager.getLibraryDb();
     const store = new DesiredStateStore(db);
     const result = store.reportActual(agentId, configKey, actualValue);
-    this.redis.invalidateFleetAgent(agentId).catch(() => {});
+    this.cache.invalidateFleetAgent(agentId).catch(() => {});
     return result;
   }
 
@@ -904,7 +901,7 @@ export class HyperMem {
     const db = this.dbManager.getLibraryDb();
     const store = new DesiredStateStore(db);
     const result = store.reportActualBulk(agentId, actuals);
-    this.redis.invalidateFleetAgent(agentId).catch(() => {});
+    this.cache.invalidateFleetAgent(agentId).catch(() => {});
     return result;
   }
 
@@ -1124,7 +1121,7 @@ export class HyperMem {
    */
   async getSessionCursor(agentId: string, sessionKey: string): Promise<import('./types.js').SessionCursor | null> {
     // Try Redis first (hot path)
-    const redisCursor = await this.redis.getCursor(agentId, sessionKey);
+    const redisCursor = await this.cache.getCursor(agentId, sessionKey);
     if (redisCursor) return redisCursor;
 
     // Fallback to SQLite
@@ -1149,7 +1146,7 @@ export class HyperMem {
 
     // Re-warm Redis so subsequent reads are fast
     try {
-      await this.redis.setCursor(agentId, sessionKey, cursor);
+      await this.cache.setCursor(agentId, sessionKey, cursor);
     } catch {
       // Best-effort re-warm
     }
@@ -1444,7 +1441,7 @@ export class HyperMem {
    *  - Fleet summary (counts, drift status)
    */
   async hydrateFleetCache(): Promise<{ agents: number; summary: boolean }> {
-    if (!this.redis.isConnected) return { agents: 0, summary: false };
+    if (!this.cache.isConnected) return { agents: 0, summary: false };
 
     const db = this.dbManager.getLibraryDb();
     const fleetStore = new FleetStore(db);
@@ -1472,7 +1469,7 @@ export class HyperMem {
           desiredConfig,
         };
 
-        await this.redis.cacheFleetAgent(agent.id, composite as unknown as Record<string, unknown>);
+        await this.cache.cacheFleetAgent(agent.id, composite as unknown as Record<string, unknown>);
         hydrated++;
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1494,7 +1491,7 @@ export class HyperMem {
         drift: driftSummary,
         hydratedAt: new Date().toISOString(),
       };
-      await this.redis.cacheFleetSummary(summary);
+      await this.cache.cacheFleetSummary(summary);
     } catch {
       return { agents: hydrated, summary: false };
     }
@@ -1508,7 +1505,7 @@ export class HyperMem {
    * Clean shutdown.
    */
   async close(): Promise<void> {
-    await this.redis.disconnect();
+    await this.cache.disconnect();
     this.dbManager.close();
   }
 }

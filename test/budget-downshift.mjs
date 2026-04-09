@@ -12,7 +12,6 @@
  */
 
 import { applyToolGradientToWindow } from '../dist/compositor.js';
-import { RedisLayer } from '../dist/redis.js';
 
 let passed = 0;
 let failed = 0;
@@ -135,64 +134,6 @@ console.log('\n── Downshift threshold logic ──');
   const isDownshift = reduction > DOWNSHIFT_THRESHOLD;
   assert(!isDownshift, `Exactly 10% reduction is NOT a trigger (strict greater-than comparison)`);
 }
-
-// ─── Redis round-trip tests ──────────────────────────────────────────────────
-
-console.log('\n── Redis model state round-trip ──');
-
-async function runRedisTests() {
-  const redis = new RedisLayer({ keyPrefix: 'hm-bd-test:', sessionTTL: 30 });
-  const connected = await redis.connect();
-
-  if (!connected) {
-    console.log('  ⚠️  Redis unavailable — skipping Redis model state tests');
-    return;
-  }
-
-  // Clean up stale keys from previous runs
-  await redis.flushPrefix();
-
-  const agentId = 'test-bd-agent';
-  const sessionKey = 'agent:test-bd-agent:webchat:main';
-
-  // Test 4: getModelState returns null on miss
-  const missing = await redis.getModelState(agentId, sessionKey);
-  assert(missing === null, 'getModelState returns null on cache miss');
-
-  // Test 5: setModelState then getModelState round-trips correctly
-  const state = {
-    model: 'gpt-5.4',
-    tokenBudget: 128_000,
-    composedAt: '2026-04-05T12:00:00.000Z',
-    historyDepth: 150,
-  };
-  await redis.setModelState(agentId, sessionKey, state);
-  const retrieved = await redis.getModelState(agentId, sessionKey);
-
-  assert(retrieved !== null, 'getModelState returns non-null after setModelState');
-  assert(retrieved?.model === state.model, `Round-trip model matches (got ${retrieved?.model})`);
-  assert(retrieved?.tokenBudget === state.tokenBudget, `Round-trip tokenBudget matches (got ${retrieved?.tokenBudget})`);
-  assert(retrieved?.composedAt === state.composedAt, `Round-trip composedAt matches (got ${retrieved?.composedAt})`);
-  assert(retrieved?.historyDepth === state.historyDepth, `Round-trip historyDepth matches (got ${retrieved?.historyDepth})`);
-  assert(retrieved?.reshapedAt === undefined, 'reshapedAt is undefined when not set');
-
-  // Test: reshapedAt round-trips correctly
-  const stateWithReshape = {
-    ...state,
-    reshapedAt: '2026-04-05T12:01:00.000Z',
-  };
-  await redis.setModelState(agentId, sessionKey, stateWithReshape);
-  const retrievedWithReshape = await redis.getModelState(agentId, sessionKey);
-  assert(
-    retrievedWithReshape?.reshapedAt === stateWithReshape.reshapedAt,
-    `reshapedAt round-trips correctly (got ${retrievedWithReshape?.reshapedAt})`
-  );
-
-  await redis.flushPrefix();
-  await redis.disconnect();
-}
-
-await runRedisTests();
 
 // ─── Summary ─────────────────────────────────────────────────────────────────
 

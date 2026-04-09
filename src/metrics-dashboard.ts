@@ -89,8 +89,8 @@ export interface SystemHealth {
   librarySchemaVersion: number | null;
   /** hypermem package version */
   packageVersion: string;
-  /** Redis connection status (if provided) */
-  redisOk: boolean | null;
+  /** Cache connection status (if provided) */
+  cacheOk: boolean | null;
   /** Timestamp of this snapshot */
   snapshotAt: string;
 }
@@ -420,7 +420,7 @@ function collectHealth(
     mainSchemaVersion,
     librarySchemaVersion,
     packageVersion: HYPERMEM_COMPAT_VERSION,
-    redisOk: null, // caller must inject redis status
+    cacheOk: null, // caller must inject cache status
     snapshotAt: new Date().toISOString(),
   };
 }
@@ -489,8 +489,8 @@ export function formatMetricsSummary(m: HyperMemMetrics): string {
   lines.push('## Health');
   lines.push(`  main db:    ${m.health.mainDbOk ? '✅' : '❌'}${m.health.mainSchemaVersion !== null ? ` (schema v${m.health.mainSchemaVersion})` : ''}`);
   lines.push(`  library db: ${m.health.libraryDbOk ? '✅' : '❌'}${m.health.librarySchemaVersion !== null ? ` (schema v${m.health.librarySchemaVersion})` : ''}`);
-  if (m.health.redisOk !== null) {
-    lines.push(`  redis:      ${m.health.redisOk ? '✅' : '❌'}`);
+  if (m.health.cacheOk !== null) {
+    lines.push(`  cache:      ${m.health.cacheOk ? '✅' : '❌'}`);
   }
 
   return lines.join('\n');

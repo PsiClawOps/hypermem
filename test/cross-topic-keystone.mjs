@@ -35,20 +35,23 @@ function makeDb() {
 }
 
 function makeCompositor() {
-  const fakeRedis = {
+  const fakeVectorStore = {
+    async search() { return []; },
+  };
+
+  const fakeCache = {
     async getSlot() { return null; },
     async getHistory() { return []; },
     async setWindow() {},
     async setCursor() {},
     async getQueryEmbedding() { return null; },
-  };
-
-  const fakeVectorStore = {
-    async search() { return []; },
+    async setTopicWindow() {},
+    async replaceHistory() {},
+    async warmSession() {},
   };
 
   return new Compositor({
-    redis: fakeRedis,
+    cache: fakeCache,
     vectorStore: fakeVectorStore,
     libraryDb: null,
   });

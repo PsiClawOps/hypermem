@@ -40,9 +40,7 @@ async function run() {
   try {
     hm = await HyperMem.create({
       dataDir: tmpDir,
-      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm-comp:', sessionTTL: 60 },
     });
-    await hm.redis.flushPrefix();
   } catch (err) {
     console.log(`  ❌ Failed to create HyperMem: ${err.message}`);
     process.exit(1);
@@ -114,7 +112,7 @@ async function run() {
   console.log('── Basic Composition (L1+L2+L4) ──');
 
   const compositor = new Compositor({
-    redis: hm.redis,
+    cache: hm.cache,
     vectorStore: null,  // No vector search for this test
     libraryDb: libDb,
   });
@@ -221,7 +219,7 @@ async function run() {
   // ── Test 4b: Gate 1 - historyDepth constrains hot Redis sessions ──
   console.log('\n── Gate 1: historyDepth limits hot Redis sessions ──');
 
-  const isWarm = await hm.redis.sessionExists(agentId, sessionKey);
+  const isWarm = await hm.cache.sessionExists(agentId, sessionKey);
   assert(isWarm, 'Session marked warm in Redis');
 
   const gatedResult = await compositor.compose({
@@ -567,7 +565,7 @@ Every council response includes:
 
   // Compose with skipProviderTranslation - should get NeutralMessages back
   const pluginCompositor = new Compositor({
-    redis: hm.redis,
+    cache: hm.cache,
     vectorStore: null,
     libraryDb: libDb,
   });
@@ -650,18 +648,15 @@ Every council response includes:
   assert(cursorRow.cursor_window_size > 0, `SQLite cursor_window_size: ${cursorRow?.cursor_window_size}`);
   assert(cursorRow.cursor_token_count > 0, `SQLite cursor_token_count: ${cursorRow?.cursor_token_count}`);
 
-  // Verify Redis has the same cursor
-  const redisCursor = await hm.redis.getCursor('forge', 'agent:forge:webchat:main');
-  assert(redisCursor !== null, 'Redis cursor exists');
-  assert(redisCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Redis/SQLite cursor_last_sent_id match');
+  // Verify cache has the same cursor
+  const cacheCursor = await hm.cache.getCursor('forge', 'agent:forge:webchat:main');
+  assert(cacheCursor !== null, 'Cache cursor exists');
+  assert(cacheCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Cache/SQLite cursor_last_sent_id match');
 
-  // Verify facade fallback: flush Redis prefix (simulates eviction), then getSessionCursor should fallback to SQLite
-  await hm.redis.flushPrefix();
-  const redisCursorAfterFlush = await hm.redis.getCursor('forge', 'agent:forge:webchat:main');
-  assert(redisCursorAfterFlush === null, 'Redis cursor is null after flush');
-  const fallbackCursor = await hm.getSessionCursor('forge', 'agent:forge:webchat:main');
-  assert(fallbackCursor !== null, 'Fallback cursor from SQLite works after Redis eviction');
-  assert(fallbackCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Fallback cursor data matches SQLite');
+  // Verify facade returns cursor from cache
+  const facadeCursor = await hm.getSessionCursor('forge', 'agent:forge:webchat:main');
+  assert(facadeCursor !== null, 'Facade cursor exists');
+  assert(facadeCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Facade cursor data matches SQLite');
 
   // ── W3: Diagnostics on ComposeResult ──
   console.log('\n── W3: Diagnostics present on ComposeResult ──');
@@ -1209,7 +1204,6 @@ ${repeated}`;
 
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
-  await hm.redis.flushPrefix();
   await hm.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
   assert(true, 'Cleaned up');

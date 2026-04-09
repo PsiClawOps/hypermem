@@ -101,6 +101,7 @@ let _evictionConfig: {
 // e.g. 128k * 0.75 - 28k = 68k for council agents at 25% reserve
 let _contextWindowSize: number = 128_000;
 let _contextWindowReserve: number = 0.25;
+let _deferToolPruning: boolean = false;
 // Cache replay threshold: 15min default. Set to 0 in user config to disable.
 let _cacheReplayThresholdMs: number = 900_000;
 
@@ -209,6 +210,12 @@ async function loadUserConfig(): Promise<{
    * Higher values = earlier trims, more headroom for large operations.
    */
   contextWindowReserve?: number;
+  /**
+   * When true, skip HyperMem's tool gradient — defer tool result pruning
+   * to OpenClaw's built-in contextPruning system (cache-ttl mode).
+   * Set this when agents.defaults.contextPruning.mode is enabled.
+   */
+  deferToolPruning?: boolean;
 }> {
   const configPath = path.join(os.homedir(), '.openclaw/hypermem/config.json');
   try {
@@ -277,6 +284,10 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         userConfig.contextWindowReserve >= 0 && userConfig.contextWindowReserve <= 0.5) {
       _contextWindowReserve = userConfig.contextWindowReserve;
     }
+    if (userConfig.deferToolPruning === true) {
+      _deferToolPruning = true;
+      console.log('[hypermem-plugin] deferToolPruning: true — tool gradient deferred to host contextPruning');
+    }
     if (typeof (userConfig as { warmCacheReplayThresholdMs?: number }).warmCacheReplayThresholdMs === 'number') {
       _cacheReplayThresholdMs = (userConfig as { warmCacheReplayThresholdMs?: number }).warmCacheReplayThresholdMs!;
     }
@@ -289,9 +300,7 @@ async function getHyperMem(): Promise<HyperMemInstance> {
 
     const instance = await HyperMem.create({
       dataDir: path.join(os.homedir(), '.openclaw/hypermem'),
-      redis: {
-        host: 'localhost',
-        port: 6379,
+      cache: {
         keyPrefix: 'hm:',
         sessionTTL: 14400,     // 4h for system/identity/meta slots
         historyTTL: 86400,     // 24h for history — ages out, not count-trimmed
@@ -514,8 +523,8 @@ async function estimateWindowTokens(hm: HyperMemInstance, agentId: string, sessi
     // has no window cache entry. Without this fallback, getWindow returns null
     // → estimateWindowTokens returns 0 → compact() always says within_budget
     // → overflow loop.
-    const window = await hm.redis.getWindow(agentId, sessionKey)
-      ?? await hm.redis.getHistory(agentId, sessionKey);
+    const window = await hm.cache.getWindow(agentId, sessionKey)
+      ?? await hm.cache.getHistory(agentId, sessionKey);
     if (!window || window.length === 0) return 0;
     return window.reduce((sum: number, msg: any) => {
       let t = estimateTokens(msg.textContent);
@@ -686,7 +695,7 @@ function createHyperMemEngine(): ContextEngine {
         }
         // Fast path: if session already has history in Redis, skip warm entirely.
         // sessionExists() is a single EXISTS call — sub-millisecond cost.
-        const alreadyWarm = await hm.redis.sessionExists(agentId, sk);
+        const alreadyWarm = await hm.cache.sessionExists(agentId, sk);
         if (alreadyWarm) {
           return { bootstrapped: true };
         }
@@ -783,9 +792,9 @@ function createHyperMemEngine(): ContextEngine {
           if (warmPressure > 0.80) {
             const warmTrimTarget = warmPressure > 0.90 ? 0.40 : 0.55;
             const warmTrimBudget = Math.floor(warmBudget * warmTrimTarget);
-            const warmTrimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, warmTrimBudget);
+            const warmTrimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, warmTrimBudget);
             if (warmTrimmed > 0) {
-              await hm.redis.invalidateWindow(agentId, sk);
+              await hm.cache.invalidateWindow(agentId, sk);
               console.log(
                 `[hypermem-plugin] bootstrap: high-pressure startup ` +
                 `(${(warmPressure * 100).toFixed(1)}%), pre-trimmed Redis to ` +
@@ -1024,9 +1033,9 @@ function createHyperMemEngine(): ContextEngine {
           }
 
           const trimBudget = Math.floor(effectiveBudget * trimTarget);
-          const trimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, trimBudget);
+          const trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
           if (trimmed > 0) {
-            await hm.redis.invalidateWindow(agentId, sk);
+            await hm.cache.invalidateWindow(agentId, sk);
           }
 
           // Also trim the messages array itself to match the budget.
@@ -1178,6 +1187,8 @@ function createHyperMemEngine(): ContextEngine {
           }
 
           // Apply tool gradient to compress large tool results before returning.
+          // Skip if deferToolPruning is enabled — OpenClaw's contextPruning handles it.
+          if (!_deferToolPruning) {
           // The full compose path runs applyToolGradientToWindow during reshaping;
           // the tool-loop path was previously skipping this, leaving a 40k-token
           // web_search result uncompressed every turn.
@@ -1190,6 +1201,7 @@ function createHyperMemEngine(): ContextEngine {
           } catch {
             // Non-fatal: if gradient fails, continue with untouched trimmedMessages
           }
+          } // end deferToolPruning gate
 
           const windowTokens = await estimateWindowTokens(hm, agentId, sk);
           const overhead = _overheadCache.get(sk) ?? getOverheadFallback();
@@ -1237,10 +1249,10 @@ function createHyperMemEngine(): ContextEngine {
       // to leave room for system prompt, facts, and identity slots.
       try {
         const trimBudget = Math.floor(effectiveBudget * 0.65);
-        const trimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, trimBudget);
+        const trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
         if (trimmed > 0) {
           // Invalidate window cache since history changed
-          await hm.redis.invalidateWindow(agentId, sk);
+          await hm.cache.invalidateWindow(agentId, sk);
         }
       } catch (trimErr) {
         // Non-fatal — compositor's budget-fit walk is the second line of defense
@@ -1260,24 +1272,24 @@ function createHyperMemEngine(): ContextEngine {
       // then invalidateWindow() which is a write-then-delete no-op. Now reads
       // from history list and writes back via replaceHistory().
       try {
-        const lastState = await hm.redis.getModelState(agentId, sk);
+        const lastState = await hm.cache.getModelState(agentId, sk);
         const DOWNSHIFT_THRESHOLD = 0.10;
         const isDownshift = lastState &&
           (lastState.tokenBudget - effectiveBudget) / lastState.tokenBudget > DOWNSHIFT_THRESHOLD;
 
-        if (isDownshift) {
+        if (isDownshift && !_deferToolPruning) {
           // Read from history list — window cache is always null here because
           // afterTurn() calls invalidateWindow() on every turn.
-          const currentHistory = await hm.redis.getHistory(agentId, sk);
+          const currentHistory = await hm.cache.getHistory(agentId, sk);
           if (currentHistory && currentHistory.length > 0) {
             const reshaped = applyToolGradientToWindow(currentHistory, effectiveBudget);
             if (reshaped.length < currentHistory.length) {
               // Write to history list (compose() input), then invalidate the
               // stale window cache so compose() rebuilds from the new history.
-              await hm.redis.replaceHistory(agentId, sk, reshaped);
-              await hm.redis.invalidateWindow(agentId, sk);
+              await hm.cache.replaceHistory(agentId, sk, reshaped);
+              await hm.cache.invalidateWindow(agentId, sk);
               const reshapedAt = new Date().toISOString();
-              await hm.redis.setModelState(agentId, sk, {
+              await hm.cache.setModelState(agentId, sk, {
                 model: model ?? 'unknown',
                 tokenBudget: effectiveBudget,
                 composedAt: new Date().toISOString(),
@@ -1307,9 +1319,9 @@ function createHyperMemEngine(): ContextEngine {
       let cachedContextBlock: string | null = null;
       if (cacheReplayThresholdMs > 0) {
         try {
-          const cachedAt = await hm.redis.getSlot(agentId, sk, 'assemblyContextAt');
+          const cachedAt = await hm.cache.getSlot(agentId, sk, 'assemblyContextAt');
           if (cachedAt && Date.now() - parseInt(cachedAt) < cacheReplayThresholdMs) {
-            cachedContextBlock = await hm.redis.getSlot(agentId, sk, 'assemblyContextBlock');
+            cachedContextBlock = await hm.cache.getSlot(agentId, sk, 'assemblyContextBlock');
             if (cachedContextBlock) {
               console.log(`[hypermem-plugin] assemble: cache replay hit for ${agentId} (${Math.round((Date.now() - parseInt(cachedAt)) / 1000)}s old)`);
             }
@@ -1343,8 +1355,8 @@ function createHyperMemEngine(): ContextEngine {
         const nowStr = Date.now().toString();
         const ttlSec = Math.ceil((cacheReplayThresholdMs * 2) / 1000);
         Promise.all([
-          hm.redis.setSlot(agentId, sk, 'assemblyContextBlock', blockToCache),
-          hm.redis.setSlot(agentId, sk, 'assemblyContextAt', nowStr),
+          hm.cache.setSlot(agentId, sk, 'assemblyContextBlock', blockToCache),
+          hm.cache.setSlot(agentId, sk, 'assemblyContextAt', nowStr),
         ]).then(() => {
           // Extend TTL on the cached keys to 2× the threshold
           // setSlot uses the sessionTTL from RedisLayer config — acceptable fallback
@@ -1368,7 +1380,7 @@ function createHyperMemEngine(): ContextEngine {
 
       // Update model state for downshift detection on next turn
       try {
-        await hm.redis.setModelState(agentId, sk, {
+        await hm.cache.setModelState(agentId, sk, {
           model: model ?? 'unknown',
           tokenBudget: effectiveBudget,
           composedAt: new Date().toISOString(),
@@ -1414,9 +1426,9 @@ function createHyperMemEngine(): ContextEngine {
 
         // Skip if a reshape pass just ran (within last 30s) — avoid double-processing
         // Cache modelState here for reuse in density-aware JSONL truncation below.
-        let cachedModelState: Awaited<ReturnType<typeof hm.redis.getModelState>> | null = null;
+        let cachedModelState: Awaited<ReturnType<typeof hm.cache.getModelState>> | null = null;
         try {
-          cachedModelState = await hm.redis.getModelState(agentId, sk);
+          cachedModelState = await hm.cache.getModelState(agentId, sk);
           if (cachedModelState?.reshapedAt) {
             const reshapeAge = Date.now() - new Date(cachedModelState.reshapedAt).getTime();
             // Only skip if session is NOT critically full — nuclear path must bypass this guard.
@@ -1460,8 +1472,8 @@ function createHyperMemEngine(): ContextEngine {
           // Keeps very recent context, clears the long tool-heavy tail.
           const nuclearDepth = Math.max(10, Math.floor(targetDepth * 0.20));
           const nuclearBudget = Math.floor(effectiveBudget * 0.25);
-          await hm.redis.trimHistoryToTokenBudget(agentId, sk, nuclearBudget);
-          await hm.redis.invalidateWindow(agentId, sk).catch(() => {});
+          await hm.cache.trimHistoryToTokenBudget(agentId, sk, nuclearBudget);
+          await hm.cache.invalidateWindow(agentId, sk).catch(() => {});
           await truncateJsonlIfNeeded(sessionFile, nuclearDepth, true);
           const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
           console.log(
@@ -1483,8 +1495,8 @@ function createHyperMemEngine(): ContextEngine {
             // Trim history so history + inbound fits within 85% of budget.
             const budgetForHistory = Math.floor(effectiveBudget * 0.85) - inboundOverhead;
             if (budgetForHistory < tokensBefore && budgetForHistory > 0) {
-              const historyTrimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, budgetForHistory);
-              await hm.redis.invalidateWindow(agentId, sk).catch(() => {});
+              const historyTrimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, budgetForHistory);
+              await hm.cache.invalidateWindow(agentId, sk).catch(() => {});
               const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
               await truncateJsonlIfNeeded(sessionFile, targetDepth);
               console.log(
@@ -1524,23 +1536,23 @@ function createHyperMemEngine(): ContextEngine {
         // compact() was only trying to trim the window (which was null) and
         // the history list was left untouched → 0 actual trimming → timeout
         // compaction death spiral.
-        const window = await hm.redis.getWindow(agentId, sk);
+        const window = await hm.cache.getWindow(agentId, sk);
         if (window && window.length > targetDepth) {
           const trimmed = window.slice(-targetDepth);
-          await hm.redis.setWindow(agentId, sk, trimmed);
+          await hm.cache.setWindow(agentId, sk, trimmed);
         }
 
         // Always trim the underlying history list — this is the source of truth
         // when no window cache exists. trimHistoryToTokenBudget walks newest→oldest
         // and LTRIMs everything beyond the budget.
         const trimBudget = Math.floor(effectiveBudget * 0.5);
-        const historyTrimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, trimBudget);
+        const historyTrimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
         if (historyTrimmed > 0) {
           console.log(`[hypermem-plugin] compact: trimmed ${historyTrimmed} messages from history list`);
         }
 
         // Invalidate the compose cache so next assemble() re-builds from trimmed data
-        await hm.redis.invalidateWindow(agentId, sk).catch(() => {});
+        await hm.cache.invalidateWindow(agentId, sk).catch(() => {});
 
         const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
         console.log(`[hypermem-plugin] compact: trimmed ${tokensBefore} → ${tokensAfter} tokens (budget: ${effectiveBudget})`);
@@ -1662,18 +1674,20 @@ function createHyperMemEngine(): ContextEngine {
         // this, afterTurn writes up to 250 messages regardless of budget, causing
         // trimHistoryToTokenBudget to fire and trim ~200 messages on every
         // subsequent assemble() — the churn loop seen in Helm's logs.
-        try {
-          const modelState = await hm.redis.getModelState(agentId, sk);
-          const gradientBudget = modelState?.tokenBudget;
-          await hm.refreshRedisGradient(agentId, sk, gradientBudget);
-        } catch (refreshErr) {
-          console.warn('[hypermem-plugin] afterTurn: refreshRedisGradient failed (non-fatal):', (refreshErr as Error).message);
+        if (hm.cache.isConnected) {
+          try {
+            const modelState = await hm.cache.getModelState(agentId, sk);
+            const gradientBudget = modelState?.tokenBudget;
+            await hm.refreshRedisGradient(agentId, sk, gradientBudget);
+          } catch (refreshErr) {
+            console.warn('[hypermem-plugin] afterTurn: refreshRedisGradient failed (non-fatal):', (refreshErr as Error).message);
+          }
         }
 
         // Invalidate the window cache after ingesting new messages.
         // The next assemble() call will re-compose with the new data.
         try {
-          await hm.redis.invalidateWindow(agentId, sk);
+          await hm.cache.invalidateWindow(agentId, sk);
         } catch {
           // Window invalidation is best-effort
         }
@@ -1687,7 +1701,7 @@ function createHyperMemEngine(): ContextEngine {
         //
         // Uses modelState.tokenBudget if cached; skips if unavailable (non-fatal).
         try {
-          const modelState = await hm.redis.getModelState(agentId, sk);
+          const modelState = await hm.cache.getModelState(agentId, sk);
           if (modelState?.tokenBudget) {
             // Use the same dual-source pressure estimate as the tool-loop trim:
             // max(runtime messages, Redis) so a post-restart empty-Redis session
@@ -1719,7 +1733,7 @@ function createHyperMemEngine(): ContextEngine {
             const afterTurnTrimTarget = postTurnPressure > 0.90 ? 0.45 : 0.70;
             if (postTurnPressure > 0.80) {
               const headroomBudget = Math.floor(modelState.tokenBudget * afterTurnTrimTarget);
-              const secondaryTrimmed = await hm.redis.trimHistoryToTokenBudget(agentId, sk, headroomBudget);
+              const secondaryTrimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, headroomBudget);
               if (secondaryTrimmed > 0) {
                 console.log(
                   `[hypermem-plugin] afterTurn: pre-emptive trim — session exiting at ` +
@@ -1765,7 +1779,7 @@ function createHyperMemEngine(): ContextEngine {
             // Fire-and-forget: don't await, don't block afterTurn
             _generateEmbeddings([assistantReplyText]).then(async ([embedding]) => {
               if (embedding) {
-                await hm.redis.setQueryEmbedding(agentId, sk, embedding);
+                await hm.cache.setQueryEmbedding(agentId, sk, embedding);
               }
             }).catch(() => {
               // Non-fatal: embedding pre-compute failed, compose() will call Ollama
@@ -1780,20 +1794,33 @@ function createHyperMemEngine(): ContextEngine {
           const _agentIdForTick = agentId;
           const runTick = async () => {
             if (_taskFlowRuntime) {
-              // Use createManaged + finish/fail only — do NOT call runTask().
-              // runTask() writes a task_run row to runs.sqlite with status='running'
-              // and the TaskFlow runtime has no completeTask() method, so those rows
-              // would accumulate forever and block clean restarts.
-              const flow = _taskFlowRuntime.createManaged({
-                controllerId: 'hypermem/indexer',
-                goal: `Index messages for ${_agentIdForTick}`,
-              });
+              // Preflight: only create a managed flow if we can actually tick.
+              // Creating a flow we never finish/fail leaves orphaned queued rows.
+              let flow: { flowId: string; revision: number } | null = null;
               try {
+                // Use createManaged + finish/fail only — do NOT call runTask().
+                // runTask() writes a task_run row to runs.sqlite with status='running'
+                // and the TaskFlow runtime has no completeTask() method, so those rows
+                // would accumulate forever and block clean restarts.
+                flow = _taskFlowRuntime.createManaged({
+                  controllerId: 'hypermem/indexer',
+                  goal: `Index messages for ${_agentIdForTick}`,
+                }) as { flowId: string; revision: number };
                 await _indexer!.tick();
-                _taskFlowRuntime.finish({ flowId: flow.flowId });
+                // expectedRevision is required: finishFlow uses optimistic locking.
+                // A freshly created managed flow always starts at revision 0.
+                // MUST be awaited — finish/fail return Promises. Calling without
+                // await lets the Promise get GC'd before the DB write completes,
+                // leaving the flow permanently in queued state.
+                const finishResult = await Promise.resolve(_taskFlowRuntime.finish({ flowId: flow!.flowId, expectedRevision: flow!.revision }));
+                if (finishResult && !finishResult.applied) {
+                  console.warn('[hypermem-plugin] TaskFlow finish failed:', finishResult.code ?? finishResult.reason, 'flowId:', flow!.flowId, 'revision:', flow!.revision);
+                }
               } catch (tickErr) {
-                // Best-effort fail — non-fatal, but mark the flow so it doesn't leak
-                try { _taskFlowRuntime.fail({ flowId: flow.flowId }); } catch { /* ignore */ }
+                // Best-effort fail — non-fatal, but always mark the flow so it doesn't leak
+                if (flow) {
+                  try { await Promise.resolve(_taskFlowRuntime.fail({ flowId: flow.flowId, expectedRevision: flow.revision })); } catch { /* ignore */ }
+                }
                 throw tickErr;
               }
             } else {
@@ -1937,8 +1964,8 @@ export async function bustAssemblyCache(agentId: string, sessionKey: string): Pr
   try {
     const hm = await getHyperMem();
     await Promise.all([
-      hm.redis.setSlot(agentId, sessionKey, 'assemblyContextBlock', ''),
-      hm.redis.setSlot(agentId, sessionKey, 'assemblyContextAt', '0'),
+      hm.cache.setSlot(agentId, sessionKey, 'assemblyContextBlock', ''),
+      hm.cache.setSlot(agentId, sessionKey, 'assemblyContextAt', '0'),
     ]);
   } catch {
     // Non-fatal

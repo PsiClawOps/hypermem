@@ -10,19 +10,16 @@
  *   rich     — 200k+ context, multi-agent, full feature set
  */
 
-import type { HyperMemConfig, CompositorConfig, IndexerConfig, EmbeddingProviderConfig, RedisConfig } from './types.js';
+import type { HyperMemConfig, CompositorConfig, IndexerConfig, EmbeddingProviderConfig, CacheConfig } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Shared base (fields common across all profiles)
 // ---------------------------------------------------------------------------
 
-const BASE_REDIS: RedisConfig = {
-  host: 'localhost',
-  port: 6379,
+const BASE_CACHE: CacheConfig = {
   keyPrefix: 'hm:',
   sessionTTL: 3600,
   historyTTL: 86400,
-  flushInterval: 5000,
 };
 
 const BASE_EMBEDDING: EmbeddingProviderConfig = {
@@ -81,7 +78,7 @@ const LIGHT_INDEXER: IndexerConfig = {
 export const lightProfile: HyperMemConfig = {
   enabled: true,
   dataDir: './hypermem-data',
-  redis: BASE_REDIS,
+  cache: BASE_CACHE,
   compositor: LIGHT_COMPOSITOR,
   indexer: LIGHT_INDEXER,
   embedding: {
@@ -139,7 +136,7 @@ const STANDARD_INDEXER: IndexerConfig = {
 export const standardProfile: HyperMemConfig = {
   enabled: true,
   dataDir: './hypermem-data',
-  redis: BASE_REDIS,
+  cache: BASE_CACHE,
   compositor: STANDARD_COMPOSITOR,
   indexer: STANDARD_INDEXER,
   embedding: BASE_EMBEDDING,
@@ -192,7 +189,7 @@ const EXTENDED_INDEXER: IndexerConfig = {
 export const fullProfile: HyperMemConfig = {
   enabled: true,
   dataDir: './hypermem-data',
-  redis: BASE_REDIS,
+  cache: BASE_CACHE,
   compositor: EXTENDED_COMPOSITOR,
   indexer: EXTENDED_INDEXER,
   embedding: {
@@ -238,7 +235,7 @@ export function getProfile(name: ProfileName | 'extended'): HyperMemConfig {
  *
  * @example
  * const config = mergeProfile('light', {
- *   redis: { host: 'redis.internal', port: 6380 },
+ *   cache: { keyPrefix: 'myapp:' },
  *   compositor: { outputProfile: 'standard' },  // upgrade tier
  * });
  */
@@ -253,7 +250,7 @@ export function mergeProfile(
     compositor: { ...base.compositor, ...(overrides.compositor ?? {}) },
     indexer: { ...base.indexer, ...(overrides.indexer ?? {}) },
     embedding: { ...base.embedding, ...(overrides.embedding ?? {}) },
-    redis: { ...base.redis, ...(overrides.redis ?? {}) },
+    cache: { ...base.cache, ...(overrides.cache ?? {}) },
   };
 }
 

@@ -89,7 +89,6 @@ async function run() {
     // ── Seed HyperMem with history ─────────────────────────────
     hm = await HyperMem.create({
       dataDir,
-      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm:mt:' },
     });
 
     hm.dbManager.ensureAgent(agentId, { displayName: 'Multi-Turn Test Agent', tier: 'test' });

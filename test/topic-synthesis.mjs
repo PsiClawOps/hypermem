@@ -40,7 +40,6 @@ async function createHarness(label = 'default') {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `hm-topic-synth-${label}-`));
   const hm = await HyperMem.create({
     dataDir: tmpDir,
-    redis: { host: '127.0.0.1', port: 6379, keyPrefix: `hm-topic-synth-${label}:`, sessionTTL: 60 },
   });
 
   const agentId = 'forge';

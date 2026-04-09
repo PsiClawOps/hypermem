@@ -4,7 +4,7 @@ export const ENGINE_VERSION = '0.5.0';
 /** Minimum Node.js version required — matches package.json engines field. */
 export const MIN_NODE_VERSION = '22.0.0';
 
-/** Minimum Redis server version required (ioredis 5.x supports Redis 7+). */
+/** @deprecated No longer used — Redis was replaced with SQLite :memory: CacheLayer. */
 export const MIN_REDIS_VERSION = '7.0.0';
 
 /** sqlite-vec version bundled with this release. */

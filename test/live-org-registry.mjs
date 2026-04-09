@@ -34,7 +34,6 @@ async function run() {
   try {
     hm = await HyperMem.create({
       dataDir: tmpDir,
-      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm-livereg:', sessionTTL: 60 },
     });
 
     const libDb = hm.dbManager.getLibraryDb();
@@ -116,10 +115,8 @@ async function run() {
     // ── Compositor wiring: orgRegistry cached at init ──────────────────────
     console.log('\n  Compositor.orgRegistry (cached on init):');
     const { Compositor } = await import('../dist/compositor.js');
-    const { RedisLayer } = await import('../dist/redis.js');
-    const redis = new RedisLayer({ host: 'localhost', port: 6379, keyPrefix: 'hm-livereg-comp:', sessionTTL: 60 });
 
-    const compositor = new Compositor({ redis, libraryDb: libDb });
+    const compositor = new Compositor({ cache: hm.cache, libraryDb: libDb });
 
     // Registry should be live (has the seeded agents)
     const cached = compositor.orgRegistry;
@@ -132,17 +129,15 @@ async function run() {
     assert('newagent' in refreshed.agents, 'compositor.refreshOrgRegistry returns newagent');
     assert(compositor.orgRegistry === refreshed, 'compositor._orgRegistry updated after refresh');
 
-    // Legacy constructor (RedisLayer only) falls back to hardcoded registry
-    const legacyCompositor = new Compositor(redis);
-    const legacyReg = legacyCompositor.orgRegistry;
-    assert('forge' in legacyReg.agents, 'legacy compositor: forge in fallback registry');
-    // Legacy registry is hardcoded, not DB-loaded (no newagent)
-    assert(!('newagent' in legacyReg.agents), 'legacy compositor: newagent NOT in hardcoded registry');
-    // refreshOrgRegistry on legacy (no libraryDb) returns existing registry unchanged
-    const legacyRefreshed = legacyCompositor.refreshOrgRegistry();
-    assert(legacyRefreshed === legacyReg, 'legacy refreshOrgRegistry no-ops without libraryDb');
-
-    await redis.disconnect();
+    // Minimal constructor falls back to hardcoded registry
+    const minimalCompositor = new Compositor({ cache: hm.cache });
+    const minimalReg = minimalCompositor.orgRegistry;
+    assert('forge' in minimalReg.agents, 'minimal compositor: forge in fallback registry');
+    // Fallback registry is hardcoded, not DB-loaded (no newagent)
+    assert(!('newagent' in minimalReg.agents), 'minimal compositor: newagent NOT in hardcoded registry');
+    // refreshOrgRegistry on minimal (no libraryDb) returns existing registry unchanged
+    const minimalRefreshed = minimalCompositor.refreshOrgRegistry();
+    assert(minimalRefreshed === minimalReg, 'minimal refreshOrgRegistry no-ops without libraryDb');
 
   } finally {
     if (hm) {

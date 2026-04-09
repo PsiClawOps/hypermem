@@ -57,7 +57,6 @@ async function run() {
 
     hm = await HyperMem.create({
       dataDir,
-      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm:' },
     });
 
     hm.dbManager.ensureAgent(agentId, { displayName: 'Plugin Test Agent', tier: 'council' });

@@ -33,7 +33,8 @@ import {
   TRIGGER_REGISTRY_VERSION,
   TRIGGER_REGISTRY_HASH,
 } from './trigger-registry.js';
-import { RedisLayer } from './redis.js';
+import { CacheLayer } from './cache.js';
+type AnyCache = CacheLayer;
 import { MessageStore } from './message-store.js';
 import { SessionTopicMap } from './session-topic-map.js';
 import { toProviderFormat } from './provider-translator.js';
@@ -764,7 +765,7 @@ function applyToolGradient<T extends NeutralMessage>(messages: T[], opts?: { tot
 }
 
 export interface CompositorDeps {
-  redis: RedisLayer;
+  cache: AnyCache;
   vectorStore?: VectorStore | null;
   libraryDb?: DatabaseSync | null;
   /** Custom trigger registry; defaults to DEFAULT_TRIGGERS if not provided */
@@ -776,7 +777,7 @@ let _registryLogged = false;
 
 export class Compositor {
   private readonly config: CompositorConfig;
-  private readonly redis: RedisLayer;
+  private readonly cache: AnyCache;
   private vectorStore: VectorStore | null;
   private readonly libraryDb: DatabaseSync | null;
   private readonly triggerRegistry: CollectionTrigger[];
@@ -784,27 +785,17 @@ export class Compositor {
   private _orgRegistry: OrgRegistry;
 
   constructor(
-    deps: CompositorDeps | RedisLayer,
+    deps: CompositorDeps,
     config?: Partial<CompositorConfig>
   ) {
-    // Accept either old-style (RedisLayer) or new-style (CompositorDeps)
-    if (deps instanceof RedisLayer) {
-      console.warn('[compositor] DEPRECATED: Compositor(RedisLayer) constructor is deprecated. Pass CompositorDeps instead. Vector search and library DB are disabled in legacy mode.');
-      this.redis = deps;
-      this.vectorStore = null;
-      this.libraryDb = null;
-      this.triggerRegistry = DEFAULT_TRIGGERS;
-      this._orgRegistry = defaultOrgRegistry();
-    } else {
-      this.redis = deps.redis;
-      this.vectorStore = deps.vectorStore || null;
-      this.libraryDb = deps.libraryDb || null;
-      this.triggerRegistry = deps.triggerRegistry || DEFAULT_TRIGGERS;
-      // Load org registry from DB on init; fall back to hardcoded if DB empty.
-      this._orgRegistry = this.libraryDb
-        ? buildOrgRegistryFromDb(this.libraryDb)
-        : defaultOrgRegistry();
-    }
+    this.cache = deps.cache;
+    this.vectorStore = deps.vectorStore || null;
+    this.libraryDb = deps.libraryDb || null;
+    this.triggerRegistry = deps.triggerRegistry || DEFAULT_TRIGGERS;
+    // Load org registry from DB on init; fall back to hardcoded if DB empty.
+    this._orgRegistry = this.libraryDb
+      ? buildOrgRegistryFromDb(this.libraryDb)
+      : defaultOrgRegistry();
     this.config = { ...DEFAULT_CONFIG, ...config };
     if (!_registryLogged) {
       logRegistryStartup();
@@ -1441,7 +1432,7 @@ export class Compositor {
           // Check Redis for a pre-computed embedding from afterTurn()
           let precomputedEmbedding: Float32Array | undefined;
           try {
-            const cached = await this.redis.getQueryEmbedding(request.agentId, request.sessionKey);
+            const cached = await this.cache.getQueryEmbedding(request.agentId, request.sessionKey);
             if (cached) precomputedEmbedding = cached;
           } catch {
             // Redis lookup is best-effort — fall through to Ollama
@@ -1815,14 +1806,14 @@ export class Compositor {
     // VS-1: Dual-write — session-scoped key for backwards compat;
     // topic-scoped key for per-topic window retrieval when activeTopicId is set.
     try {
-      await this.redis.setWindow(request.agentId, request.sessionKey, messages, 120);
+      await this.cache.setWindow(request.agentId, request.sessionKey, messages, 120);
     } catch {
       // Window cache write is best-effort
     }
     // VS-1: Topic-scoped window dual-write
     if (composedActiveTopicId) {
       try {
-        await this.redis.setTopicWindow(request.agentId, request.sessionKey, composedActiveTopicId, messages, 120);
+        await this.cache.setTopicWindow(request.agentId, request.sessionKey, composedActiveTopicId, messages, 120);
       } catch {
         // Topic window write is best-effort
       }
@@ -1845,7 +1836,7 @@ export class Compositor {
               windowSize: historyMsgs.length,
               tokenCount: totalTokens,
             };
-            await this.redis.setCursor(request.agentId, request.sessionKey, cursor);
+            await this.cache.setCursor(request.agentId, request.sessionKey, cursor);
 
             // Dual-write cursor to SQLite for durability across Redis eviction (P1.3)
             try {
@@ -2023,7 +2014,7 @@ export class Compositor {
     // from SQLite on every turn (~0.3ms each) — faster than a Redis GET round-trip.
     // Caching them here would create stale entries that compose() ignores anyway.
 
-    await this.redis.warmSession(agentId, sessionKey, {
+    await this.cache.warmSession(agentId, sessionKey, {
       system: opts?.systemPrompt,
       identity: opts?.identity,
       history,
@@ -2080,7 +2071,7 @@ export class Compositor {
       historyToWrite = capped;
     }
 
-    await this.redis.replaceHistory(agentId, sessionKey, historyToWrite, this.config.maxHistoryMessages);
+    await this.cache.replaceHistory(agentId, sessionKey, historyToWrite, this.config.maxHistoryMessages);
   }
 
   // ─── Slot Content Resolution ─────────────────────────────────
@@ -2095,7 +2086,7 @@ export class Compositor {
     db: DatabaseSync,
     libraryDb?: DatabaseSync
   ): Promise<string | null> {
-    const cached = await this.redis.getSlot(agentId, sessionKey, slot);
+    const cached = await this.cache.getSlot(agentId, sessionKey, slot);
     if (cached) return cached;
 
     switch (slot) {
@@ -2128,7 +2119,7 @@ export class Compositor {
     // Pass limit through to Redis — this is the correct enforcement point.
     // Previously getHistory() ignored the limit on the Redis path (LRANGE 0 -1),
     // meaning historyDepth in the compose request had no effect on hot sessions.
-    const cached = await this.redis.getHistory(agentId, sessionKey, limit);
+    const cached = await this.cache.getHistory(agentId, sessionKey, limit);
     if (cached.length > 0) return cached;
 
     const conversation = store.getConversation(sessionKey);
