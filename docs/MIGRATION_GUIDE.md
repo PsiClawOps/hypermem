@@ -556,8 +556,9 @@ Zep stores conversation history per session and builds a per-user knowledge grap
 from zep_cloud.client import Zep
 import json
 
-client = Zep(api_key="your_zep_api_key")  # omit api_key for self-hosted
-# For self-hosted: client = Zep(base_url="http://localhost:8000")
+client = Zep(api_key="your_zep_api_key")
+# For self-hosted: client = Zep(api_key="unused", base_url="http://localhost:8000")
+# Note: api_key is required by the Pydantic validator even for self-hosted; any non-empty string works.
 
 export = {"sessions": [], "facts": []}
 

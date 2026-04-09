@@ -53,7 +53,7 @@ OpenClaw also ships compaction safeguards and hybrid file search. That's a solid
 
 ## hypermem
 
-Four storage layers, sub-millisecond retrieval, zero external services.
+Four storage layers, sub-millisecond retrieval, zero required external services. Runs entirely in-process with local Nomic embeddings; external embedding providers (OpenRouter, etc.) are optional upgrades for installs without a local GPU/CPU.
 
 | Layer | What it holds | Speed |
 |---|---|---|
@@ -163,7 +163,7 @@ FTS5 full-text search catches exact matches. KNN vector search catches semantic 
 
 Long agentic sessions generate a lot of tool output. Left unmanaged, old results crowd out current reasoning.
 
-Tool Context Tuning compresses by turn age. T0 turns stay verbatim under normal pressure. At projected occupancy above 80% with a large result (>40k chars), T0 is trimmed head-and-tail with a structured `[hypermem_tool_result_trim ... reason=oversize_turn0_trim]` note. T1 turns become short prose stubs: `Read /src/foo.ts (1.2KB)`, `Ran npm test -- exit 0`. T2 and T3 turns drop payloads entirely, keeping message text. Large results keep the head and tail and cut the middle. For multi-agent teams, compression is tier-aware: director and council agents preserve more context per pass, reflecting their coordination scope; specialists use a tighter cap to stay focused. The in-memory cache is refreshed from SQLite after each turn so it never drifts from the source of truth.
+Tool Context Tuning compresses by turn age. T0 turns stay verbatim under normal pressure. At projected occupancy above 80% with a large result (>40k chars), T0 is trimmed head-and-tail with a structured `[hypermem_tool_result_trim ... reason=oversize_turn0_trim]` note. T1 turns become short prose stubs: `Read /src/foo.ts (1.2KB)`, `Ran npm test -- exit 0`. T2 and T3 turns drop payloads entirely, keeping message text. Large results keep the head and tail and cut the middle. For multi-agent teams, compression is tier-aware: director and council agents preserve more context per pass, reflecting their coordination scope; specialists use a tighter cap to stay focused. The in-memory cache is refreshed from SQLite after each turn so it never drifts from the source of truth. Image content blocks inside tool results are treated as oversized payloads: evicted at T2 regardless of projected occupancy and cleared entirely at T3. Token-optimizer tools like ClawSqueezer remain fully compatible — hypermem's image eviction and ClawSqueezer's output compression address different pressure surfaces and do not conflict.
 
 ### Knowledge that outlasts the conversation
 
