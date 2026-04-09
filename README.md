@@ -12,7 +12,6 @@ hypermem is a runtime context engine for OpenClaw agents.
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-Start a conversation. Run `session_status`. You'll see compositor stats: token budget, pressure level, slot allocations. That's the engine running.
 
 ---
 
@@ -428,7 +427,6 @@ openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/pl
 openclaw gateway restart
 ```
 
-Run `session_status` after your next conversation. You'll see compositor stats: token budget, pressure level, slot allocations. That's the engine running.
 
 **Requirements:** Node.js 22+, OpenClaw with context engine plugin support, and either Ollama (local) or an OpenRouter API key (hosted) for embeddings.
 
