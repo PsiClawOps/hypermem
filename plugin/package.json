@@ -1,0 +1,46 @@
+{
+  "name": "@psiclawops/hypermem-context-engine",
+  "version": "0.5.0",
+  "description": "HyperMem context engine plugin for OpenClaw",
+  "type": "module",
+  "main": "dist/index.js",
+  "license": "Apache-2.0",
+  "author": "PsiClawOps",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PsiClawOps/hypermem-internal.git",
+    "directory": "plugin"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "openclaw": {
+    "plugin": {
+      "id": "hypermem",
+      "name": "HyperMem Context Engine",
+      "kind": "context-engine"
+    },
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@psiclawops/hypermem": "file:..",
+    "openclaw": "*",
+    "typescript": "^5.4.0"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "context-engine",
+    "hypermem"
+  ]
+}
