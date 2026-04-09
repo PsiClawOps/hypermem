@@ -54,25 +54,9 @@ OpenClaw also ships compaction safeguards and hybrid file search. That's a solid
 
 ---
 
-## Our first attempt: ClawText
-
-We built ClawText to extend that baseline: automatic session capture, hybrid BM25 + semantic retrieval, operational learning, and a prompt compositor that allocated context into scored slots with token budgets.
-
-It worked. Then we hit limits.
-
-Markdown files don't scale across thousands of sessions and dozens of active agents. Structured retrieval across 20,000 episodes needs a query engine, not a file parser. `MEMORY.md` is one file — it doesn't support concurrent reads across a fleet without coordination overhead.
-
-Redis was the hot cache. It brought TCP with it: connection timeouts, retry backoff, pool exhaustion under load. The sessions where stability mattered most were the sessions most likely to degrade.
-
-ClawText's architecture was right. The substrate wasn't.
-
----
-
 ## hypermem
 
-The same model — context management, not transcript replay — on the right foundation.
-
-SQLite in-memory replaces Redis: no TCP, no connection timeouts, no retry backoff. Structured SQL replaces markdown files. Per-agent databases replace shared state. The compositor runs the same slot-based budget allocation, now querying four storage layers in parallel.
+Context management, not transcript replay. Structured SQL replaces markdown files. Per-agent databases replace shared state. The compositor runs slot-based budget allocation across four storage layers in parallel.
 
 ```text
 L1  SQLite mem     Hot session cache, identity, compressed recent history
@@ -321,7 +305,7 @@ L1 and L4 structured retrieval are sub-millisecond. After the first turn, query 
 
 hypermem plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle.
 
-**L1: SQLite in-memory** — Redis introduced TCP instability: connection timeouts, retry backoff, pool exhaustion during high-volume agentic runs. SQLite in-memory is the replacement. Same sub-millisecond hot reads. No network dependency, no daemon, no retry logic. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and fleet registry data. The compositor hits this first on every turn.
+**L1: SQLite in-memory** — sub-millisecond hot reads, no network dependency, no daemon, no retry logic. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and fleet registry data. The compositor hits this first on every turn.
 
 **L2: Messages DB** — a single `MEMORY.md` file doesn't hold per-agent conversation history at scale. Thousands of turns across dozens of agents need queryable, concurrent-safe storage. Per-agent SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
 
@@ -529,7 +513,7 @@ const spawn = await buildSpawnContext(
 
 hypermem doesn't touch your existing memory data. Install it, switch the context engine, and migrate historical data on your own timeline, before or after switching.
 
-Migrations are supported from any memory platform. Worked examples are included in the migration documentation for: **OpenClaw built-in memory, ClawText, Mem0, Honcho, QMD session exports, and Engram**.
+Migrations are supported from any memory platform. Worked examples are included in the migration documentation for: **OpenClaw built-in memory, Mem0, Honcho, QMD session exports, and Engram**.
 
 All migration scripts default to dry-run. Nothing is written until you add `--apply`.
 
