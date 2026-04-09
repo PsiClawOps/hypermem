@@ -498,15 +498,15 @@ Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 
 ---
 
-## Take it further with the ACA
+## Take it further with the Agentic Cognitive Architecture
 
 hypermem's output normalization corrects model tendencies after they appear: sycophancy, hedging, pagination. The Agentic Cognitive Architecture prevents them from appearing in the first place.
 
-The ACA is a design guide for building agents that stay coherent across sessions without constant prompt engineering. It covers identity self-authorship (SOUL.md), structured memory contracts, and agent-to-agent communication protocols. The same FOS/MOD profiles that normalize output in hypermem are derived from ACA patterns.
+The Agentic Cognitive Architecture is a design guide for building agents that stay coherent across sessions without constant prompt engineering. It covers identity self-authorship (SOUL.md), structured memory contracts, and agent-to-agent communication protocols. The same FOS/MOD profiles that normalize output in hypermem are derived from Agentic Cognitive Architecture patterns.
 
-When your agent's identity, memory, and communication are architected rather than prompted, the compositor has better material to work with: cleaner facts, more consistent voice, fewer confabulations to catch. The ACA makes hypermem's output normalization cheaper because the agent needs less correction.
+When your agent's identity, memory, and communication are architected rather than prompted, the compositor has better material to work with: cleaner facts, more consistent voice, fewer confabulations to catch. The Agentic Cognitive Architecture makes hypermem's output normalization cheaper because the agent needs less correction.
 
-Read the ACA design guide: [PsiClawOps/ACA-internal](https://github.com/PsiClawOps/ACA-internal)
+Read the Agentic Cognitive Architecture design guide: [PsiClawOps/AgenticCognitiveArchitecture](https://github.com/PsiClawOps/AgenticCognitiveArchitecture/)
 
 ---
 
