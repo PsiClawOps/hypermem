@@ -62,7 +62,9 @@ Four storage layers, sub-millisecond retrieval, zero required external services.
 | **L3 Semantic** | Finds related content even when the words don't match. | 0.29ms |
 | **L4 Knowledge** | Facts, wiki pages, episodes, preferences. Shared across agents. | 0.09ms |
 
-Everything is retained. Nothing is lost at the session boundary. When an agent restarts, it warms from storage before the first turn. The retry logic decision from last week, the deployment preferences from last month, the architecture choices from day one: all queryable, all available for composition.
+Everything is retained. Nothing is lost at the session boundary. The retry logic decision from last week, the deployment preferences from last month, the architecture choices from day one: all queryable, all available for composition.
+
+**Session warming.** Before the first turn fires, hypermem pre-loads the agent's full working state from SQLite and Redis: recent history, facts ranked by confidence and recency, active topic context, cached embeddings for fast semantic recall. The agent's first reply draws from everything that was in scope at the end of the last session. To the agent, the session boundary never happened.
 
 ---
 
