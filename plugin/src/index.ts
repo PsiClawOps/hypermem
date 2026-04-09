@@ -1858,14 +1858,19 @@ function createHyperMemEngine(): ContextEngine {
           }
 
           const neutral = toNeutralMessage(m);
-          if (neutral.role === 'user') {
-            // Record user messages here and strip transport envelope metadata before
-            // storage so prompt wrappers like:
+          if (neutral.role === 'user' && !neutral.toolResults?.length) {
+            // Record plain user messages here and strip transport envelope metadata
+            // before storage so prompt wrappers like:
             //   Sender (untrusted metadata): { ... }
             // never enter messages.db / Redis history / downstream facts.
             //
             // recordUserMessage() also strips defensively at core level, but we do
             // it here too so the intended behavior is explicit at the plugin boundary.
+            //
+            // IMPORTANT: tool results arrive as role='user' carriers (toNeutralMessage
+            // sets role='user' + toolResults=[...] + textContent=null). These MUST go
+            // through recordAssistantMessage to persist the toolResults array.
+            // recordUserMessage takes a plain string and would silently discard them.
             await hm.recordUserMessage(agentId, sk, stripMessageMetadata(neutral.textContent ?? ''));
           } else {
             await hm.recordAssistantMessage(agentId, sk, neutral);
