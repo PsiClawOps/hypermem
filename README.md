@@ -74,7 +74,7 @@ Every memory system stores. Almost none compose.
 
 Your agent has four layers of stored context, but what shows up in the prompt? How much of the token budget goes to stale content? Who decides what's relevant to this specific turn?
 
-The hypercompositor queries all four layers in parallel on every turn and composes context within a fixed token budget. No transcript accumulates. No summary is ever needed. Amnesia isn't a storage problem; the memories exist, but nobody composed them into a coherent prompt. Compaction isn't inevitable; content that doesn't fit this turn stays in storage instead of being destroyed.
+The hypercompositor queries all four layers in parallel on every turn and composes context within a fixed token budget. No transcript accumulates. No lossy transcript summarization. Amnesia isn't a storage problem; the memories exist, but nobody composed them into a coherent prompt. Compaction isn't inevitable; content that doesn't fit this turn stays in storage instead of being destroyed.
 
 **Bigger context windows don't help if you fill them with stale history.**
 128k tokens of stale history and irrelevant memory is worse than 32k of precisely selected content. 10 budget categories, priority-ordered, greedy-fill. Every token in the prompt earned its spot.
@@ -131,7 +131,7 @@ When it fills:                          When budget is exceeded:
 | When context fills | Trim + summarize (lossy) | Budget allocation (lossless storage) |
 | Old decisions | Lost after compaction | Retrievable via keystones + semantic recall |
 | Topic changes | All history competes equally | Scoped retrieval by active topic |
-| Tool output | Stays until trimmed | Compressed by turn age |
+| Tool output | Stays until trimmed | Cluster-compressed by age |
 | Model swap mid-session | Re-count, hope it fits | Budget recomputed from new window size next turn |
 
 High-signal turns are marked as keystones and survive pressure trimming ahead of ordinary history.
@@ -142,7 +142,7 @@ High-signal turns are marked as keystones and survive pressure trimming ahead of
 
 ### Tool output that doesn't take over
 
-Agentic sessions generate massive tool output. Left unmanaged, old results crowd out current reasoning. hypermem compresses tool history by age: recent results stay full, older results become stubs, the oldest drop payloads entirely. The budget goes to current work, not last hour's `npm test` output.
+Agentic sessions generate massive tool output. Left unmanaged, old results crowd out current reasoning. hypermem groups tool calls with their results into atomic clusters: the call and its response are never split. Clusters compress by age: recent clusters stay full (T0), older clusters cap at 6k (T1), then 800 chars (T2), then 150-char stubs (T3). A pair integrity guard ensures call-result pairs survive or drop together. The budget goes to current work, not last hour's npm test output.
 
 ### Knowledge that outlasts the conversation
 
@@ -197,7 +197,7 @@ Spawned subagents inherit a bounded context block: recent parent turns, session-
 
 ## Pressure management
 
-hypermem composes context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
+hypermem composes context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Three automatic paths handle this:
 
 | Path | Trigger | Action |
 |---|---|---|
@@ -262,7 +262,13 @@ hypermem plugs into OpenClaw as a context engine and owns the full prompt compos
 
 **L3: Vectors DB.** Keyword search alone misses semantically related content. A decision recorded as "we chose exponential backoff" won't match a search for "what was the retry strategy" without vector similarity. Per-agent sqlite-vec database with KNN search over prior turns and indexed workspace documents. Reconstructable from L2 if lost. Supports two embedding providers: Ollama (local, default `nomic-embed-text`) or hosted via OpenRouter (recommended: `qwen/qwen3-embedding-8b`, 4096d, top of MTEB retrieval leaderboard).
 
-Retrieval combines FTS5 full-text search (exact matches), KNN vector search (semantic matches), and Reciprocal Rank Fusion to merge both into one ranked result. Trigger-based retrieval handles known patterns; when no trigger matches, bounded semantic fallback keeps the memory slot from returning empty.
+Retrieval follows a fixed pipeline on every compose call:
+
+1. **Trigger registry** fires first. Nine pattern triggers check for exact-match shortcuts. If one hits, scoped FTS5 prefix queries (`word1* OR word2*`) run against L4 collections and return immediately.
+2. **Semantic fallback** fires when no trigger matches. Bounded hybrid retrieval runs FTS5 + KNN in parallel, then merges via Reciprocal Rank Fusion (RRF). BM25 ranks and KNN cosine distances combine into a single ordered result.
+3. **Noise floor** filters anything below RRF 0.008 before it reaches the compositor.
+
+FTS5 queries use compound indexes on `agentId + sort key` and prefix optimization (3+ chars, capped at 8 terms, OR queries). These indexes yielded a 25% read improvement over baseline despite a 47% increase in stored data.
 
 **L4: Library DB.** Per-agent storage can't hold shared knowledge. Facts established by one agent, wiki pages synthesized from cross-agent topics, fleet registry state: these belong to the system, not one agent. One shared SQLite database:
 
@@ -283,7 +289,11 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
 
 **Secret scanner:** Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, hypermem scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected; the write succeeds without the content reaching fleet-visible storage.
 
-**The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and composes a provider-format context block. A safety valve catches estimation drift and trims post-composition. Because the budget is computed from the model's actual context window at compose time (resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly), a mid-session model swap triggers a budget recompute on the next turn. Structured tool history is guarded from destructive persistence during a budget downshift. T0 is preserved verbatim up to 80% projected occupancy. At high pressure with a large result, T0 is trimmed head-and-tail with a structured trim note. Compression of older turns starts at T1.
+**The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, and composes a provider-format context block. A safety valve catches estimation drift and trims post-composition. Because the budget is computed from the model's actual context window at compose time (resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly), a mid-session model swap triggers a budget recompute on the next turn. Structured tool history is guarded from destructive persistence during a budget downshift.
+
+**Tool compression** groups calls with results into atomic clusters via `clusterNeutralMessages()`. T0 is preserved verbatim up to 80% projected occupancy. At high pressure with a large result, T0 is trimmed head-and-tail with a structured trim note. T1 caps at 6k, T2 at 800 chars, T3 at 150-char stubs. A pair integrity guard ensures call-result clusters survive or drop together. `getTurnAge()` counts tool clusters correctly (no longer miscounting tool-result carriers as user turns). `toolPairMetrics` tracks compression ratio and logs anomalies at the OpenClaw seam. When `deferToolPruning` is enabled and OpenClaw's native `contextPruning` is active (Anthropic, Google), the native pruner handles tool result trimming instead.
+
+**canPersistReshapedHistory** guards the compositor from persisting structurally reshaped history back to the JSONL transcript. When structured tool history is present, budget downshifts are computed but not committed to storage, preventing a lower-context snapshot from overwriting the full history on disk.
 
 ```
   user message
@@ -300,7 +310,7 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
        │
   budget allocator ──► 10 slots, fixed token cap
        │
-  tool compression ──► progressive, recent stays full
+  tool compression ──► clusters by age, T0 full → T1 6k → T2 800 → T3 150-char stub
        │
   keystone guard ──► high-signal turns survive pressure
        │
