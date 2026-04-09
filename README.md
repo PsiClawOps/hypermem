@@ -26,14 +26,14 @@ Two questions make this concrete:
 
 | Question | What the LLM has | What happens |
 |---|---|---|
-| *"What was Caesar's greatest military victory?"* | Training data | ✅ Answered correctly — no session context needed |
-| *"What did we decide about the retry logic last week?"* | Nothing — prior session is gone | ❌ The decision existed only in that session |
+| *"What was Caesar's greatest military victory?"* | Training data | ✅ Answered correctly, no session context needed |
+| *"What did we decide about the retry logic last week?"* | Nothing (prior session is gone) | ❌ The decision existed only in that session |
 
 The difference isn't intelligence. It's what was in the prompt. Two failure modes follow:
 
-**New-session amnesia.** The agent restarts and everything is gone. Decisions, preferences, work in progress — erased at the session boundary. Operators re-explain context. Agents re-ask questions already answered.
+**New-session amnesia.** The agent restarts and everything is gone. Decisions, preferences, work in progress: erased at the session boundary. Operators re-explain context. Agents re-ask questions already answered.
 
-**Compaction crunch.** Long sessions fill the context window. The runtime summarizes to make room. Specifics — tool output, exact decisions, file paths — are lost in the summary. The agent keeps running, but degraded.
+**Compaction crunch.** Long sessions fill the context window. The runtime summarizes to make room. Specifics (tool output, exact decisions, file paths) are lost in the summary. The agent keeps running, but degraded.
 
 ---
 
@@ -56,46 +56,39 @@ OpenClaw also ships compaction safeguards and hybrid file search. That's a solid
 
 ## hypermem
 
-Context management, not transcript replay. Structured SQL replaces markdown files. Per-agent databases replace shared state. The compositor runs slot-based budget allocation across four storage layers in parallel.
+Four storage layers, sub-millisecond retrieval, zero external services.
 
-```text
-L1  SQLite mem     Hot session cache, identity, compressed recent history
-L2  Messages DB   Per-agent conversation history in SQLite
-L3  Vectors DB    Per-agent semantic search with sqlite-vec embeddings
-L4  Library DB    Fleet-wide structured knowledge, facts, episodes, registry
-```
+| Layer | What it holds | Speed |
+|---|---|---|
+| **L1 In-memory** | What the agent needs right now. Identity, recent history, active state. | 0.1ms |
+| **L2 History** | Every conversation, queryable and concurrent-safe. Per-agent. | 0.16ms |
+| **L3 Semantic** | Finds related content even when the words don't match. | 0.29ms |
+| **L4 Knowledge** | Facts, wiki pages, episodes, preferences. Shared across agents. | 0.08ms |
 
-This is the core claim: hypermem is not transcript replay. It is context management. Each turn is rebuilt from active topic, hot state, durable history, semantic recall, and compiled knowledge inside a fixed token budget.
+Everything is retained. Nothing is lost at the session boundary. When an agent restarts, it warms from storage before the first turn. The retry logic decision from last week, the deployment preferences from last month, the architecture choices from day one: all queryable, all available for composition.
 
-```
-  user message
-       │
-  topic detection ──► scope retrieval to active thread
-       │
-  ┌────┴────────────────────────────────────────────┐
-  │              query 4 layers (parallel)           │
-  │                                                  │
-  │  L1 SQLite mem L2 History    L3 Vectors  L4 Library │
-  │  hot state    durable       semantic    facts/wiki │
-  │  0.1ms        0.16ms        0.29ms      0.08ms     │
-  └────┬────────────────────────────────────────────┘
-       │
-  budget allocator ──► 10 slots, fixed token cap
-       │
-  tool compression ──► T0 verbatim → T1 stubs → T2+ dropped
-       │
-  keystone guard ──► high-signal turns survive pressure
-       │
-  FOS profile ──► output normalization directives
-       │
-  assembled prompt ──► 9,852 tokens (16% of 60k budget)    52ms
-       │
-  model response
-       │
-  afterTurn ──► write back to all 4 layers
-```
+---
 
-This is what context management looks like. Not a growing transcript, but a budget:
+## hypercompositor
+
+Every memory system stores. Almost none compose.
+
+Your agent has four layers of stored context, but what shows up in the prompt? How much of the token budget goes to stale content? Who decides what's relevant to this specific turn?
+
+The hypercompositor queries all four layers in parallel on every turn and assembles context within a fixed token budget. No transcript accumulates. No summary is ever needed.
+
+**Session amnesia isn't a storage problem.**
+The memories exist. They're in the database. The agent wakes up blank anyway because nobody assembled them into a coherent prompt. The hypercompositor queries four layers in parallel, allocates budget by priority, scopes to the active topic, and assembles a prompt that reads like the agent never left.
+
+**Compaction isn't inevitable.**
+Every other system hits a wall when context fills up. Summarize, truncate, lose specifics. The hypercompositor never accumulates a transcript to compress. Every turn is built from storage within a fixed budget. When the budget is tight, lower-priority content stays in storage instead of being destroyed. Change the topic back and it returns.
+
+**Bigger context windows don't help if you fill them with garbage.**
+128k tokens of stale history and irrelevant memory is worse than 32k of precisely selected content. 10 budget categories, priority-ordered, greedy-fill. Every token in the prompt earned its spot.
+
+### What the model actually sees
+
+Token budget allocation from a real session (847 turns deep, 60k budget):
 
 ```
 What the model sees (9,852 of 60,000 tokens):
@@ -117,12 +110,10 @@ What's in storage, not in this prompt:
   Change the topic, and the next turn pulls different content from the same storage.
 ```
 
-### How a prompt gets built: standard vs. hypercompositor
-
-Most context engines address amnesia with storage and address compaction with summarization. Both are lossy. The compositor solves both at the source: every turn is assembled fresh from four storage layers within a fixed token budget. Nothing is accumulated. Nothing is summarized away. Content that doesn't fit this turn stays in storage and comes back when relevant.
+### Standard context engine vs. hypercompositor
 
 ```
-Standard                                Compositor
+Standard                                hypercompositor
 ────────────────────────────────        ────────────────────────────────
 message → append to transcript          message → detect active topic
 transcript full → trim oldest           query 4 storage layers in parallel
@@ -140,7 +131,7 @@ When it fills:                          When budget is exceeded:
   no recovery path                        change topic back → retrieved again
 ```
 
-| | Standard | Compositor |
+| | Standard | hypercompositor |
 |---|---|---|
 | Context source | Growing transcript | 4 independent storage layers |
 | When context fills | Trim + summarize (lossy) | Budget allocation (lossless storage) |
@@ -148,7 +139,6 @@ When it fills:                          When budget is exceeded:
 | Topic changes | All history competes equally | Scoped retrieval by active topic |
 | Tool output | Stays until trimmed | Compressed by turn age (T0/T1/T2/T3) |
 | Model swap mid-session | Re-count, hope it fits | Budget recomputed from new window size next turn |
-| Compose time | Free (it is the transcript) | 52ms avg, 57ms p95 |
 
 ---
 
@@ -254,7 +244,7 @@ hypermem assembles context fresh on every turn, but a long-running session still
 |---|---|---|
 | **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures projected occupancy before results land. Plans against a 120k baseline window regardless of actual provider context size. 75%: green zone, keep full. 80%: defensive -- trim large results (>40k chars) head+tail with structured note. 85%: hard caution zone -- trim on turn 0 and turn 1. Also trims the messages[] array returned to the runtime; this is what actually prevents stripping on the current turn, not just the next one |
 | **AfterTurn trim** | Every turn at >80% | Pre-emptive headroom cut after the assistant replies, before the next turn arrives |
-| **Nuclear compaction** | compact() at >85% | Cuts in-memory cache to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
+| **Deep compaction** | compact() at >85% | Cuts in-memory cache to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
 | **Density-aware JSONL truncation** | compact() | Counts tokens per message, not message count. Catches large-message sessions that looked fine by count but were full by volume |
 | **Pre-ingestion wave guard** | Any toolResult payload before recording | Truncates or skips large tool payloads before they enter the ingest path, preventing the ingest itself from adding pressure during high-volume agentic runs |
 
@@ -305,13 +295,13 @@ L1 and L4 structured retrieval are sub-millisecond. After the first turn, query 
 
 hypermem plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle.
 
-**L1: SQLite in-memory** — sub-millisecond hot reads, no network dependency, no daemon, no retry logic. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and fleet registry data. The compositor hits this first on every turn.
+**L1: SQLite in-memory.** Sub-millisecond hot reads, no network dependency, no daemon, no retry logic. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and fleet registry data. The compositor hits this first on every turn.
 
-**L2: Messages DB** — a single `MEMORY.md` file doesn't hold per-agent conversation history at scale. Thousands of turns across dozens of agents need queryable, concurrent-safe storage. Per-agent SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
+**L2: Messages DB.** A single `MEMORY.md` file doesn't hold per-agent conversation history at scale. Thousands of turns across dozens of agents need queryable, concurrent-safe storage. Per-agent SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
 
-**L3: Vectors DB** — keyword search alone misses semantically related content. The retry logic decision won't surface on a search for "what did we decide" unless the original turn used those exact words. Per-agent sqlite-vec database with KNN search over prior turns and indexed workspace documents. Reconstructable from L2 if lost. Supports two embedding providers: Ollama (local, default `nomic-embed-text`) or hosted via OpenRouter (recommended: `qwen/qwen3-embedding-8b`, 4096d, top of MTEB retrieval leaderboard).
+**L3: Vectors DB.** Keyword search alone misses semantically related content. The retry logic decision won't surface on a search for "what did we decide" unless the original turn used those exact words. Per-agent sqlite-vec database with KNN search over prior turns and indexed workspace documents. Reconstructable from L2 if lost. Supports two embedding providers: Ollama (local, default `nomic-embed-text`) or hosted via OpenRouter (recommended: `qwen/qwen3-embedding-8b`, 4096d, top of MTEB retrieval leaderboard).
 
-**L4: Library DB** — per-agent storage can't hold shared knowledge. Facts established by one agent, wiki pages synthesized from cross-agent topics, fleet registry state: these belong to the system, not one agent. One shared SQLite database:
+**L4: Library DB.** Per-agent storage can't hold shared knowledge. Facts established by one agent, wiki pages synthesized from cross-agent topics, fleet registry state: these belong to the system, not one agent. One shared SQLite database:
 
 | Collection | What it holds |
 |---|---|
@@ -330,7 +320,35 @@ hypermem plugs into OpenClaw as a context engine and owns the full prompt compos
 
 **The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, runs Tool Context Tuning on history, and assembles a provider-format context block. A safety valve catches estimation drift and trims post-assembly. Because the budget is computed from the model's actual context window at compose time (resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly), a mid-session model swap is absorbed on the next turn with no manual intervention. T0 is preserved verbatim up to 80% projected occupancy. At high pressure with a large result, T0 is trimmed head-and-tail with a structured trim note. Compression of older turns starts at T1.
 
-Token budget allocation from a real session (Forge, 847 turns deep, 60k budget):
+```
+  user message
+       │
+  topic detection ──► scope retrieval to active thread
+       │
+  ┌────┴────────────────────────────────────────────┐
+  │              query 4 layers (parallel)           │
+  │                                                  │
+  │  L1 in-memory  L2 History    L3 Vectors  L4 Library │
+  │  hot state    durable       semantic    facts/wiki │
+  │  0.1ms        0.16ms        0.29ms      0.08ms     │
+  └────┬────────────────────────────────────────────┘
+       │
+  budget allocator ──► 10 slots, fixed token cap
+       │
+  tool compression ──► T0 verbatim, T1 stubs, T2+ dropped
+       │
+  keystone guard ──► high-signal turns survive pressure
+       │
+  FOS profile ──► output normalization directives
+       │
+  assembled prompt
+       │
+  model response
+       │
+  afterTurn ──► write back to all 4 layers
+```
+
+Token budget allocation from a real session (847 turns deep, 60k budget):
 
 ```
 Slot                          Tokens    % of budget
@@ -343,10 +361,9 @@ Spawn context                      0        0.0%
 -----------------------------------------------------
 Assembled                       9,852       16.4%
 Reserved for response          50,148       83.6%
-Compose time                      52ms
 ```
 
-The 16% assembly figure is typical for a warm single-agent session. Multi-agent sessions with active fleet registry and cross-session wiki hit 25-30%. The response reserve is never touched by the compositor; it belongs to the model.
+The 16% assembly figure is typical for a warm single-agent session. Multi-agent sessions with active registry and cross-session wiki hit 25-30%. The response reserve is never touched by the compositor; it belongs to the model.
 
 ---
 
@@ -466,7 +483,7 @@ const hm = await HyperMem.create({
   cache: { maxEntries: 10000 },
   // Local (Ollama):
   embedding: { ollamaUrl: 'http://localhost:11434', model: 'nomic-embed-text' },
-  // Hosted (OpenRouter) — recommended for installs without local GPU/CPU:
+  // Hosted (OpenRouter), recommended for installs without local GPU/CPU:
   // embedding: { provider: 'openai', openaiApiKey: 'sk-or-...', openaiBaseUrl: 'https://openrouter.ai/api/v1', model: 'qwen/qwen3-embedding-8b', dimensions: 4096, batchSize: 128 },
 });
 
