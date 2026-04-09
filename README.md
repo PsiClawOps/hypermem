@@ -295,7 +295,7 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
 
 **The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, and composes a provider-format context block. A safety valve catches estimation drift and trims post-composition. Because the budget is computed from the model's actual context window at compose time (resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly), a mid-session model swap triggers a budget recompute on the next turn. Structured tool history is guarded from destructive persistence during a budget downshift.
 
-**Tool compression** groups calls with results into atomic clusters via `clusterNeutralMessages()`. T0 is preserved verbatim up to 80% projected occupancy. At high pressure with a large result, T0 is trimmed head-and-tail with a structured trim note. T1 caps at 6k, T2 at 800 chars, T3 at 150-char stubs. A pair integrity guard ensures call-result clusters survive or drop together. `getTurnAge()` counts tool clusters correctly (no longer miscounting tool-result carriers as user turns). `toolPairMetrics` tracks compression ratio and logs anomalies at the OpenClaw seam. When `deferToolPruning` is enabled and OpenClaw's native `contextPruning` is active (Anthropic, Google), the native pruner handles tool result trimming instead.
+**Tool compression** groups calls with results into atomic clusters via `clusterNeutralMessages()`. T0 preserves the current turn plus the two most recent completed turns at full fidelity, matching OpenClaw's native `keepLastAssistants: 3` baseline. Above 80% projected occupancy, large T0 results are head-and-tail trimmed with a structured trim note rather than dropped. Older clusters then enter the gradient: T1 caps at 6k per result, T2 at 800 chars, T3 at 150-char stubs. A pair-integrity guard ensures call-result clusters survive or drop together. `getTurnAge()` counts tool clusters correctly, and `toolPairMetrics` logs pair-integrity anomalies at the OpenClaw seam. When `deferToolPruning` is enabled and OpenClaw's native `contextPruning` is active, the native pruner handles tool result trimming instead.
 
 **canPersistReshapedHistory** guards the compositor from persisting structurally reshaped history back to the JSONL transcript. When structured tool history is present, budget downshifts are computed but not committed to storage, preventing a lower-context snapshot from overwriting the full history on disk.
 
@@ -314,7 +314,7 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
        │
   budget allocator ──► 10 slots, fixed token cap
        │
-  tool compression ──► clusters by age, T0 full → T1 6k → T2 800 → T3 150-char stub
+  tool compression ──► clusters by age, T0 3 turns full → T1 6k → T2 800 → T3 150-char stub
        │
   keystone guard ──► high-signal turns survive pressure
        │
@@ -324,7 +324,7 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
        │
   model response
        │
-  afterTurn ──► write back to all 4 layers
+  afterTurn ──► write back to all 4 layers (tool-result carrier messages persisted through recordAssistantMessage, not flattened into plain user text, so structured tool results remain recoverable in durable history)
 ```
 
 Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the-model-actually-sees) above. The 72% composition figure is typical for a warm mature session. Multi-agent sessions with active registry and cross-session wiki may run slightly higher.
