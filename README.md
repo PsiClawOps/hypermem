@@ -16,6 +16,64 @@ openclaw config set plugins.slots.contextEngine hypermem
 
 Start a conversation. Run `session_status`. You'll see compositor stats: token budget, pressure level, slot allocations. That's the engine running.
 
+---
+
+## The problem
+
+Every LLM conversation is assembled at runtime. The model sees only what's in the prompt. It has no memory of prior sessions, no access to decisions made last week, no awareness of work that happened before this context window opened.
+
+Two questions make this concrete:
+
+| Question | What the LLM has | What happens |
+|---|---|---|
+| *"What was Caesar's greatest military victory?"* | Training data | ✅ Answered correctly — no session context needed |
+| *"What did we decide about the retry logic last week?"* | Nothing — prior session is gone | ❌ The decision existed only in that session |
+
+The difference isn't intelligence. It's what was in the prompt. Two failure modes follow:
+
+**New-session amnesia.** The agent restarts and everything is gone. Decisions, preferences, work in progress — erased at the session boundary. Operators re-explain context. Agents re-ask questions already answered.
+
+**Compaction crunch.** Long sessions fill the context window. The runtime summarizes to make room. Specifics — tool output, exact decisions, file paths — are lost in the summary. The agent keeps running, but degraded.
+
+---
+
+## What OpenClaw provides today
+
+OpenClaw addresses both failure modes with structured guidance files injected into every session:
+
+| File | What it contributes | Survives session restart? |
+|---|---|---|
+| `SOUL.md` | Agent identity, voice, principles | ✅ always injected |
+| `USER.md` | User preferences, working style | ✅ always injected |
+| `JOB.md` / `AGENT.md` | Task focus, project instructions | ✅ always injected |
+| `MEMORY.md` | Hand-curated decisions, facts, patterns | ✅ if manually maintained |
+
+These are powerful for identity and preferences. But the retry logic decision from last week? If nobody manually captured it into `MEMORY.md`, that session boundary erased it. The system is only as strong as its last manual update.
+
+OpenClaw also ships compaction safeguards and hybrid file search. That's a solid baseline. It has limits.
+
+---
+
+## Our first attempt: ClawText
+
+We built ClawText to extend that baseline: automatic session capture, hybrid BM25 + semantic retrieval, operational learning, and a prompt compositor that allocated context into scored slots with token budgets.
+
+It worked. Then we hit limits.
+
+Markdown files don't scale across thousands of sessions and dozens of active agents. Structured retrieval across 20,000 episodes needs a query engine, not a file parser. `MEMORY.md` is one file — it doesn't support concurrent reads across a fleet without coordination overhead.
+
+Redis was the hot cache. It brought TCP with it: connection timeouts, retry backoff, pool exhaustion under load. The sessions where stability mattered most were the sessions most likely to degrade.
+
+ClawText's architecture was right. The substrate wasn't.
+
+---
+
+## hypermem
+
+The same model — context management, not transcript replay — on the right foundation.
+
+SQLite in-memory replaces Redis: no TCP, no connection timeouts, no retry backoff. Structured SQL replaces markdown files. Per-agent databases replace shared state. The compositor runs the same slot-based budget allocation, now querying four storage layers in parallel.
+
 ```text
 L1  SQLite mem     Hot session cache, identity, compressed recent history
 L2  Messages DB   Per-agent conversation history in SQLite
@@ -75,11 +133,7 @@ What's in storage, not in this prompt:
   Change the topic, and the next turn pulls different content from the same storage.
 ```
 
-OpenClaw gives agents a solid baseline: workspace memory files, hybrid file search, and compaction safeguards. hypermem goes deeper. It replaces transcript accumulation with a context engine that assembles prompts fresh from storage on every turn.
-
 ### How a prompt gets built: standard vs. hypercompositor
-
-Two problems kill agent sessions. **New-session amnesia:** the agent restarts and everything is gone. Decisions, preferences, work state, context. The operator re-explains. The agent re-asks. **Compaction crunch:** long sessions fill the context window, the runtime summarizes to make room, and specifics are lost. Tool output, exact decisions, file paths. The agent keeps running but degraded, confident about things it no longer actually knows.
 
 Most context engines address amnesia with storage and address compaction with summarization. Both are lossy. The compositor solves both at the source: every turn is assembled fresh from four storage layers within a fixed token budget. Nothing is accumulated. Nothing is summarized away. Content that doesn't fit this turn stays in storage and comes back when relevant.
 
@@ -267,13 +321,13 @@ L1 and L4 structured retrieval are sub-millisecond. After the first turn, query 
 
 hypermem plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle.
 
-**L1: SQLite in-memory** is the hot layer. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and fleet registry data. No TCP, no connection timeouts, no retry backoff. The compositor goes here first on every turn.
+**L1: SQLite in-memory** — Redis introduced TCP instability: connection timeouts, retry backoff, pool exhaustion during high-volume agentic runs. SQLite in-memory is the replacement. Same sub-millisecond hot reads. No network dependency, no daemon, no retry logic. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and fleet registry data. The compositor hits this first on every turn.
 
-**L2: Messages DB** is the durable per-agent record. SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
+**L2: Messages DB** — a single `MEMORY.md` file doesn't hold per-agent conversation history at scale. Thousands of turns across dozens of agents need queryable, concurrent-safe storage. Per-agent SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
 
-**L3: Vectors DB** is the semantic index. Per-agent sqlite-vec database with KNN search over prior turns and indexed workspace documents. Reconstructable from L2 if lost. Supports two embedding providers: Ollama (local, default `nomic-embed-text`) or hosted via OpenRouter (recommended: `qwen/qwen3-embedding-8b`, 4096d, top of MTEB retrieval leaderboard).
+**L3: Vectors DB** — keyword search alone misses semantically related content. The retry logic decision won't surface on a search for "what did we decide" unless the original turn used those exact words. Per-agent sqlite-vec database with KNN search over prior turns and indexed workspace documents. Reconstructable from L2 if lost. Supports two embedding providers: Ollama (local, default `nomic-embed-text`) or hosted via OpenRouter (recommended: `qwen/qwen3-embedding-8b`, 4096d, top of MTEB retrieval leaderboard).
 
-**L4: Library DB** is the fleet-wide knowledge layer. One shared SQLite database:
+**L4: Library DB** — per-agent storage can't hold shared knowledge. Facts established by one agent, wiki pages synthesized from cross-agent topics, fleet registry state: these belong to the system, not one agent. One shared SQLite database:
 
 | Collection | What it holds |
 |---|---|
