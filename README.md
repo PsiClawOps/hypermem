@@ -113,7 +113,7 @@ message → append to transcript          message → detect active topic
 transcript full → trim oldest           query 4 storage layers in parallel
 trimmed content → summarize (lossy)     budget allocator: 10 slots, fixed cap
 send transcript to model                tool compression by turn age
-model responds → append again           keystone guard + FOS profile
+model responds → append again           keystone guard + hyperform profile
                                         composed prompt → model
      ┌──────────────────┐               model responds → afterTurn ingest
      │  loop until full  │               → write back to all 4 layers
@@ -138,23 +138,11 @@ High-signal turns are marked as keystones and survive pressure trimming ahead of
 
 ---
 
-## What it solves
+## hyperform
 
-### Tool output that doesn't take over
+Raw model output has two problems. It drifts from your standards (sycophancy, hedging, pagination, formatting) and it drifts from your facts (confabulation, contradiction, stale claims). hyperform handles both.
 
-Agentic sessions generate massive tool output. Left unmanaged, old results crowd out current reasoning. hypermem compresses tool history by age: recent results stay full, older results become stubs, the oldest become one-line summaries. The budget goes to current work, not last hour's npm test output.
-
-### Knowledge that outlasts the conversation
-
-Most memory systems store what was said. hypermem synthesizes what was learned.
-
-When a topic goes quiet, hypermem compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay.
-
-OpenClaw 2026.4.7 ships memory wiki for structured storage. hypermem goes further: wiki pages are synthesized automatically and injected by the compositor within token budget.
-
-### Output normalization and verification
-
-Agents confabulate and drift toward the defaults baked into their training. GPT-5.4 paginates and offers to elaborate. Sonnet over-lists. Gemini hedges. FOS (Fact-Oriented Synthesis) injects output normalization directives into composed context via the `outputProfile` config key. Three tiers:
+**Normalization** shapes output to match a profile you define. Three presets ship with hypermem:
 
 | Profile | Tokens | Covers |
 |---|---|---|
@@ -187,7 +175,23 @@ tool context, and leave ~30k as allocator reserve. hypermem handles slot competi
 automatically -- set contextWindowReserve to your preferred floor and let the compositor fill.
 ```
 
-FOS/MOD (Moderation) checks every response against the live L4 fact corpus before it is recorded. Unsupported claims are flagged, contradictions with established facts surface in diagnostics, and a confabulation risk score is attached to the stored episode.
+**Verification** checks claims against the fact corpus before they're recorded. No LLM call. Pattern matching against stored facts, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
+
+---
+
+## What it solves
+
+### Tool output that doesn't take over
+
+Agentic sessions generate massive tool output. Left unmanaged, old results crowd out current reasoning. hypermem compresses tool history by age: recent results stay full, older results become stubs, the oldest become one-line summaries. The budget goes to current work, not last hour's npm test output.
+
+### Knowledge that outlasts the conversation
+
+Most memory systems store what was said. hypermem synthesizes what was learned.
+
+When a topic goes quiet, hypermem compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay.
+
+OpenClaw 2026.4.7 ships memory wiki for structured storage. hypermem goes further: wiki pages are synthesized automatically and injected by the compositor within token budget.
 
 ### Subagents that hit the ground running
 
@@ -314,7 +318,7 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
        │
   keystone guard ──► high-signal turns survive pressure
        │
-  FOS profile ──► output normalization directives
+  hyperform ──► output normalization directives
        │
   composed prompt
        │
@@ -408,7 +412,7 @@ Primary tuning knobs:
 
 - **`targetBudgetFraction`**: caps total non-history context weight. Lower values force lighter composition.
 - **`wikiTokenCap`**: caps compiled-knowledge/wiki contribution.
-- **`outputProfile`**: `light`, `standard`, or `full`. Controls how much FOS/MOD guidance is injected per turn.
+- **`outputProfile`**: `light`, `standard`, or `full`. Controls how much hyperform guidance is injected per turn.
 
 Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes effect on gateway restart:
 
