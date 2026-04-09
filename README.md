@@ -258,7 +258,7 @@ L1 and L4 structured retrieval are sub-millisecond. Vector embeddings are comput
 
 hypermem plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle. It registers as both `contextEngine` and `memory`, providing the standard memory slot interface alongside full prompt composition: `memory_search` routes through the official slot and shows correctly in `openclaw plugins list`.
 
-**L1: SQLite in-memory.** Sub-millisecond hot reads, no network dependency, no daemon, no retry logic. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and fleet registry data. The compositor hits this first on every turn.
+**L1: SQLite in-memory.** Sub-millisecond hot reads, no network dependency, no daemon, no retry logic. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and agent registry data. The compositor hits this first on every turn.
 
 **L2: Messages DB.** A single `MEMORY.md` file doesn't hold per-agent conversation history at scale. Thousands of turns across dozens of agents need queryable, concurrent-safe storage. Per-agent SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
 
@@ -272,7 +272,7 @@ Retrieval follows a fixed pipeline on every compose call:
 
 FTS5 queries use compound indexes on `agentId + sort key` and prefix optimization (3+ chars, capped at 8 terms, OR queries). These indexes yielded a 25% read improvement over baseline despite a 47% increase in stored data.
 
-**L4: Library DB.** Per-agent storage can't hold shared knowledge. Facts established by one agent, wiki pages synthesized from cross-agent topics, fleet registry state: these belong to the system, not one agent. One shared SQLite database:
+**L4: Library DB.** Per-agent storage can't hold shared knowledge. Facts established by one agent, wiki pages synthesized from cross-agent topics, shared registry state: these belong to the system, not one agent. One shared SQLite database:
 
 | Collection | What it holds |
 |---|---|
@@ -289,7 +289,7 @@ FTS5 queries use compound indexes on `agentId + sort key` and prefix optimizatio
 
 Facts are ranked by `confidence × recencyDecay`, where decay is exponential with a configurable half-life: recent, high-confidence facts float to the top while stale entries yield budget to newer knowledge.
 
-**Secret scanner:** Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, hypermem scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected; the write succeeds without the content reaching fleet-visible storage.
+**Secret scanner:** Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, hypermem scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected; the write succeeds without the content reaching shared-visible storage.
 
 **The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, and composes a provider-format context block. A safety valve catches estimation drift and trims post-composition. Because the budget is computed from the model's actual context window at compose time (resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly), a mid-session model swap triggers a budget recompute on the next turn. Structured tool history is guarded from destructive persistence during a budget downshift.
 
@@ -515,7 +515,7 @@ Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 
 ## Identity layer
 
-hypermem handles context and output normalization. The Agentic Cognitive Architecture handles identity: self-authored SOUL files, structured communication contracts, and coherence anchoring across sessions. Same team, complementary layers.
+hypermem handles context and output normalization. The Agentic Cognitive Architecture handles identity: self-authored SOUL files, structured communication contracts, and identity persistence across sessions. Same team, complementary layers.
 
 Design guide: [PsiClawOps/AgenticCognitiveArchitecture](https://github.com/PsiClawOps/AgenticCognitiveArchitecture/)
 
