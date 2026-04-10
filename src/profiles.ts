@@ -38,29 +38,30 @@ const BASE_EMBEDDING: EmbeddingProviderConfig = {
 //   - Single agent — no cross-session context needed
 //   - Minimal ACA stack — no dreaming, no background indexing overhead
 //   - Low Redis churn — longer flush intervals, shorter history window
-//   - outputProfile: 'light' — ~100 token standalone directives, no fleet concepts
+//   - hyperformProfile: 'light' — ~100 token standalone directives, no fleet concepts
 //   - No parallel operations — sequential fact extraction only
 // ---------------------------------------------------------------------------
 
 const LIGHT_COMPOSITOR: CompositorConfig = {
-  defaultTokenBudget: 40000,        // leaves ~24k for model output at 64k window
-  maxHistoryMessages: 200,          // keep window tight — small models lose coherence past ~150 msgs
-  maxFacts: 15,                     // surface top facts only, don't swamp the window
-  maxCrossSessionContext: 0,        // single agent — no cross-session
-  maxRecentToolPairs: 2,            // minimal tool history
+  budgetFraction: 0.625,               // 40k effective at 64k window
+  defaultTokenBudget: 40000,           // absolute fallback when model detection fails
+  maxHistoryMessages: 200,
+  maxFacts: 15,
+  maxCrossSessionContext: 0,
+  maxRecentToolPairs: 2,
   maxProseToolPairs: 4,
-  warmHistoryBudgetFraction: 0.35,  // slightly less history, more room for context
-  contextWindowReserve: 0.35,       // generous reserve — small models need output headroom
+  warmHistoryBudgetFraction: 0.35,
+  contextWindowReserve: 0.35,          // generous reserve for tool call responses
   dynamicReserveEnabled: true,
-  dynamicReserveTurnHorizon: 3,     // shorter horizon — small sessions
+  dynamicReserveTurnHorizon: 3,
   dynamicReserveMax: 0.50,
-  keystoneHistoryFraction: 0.1,     // light keystone — history window is already small
+  keystoneHistoryFraction: 0.1,
   keystoneMaxMessages: 5,
-  keystoneMinSignificance: 0.7,     // higher bar — only high-signal keystone messages
-  targetBudgetFraction: 0.50,       // Anvil spec: 0.50 for light
-  maxTotalTriggerTokens: 1500,      // tight trigger ceiling
-  outputProfile: 'light',        // standalone density directives only, no fleet concepts
-  wikiTokenCap: 300,                // Anvil spec: 300 for light
+  keystoneMinSignificance: 0.7,
+  targetBudgetFraction: 0.50,          // Anvil spec: 0.50 for light
+  maxTotalTriggerTokens: 1500,
+  hyperformProfile: 'light',           // standalone density directives only, no fleet concepts
+  wikiTokenCap: 300,                   // Anvil spec: 300 for light
 };
 
 const LIGHT_INDEXER: IndexerConfig = {
@@ -97,10 +98,11 @@ export const lightProfile: HyperMemConfig = {
 //   - Mid-range models (Sonnet, GPT-5-mini, Gemini Flash) at 128k
 //   - Small multi-agent setups or single power-user agents
 //   - Full ACA stack — dreaming optional, background indexing on
-//   - outputProfile: 'standard' — full FOS, no MOD
+//   - hyperformProfile: 'standard' — full FOS, no MOD
 // ---------------------------------------------------------------------------
 
 const STANDARD_COMPOSITOR: CompositorConfig = {
+  budgetFraction: 0.703,               // 90k effective at 128k window
   defaultTokenBudget: 90000,
   maxHistoryMessages: 500,
   maxFacts: 30,
@@ -108,17 +110,17 @@ const STANDARD_COMPOSITOR: CompositorConfig = {
   maxRecentToolPairs: 3,
   maxProseToolPairs: 10,
   warmHistoryBudgetFraction: 0.40,
-  contextWindowReserve: 0.25,
+  contextWindowReserve: 0.25,          // balanced reserve for tool call responses
   dynamicReserveEnabled: true,
   dynamicReserveTurnHorizon: 5,
   dynamicReserveMax: 0.50,
   keystoneHistoryFraction: 0.20,
   keystoneMaxMessages: 15,
   keystoneMinSignificance: 0.5,
-  targetBudgetFraction: 0.65,       // Anvil spec: 0.65 for standard
+  targetBudgetFraction: 0.65,          // Anvil spec: 0.65 for standard
   maxTotalTriggerTokens: 4000,
-  outputProfile: 'standard',       // full FOS, MOD suppressed
-  wikiTokenCap: 600,                // Anvil spec: 600 for standard
+  hyperformProfile: 'standard',        // full FOS, MOD suppressed
+  wikiTokenCap: 600,                   // Anvil spec: 600 for standard
 };
 
 const STANDARD_INDEXER: IndexerConfig = {
@@ -149,11 +151,12 @@ export const standardProfile: HyperMemConfig = {
 //   - Large context models (Opus, GPT-5.4, Gemini Pro) at 200k+
 //   - Council / multi-agent fleet deployments
 //   - Full ACA stack including dreaming, background indexing, cross-session
-//   - outputProfile: 'full' — FOS + MOD, full spec
+//   - hyperformProfile: 'full' — FOS + MOD, full spec
 //   - Higher keystone threshold — more historical context worth surfacing
 // ---------------------------------------------------------------------------
 
 const EXTENDED_COMPOSITOR: CompositorConfig = {
+  budgetFraction: 0.588,               // 160k effective at 272k window
   defaultTokenBudget: 160000,
   maxHistoryMessages: 1000,
   maxFacts: 60,
@@ -161,17 +164,17 @@ const EXTENDED_COMPOSITOR: CompositorConfig = {
   maxRecentToolPairs: 5,
   maxProseToolPairs: 15,
   warmHistoryBudgetFraction: 0.45,
-  contextWindowReserve: 0.20,
+  contextWindowReserve: 0.20,          // tight reserve; large windows have natural headroom
   dynamicReserveEnabled: true,
   dynamicReserveTurnHorizon: 7,
   dynamicReserveMax: 0.45,
   keystoneHistoryFraction: 0.25,
   keystoneMaxMessages: 30,
   keystoneMinSignificance: 0.4,
-  targetBudgetFraction: 0.55,       // Anvil spec: 0.55 for extended (history is huge, budget carefully)
+  targetBudgetFraction: 0.55,          // Anvil spec: 0.55 for extended (history is huge, budget carefully)
   maxTotalTriggerTokens: 10000,
-  outputProfile: 'full',          // FOS + MOD — full fleet spec
-  wikiTokenCap: 800,                // Anvil spec: 800 for extended
+  hyperformProfile: 'full',            // FOS + MOD — full fleet spec
+  wikiTokenCap: 800,                   // Anvil spec: 800 for extended
 };
 
 const EXTENDED_INDEXER: IndexerConfig = {
@@ -236,7 +239,7 @@ export function getProfile(name: ProfileName | 'extended'): HyperMemConfig {
  * @example
  * const config = mergeProfile('light', {
  *   cache: { keyPrefix: 'myapp:' },
- *   compositor: { outputProfile: 'standard' },  // upgrade tier
+ *   compositor: { hyperformProfile: 'standard' },  // upgrade tier
  * });
  */
 export function mergeProfile(

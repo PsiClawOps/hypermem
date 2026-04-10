@@ -91,7 +91,31 @@ const MODEL_CONTEXT_WINDOWS: Array<{ pattern: string; tokens: number }> = [
  * Default reserve: 25% (leaves 75% for input context).
  * Falls back to defaultTokenBudget if no model match.
  */
-function resolveModelBudget(model: string | undefined, defaultBudget: number, reserve = 0.15): number {
+/**
+ * Resolve effective input token budget for a model.
+ *
+ * Priority:
+ * 1. If budgetFraction is set AND model window is detected: window × budgetFraction × (1 - reserve)
+ * 2. If model window detected but no budgetFraction: window × (1 - reserve)
+ * 3. Fallback to defaultTokenBudget (absolute number)
+ */
+function resolveModelBudget(
+  model: string | undefined,
+  defaultBudget: number,
+  reserve = 0.15,
+  budgetFraction?: number,
+): number {
+  const window = resolveModelWindow(model, defaultBudget);
+  // If we detected an actual model window (not the fallback derivation)
+  if (model && budgetFraction != null) {
+    const normalized = model.toLowerCase();
+    for (const entry of MODEL_CONTEXT_WINDOWS) {
+      if (normalized.includes(entry.pattern)) {
+        return Math.floor(entry.tokens * budgetFraction * (1 - reserve));
+      }
+    }
+  }
+  // Original path: detected window × (1 - reserve), or absolute fallback
   if (!model) return defaultBudget;
   const normalized = model.toLowerCase();
   for (const entry of MODEL_CONTEXT_WINDOWS) {
@@ -169,6 +193,7 @@ function computeDynamicReserve(
 }
 
 const DEFAULT_CONFIG: CompositorConfig = {
+  budgetFraction: 0.703,
   defaultTokenBudget: 90000,
   maxHistoryMessages: 250,
   maxFacts: 28,
@@ -922,7 +947,7 @@ export class Compositor {
       : [];
     const { reserve: dynamicReserve, avgTurnCost, dynamic: isDynamic, pressureHigh } =
       computeDynamicReserve(sampleMessages, totalWindow, this.config);
-    const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget, dynamicReserve);
+    const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget, dynamicReserve, this.config.budgetFraction);
     let remaining = budget;
     const warnings: string[] = [];
     const slots: SlotTokenCounts = {
@@ -983,7 +1008,7 @@ export class Compositor {
       const fosEnabled = this.config?.enableFOS !== false;
       const modEnabled = this.config?.enableMOD !== false;
       const outputTier = resolveOutputTier(
-        (this.config?.outputProfile ?? this.config?.outputStandard) as any,
+        (this.config?.hyperformProfile ?? this.config?.outputProfile ?? this.config?.outputStandard) as any,
         fosEnabled,
         modEnabled
       );
@@ -2048,7 +2073,7 @@ export class Compositor {
     // Warm budget uses the same reserve fraction as compose() so warm history
     // never pre-fills more than compose() would actually allow.
     const reserve = this.config.contextWindowReserve ?? 0.15;
-    const effectiveBudget = resolveModelBudget(opts?.model, this.config.defaultTokenBudget, reserve);
+    const effectiveBudget = resolveModelBudget(opts?.model, this.config.defaultTokenBudget, reserve, this.config.budgetFraction);
     const warmBudget = Math.floor(
       effectiveBudget * (this.config.warmHistoryBudgetFraction ?? 0.4)
     );

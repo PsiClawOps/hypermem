@@ -177,6 +177,32 @@ automatically -- set contextWindowReserve to your preferred floor and let the co
 
 **Confabulation resistance** checks output against stored facts before claims are recorded. No LLM call. Pattern matching against the fact corpus, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
 
+### Configuring hyperform
+
+Set `compositor.hyperformProfile` in your hypermem config file (`~/.openclaw/hypermem/config.json`):
+
+```json
+{
+  "compositor": {
+    "hyperformProfile": "standard"
+  }
+}
+```
+
+Valid values:
+
+| Value | Tokens | What it injects |
+|---|---|---|
+| `"light"` | ~100 | Anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration |
+| `"standard"` | ~250 | Full FOS directive set plus pagination rules and hedging policy |
+| `"full"` | ~400 | FOS + MOD: complete normalization with model-specific calibration and cross-agent coordination |
+
+Backward-compatible aliases: `"starter"` maps to `"light"`, `"fleet"` maps to `"full"`.
+
+Default: `"full"` for existing installs, `"light"` for new installs. Start with `"light"` on single-agent or 64k setups. Move to `"standard"` once you want full output shaping without the multi-agent overhead. Use `"full"` only when running a multi-agent fleet where MOD (model output directives for cross-agent consistency) matters.
+
+Changes take effect on gateway restart. No per-agent override yet; `hyperformProfile` applies fleet-wide.
+
 ---
 
 ## What it solves
@@ -407,49 +433,111 @@ If you prefer, hand the install to your OpenClaw agent:
 
 ### Tuning
 
-hypermem ships three aligned operating profiles: `light`, `standard`, and `full`. Pick one and set `outputProfile` in your config. Everything else follows.
+hypermem has two independent tuning surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model's response is shaped). Most users pick a profile and override one or two knobs.
 
-| Profile | Context window | Budget fraction | Best for |
-|---|---|---|---|
-| `light` | 64k | 0.50 | Single-agent installs, minimal parallel work |
-| `standard` | 128k | 0.65 | Normal OpenClaw deployments |
-| `full` | 200k+ | 0.55 | Large-context or multi-agent installs, maximum richness |
+#### Profiles
 
-**Start with `light`** on 64k models or single-agent systems. Move to `standard` once the system has stable latency and headroom. Use `full` only when you want maximum context richness and have the budget for it.
+Three pre-built profiles ship with hypermem. Each sets every compositor knob to a coherent default:
 
-Primary tuning knobs:
+| Profile | Target window | `budgetFraction` | `targetBudgetFraction` | `hyperformProfile` | Best for |
+|---|---|---|---|---|---|
+| `light` | 64k | 0.625 | 0.50 | `light` | Single-agent installs, small models |
+| `standard` | 128k | 0.703 | 0.65 | `standard` | Normal deployments, small fleets |
+| `full` | 200k+ | 0.588 | 0.55 | `full` | Multi-agent fleets, large-context models |
 
-- **`targetBudgetFraction`**: caps total non-history context weight. Lower values force lighter composition.
-- **`wikiTokenCap`**: caps compiled-knowledge/wiki contribution.
-- **`outputProfile`**: `light`, `standard`, or `full`. Controls how much hyperform guidance is injected per turn.
-
-Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes effect on gateway restart:
-
-```json
-{
-  "deferToolPruning": true,
-  "compositor": {
-    "defaultTokenBudget": 60000,
-    "maxFacts": 18,
-    "contextWindowReserve": 0.25,
-    "outputProfile": "standard"
-  }
-}
-```
-
-Additional compositor knobs: `maxCrossSessionContext`, `maxRecentToolPairs`, `maxProseToolPairs`, see INSTALL.md for full descriptions.
-
-`deferToolPruning: true` tells hypermem to skip its own T0/T1/T2/T3 gradient when OpenClaw's native `contextPruning` extension is active (Anthropic and Google providers). On those providers, OpenClaw's pruner handles tool result trimming: ratio-driven at >30% context fill, soft-trim head+tail for results over 4,000 chars, hard-clear above 50k total, with the last 3 assistant turns always protected. hypermem's gradient remains active as fallback for other providers (GPT-5.4, etc.). Default: `true` for Anthropic installs.
-
-`outputProfile` valid values: `"light"` (~100 tokens: anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration), `"standard"` (~250 tokens: full directive set plus pagination and hedging rules), `"full"` (~400 tokens: complete normalization with full directive set and model-specific calibration). Default: `"standard"`.
-
-Context presets ship as named profiles importable from the package:
+Start with `light`. Move up when you need richer context and have the headroom.
 
 ```typescript
 import { lightProfile, standardProfile, fullProfile } from '@psiclawops/hypermem';
 ```
 
-Pass to `HyperMem.create()` as the base config. Full tuning notes are in INSTALL.md.
+Pass to `HyperMem.create()` as the base config, or use `mergeProfile()` to override individual knobs.
+
+#### Context assembly knobs
+
+These control how the context window is divided. All live under `compositor` in `~/.openclaw/hypermem/config.json`.
+
+**Window budget:**
+
+| Knob | Type | What it controls |
+|---|---|---|
+| `budgetFraction` | 0.0–1.0 | Fraction of the detected context window used as the input token budget. `detectedWindow × budgetFraction` = effective input budget. This is the primary dial. |
+| `contextWindowReserve` | 0.0–1.0 | Fraction reserved for model output and tool call responses. Higher = more headroom for large tool results, fewer tokens for context. Default: 0.25 (standard), 0.35 (light). |
+| `targetBudgetFraction` | 0.3–0.85 | Fraction of the effective budget allocated to assembled context (facts, wiki, cross-session). The remainder goes to conversation history. Lower = lighter context, more history. |
+
+How they compose: `detectedWindow × budgetFraction × (1 - contextWindowReserve)` = tokens available for context + history. Then `targetBudgetFraction` splits that between assembled context and history.
+
+`budgetFraction` replaces the old `defaultTokenBudget` (absolute token number). `defaultTokenBudget` is still honored as a fallback when model detection fails.
+
+**Fact injection:**
+
+| Knob | Type | Default | What it controls |
+|---|---|---|---|
+| `maxFacts` | number | 30 | Maximum facts surfaced per compose pass. More facts = richer context, higher token cost. |
+| `wikiTokenCap` | tokens | 600 | Hard ceiling on compiled wiki/knowledge injection per pass. Prevents topic synthesis from dominating. |
+| `maxTotalTriggerTokens` | tokens | 4000 | Ceiling across all trigger-fired doc chunk collections. Prevents pathological prompts from starving the budget. |
+
+**History and keystone:**
+
+| Knob | Type | Default | What it controls |
+|---|---|---|---|
+| `maxHistoryMessages` | number | 500 | Maximum messages stored in the hot history window. |
+| `keystoneHistoryFraction` | 0.0–0.5 | 0.20 | Fraction of history budget reserved for recalled older messages (keystones). 0 disables keystones. |
+| `keystoneMaxMessages` | number | 15 | Max keystone messages injected per pass. |
+| `keystoneMinSignificance` | 0.0–1.0 | 0.5 | Minimum episode significance for a message to qualify as a keystone. |
+
+**Tool history:**
+
+| Knob | Type | Default | What it controls |
+|---|---|---|---|
+| `maxRecentToolPairs` | number | 3 | Recent tool call/result pairs kept verbatim. |
+| `maxProseToolPairs` | number | 10 | Older pairs converted to heuristic prose stubs (e.g. "Read /src/foo.ts (1.2KB)"). Beyond this, tool payloads are dropped. |
+| `maxCrossSessionContext` | tokens | 4000 | Token ceiling for cross-session context from other agents. 0 disables. |
+
+**Dynamic reserve:**
+
+| Knob | Type | Default | What it controls |
+|---|---|---|---|
+| `dynamicReserveEnabled` | boolean | true | Projects forward from recent turn cost to adjust reserve dynamically. |
+| `dynamicReserveTurnHorizon` | number | 5 | Turns to project forward: `avg_turn_cost × horizon / totalWindow`. |
+| `dynamicReserveMax` | 0.0–1.0 | 0.50 | Hard ceiling on dynamic reserve fraction. |
+
+#### Output shaping (HyperForm)
+
+`hyperformProfile` controls what output normalization directives are injected. This is independent of context assembly.
+
+| Value | Tokens | What it injects |
+|---|---|---|
+| `"light"` | ~100 | Anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration |
+| `"standard"` | ~250 | Full FOS directive set plus pagination rules and hedging policy |
+| `"full"` | ~400 | FOS + MOD: complete normalization with model-specific calibration and cross-agent coordination |
+
+See the [hyperform section](#hyperform) above for before/after examples.
+
+Backward-compatible aliases: `"starter"` maps to `"light"`, `"fleet"` maps to `"full"`. The old field name `outputProfile` still works but `hyperformProfile` is preferred.
+
+Fine-grained FOS/MOD control: set `enableFOS: false` or `enableMOD: false` to suppress individual layers without changing the profile tier.
+
+#### Example config
+
+Drop a `~/.openclaw/hypermem/config.json` to override defaults. Takes effect on gateway restart:
+
+```json
+{
+  "deferToolPruning": true,
+  "compositor": {
+    "budgetFraction": 0.70,
+    "contextWindowReserve": 0.25,
+    "targetBudgetFraction": 0.65,
+    "maxFacts": 18,
+    "hyperformProfile": "standard"
+  }
+}
+```
+
+`deferToolPruning: true` tells hypermem to skip its own T0/T1/T2/T3 tool gradient when OpenClaw's native `contextPruning` extension is active (Anthropic and Google providers). On those providers, OpenClaw's pruner handles tool result trimming: ratio-driven at >30% context fill, soft-trim head+tail for results over 4,000 chars, hard-clear above 50k total, with the last 3 assistant turns always protected. hypermem's gradient remains active as fallback for other providers (GPT-5.4, etc.). Default: `true` for Anthropic installs.
+
+Full tuning notes and deployment-specific options: **[INSTALL.md](./INSTALL.md)**
 
 ---
 

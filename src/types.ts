@@ -443,6 +443,19 @@ export interface CacheConfig {
 export type RedisConfig = CacheConfig;
 
 export interface CompositorConfig {
+  /**
+   * Fraction of the detected context window to use as the input token budget.
+   * The effective budget is: detectedContextWindow × budgetFraction.
+   * contextWindowReserve is then subtracted from this for output headroom.
+   *
+   * Range: 0.3–0.85. Default: 0.70
+   * Light: 0.625 (40k/64k), Standard: 0.703 (90k/128k), Full: 0.60 (160k/272k)
+   */
+  budgetFraction?: number;
+  /**
+   * @deprecated Use budgetFraction instead. Absolute token fallback used when
+   * model detection fails and budgetFraction is not set.
+   */
   defaultTokenBudget: number;
   maxHistoryMessages: number;
   maxFacts: number;
@@ -551,19 +564,19 @@ export interface CompositorConfig {
    */
   enableMOD?: boolean;
   /**
-   * Output profile tier. Controls what FOS content is injected.
+   * HyperForm output shaping profile. Controls what FOS/MOD content is injected.
    *
    * 'light'    — ~100 token standalone directives. No MOD, no fleet concepts.
-   *             Works on any single-agent 64k setup. No DB required.
-   * 'standard' — Full FOS: density targets, format rules, compression ratios,
-   *              task-context scoping. No MOD.
+   * 'standard' — Full FOS: density targets, format rules, compression ratios.
    * 'full'     — FOS + MOD. Cross-agent coordination, full spec.
    *
    * Backward compat: 'starter' maps to 'light', 'fleet' maps to 'full'.
    * Default: 'full' (backward-compatible). New install default: 'light'.
    */
+  hyperformProfile?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
+  /** @deprecated Use hyperformProfile */
   outputProfile?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
-  /** @deprecated Use outputProfile */
+  /** @deprecated Use hyperformProfile */
   outputStandard?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
   /**
    * Hard token ceiling for wiki page injection per compose pass.
