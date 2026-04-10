@@ -265,6 +265,8 @@ hypermem plugs into OpenClaw via two plugins that fill both composition slots:
 
 Both load from the same repo and share a single HyperMem core singleton. The context engine plugin (`hypercompositor`) is the heavy one: session warming, compositor, tool gradient, hyperform. The memory plugin (`hypermem`) is a thin wrapper that exposes HyperMem's hybrid retrieval as OpenClaw's standard `MemoryPluginCapability`, so `memory_search` routes through the official memory slot and shows correctly in `openclaw plugins list`.
 
+The Plugin column is the npm package name. The ID column is what goes in `plugins.allow` and `plugins.slots.*`. Don't put the package name in a slot config.
+
 **L1: SQLite in-memory.** Sub-millisecond hot reads, no network dependency, no daemon, no retry logic. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and agent registry data. The compositor hits this first on every turn.
 
 **L2: Messages DB.** A single `MEMORY.md` file doesn't hold per-agent conversation history at scale. Thousands of turns across dozens of agents need queryable, concurrent-safe storage. Per-agent SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
