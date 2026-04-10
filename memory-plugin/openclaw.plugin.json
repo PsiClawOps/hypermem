@@ -1,0 +1,10 @@
+{
+  "id": "hypermem-memory",
+  "enabledByDefault": false,
+  "kind": "memory",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

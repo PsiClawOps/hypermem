@@ -161,7 +161,7 @@ This means:
 
 ## Context Engine Plugin
 
-`plugin/src/index.ts` — OpenClaw context engine plugin (replaces basic hook integration):
+`plugin/src/index.ts` — OpenClaw context engine plugin (fills `contextEngine` slot):
 
 ```
 gateway:startup     → Init hypermem, auto-rotate DBs, hydrate fleet cache
@@ -171,7 +171,15 @@ agent:afterTurn     → Ingest new messages to SQLite + Redis, trigger backgroun
 ```
 
 Registers with `ownsCompaction: true` — runtime skips legacy compaction entirely.
-Deployed as managed hook at `~/.openclaw/hooks/hypermem-core/handler.js`.
+
+## Memory Plugin
+
+`memory-plugin/src/index.ts` — Lightweight memory provider (fills `memory` slot):
+
+- Registers `MemoryPluginCapability` with a `MemorySearchManager` backed by HyperMem's hybrid FTS5 + KNN retrieval
+- Provides the `memory_search` tool through the official memory slot interface
+- Public artifacts provider lists `MEMORY.md` and `memory/*.md` for all configured agents
+- Stateless wrapper: lifecycle is owned by the context engine plugin
 
 ### Plugin Data Flow
 
@@ -270,6 +278,7 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 | `preference-store.ts` | ~170 | L4 | Operator behavioral patterns |
 | `topic-store.ts` | ~160 | L4 | Cross-session thread tracking |
 | `plugin/src/index.ts` | ~590 | - | OpenClaw context engine plugin + window invalidation |
+| `memory-plugin/src/index.ts` | ~290 | - | OpenClaw memory slot plugin (memory_search via hybrid retrieval) |
 
 ## Test Coverage (105 assertions, 11 suites)
 

@@ -20,7 +20,8 @@ All notable changes to HyperMem are documented here.
 ### Changed
 
 - **Tool gradient is now a fallback, not primary.** When OpenClaw's `contextPruning` is active (`mode: "cache-ttl"`), HyperMem skips its own gradient pass. The two systems no longer fight over the same tool results.
-- **`install.sh` now registers the memory plugin slot.** Adds `plugins.slots.memory hypermem` automatically on install. Previously required manual config.
+- **Two-plugin architecture.** HyperMem now ships as two OpenClaw plugins: `hypermem` (context engine, fills `contextEngine` slot) and `hypermem-memory` (lightweight memory provider, fills `memory` slot). The memory plugin provides `memory_search` backed by hybrid FTS5 + KNN retrieval against library.db. Previously, a single plugin attempted to fill both slots.
+- **`install.sh` now registers both plugin slots and load paths.** Adds `plugins.slots.contextEngine hypermem` and `plugins.slots.memory hypermem-memory` automatically on install. Previously required manual config.
 - **Knowledge lint threshold raised.** `isQualityFact()` minimum content length raised from 40 to 60 chars. Removed ~12% additional low-signal entries in production validation.
 
 ### Fixed

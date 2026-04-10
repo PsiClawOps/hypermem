@@ -1,0 +1,6 @@
+# Git-ignored but needed in npm package
+!dist/
+
+# Not needed in npm package
+src/
+tsconfig.json

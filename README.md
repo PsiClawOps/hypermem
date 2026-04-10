@@ -256,7 +256,14 @@ L1 and L4 structured retrieval are sub-millisecond. Vector embeddings are comput
 
 ## Architecture
 
-hypermem plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle. It registers as both `contextEngine` and `memory`, providing the standard memory slot interface alongside full prompt composition: `memory_search` routes through the official slot and shows correctly in `openclaw plugins list`.
+hypermem plugs into OpenClaw via two plugins that fill both composition slots:
+
+| Plugin | ID | Slot | What it does |
+|---|---|---|---|
+| `@psiclawops/hypermem-context-engine` | `hypermem` | `contextEngine` | Owns session lifecycle, ingest, compose, afterTurn indexing, tool compression, hyperform |
+| `@psiclawops/hypermem-memory` | `hypermem-memory` | `memory` | Provides `memory_search` tool backed by hybrid FTS5 + KNN retrieval against library.db |
+
+Both load from the same repo. The context engine plugin is the heavy one (session warming, compositor, tool gradient, hyperform). The memory plugin is a thin wrapper that exposes HyperMem's hybrid retrieval as OpenClaw's standard `MemoryPluginCapability`, so `memory_search` routes through the official memory slot and shows correctly in `openclaw plugins list`.
 
 **L1: SQLite in-memory.** Sub-millisecond hot reads, no network dependency, no daemon, no retry logic. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and agent registry data. The compositor hits this first on every turn.
 
@@ -371,10 +378,12 @@ git clone https://github.com/PsiClawOps/hypermem.git ~/.openclaw/workspace/repo/
 cd ~/.openclaw/workspace/repo/hypermem
 npm install && npm run build
 npm --prefix plugin install && npm --prefix plugin run build
+npm --prefix memory-plugin install && npm --prefix memory-plugin run build
 
 openclaw config set plugins.slots.contextEngine hypermem
-openclaw config set plugins.slots.memory hypermem
-openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin"]' --strict-json
+openclaw config set plugins.slots.memory hypermem-memory
+openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin","~/.openclaw/workspace/repo/hypermem/memory-plugin"]' --strict-json
+openclaw config set plugins.allow '["hypermem","hypermem-memory"]' --strict-json
 openclaw gateway restart
 ```
 
