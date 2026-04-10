@@ -1,5 +1,5 @@
 {
-  "id": "hypermem",
+  "id": "hypercompositor",
   "enabledByDefault": false,
   "kind": "context-engine",
   "configSchema": {

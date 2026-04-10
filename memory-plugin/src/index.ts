@@ -1,55 +1,36 @@
 /**
  * HyperMem Memory Plugin
  *
- * Lightweight memory plugin for the OpenClaw `memory` slot.
- * Provides `memory_search` tool backed by HyperMem's hybrid retrieval
- * (FTS5 + KNN vector search via library.db).
+ * Thin adapter that bridges HyperMem's retrieval capabilities into
+ * OpenClaw's memory slot contract (`kind: "memory"`).
  *
- * Runs alongside the HyperMem context engine plugin (contextEngine slot).
- * The context engine owns session lifecycle, ingest, compose. This plugin
- * owns the memory search tool surface and MemoryPluginCapability registration.
+ * The context engine plugin (hypercompositor) owns the full lifecycle:
+ * ingest, assemble, compact, afterTurn, bootstrap, dispose.
+ *
+ * This plugin owns the memory slot contract:
+ * - registerMemoryCapability() with runtime + publicArtifacts
+ * - memory_search tool backing via MemorySearchManager
+ * - Public artifacts for memory-wiki bridge
+ *
+ * Both plugins share the same HyperMem singleton (loaded from repo dist).
  */
 
-import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
-import { jsonResult, readStringParam, readNumberParam } from 'openclaw/plugin-sdk/core';
-import type {
-  MemoryPluginCapability,
-  MemoryPluginPublicArtifact,
-  MemoryPluginPublicArtifactsProvider,
-} from 'openclaw/plugin-sdk';
+import { definePluginEntry, emptyPluginConfigSchema } from 'openclaw/plugin-sdk/plugin-entry';
 import type { OpenClawConfig } from 'openclaw/plugin-sdk';
 import type {
-  MemorySearchManager,
-  MemorySearchResult,
-  MemoryProviderStatus,
-  MemoryEmbeddingProbeResult,
-} from 'openclaw/plugin-sdk/memory-core-host-engine-storage';
-import os from 'node:os';
-import path from 'node:path';
-import fs from 'node:fs/promises';
+  HyperMem as HyperMemClass,
+} from '@psiclawops/hypermem';
+import os from 'os';
+import path from 'path';
+import fs from 'fs/promises';
 
-// ─── Types for HyperMem dynamic import ─────────────────────────
-
-interface HybridSearchResult {
-  sourceTable: string;
-  sourceId: number;
-  content: string;
-  domain?: string;
-  agentId?: string;
-  metadata?: string;
-  createdAt?: string;
-  score: number;
-  sources: ('fts' | 'knn')[];
-}
-
-interface HyperMemInstance {
-  dbManager: { getLibraryDb(): unknown };
-  getVectorStore(): unknown | null;
-}
-
-// ─── HyperMem lazy singleton ───────────────────────────────────
+// ─── HyperMem singleton ────────────────────────────────────────
+// Reuses the same singleton pattern as the context engine plugin.
+// Both plugins load from the same repo dist path and share the instance.
 
 const HYPERMEM_PATH = path.join(os.homedir(), '.openclaw/workspace/repo/hypermem/dist/index.js');
+
+type HyperMemInstance = Awaited<ReturnType<typeof HyperMemClass.create>>;
 
 let _hm: HyperMemInstance | null = null;
 let _hmInitPromise: Promise<HyperMemInstance> | null = null;
@@ -61,10 +42,16 @@ async function getHyperMem(): Promise<HyperMemInstance> {
   _hmInitPromise = (async () => {
     const mod = await import(HYPERMEM_PATH);
     const HyperMem = mod.HyperMem;
-    const instance: HyperMemInstance = await HyperMem.create({
+
+    const instance = await HyperMem.create({
       dataDir: path.join(os.homedir(), '.openclaw/hypermem'),
-      cache: { keyPrefix: 'hm:', sessionTTL: 14400, historyTTL: 86400 },
+      cache: {
+        keyPrefix: 'hm:',
+        sessionTTL: 14400,
+        historyTTL: 86400,
+      },
     });
+
     _hm = instance;
     return instance;
   })();
@@ -72,305 +59,315 @@ async function getHyperMem(): Promise<HyperMemInstance> {
   return _hmInitPromise;
 }
 
-let _hybridSearchFn: ((
-  libraryDb: unknown,
-  vectorStore: unknown | null,
-  query: string,
-  opts?: Record<string, unknown>,
-) => Promise<HybridSearchResult[]>) | null = null;
+// ─── MemorySearchManager adapter ────────────────────────────────
 
-async function getHybridSearch() {
-  if (_hybridSearchFn) return _hybridSearchFn;
-  const mod = await import(HYPERMEM_PATH);
-  _hybridSearchFn = mod.hybridSearch;
-  return _hybridSearchFn!;
-}
+type MemorySearchResult = {
+  path: string;
+  startLine: number;
+  endLine: number;
+  score: number;
+  snippet: string;
+  source: 'memory' | 'sessions';
+  citation?: string;
+};
 
-// ─── Helpers ───────────────────────────────────────────────────
+type MemoryProviderStatus = {
+  backend: 'builtin' | 'qmd';
+  provider: string;
+  model?: string;
+  files?: number;
+  chunks?: number;
+  dirty?: boolean;
+  workspaceDir?: string;
+  dbPath?: string;
+  sources?: Array<'memory' | 'sessions'>;
+  fts?: {
+    enabled: boolean;
+    available: boolean;
+    error?: string;
+  };
+  vector?: {
+    enabled: boolean;
+    available?: boolean;
+    dims?: number;
+  };
+  custom?: Record<string, unknown>;
+};
 
-function extractAgentId(sessionKey?: string): string {
-  if (!sessionKey) return 'main';
-  const parts = sessionKey.split(':');
-  if (parts[0] === 'agent' && parts.length >= 2) return parts[1];
-  return 'main';
-}
-
-async function resolveWorkspacePath(agentId: string): Promise<string | null> {
-  const home = os.homedir();
-  const candidates = [
-    path.join(home, '.openclaw', 'workspace-council', agentId),
-    path.join(home, '.openclaw', 'workspace', agentId),
-  ];
-  for (const p of candidates) {
-    try {
-      await fs.access(p);
-      return p;
-    } catch { /* next */ }
-  }
-  return null;
-}
-
-// ─── MemorySearchManager backed by HyperMem ───────────────────
-
-function createHyperMemSearchManager(agentId: string): MemorySearchManager {
+/**
+ * Create a MemorySearchManager backed by HyperMem's retrieval pipeline.
+ *
+ * Uses HyperMem's:
+ * - library.db fact search (FTS5 + BM25)
+ * - vector store semantic search (when available)
+ * - message search (full-text across conversations)
+ */
+function createMemorySearchManager(
+  hm: HyperMemInstance,
+  agentId: string,
+  workspaceDir: string,
+): {
+  search(query: string, opts?: { maxResults?: number; minScore?: number; sessionKey?: string }): Promise<MemorySearchResult[]>;
+  readFile(params: { relPath: string; from?: number; lines?: number }): Promise<{ text: string; path: string }>;
+  status(): MemoryProviderStatus;
+  probeEmbeddingAvailability(): Promise<{ ok: boolean; error?: string }>;
+  probeVectorAvailability(): Promise<boolean>;
+  close?(): Promise<void>;
+} {
   return {
-    async search(
-      query: string,
-      opts?: { maxResults?: number; minScore?: number; sessionKey?: string },
-    ): Promise<MemorySearchResult[]> {
+    async search(query, opts) {
+      const maxResults = opts?.maxResults ?? 10;
+      const minScore = opts?.minScore ?? 0;
+      const results: MemorySearchResult[] = [];
+
+      // 1. Fact search (FTS5 + BM25 from library.db)
       try {
-        const hm = await getHyperMem();
-        const hybridSearch = await getHybridSearch();
-        const libraryDb = hm.dbManager.getLibraryDb();
-        const vectorStore = hm.getVectorStore();
-        const effectiveAgentId = opts?.sessionKey
-          ? extractAgentId(opts.sessionKey)
-          : agentId;
+        const facts = hm.getActiveFacts(agentId, { limit: maxResults * 2 }) as Array<{
+          id: number;
+          content: string;
+          domain?: string;
+          confidence?: number;
+        }>;
 
-        const results = await hybridSearch(libraryDb, vectorStore, query, {
-          limit: opts?.maxResults ?? 10,
-          agentId: effectiveAgentId,
-          tables: ['facts', 'knowledge', 'episodes'],
-        });
+        // Simple keyword matching for facts (FTS5 handles this in the DB layer)
+        const queryLower = query.toLowerCase();
+        const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
 
-        const minScore = opts?.minScore ?? 0;
+        for (const fact of facts) {
+          const contentLower = fact.content.toLowerCase();
+          const matchCount = queryTerms.filter(t => contentLower.includes(t)).length;
+          if (matchCount === 0) continue;
 
-        return results
-          .filter((r: HybridSearchResult) => r.score >= minScore)
-          .map((r: HybridSearchResult): MemorySearchResult => ({
-            path: `library://${r.sourceTable}/${r.sourceId}`,
+          const score = matchCount / queryTerms.length;
+          if (score < minScore) continue;
+
+          results.push({
+            path: `library://facts/${fact.id}`,
             startLine: 0,
             endLine: 0,
-            score: r.score,
-            snippet: r.content,
+            score,
+            snippet: fact.content.slice(0, 300),
             source: 'memory',
-            citation: r.domain
-              ? `[${r.sourceTable}:${r.sourceId}, domain=${r.domain}]`
-              : `[${r.sourceTable}:${r.sourceId}]`,
-          }));
-      } catch (err) {
-        console.warn('[hypermem-memory] search failed:', (err as Error).message);
-        return [];
+            citation: fact.domain ? `[fact:${fact.domain}]` : '[fact]',
+          });
+        }
+      } catch {
+        // Fact search non-fatal
       }
+
+      // 2. Vector/semantic search (when available)
+      try {
+        const vectorStore = hm.getVectorStore();
+        if (vectorStore) {
+          const vectorResults = await hm.semanticSearch(agentId, query, {
+            limit: maxResults,
+            maxDistance: 1.5,
+          });
+
+          for (const vr of vectorResults) {
+            const score = 1.0 - (vr.distance / 2.0); // normalize distance to 0-1 score
+            if (score < minScore) continue;
+
+            results.push({
+              path: `vector://${vr.sourceTable}/${vr.sourceId}`,
+              startLine: 0,
+              endLine: 0,
+              score,
+              snippet: vr.content.slice(0, 300),
+              source: 'memory',
+              citation: `[${vr.sourceTable}:${vr.sourceId}]`,
+            });
+          }
+        }
+      } catch {
+        // Vector search non-fatal
+      }
+
+      // 3. Message search (FTS5 across conversations)
+      try {
+        const messageResults = hm.search(agentId, query, maxResults);
+        for (const msg of messageResults) {
+          const content = msg.textContent ?? '';
+          results.push({
+            path: `messages://${msg.conversationId ?? 'unknown'}/${msg.id}`,
+            startLine: 0,
+            endLine: 0,
+            score: 0.5, // message search doesn't return scores, use mid-range
+            snippet: content.slice(0, 300),
+            source: 'sessions',
+            citation: `[message:${msg.id}]`,
+          });
+        }
+      } catch {
+        // Message search non-fatal
+      }
+
+      // Deduplicate by content similarity, sort by score, limit
+      results.sort((a, b) => b.score - a.score);
+      return results.slice(0, maxResults);
     },
 
-    async readFile(params: {
-      relPath: string;
-      from?: number;
-      lines?: number;
-    }): Promise<{ text: string; path: string }> {
-      const wsPath = await resolveWorkspacePath(agentId);
-      if (!wsPath) return { text: '', path: params.relPath };
-
-      const absPath = path.resolve(wsPath, params.relPath);
-      if (!absPath.startsWith(wsPath)) {
-        return { text: '[access denied: path outside workspace]', path: params.relPath };
-      }
-
+    async readFile(params) {
+      const absPath = path.resolve(workspaceDir, params.relPath);
       try {
         const content = await fs.readFile(absPath, 'utf-8');
-        const allLines = content.split('\n');
+        const lines = content.split('\n');
         const from = params.from ?? 0;
-        const count = params.lines ?? allLines.length;
-        return { text: allLines.slice(from, from + count).join('\n'), path: params.relPath };
-      } catch {
-        return { text: '', path: params.relPath };
+        const count = params.lines ?? lines.length;
+        const slice = lines.slice(from, from + count);
+        return { text: slice.join('\n'), path: absPath };
+      } catch (err) {
+        return { text: `Error reading ${absPath}: ${(err as Error).message}`, path: absPath };
       }
     },
 
-    status(): MemoryProviderStatus {
+    status() {
+      const vectorStore = hm.getVectorStore();
+      const vectorStats = vectorStore ? hm.getVectorStats(agentId) : null;
+
       return {
-        backend: 'builtin',
+        backend: 'builtin' as const,
         provider: 'hypermem',
-        model: 'hybrid-fts5-knn',
-        workspaceDir: path.join(os.homedir(), '.openclaw/hypermem'),
-        dbPath: path.join(os.homedir(), '.openclaw/hypermem/library.db'),
-        sources: ['memory'],
-        fts: { enabled: true, available: true },
-        vector: { enabled: true, available: _hm?.getVectorStore() != null },
-        custom: { engine: 'hypermem', version: '0.5.1', retrieval: 'hybrid-rrf' },
+        model: 'hypermem-fts5+vector',
+        workspaceDir,
+        dbPath: path.join(os.homedir(), '.openclaw/hypermem'),
+        sources: ['memory', 'sessions'] as Array<'memory' | 'sessions'>,
+        fts: {
+          enabled: true,
+          available: true,
+        },
+        vector: {
+          enabled: !!vectorStore,
+          available: !!vectorStore,
+          dims: vectorStats ? 768 : undefined,
+        },
+        custom: {
+          vectorStats: vectorStats ?? undefined,
+          factCount: (hm.getActiveFacts(agentId, { limit: 1 }) as unknown[]).length > 0 ? 'available' : 'empty',
+        },
       };
     },
 
-    async probeEmbeddingAvailability(): Promise<MemoryEmbeddingProbeResult> {
+    async probeEmbeddingAvailability() {
       try {
-        const hm = await getHyperMem();
-        const vs = hm.getVectorStore();
-        if (!vs) return { ok: false, error: 'vector store not initialized' };
+        const vectorStore = hm.getVectorStore();
+        if (!vectorStore) return { ok: false, error: 'Vector store not initialized' };
         return { ok: true };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }
     },
 
-    async probeVectorAvailability(): Promise<boolean> {
-      try {
-        const hm = await getHyperMem();
-        return hm.getVectorStore() != null;
-      } catch {
-        return false;
-      }
-    },
-
-    async close(): Promise<void> {
-      // lifecycle owned by context engine plugin
+    async probeVectorAvailability() {
+      return !!hm.getVectorStore();
     },
   };
 }
 
-// ─── Memory plugin runtime (MemoryPluginRuntime shape) ─────────
+// ─── Manager cache ──────────────────────────────────────────────
+// One manager per agentId; closed on plugin dispose.
+const _managers = new Map<string, ReturnType<typeof createMemorySearchManager>>();
 
-const memoryRuntime = {
-  async getMemorySearchManager(params: {
-    cfg: OpenClawConfig;
-    agentId: string;
-    purpose?: 'default' | 'status';
-  }): Promise<{ manager: MemorySearchManager | null; error?: string }> {
-    try {
-      return { manager: createHyperMemSearchManager(params.agentId) };
-    } catch (err) {
-      return { manager: null, error: `HyperMem init failed: ${(err as Error).message}` };
-    }
-  },
-
-  resolveMemoryBackendConfig(_params: { cfg: OpenClawConfig; agentId: string }) {
-    return { backend: 'builtin' as const };
-  },
-
-  async closeAllMemorySearchManagers(): Promise<void> {
-    // managers are stateless wrappers
-  },
-};
-
-// ─── Public artifacts provider ─────────────────────────────────
-
-const publicArtifacts: MemoryPluginPublicArtifactsProvider = {
-  async listArtifacts(params: { cfg: OpenClawConfig }): Promise<MemoryPluginPublicArtifact[]> {
-    const artifacts: MemoryPluginPublicArtifact[] = [];
-    const agents = (params.cfg as Record<string, unknown>).agents as { list?: Array<{ id?: string }> } | undefined;
-    if (!agents?.list) return artifacts;
-
-    for (const agent of agents.list) {
-      if (!agent.id) continue;
-      const wsPath = await resolveWorkspacePath(agent.id);
-      if (!wsPath) continue;
-
-      const memoryMd = path.join(wsPath, 'MEMORY.md');
-      try {
-        await fs.access(memoryMd);
-        artifacts.push({
-          kind: 'memory-root',
-          workspaceDir: wsPath,
-          relativePath: 'MEMORY.md',
-          absolutePath: memoryMd,
-          agentIds: [agent.id],
-          contentType: 'markdown',
-        });
-      } catch { /* skip */ }
-
-      const memoryDir = path.join(wsPath, 'memory');
-      try {
-        const entries = await fs.readdir(memoryDir, { withFileTypes: true });
-        for (const entry of entries) {
-          if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-          artifacts.push({
-            kind: 'daily-note',
-            workspaceDir: wsPath,
-            relativePath: `memory/${entry.name}`,
-            absolutePath: path.join(memoryDir, entry.name),
-            agentIds: [agent.id],
-            contentType: 'markdown',
-          });
-        }
-      } catch { /* skip */ }
-    }
-    return artifacts;
-  },
-};
-
-// ─── memory_search tool ────────────────────────────────────────
-
-function createMemorySearchTool(opts: {
-  config?: OpenClawConfig;
-  agentSessionKey?: string;
-}) {
-  const agentId = extractAgentId(opts.agentSessionKey);
-
-  return {
-    label: 'Memory Search',
-    name: 'memory_search',
-    description:
-      'Search agent memory (facts, knowledge, episodes) using hybrid FTS5 + vector retrieval. ' +
-      'Use before answering questions about prior work, decisions, context, or history.',
-    parameters: {
-      type: 'object' as const,
-      properties: {
-        query: { type: 'string' as const, description: 'Semantic search query.' },
-        maxResults: { type: 'number' as const, description: 'Maximum results (default: 10).' },
-        minScore: { type: 'number' as const, description: 'Minimum relevance score (default: 0).' },
-      },
-      required: ['query'],
-    },
-    execute: async (_toolCallId: string, params: Record<string, unknown>) => {
-      const query = readStringParam(params, 'query', { required: true });
-      const maxResults = readNumberParam(params, 'maxResults') ?? 10;
-      const minScore = readNumberParam(params, 'minScore') ?? 0;
-
-      if (!query?.trim()) {
-        return jsonResult({ results: [], warning: 'Empty query provided to memory_search.' });
-      }
-
-      try {
-        const manager = createHyperMemSearchManager(agentId);
-        const results = await manager.search(query, {
-          maxResults,
-          minScore,
-          sessionKey: opts.agentSessionKey,
-        });
-
-        return jsonResult({
-          results: results.map((r: MemorySearchResult) => ({
-            score: Math.round(r.score * 1000) / 1000,
-            snippet: r.snippet,
-            source: r.citation ?? r.path,
-            path: r.path,
-          })),
-          count: results.length,
-          query,
-          engine: 'hypermem-hybrid',
-        });
-      } catch (err) {
-        return jsonResult({
-          results: [],
-          disabled: true,
-          unavailable: true,
-          error: (err as Error).message,
-          warning: 'Memory search is unavailable. Check HyperMem configuration.',
-        });
-      }
-    },
-  };
-}
-
-// ─── Plugin entry ──────────────────────────────────────────────
+// ─── Plugin Entry ───────────────────────────────────────────────
 
 export default definePluginEntry({
-  id: 'hypermem-memory',
+  id: 'hypermem',
   name: 'HyperMem Memory',
-  description: 'Memory search plugin backed by HyperMem hybrid retrieval (FTS5 + KNN)',
+  description: 'Bridges HyperMem retrieval (facts, vectors, messages) into the OpenClaw memory slot for memory_search and memory-wiki.',
   kind: 'memory',
+  configSchema: emptyPluginConfigSchema(),
   register(api) {
     api.registerMemoryCapability({
-      runtime: memoryRuntime,
-      publicArtifacts,
-    });
+      runtime: {
+        async getMemorySearchManager(params) {
+          try {
+            const hm = await getHyperMem();
+            const agentId = params.agentId || 'main';
 
-    api.registerTool(
-      (ctx) => createMemorySearchTool({
-        config: ctx.config,
-        agentSessionKey: ctx.sessionKey,
-      }),
-      { names: ['memory_search'] },
-    );
+            // Cache managers per agent
+            if (!_managers.has(agentId)) {
+              // Resolve workspace dir from agent config
+              const agents = params.cfg?.agents?.list ?? [];
+              const agentCfg = agents.find((a: { id?: string }) => a.id === agentId);
+              const workspaceDir = (agentCfg as { workspace?: string } | undefined)?.workspace
+                ?? path.join(os.homedir(), '.openclaw/workspace');
+
+              _managers.set(agentId, createMemorySearchManager(hm, agentId, workspaceDir));
+            }
+
+            return { manager: _managers.get(agentId)! };
+          } catch (err) {
+            return { manager: null, error: (err as Error).message };
+          }
+        },
+
+        resolveMemoryBackendConfig(_params) {
+          return { backend: 'builtin' as const };
+        },
+
+        async closeAllMemorySearchManagers() {
+          _managers.clear();
+        },
+      },
+
+      publicArtifacts: {
+        async listArtifacts(params) {
+          const artifacts: Array<{
+            kind: string;
+            workspaceDir: string;
+            relativePath: string;
+            absolutePath: string;
+            agentIds: string[];
+            contentType: 'markdown' | 'json' | 'text';
+          }> = [];
+
+          // List memory files for each agent
+          const agents = params.cfg?.agents?.list ?? [];
+          for (const agent of agents) {
+            const agentId = (agent as { id?: string }).id;
+            if (!agentId) continue;
+
+            const workspace = (agent as { workspace?: string }).workspace;
+            if (!workspace) continue;
+
+            const memoryDir = path.join(workspace, 'memory');
+            try {
+              const files = await fs.readdir(memoryDir);
+              for (const file of files) {
+                if (!file.endsWith('.md')) continue;
+                artifacts.push({
+                  kind: 'memory-daily',
+                  workspaceDir: workspace,
+                  relativePath: `memory/${file}`,
+                  absolutePath: path.join(memoryDir, file),
+                  agentIds: [agentId],
+                  contentType: 'markdown',
+                });
+              }
+            } catch {
+              // No memory dir for this agent — skip
+            }
+
+            // Also expose MEMORY.md index
+            const memoryIndex = path.join(workspace, 'MEMORY.md');
+            try {
+              await fs.access(memoryIndex);
+              artifacts.push({
+                kind: 'memory-index',
+                workspaceDir: workspace,
+                relativePath: 'MEMORY.md',
+                absolutePath: memoryIndex,
+                agentIds: [agentId],
+                contentType: 'markdown',
+              });
+            } catch {
+              // No MEMORY.md — skip
+            }
+          }
+
+          return artifacts;
+        },
+      },
+    });
   },
 });

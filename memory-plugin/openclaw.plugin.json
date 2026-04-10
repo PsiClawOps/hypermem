@@ -1,5 +1,5 @@
 {
-  "id": "hypermem-memory",
+  "id": "hypermem",
   "enabledByDefault": false,
   "kind": "memory",
   "configSchema": {
