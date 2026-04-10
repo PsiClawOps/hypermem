@@ -161,7 +161,7 @@ This means:
 
 ## Context Engine Plugin
 
-`plugin/src/index.ts` — OpenClaw context engine plugin (fills `contextEngine` slot):
+`plugin/src/index.ts` — OpenClaw context engine plugin (`hypercompositor`, fills `contextEngine` slot):
 
 ```
 gateway:startup     → Init hypermem, auto-rotate DBs, hydrate fleet cache
@@ -174,7 +174,7 @@ Registers with `ownsCompaction: true` — runtime skips legacy compaction entire
 
 ## Memory Plugin
 
-`memory-plugin/src/index.ts` — Lightweight memory provider (fills `memory` slot):
+`memory-plugin/src/index.ts` — Lightweight memory provider (`hypermem`, fills `memory` slot):
 
 - Registers `MemoryPluginCapability` with a `MemorySearchManager` backed by HyperMem's hybrid FTS5 + KNN retrieval
 - Provides the `memory_search` tool through the official memory slot interface
@@ -277,8 +277,8 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 | `episode-store.ts` | ~180 | L4 | Significant event tracking |
 | `preference-store.ts` | ~170 | L4 | Operator behavioral patterns |
 | `topic-store.ts` | ~160 | L4 | Cross-session thread tracking |
-| `plugin/src/index.ts` | ~590 | - | OpenClaw context engine plugin + window invalidation |
-| `memory-plugin/src/index.ts` | ~290 | - | OpenClaw memory slot plugin (memory_search via hybrid retrieval) |
+| `plugin/src/index.ts` | ~590 | - | `hypercompositor` context engine plugin + window invalidation |
+| `memory-plugin/src/index.ts` | ~290 | - | `hypermem` memory slot plugin (memory_search via hybrid retrieval) |
 
 ## Test Coverage (105 assertions, 11 suites)
 

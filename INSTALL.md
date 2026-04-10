@@ -215,14 +215,14 @@ Use the OpenClaw CLI. **Do not edit `openclaw.json` directly** — the CLI valid
 # Add both plugin load paths
 openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin","~/.openclaw/workspace/repo/hypermem/memory-plugin"]' --strict-json
 
-# Set hypermem as the active context engine
-openclaw config set plugins.slots.contextEngine hypermem
+# Set hypercompositor as the active context engine
+openclaw config set plugins.slots.contextEngine hypercompositor
 
-# Set hypermem-memory as the active memory provider for memory_search and related slot calls
-openclaw config set plugins.slots.memory hypermem-memory
+# Set hypermem as the active memory provider for memory_search and related slot calls
+openclaw config set plugins.slots.memory hypermem
 
 # Enable both plugins
-openclaw config set plugins.allow '["hypermem","hypermem-memory"]' --strict-json
+openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
 ```
 
 If you already have entries in `plugins.allow` or `plugins.load.paths`, add to the existing array rather than replacing it. Check current values first:
@@ -478,13 +478,20 @@ You should see lines like:
 
 If you see `[hypermem]` lines, the plugin is active and assembling context.
 
+You can also run the status CLI for a full health check and metrics dashboard:
+
+```bash
+node bin/hypermem-status.mjs              # full dashboard
+node bin/hypermem-status.mjs --health      # health checks only (exit 1 on failure)
+```
+
 **If you don't see any hypermem lines:** The plugin didn't load. Check:
 ```bash
 openclaw config get plugins.slots.contextEngine
-# Should return: hypermem
+# Should return: hypercompositor
 
 openclaw config get plugins.slots.memory
-# Should return: hypermem-memory
+# Should return: hypermem
 
 openclaw status
 # Look for hypermem in the plugins section
