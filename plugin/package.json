@@ -1,7 +1,7 @@
 {
-  "name": "@psiclawops/hypermem-context-engine",
-  "version": "0.5.0",
-  "description": "HyperMem context engine plugin for OpenClaw",
+  "name": "@psiclawops/hypercompositor",
+  "version": "0.5.1",
+  "description": "HyperCompositor \u2014 context engine plugin for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
   "license": "Apache-2.0",
@@ -17,8 +17,8 @@
   },
   "openclaw": {
     "plugin": {
-      "id": "hypermem",
-      "name": "HyperMem Context Engine",
+      "id": "hypercompositor",
+      "name": "HyperCompositor \u2014 Context Engine",
       "kind": "context-engine"
     },
     "extensions": [
@@ -42,5 +42,13 @@
     "openclaw-plugin",
     "context-engine",
     "hypermem"
+  ],
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
   ]
 }
