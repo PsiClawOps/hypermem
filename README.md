@@ -483,103 +483,33 @@ If you prefer, hand the install to your OpenClaw agent:
 
 ### Tuning
 
-hypermem has two independent tuning surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model's response is shaped). Most users pick a profile and adjust one or two settings.
+Two independent surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model writes). Pick a profile first — most deployments adjust one or two settings on top.
 
-#### Profiles
+| Profile | Target window | Best for |
+|---|---|---|
+| `light` | 64k | Single agent, small models, constrained resources |
+| `standard` | 128k | Normal deployments, small fleets |
+| `full` | 200k+ | Multi-agent fleets, large-context models |
 
-Three pre-built profiles ship. Each sets every compositor knob to a coherent default:
-
-| Profile | Target window | `budgetFraction` | `reserveFraction` | `historyFraction` | `memoryFraction` | `hyperformProfile` |
-|---|---|---|---|---|---|---|
-| `light` | 64k | 0.625 | 0.35 | 0.35 | 0.30 | `light` |
-| `standard` | 128k | 0.703 | 0.25 | 0.40 | 0.40 | `standard` |
-| `full` | 200k+ | 0.588 | 0.20 | 0.45 | 0.40 | `full` |
-
-Start with `light`. Move up when you need richer context and have the headroom.
+Start with `light`. Use `mergeProfile()` to adjust individual settings:
 
 ```typescript
-import { lightProfile, standardProfile, fullProfile } from '@psiclawops/hypermem';
+import { mergeProfile } from '@psiclawops/hypermem';
+const config = mergeProfile('standard', { compositor: { maxFacts: 40 } });
 ```
 
-Pass to `HyperMem.create()` as the base config, or use `mergeProfile()` to adjust individual settings.
-
-#### Context assembly
-
-Budget flows through four fractions applied in sequence:
-
-```
-detectedWindow × budgetFraction                 = total input budget
-total × reserveFraction                         = reserved (output + tool calls)
-total × (1 − reserveFraction)                   = usable budget
-usable × historyFraction                        = history cap
-usable × memoryFraction                         = memory pool cap
-remainder                                        = system / identity / HyperForm (~3–8k)
-```
-
-The compositor fills slots in priority order (greedy fill, not proportional). See [Budget fill order](#budget-fill-order). History fills first up to its cap, then facts/wiki/semantic fill from the memory pool, then HyperForm/identity/system take what they need from the remainder.
-
-| Knob | Default | What it controls |
-|---|---|---|
-| `budgetFraction` | 0.703 | Fraction of detected context window to use as total input budget. |
-| `reserveFraction` | 0.25 | Fraction of total budget held back for model output and tool call responses. |
-| `historyFraction` | 0.40 | Fraction of usable budget (post-reserve) allocated to conversation history. |
-| `memoryFraction` | 0.40 | Fraction of usable budget (post-reserve) shared across facts, wiki, semantic recall, cross-session, and trigger-fired doc chunks. |
-
-`historyFraction + memoryFraction` should stay at or below 0.85 to leave room for fixed-cost slots (system, identity, HyperForm). At 0.85 sum with typical prompts, you have ~15% (≈10–20k tokens) for those slots.
-
-`budgetFraction` replaces the old `defaultTokenBudget` (absolute token number). `defaultTokenBudget` is still honored as a fallback when model detection fails.
-
-**Tool pair handling is automatic.** The tool gradient preserves recent turns at full fidelity and progressively compresses older ones. There is no user-facing knob for this; the safe floor is enforced internally.
-
-#### Advanced context knobs
-
-These are internal knobs that rarely need adjustment. If you are customizing these, you probably already know why:
-
-| Knob | Default | What it controls |
-|---|---|---|
-| `maxHistoryMessages` | 500 | Hard message-count cap on history. Rarely the bottleneck on token-budgeted sessions. |
-| `wikiTokenCap` | 600 | Hard ceiling on wiki/knowledge injection per pass, within the memory pool. |
-| `maxTotalTriggerTokens` | 4000 | Ceiling across all trigger-fired doc chunk collections per pass. |
-| `keystoneHistoryFraction` | 0.20 | Fraction of history budget for keystone (recalled older) messages. |
-| `keystoneMaxMessages` | 15 | Max keystone messages per pass. |
-| `maxCrossSessionContext` | 4000 | Token ceiling for cross-session context injection. |
-| `dynamicReserveEnabled` | true | Auto-adjust reserve based on recent turn cost. |
-| `dynamicReserveTurnHorizon` | 5 | Turns projected forward for reserve calculation. |
-| `dynamicReserveMax` | 0.50 | Hard ceiling on dynamic reserve. |
-
-#### Output shaping (HyperForm)
-
-`hyperformProfile` controls what output normalization directives are injected. This is independent of context assembly.
-
-| Value | Tokens | What it injects |
-|---|---|---|
-| `"light"` | ~100 | Anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration |
-| `"standard"` | ~250 | Full directive set plus pagination rules and hedging policy |
-| `"full"` | ~400 | Complete directives with model-specific adaptation and cross-agent coordination |
-
-See the [hyperform section](#hyperform) above for behavior vs. model adaptation details and before/after examples.
-
-Backward-compatible aliases: `"starter"` maps to `"light"`, `"fleet"` maps to `"full"`. The old field name `outputProfile` still works but `hyperformProfile` is preferred.
-
-Fine-grained control: set `enableFOS: false` or `enableMOD: false` to suppress individual layers without changing the profile tier.
-
-#### Example config
-
-Drop a `~/.openclaw/hypermem/config.json` to override defaults. Takes effect on gateway restart:
+Drop a `~/.openclaw/hypermem/config.json` to override defaults (takes effect on gateway restart):
 
 ```json
 {
   "compositor": {
     "budgetFraction": 0.70,
-    "reserveFraction": 0.25,
-    "historyFraction": 0.40,
-    "memoryFraction": 0.45,
     "hyperformProfile": "standard"
   }
 }
 ```
 
-**Full tuning reference with all adjustments, worked examples, and custom entries: [docs/TUNING.md](./docs/TUNING.md)**
+Full reference: **[docs/TUNING.md](./docs/TUNING.md)**
 
 ---
 

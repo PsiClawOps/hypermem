@@ -44,9 +44,7 @@ Hyperform controls what normalization directives are injected into every compose
 
 ### Why this matters
 
-Consistent output isn't just aesthetic. A model that paginates short answers, preambles with filler, or inflates lists uses more output tokens per turn. Over hundreds of turns, that compounds into real cost. Hyperform directives compress output at the source — fewer tokens generated means lower API spend per session, and less context pressure for subsequent turns.
-
-A model producing 2x verbose output with 8-item lists where 3 would suffice pays for 8 tokens of list per answer. With behavior normalization, it pays for 3. Over a long session, the savings accumulate in both token cost and context window pressure (less output to store and retrieve next turn).
+Hyperform directives compress output at the source: fewer tokens generated per turn means lower API spend and less context pressure for subsequent turns. See the [README](../README.md#hyperform) for the full rationale.
 
 ### The two layers
 
@@ -313,13 +311,7 @@ Reserves 30% of the history budget for keystones (up from default 20%) and allow
 
 ### Adjusting for model context size
 
-The three profiles set `budgetFraction` and `contextWindowReserve` for different window sizes:
-
-| Profile | Window | budgetFraction | Reserve | Effective budget |
-|---|---|---|---|---|
-| `light` | 64k | 0.625 | 0.35 | ~26k |
-| `standard` | 128k | 0.703 | 0.25 | ~67k |
-| `full` | 200k+ | 0.588 | 0.20 | ~94k+ |
+The three profiles cover the common cases — see [Quick Start: Pick a Profile](#quick-start-pick-a-profile) for the full table. For window sizes outside the profiles:
 
 **For small models (32k context):**
 
