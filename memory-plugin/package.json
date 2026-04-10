@@ -1,6 +1,6 @@
 {
   "name": "@psiclawops/hypermem-memory",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "HyperMem memory plugin for OpenClaw — bridges HyperMem retrieval into the memory slot",
   "type": "module",
   "main": "dist/index.js",
@@ -33,7 +33,6 @@
     "@psiclawops/hypermem": "^0.5.2"
   },
   "devDependencies": {
-    "@psiclawops/hypermem": "file:..",
     "openclaw": "*",
     "typescript": "^5.4.0"
   },
