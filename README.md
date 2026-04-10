@@ -140,7 +140,7 @@ High-signal turns are marked as keystones and survive pressure trimming ahead of
 
 ## hyperform
 
-Raw model output has two problems. It drifts from your standards (sycophancy, hedging, pagination, formatting) and it drifts from your facts (confabulation, contradiction, stale claims). hyperform handles both.
+Raw model output has two problems. It drifts from your standards (sycophancy, hedging, pagination, formatting) and it drifts from your facts (confabulation, contradiction, stale claims). hyperform handles both: normalization enforces consistency, confabulation resistance checks output against what's actually stored.
 
 **Normalization** shapes output to match a profile you define. Three presets ship with hypermem:
 
@@ -175,7 +175,7 @@ tool context, and leave ~30k as allocator reserve. hypermem handles slot competi
 automatically -- set contextWindowReserve to your preferred floor and let the compositor fill.
 ```
 
-**Verification** checks claims against the fact corpus before they're recorded. No LLM call. Pattern matching against stored facts, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
+**Confabulation resistance** checks output against stored facts before claims are recorded. No LLM call. Pattern matching against the fact corpus, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
 
 ---
 
@@ -283,7 +283,7 @@ FTS5 queries use compound indexes on `agentId + sort key` and prefix optimizatio
 
 | Collection | What it holds |
 |---|---|
-| Facts | Verifiable claims with confidence, domain, expiry, supersedes chains |
+| Facts | Claims with confidence scoring, domain, expiry, supersedes chains |
 | Knowledge | Domain/key/value structured data with full-text search |
 | Episodes | Significant events with impact scores and participant tracking |
 | Topics | Cross-session thread tracking and synthesized wiki pages |
