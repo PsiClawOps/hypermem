@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * hypermem 0.5.3 publish smoke test
+ * hypermem 0.5.4 publish smoke test
  *
  * Validates:
  *   1. Package exports resolve cleanly
@@ -37,7 +37,7 @@ function fail(name, err) {
   if (verbose) console.error('     ', err?.message ?? err);
 }
 
-console.log(`\nhypermem 0.5.3 smoke test\n${'─'.repeat(40)}`);
+console.log(`\nhypermem 0.5.4 smoke test\n${'─'.repeat(40)}`);
 
 // ── 1. dist exists ──────────────────────────────────────────────────────────
 console.log('\n[1] dist artifacts');
@@ -176,4 +176,4 @@ if (failures.length) {
   process.exit(1);
 }
 
-console.log('\n✅  hypermem 0.5.3 smoke test passed\n');
+console.log('\n✅  hypermem 0.5.4 smoke test passed\n');
