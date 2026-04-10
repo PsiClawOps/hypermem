@@ -340,9 +340,9 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.5.0.** Topic-aware memory and compiled-knowledge system, optimized to run light by default and scale up when operators need richer context.
+**Current release: hypermem 0.5.2.** Topic-aware memory and compiled-knowledge system, optimized to run light by default and scale up when operators need richer context.
 
-What 0.5.0 includes:
+What 0.5.2 includes:
 - Topic-aware context tracking
 - Compiled knowledge / wiki-like synthesis and recall
 - Metrics dashboard primitives
@@ -360,7 +360,7 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.5.0'
+  ENGINE_VERSION,        // '0.5.2'
   MIN_NODE_VERSION,      // '22.0.0'
   MIN_SQLITE_VERSION,    // '3.35.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
