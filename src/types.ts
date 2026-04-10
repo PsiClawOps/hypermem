@@ -219,6 +219,10 @@ export interface ComposeRequest {
   includeFacts?: boolean;
   includeContext?: boolean;
   includeLibrary?: boolean;
+  /** When false, skip semantic recall (vector search + FTS hybrid). Default: true. */
+  includeSemanticRecall?: boolean;
+  /** When false, skip keystone history injection (within-session + cross-topic). Default: true. */
+  includeKeystones?: boolean;
   /**
    * The current-turn prompt text. Used as the retrieval query for semantic recall
    * and doc chunk trigger matching. When provided, this is preferred over reading

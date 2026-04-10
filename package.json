@@ -1,10 +1,13 @@
 {
   "name": "@psiclawops/hypermem",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Agent-centric memory and context composition engine for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "hypermem-status": "bin/hypermem-status.mjs"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",

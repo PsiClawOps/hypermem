@@ -11,6 +11,7 @@
  */
 
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import { HYPERMEM_COMPAT_VERSION } from './version.js';
 
 export interface FactMetrics {
   /** Total facts indexed across all agents */
@@ -395,7 +396,6 @@ function collectHealth(
   mainDb: DatabaseSync,
   libraryDb: DatabaseSync,
 ): SystemHealth {
-  const { HYPERMEM_COMPAT_VERSION } = require('./version.js') as { HYPERMEM_COMPAT_VERSION: string };
 
   let mainSchemaVersion: number | null = null;
   let librarySchemaVersion: number | null = null;

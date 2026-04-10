@@ -103,6 +103,9 @@ let _evictionConfig: {
 let _contextWindowSize: number = 128_000;
 let _contextWindowReserve: number = 0.25;
 let _deferToolPruning: boolean = false;
+// Subagent warming mode: 'full' | 'light' | 'off'. Default: 'light'.
+// Controls how much HyperMem context is injected into subagent sessions.
+let _subagentWarming: 'full' | 'light' | 'off' = 'light';
 // Cache replay threshold: 15min default. Set to 0 in user config to disable.
 let _cacheReplayThresholdMs: number = 900_000;
 
@@ -217,6 +220,13 @@ async function loadUserConfig(): Promise<{
    * Set this when agents.defaults.contextPruning.mode is enabled.
    */
   deferToolPruning?: boolean;
+  /**
+   * Controls how much HyperMem context is injected into subagent sessions.
+   * - 'full'  — same compositor pipeline as parent sessions (all layers)
+   * - 'light' — facts + history only; skips library/wiki/semantic/keystones/doc chunks (default)
+   * - 'off'   — skip all HyperMem warming; pass messages through as-is
+   */
+  subagentWarming?: 'full' | 'light' | 'off';
 }> {
   const configPath = path.join(os.homedir(), '.openclaw/hypermem/config.json');
   try {
@@ -288,6 +298,11 @@ async function getHyperMem(): Promise<HyperMemInstance> {
     if (userConfig.deferToolPruning === true) {
       _deferToolPruning = true;
       console.log('[hypermem-plugin] deferToolPruning: true — tool gradient deferred to host contextPruning');
+    }
+    const warmingVal = (userConfig as { subagentWarming?: string }).subagentWarming;
+    if (warmingVal === 'full' || warmingVal === 'light' || warmingVal === 'off') {
+      _subagentWarming = warmingVal;
+      console.log(`[hypermem-plugin] subagentWarming: ${_subagentWarming}`);
     }
     if (typeof (userConfig as { warmCacheReplayThresholdMs?: number }).warmCacheReplayThresholdMs === 'number') {
       _cacheReplayThresholdMs = (userConfig as { warmCacheReplayThresholdMs?: number }).warmCacheReplayThresholdMs!;
@@ -857,7 +872,7 @@ function createHyperMemEngine(): ContextEngine {
     info: {
       id: 'hypermem',
       name: 'hypermem context engine',
-      version: '0.1.0',
+      version: '0.5.2',
       // We own compaction — assemble() trims to budget via the compositor safety
       // valve, so runtime compaction is never needed. compact() handles any
       // explicit calls by trimming the Redis history window directly.
@@ -1426,6 +1441,26 @@ function createHyperMemEngine(): ContextEngine {
       const sk = resolveSessionKey(sessionId, sessionKey);
       const agentId = extractAgentId(sk);
 
+      // ── Subagent warming control ─────────────────────────────────────────
+      // Detect subagent sessions by key pattern and apply warming mode.
+      // 'off' = passthrough (no HyperMem context at all)
+      // 'light' = facts + history only (skip library/wiki/semantic/keystones/doc chunks)
+      // 'full' = standard compositor pipeline
+      const isSubagent = sk.includes('subagent:');
+      if (isSubagent && _subagentWarming === 'off') {
+        console.log(`[hypermem-plugin] assemble: subagent warming=off, passthrough (sk: ${sk})`);
+        return {
+          messages: messages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
+          estimatedTokens: messages.reduce((sum: number, m: unknown) => {
+            const msg = m as Record<string, unknown>;
+            return sum + Math.ceil((typeof msg.textContent === 'string' ? msg.textContent.length : 0) / 4);
+          }, 0),
+        };
+      }
+      if (isSubagent) {
+        console.log(`[hypermem-plugin] assemble: subagent warming=${_subagentWarming} (sk: ${sk})`);
+      }
+
       // Resolve agent tier from fleet store (for doc chunk tier filtering)
       let tier: string | undefined;
       try {
@@ -1544,6 +1579,10 @@ function createHyperMemEngine(): ContextEngine {
         }
       }
 
+            // Subagent light mode: skip library/wiki/semantic/keystones/doc chunks.
+      // Keeps: system, identity, history, active facts, output profile, tool gradient.
+      const subagentLight = isSubagent && _subagentWarming === 'light';
+
       const request: ComposeRequest = {
         agentId,
         sessionKey: sk,
@@ -1551,7 +1590,10 @@ function createHyperMemEngine(): ContextEngine {
         historyDepth,
         tier,
         model,          // pass model for provider detection
-        includeDocChunks: !cachedContextBlock,  // skip doc retrieval on cache hit
+        includeDocChunks: subagentLight ? false : !cachedContextBlock,  // skip doc retrieval on cache hit or subagent light
+        includeLibrary: subagentLight ? false : undefined,  // skip wiki/knowledge/preferences
+        includeSemanticRecall: subagentLight ? false : undefined,  // skip vector/FTS recall
+        includeKeystones: subagentLight ? false : undefined,  // skip keystone history injection
         prompt,
         skipProviderTranslation: true,  // runtime handles provider translation
       };
@@ -2251,13 +2293,13 @@ export async function bustAssemblyCache(agentId: string, sessionKey: string): Pr
 const engine = createHyperMemEngine();
 
 export default definePluginEntry({
-  id: 'hypermem',
-  name: 'hypermem context engine',
+  id: 'hypercompositor',
+  name: 'HyperCompositor — context engine',
   description: 'Four-layer memory architecture for OpenClaw agents: Redis hot cache, message history, vector search, and structured library.',
   kind: 'context-engine',
   configSchema: emptyPluginConfigSchema(),
   register(api) {
-    api.registerContextEngine('hypermem', () => engine);
+    api.registerContextEngine('hypercompositor', () => engine);
 
     // P1.7: Bind TaskFlow runtime for task visibility — best-effort.
     // Guard: api.runtime.taskFlow may not exist on older OpenClaw versions.

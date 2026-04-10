@@ -140,7 +140,7 @@ High-signal turns are marked as keystones and survive pressure trimming ahead of
 
 ## hyperform
 
-Raw model output has two problems. It drifts from your standards (sycophancy, hedging, pagination, formatting) and it drifts from your facts (confabulation, contradiction, stale claims). hyperform handles both.
+Raw model output has two problems. It drifts from your standards (sycophancy, hedging, pagination, formatting) and it drifts from your facts (confabulation, contradiction, stale claims). hyperform handles both: normalization enforces consistency, confabulation resistance checks output against what's actually stored.
 
 **Normalization** shapes output to match a profile you define. Three presets ship with hypermem:
 
@@ -175,7 +175,7 @@ tool context, and leave ~30k as allocator reserve. hypermem handles slot competi
 automatically -- set contextWindowReserve to your preferred floor and let the compositor fill.
 ```
 
-**Verification** checks claims against the fact corpus before they're recorded. No LLM call. Pattern matching against stored facts, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
+**Confabulation resistance** checks output against stored facts before claims are recorded. No LLM call. Pattern matching against the fact corpus, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
 
 ---
 
@@ -256,7 +256,16 @@ L1 and L4 structured retrieval are sub-millisecond. Vector embeddings are comput
 
 ## Architecture
 
-hypermem plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle. It registers as both `contextEngine` and `memory`, providing the standard memory slot interface alongside full prompt composition: `memory_search` routes through the official slot and shows correctly in `openclaw plugins list`.
+hypermem plugs into OpenClaw via two plugins that fill both composition slots:
+
+| Plugin | ID | Slot | What it does |
+|---|---|---|---|
+| `@psiclawops/hypercompositor` | `hypercompositor` | `contextEngine` | Owns session lifecycle, ingest, compose, afterTurn indexing, tool compression, hyperform |
+| `@psiclawops/hypermem-memory` | `hypermem` | `memory` | Provides `memory_search` tool backed by hybrid FTS5 + KNN retrieval against library.db |
+
+Both load from the same repo and share a single HyperMem core singleton. The context engine plugin (`hypercompositor`) is the heavy one: session warming, compositor, tool gradient, hyperform. The memory plugin (`hypermem`) is a thin wrapper that exposes HyperMem's hybrid retrieval as OpenClaw's standard `MemoryPluginCapability`, so `memory_search` routes through the official memory slot and shows correctly in `openclaw plugins list`.
+
+The Plugin column is the npm package name. The ID column is what goes in `plugins.allow` and `plugins.slots.*`. Don't put the package name in a slot config.
 
 **L1: SQLite in-memory.** Sub-millisecond hot reads, no network dependency, no daemon, no retry logic. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and agent registry data. The compositor hits this first on every turn.
 
@@ -276,7 +285,7 @@ FTS5 queries use compound indexes on `agentId + sort key` and prefix optimizatio
 
 | Collection | What it holds |
 |---|---|
-| Facts | Verifiable claims with confidence, domain, expiry, supersedes chains |
+| Facts | Claims with confidence scoring, domain, expiry, supersedes chains |
 | Knowledge | Domain/key/value structured data with full-text search |
 | Episodes | Significant events with impact scores and participant tracking |
 | Topics | Cross-session thread tracking and synthesized wiki pages |
@@ -331,9 +340,9 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.5.0.** Topic-aware memory and compiled-knowledge system, optimized to run light by default and scale up when operators need richer context.
+**Current release: hypermem 0.5.2.** Topic-aware memory and compiled-knowledge system, optimized to run light by default and scale up when operators need richer context.
 
-What 0.5.0 includes:
+What 0.5.2 includes:
 - Topic-aware context tracking
 - Compiled knowledge / wiki-like synthesis and recall
 - Metrics dashboard primitives
@@ -351,7 +360,7 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.5.0'
+  ENGINE_VERSION,        // '0.5.2'
   MIN_NODE_VERSION,      // '22.0.0'
   MIN_SQLITE_VERSION,    // '3.35.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
@@ -371,10 +380,12 @@ git clone https://github.com/PsiClawOps/hypermem.git ~/.openclaw/workspace/repo/
 cd ~/.openclaw/workspace/repo/hypermem
 npm install && npm run build
 npm --prefix plugin install && npm --prefix plugin run build
+npm --prefix memory-plugin install && npm --prefix memory-plugin run build
 
-openclaw config set plugins.slots.contextEngine hypermem
+openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
-openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin"]' --strict-json
+openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin","~/.openclaw/workspace/repo/hypermem/memory-plugin"]' --strict-json
+openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
 openclaw gateway restart
 ```
 
@@ -482,6 +493,19 @@ const spawn = await buildSpawnContext(
   'forge',
   { parentSessionKey: 'agent:forge:webchat:main', workingSnapshot: 12 }
 );
+```
+
+---
+
+## CLI
+
+`bin/hypermem-status.mjs` provides health checks and metrics from the command line:
+
+```bash
+node bin/hypermem-status.mjs              # full dashboard
+node bin/hypermem-status.mjs --agent forge   # scoped to one agent
+node bin/hypermem-status.mjs --json          # machine-readable output
+node bin/hypermem-status.mjs --health        # health checks only (exit 1 on failure)
 ```
 
 ---

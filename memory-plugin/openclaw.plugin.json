@@ -1,7 +1,7 @@
 {
-  "id": "hypercompositor",
+  "id": "hypermem",
   "enabledByDefault": false,
-  "kind": "context-engine",
+  "kind": "memory",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

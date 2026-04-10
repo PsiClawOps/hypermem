@@ -1,7 +1,7 @@
 {
-  "name": "@psiclawops/hypercompositor",
+  "name": "@psiclawops/hypermem-memory",
   "version": "0.5.2",
-  "description": "HyperCompositor \u2014 context engine plugin for OpenClaw",
+  "description": "HyperMem memory plugin for OpenClaw \u2014 bridges HyperMem retrieval into the memory slot",
   "type": "module",
   "main": "dist/index.js",
   "license": "Apache-2.0",
@@ -9,7 +9,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/PsiClawOps/hypermem-internal.git",
-    "directory": "plugin"
+    "directory": "memory-plugin"
   },
   "publishConfig": {
     "access": "public",
@@ -17,9 +17,9 @@
   },
   "openclaw": {
     "plugin": {
-      "id": "hypercompositor",
-      "name": "HyperCompositor \u2014 Context Engine",
-      "kind": "context-engine"
+      "id": "hypermem",
+      "name": "HyperMem Memory",
+      "kind": "memory"
     },
     "extensions": [
       "./dist/index.js"
@@ -43,7 +43,7 @@
   "keywords": [
     "openclaw",
     "openclaw-plugin",
-    "context-engine",
+    "memory",
     "hypermem"
   ],
   "files": [

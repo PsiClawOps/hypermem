@@ -197,6 +197,8 @@ npm install
 npm run build
 npm --prefix plugin install
 npm --prefix plugin run build
+npm --prefix memory-plugin install
+npm --prefix memory-plugin run build
 ```
 
 Verify the build is clean:
@@ -210,17 +212,17 @@ npm test
 Use the OpenClaw CLI. **Do not edit `openclaw.json` directly** — the CLI validates before writing and sends the reload signal.
 
 ```bash
-# Add the plugin load path
-openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin"]' --strict-json
+# Add both plugin load paths
+openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin","~/.openclaw/workspace/repo/hypermem/memory-plugin"]' --strict-json
 
-# Set hypermem as the active context engine
-openclaw config set plugins.slots.contextEngine hypermem
+# Set hypercompositor as the active context engine
+openclaw config set plugins.slots.contextEngine hypercompositor
 
 # Set hypermem as the active memory provider for memory_search and related slot calls
 openclaw config set plugins.slots.memory hypermem
 
-# Enable the plugin
-openclaw config set plugins.allow '["hypermem"]' --strict-json
+# Enable both plugins
+openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
 ```
 
 If you already have entries in `plugins.allow` or `plugins.load.paths`, add to the existing array rather than replacing it. Check current values first:
@@ -476,10 +478,17 @@ You should see lines like:
 
 If you see `[hypermem]` lines, the plugin is active and assembling context.
 
+You can also run the status CLI for a full health check and metrics dashboard:
+
+```bash
+node bin/hypermem-status.mjs              # full dashboard
+node bin/hypermem-status.mjs --health      # health checks only (exit 1 on failure)
+```
+
 **If you don't see any hypermem lines:** The plugin didn't load. Check:
 ```bash
 openclaw config get plugins.slots.contextEngine
-# Should return: hypermem
+# Should return: hypercompositor
 
 openclaw config get plugins.slots.memory
 # Should return: hypermem
@@ -542,7 +551,7 @@ To return to OpenClaw's default context engine:
 
 ```bash
 openclaw config set plugins.slots.contextEngine legacy
-openclaw config unset plugins.slots.memory
+openclaw config set plugins.slots.memory none
 openclaw gateway restart
 ```
 
@@ -562,7 +571,17 @@ Check which embedding tier you configured. For Tier 2 (Ollama): confirm Ollama i
 Your library DB is empty — this is expected on a fresh install. Facts and episodes accumulate over real conversations. After a few sessions you'll see these numbers grow. You can also seed workspace files manually using the seeder API.
 
 **Plugin not found / context engine not switching**
-Confirm the plugin path is correct: `ls ~/.openclaw/workspace/repo/hypermem/plugin/dist/index.js` should exist. If missing, run `npm --prefix ~/.openclaw/workspace/repo/hypermem/plugin run build`. Then restart the gateway.
+Confirm the plugin paths are correct:
+```bash
+ls ~/.openclaw/workspace/repo/hypermem/plugin/dist/index.js
+ls ~/.openclaw/workspace/repo/hypermem/memory-plugin/dist/index.js
+```
+If either is missing, run the build for that plugin:
+```bash
+npm --prefix ~/.openclaw/workspace/repo/hypermem/plugin run build
+npm --prefix ~/.openclaw/workspace/repo/hypermem/memory-plugin run build
+```
+Then restart the gateway.
 
 **Redis `WRONGTYPE` or key format errors in logs**
 A prior install may have left keys with a different prefix. Clear with:

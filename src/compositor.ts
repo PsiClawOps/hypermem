@@ -1126,7 +1126,7 @@ export class Compositor {
       let keystoneMessages: NeutralMessage[] = [];
       let keystoneTokens = 0;
 
-      if (includedHistory.length >= 30 && keystoneFraction > 0) {
+      if (request.includeKeystones !== false && includedHistory.length >= 30 && keystoneFraction > 0) {
         const keystoneResult = await this.buildKeystones(
           db,
           request.agentId,
@@ -1154,7 +1154,7 @@ export class Compositor {
       let crossTopicMessages: NeutralMessage[] = [];
       let crossTopicTokens = 0;
 
-      if (activeTopic && this.vectorStore) {
+      if (request.includeKeystones !== false && activeTopic && this.vectorStore) {
         try {
           const rawCrossTopicKeystones = await this.getKeystonesByTopic(
             request.agentId,
@@ -1348,7 +1348,7 @@ export class Compositor {
       // facts already included above. Uses ingest_at as occurred_at proxy (v1).
       const queryText = request.prompt ?? '';
 
-      if (queryText && hasTemporalSignals(queryText) && libDb && remaining > 300) {
+      if (request.includeSemanticRecall !== false && queryText && hasTemporalSignals(queryText) && libDb && remaining > 300) {
         try {
           const temporalStore = new TemporalStore(libDb);
           const temporalFacts = temporalStore.timeRangeQuery({
@@ -1401,7 +1401,7 @@ export class Compositor {
       // Searches raw messages_fts — bypasses isQualityFact() quality gate so
       // content filtered from library.db is still reachable for open-domain
       // questions. Primary fix for LoCoMo open-domain F1 gap (0.133 baseline).
-      if (queryText && isOpenDomainQuery(queryText) && db && remaining > 300) {
+      if (request.includeSemanticRecall !== false && queryText && isOpenDomainQuery(queryText) && db && remaining > 300) {
         try {
           const existingContent = contextParts.join('\n');
           const odResults = searchOpenDomain(db, queryText, existingContent, 10);
@@ -1491,7 +1491,7 @@ export class Compositor {
     // Use request.prompt as the retrieval query when available — it is the
     // live current-turn text. Falling back to getLastUserMessage(messages)
     // reads from the already-assembled history, which is one turn stale.
-    if (remaining > 500 && (this.vectorStore || libDb)) {
+    if (request.includeSemanticRecall !== false && remaining > 500 && (this.vectorStore || libDb)) {
       const lastUserMsg = request.prompt?.trim() || this.getLastUserMessage(messages);
       if (lastUserMsg) {
         try {
