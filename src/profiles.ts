@@ -43,25 +43,33 @@ const BASE_EMBEDDING: EmbeddingProviderConfig = {
 // ---------------------------------------------------------------------------
 
 const LIGHT_COMPOSITOR: CompositorConfig = {
+  // ── Primary budget controls ──
   budgetFraction: 0.625,               // 40k effective at 64k window
-  defaultTokenBudget: 40000,           // absolute fallback when model detection fails
+  reserveFraction: 0.35,               // generous — small systems do heavy tool work
+  historyFraction: 0.35,               // ~14k tokens of conversation history
+  memoryFraction: 0.30,                // ~12k tokens for facts/wiki/semantic
+  // ── Absolute fallback ──
+  defaultTokenBudget: 40000,
+  // ── History internals ──
   maxHistoryMessages: 200,
-  maxFacts: 15,
-  maxCrossSessionContext: 0,
-  maxRecentToolPairs: 2,
-  maxProseToolPairs: 4,
   warmHistoryBudgetFraction: 0.35,
-  contextWindowReserve: 0.35,          // generous reserve for tool call responses
-  dynamicReserveEnabled: true,
-  dynamicReserveTurnHorizon: 3,
-  dynamicReserveMax: 0.50,
   keystoneHistoryFraction: 0.1,
   keystoneMaxMessages: 5,
   keystoneMinSignificance: 0.7,
-  targetBudgetFraction: 0.50,          // Anvil spec: 0.50 for light
+  // ── Memory internals ──
+  maxFacts: 15,
+  maxCrossSessionContext: 0,
   maxTotalTriggerTokens: 1500,
-  hyperformProfile: 'light',           // standalone density directives only, no fleet concepts
-  wikiTokenCap: 300,                   // Anvil spec: 300 for light
+  wikiTokenCap: 300,
+  // ── Tool gradient (internal — safe floor enforced automatically) ──
+  maxRecentToolPairs: 2,
+  maxProseToolPairs: 4,
+  // ── Dynamic reserve ──
+  dynamicReserveEnabled: true,
+  dynamicReserveTurnHorizon: 3,
+  dynamicReserveMax: 0.50,
+  // ── HyperForm ──
+  hyperformProfile: 'light',
 };
 
 const LIGHT_INDEXER: IndexerConfig = {
@@ -102,25 +110,33 @@ export const lightProfile: HyperMemConfig = {
 // ---------------------------------------------------------------------------
 
 const STANDARD_COMPOSITOR: CompositorConfig = {
+  // ── Primary budget controls ──
   budgetFraction: 0.703,               // 90k effective at 128k window
+  reserveFraction: 0.25,               // balanced — leaves room for large tool results
+  historyFraction: 0.40,               // ~27k tokens of conversation history
+  memoryFraction: 0.40,                // ~27k tokens for facts/wiki/semantic
+  // ── Absolute fallback ──
   defaultTokenBudget: 90000,
+  // ── History internals ──
   maxHistoryMessages: 500,
-  maxFacts: 30,
-  maxCrossSessionContext: 4000,
-  maxRecentToolPairs: 3,
-  maxProseToolPairs: 10,
   warmHistoryBudgetFraction: 0.40,
-  contextWindowReserve: 0.25,          // balanced reserve for tool call responses
-  dynamicReserveEnabled: true,
-  dynamicReserveTurnHorizon: 5,
-  dynamicReserveMax: 0.50,
   keystoneHistoryFraction: 0.20,
   keystoneMaxMessages: 15,
   keystoneMinSignificance: 0.5,
-  targetBudgetFraction: 0.65,          // Anvil spec: 0.65 for standard
+  // ── Memory internals ──
+  maxFacts: 30,
+  maxCrossSessionContext: 4000,
   maxTotalTriggerTokens: 4000,
-  hyperformProfile: 'standard',        // full FOS, MOD suppressed
-  wikiTokenCap: 600,                   // Anvil spec: 600 for standard
+  wikiTokenCap: 600,
+  // ── Tool gradient (internal — safe floor enforced automatically) ──
+  maxRecentToolPairs: 3,
+  maxProseToolPairs: 10,
+  // ── Dynamic reserve ──
+  dynamicReserveEnabled: true,
+  dynamicReserveTurnHorizon: 5,
+  dynamicReserveMax: 0.50,
+  // ── HyperForm ──
+  hyperformProfile: 'standard',
 };
 
 const STANDARD_INDEXER: IndexerConfig = {
@@ -156,25 +172,33 @@ export const standardProfile: HyperMemConfig = {
 // ---------------------------------------------------------------------------
 
 const EXTENDED_COMPOSITOR: CompositorConfig = {
+  // ── Primary budget controls ──
   budgetFraction: 0.588,               // 160k effective at 272k window
+  reserveFraction: 0.20,               // tighter — large windows have natural headroom
+  historyFraction: 0.45,               // ~72k tokens of conversation history
+  memoryFraction: 0.40,                // ~64k tokens for facts/wiki/semantic
+  // ── Absolute fallback ──
   defaultTokenBudget: 160000,
+  // ── History internals ──
   maxHistoryMessages: 1000,
-  maxFacts: 60,
-  maxCrossSessionContext: 12000,
-  maxRecentToolPairs: 5,
-  maxProseToolPairs: 15,
   warmHistoryBudgetFraction: 0.45,
-  contextWindowReserve: 0.20,          // tight reserve; large windows have natural headroom
-  dynamicReserveEnabled: true,
-  dynamicReserveTurnHorizon: 7,
-  dynamicReserveMax: 0.45,
   keystoneHistoryFraction: 0.25,
   keystoneMaxMessages: 30,
   keystoneMinSignificance: 0.4,
-  targetBudgetFraction: 0.55,          // Anvil spec: 0.55 for extended (history is huge, budget carefully)
+  // ── Memory internals ──
+  maxFacts: 60,
+  maxCrossSessionContext: 12000,
   maxTotalTriggerTokens: 10000,
-  hyperformProfile: 'full',            // FOS + MOD — full fleet spec
-  wikiTokenCap: 800,                   // Anvil spec: 800 for extended
+  wikiTokenCap: 800,
+  // ── Tool gradient (internal — safe floor enforced automatically) ──
+  maxRecentToolPairs: 5,
+  maxProseToolPairs: 15,
+  // ── Dynamic reserve ──
+  dynamicReserveEnabled: true,
+  dynamicReserveTurnHorizon: 7,
+  dynamicReserveMax: 0.45,
+  // ── HyperForm ──
+  hyperformProfile: 'full',
 };
 
 const EXTENDED_INDEXER: IndexerConfig = {
@@ -239,7 +263,7 @@ export function getProfile(name: ProfileName | 'extended'): HyperMemConfig {
  * @example
  * const config = mergeProfile('light', {
  *   cache: { keyPrefix: 'myapp:' },
- *   compositor: { hyperformProfile: 'standard' },  // upgrade tier
+ *   compositor: { hyperformProfile: 'standard', memoryFraction: 0.50 },  // upgrade tier + more memory
  * });
  */
 export function mergeProfile(

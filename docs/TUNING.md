@@ -1,6 +1,6 @@
 # hypermem Tuning Guide
 
-Configuration reference for operators and agents. All knobs are optional — hypermem ships with production-tested defaults.
+Configuration reference for operators and agents. All settings are optional — hypermem ships with production-tested defaults.
 
 Config lives in `~/.openclaw/hypermem/config.json` (takes effect on gateway restart) or is passed programmatically via `HyperMem.create()`:
 
@@ -14,7 +14,7 @@ const hm = await HyperMem.create({
 
 ## Quick Start: Pick a Profile
 
-Three pre-built profiles ship with hypermem. Each sets every knob to a coherent default for a common deployment pattern:
+Three pre-built profiles ship with hypermem. Each configures every setting to a coherent default for a common deployment pattern:
 
 | Profile | Context window | Budget | Hyperform | Best for |
 |---|---|---|---|---|
@@ -28,7 +28,7 @@ import { getProfile, mergeProfile } from '@psiclawops/hypermem';
 // Use a profile as-is
 const config = getProfile('light');
 
-// Start from a profile, override specific knobs
+// Start from a profile, adjust specific settings
 const custom = mergeProfile('standard', {
   compositor: { maxFacts: 40, hyperformProfile: 'full' },
 });
@@ -50,40 +50,40 @@ A model producing 2x verbose output with 8-item lists where 3 would suffice pays
 
 ### The two layers
 
-#### Behavior (FOS — Fleet Output Standard)
+#### Behavior standards
 
-FOS defines how your agents write. Anti-sycophancy rules prevent "Great question!" openings. Density targets compress answers. Anti-pattern bans remove the most common AI markers (em dashes, AI vocabulary, inflated significance). These rules apply to all models equally.
+Behavior standards define how your agents write. Anti-sycophancy rules prevent "Great question!" openings. Density targets compress answers. Anti-pattern bans remove the most common AI markers (em dashes, AI vocabulary, inflated significance). These rules apply to all models equally.
 
 **What each tier injects:**
 
 | Tier | Tokens | What's included |
 |---|---|---|
 | `light` | ~100 | 9 standalone directives: lead with answer, no sycophancy, no em dashes, AI vocab ban, length targets, filler ban, no pagination of short answers, evidence calibration, numbers over adjectives. No database required. |
-| `standard` | ~250 | Full FOS directive set from the `fleet_output_standard` DB table: structural rules, density targets (simple/analysis/code), anti-patterns, format rules, compression ratios, and task-context overrides. |
-| `full` | ~250 + MOD | Same FOS as `standard`, plus model adaptation layer (see below). |
+| `standard` | ~250 | Full directive set from the `fleet_output_standard` DB table: structural rules, density targets (simple/analysis/code), anti-patterns, format rules, compression ratios, and task-context overrides. |
+| `full` | ~250 + adaptation | Same directives as `standard`, plus model adaptation layer (see below). |
 
-The `light` tier is hardcoded and works without any database. The `standard` and `full` tiers read from the `fleet_output_standard` table in `library.db`. If no FOS record exists (fresh install), `standard` falls back to the `light` directives automatically.
+The `light` tier is hardcoded and works without any database. The `standard` and `full` tiers read from the `fleet_output_standard` table in `library.db`. If no record exists (fresh install), `standard` falls back to the `light` directives automatically.
 
-#### Model Adaptation (MOD — Model Output Directives)
+#### Model adaptation
 
-MOD corrects for known model tendencies. Different models have different default behaviors: GPT-5.4 tends toward 2x verbosity and long lists. Claude Opus defaults to hedging and preambles. Gemini produces bulleted summaries where prose would be more direct.
+Model adaptation corrects for known model tendencies. Different models have different default behaviors: GPT-5.4 tends toward 2x verbosity and long lists. Claude Opus defaults to hedging and preambles. Gemini produces bulleted summaries where prose would be more direct.
 
-MOD entries are stored in the `model_output_directives` DB table and matched by model ID:
+Adaptation entries are stored in the `model_output_directives` DB table and matched by model ID:
 
 **Match hierarchy:**
 1. Exact match on model ID (case-insensitive)
 2. Glob pattern match (e.g., `gpt-5.4*` matches `gpt-5.4-turbo`) — longest pattern wins ties
 3. Wildcard `*` fallback
-4. No MOD (if nothing matches)
+4. No adaptation (if nothing matches)
 
-**What a MOD entry contains:**
+**What an adaptation entry contains:**
 - **Calibration** — known model tendencies (e.g., "2x verbosity, 1.8x list length") plus specific adjustments (e.g., "Actively compress. Cut first drafts in half.")
 - **Corrections** — hard/medium/soft severity rules applied in order (e.g., "Do not open with I. No preamble before the answer.")
 - **Task overrides** — per-task-type adjustments (e.g., different compression for code generation vs. analysis)
 
-MOD is only active at the `full` tier. At `light` and `standard`, model-specific corrections are suppressed and only the shared FOS behavior rules apply.
+Model adaptation is only active at the `full` tier. At `light` and `standard`, model-specific corrections are suppressed and only the shared behavior rules apply.
 
-**Does hypermem ship with pre-populated MOD entries?** No. The `model_output_directives` table starts empty. You populate it with corrections specific to the models you run. See [Creating custom FOS/MOD entries](#creating-custom-fosmod-entries) below.
+**Does hypermem ship with pre-populated adaptation entries?** No. The `model_output_directives` table starts empty. You populate it with corrections specific to the models you run. See [Creating custom entries](#creating-custom-entries) below.
 
 ### Choosing a tier
 
@@ -92,7 +92,7 @@ MOD is only active at the `full` tier. At `light` and `standard`, model-specific
 | Single agent, 64k or smaller model | `light` | Minimal token overhead, no DB dependency |
 | Single agent, 128k+ model | `standard` | Richer output control, worth the extra ~150 tokens |
 | Fleet with mixed models | `full` | Different models need different corrections |
-| Cost-sensitive deployment | `light` or `standard` | Avoids MOD overhead; consistent FOS already reduces output tokens |
+| Cost-sensitive deployment | `light` or `standard` | Avoids adaptation overhead; consistent behavior standards already reduce output tokens |
 | Benchmarking model quality | `light` with `enableFOS: false` | Minimal interference for apples-to-apples comparison |
 
 ### Configuring hyperform
@@ -121,15 +121,15 @@ const hm = await HyperMem.create(mergeProfile('light', {
 |---|---|---|
 | `compositor.hyperformProfile` | `'full'` (existing), `'light'` (new installs) | Sets the tier. Backward-compat aliases: `'starter'` → `'light'`, `'fleet'` → `'full'`. |
 | `compositor.enableFOS` | `true` | Set `false` to suppress all behavior directives (saves ~100-250 tokens/turn) |
-| `compositor.enableMOD` | `true` | Set `false` to suppress model adaptation (saves ~0-150 tokens/turn depending on MOD match) |
+| `compositor.enableMOD` | `true` | Set `false` to suppress model adaptation (saves ~0-150 tokens/turn depending on match) |
 
-At `light` tier, `enableFOS` and `enableMOD` are both effectively `false` — the light directives are injected directly, not through the FOS/MOD pipeline. At `standard`, FOS is active and MOD is suppressed. At `full`, both are active unless explicitly disabled.
+At `light` tier, `enableFOS` and `enableMOD` are both effectively `false` — the light directives are injected directly, not through the behavior/adaptation pipeline. At `standard`, behavior standards are active and model adaptation is suppressed. At `full`, both are active unless explicitly disabled.
 
-### Creating custom FOS/MOD entries
+### Creating custom entries
 
-FOS and MOD records live in the `fleet_output_standard` and `model_output_directives` tables in `library.db`. There is no API endpoint for these — write directly to the database.
+Behavior and adaptation records live in the `fleet_output_standard` and `model_output_directives` tables in `library.db`. There is no API endpoint for these — write directly to the database.
 
-**Adding a custom FOS record:**
+**Adding a behavior record:**
 
 ```sql
 INSERT INTO fleet_output_standard (
@@ -151,7 +151,7 @@ INSERT INTO fleet_output_standard (
 );
 ```
 
-**Adding a MOD record for a specific model:**
+**Adding an adaptation record for a specific model:**
 
 ```sql
 INSERT INTO model_output_directives (
@@ -176,7 +176,7 @@ INSERT INTO model_output_directives (
 );
 ```
 
-**Adding a wildcard MOD fallback** (applies to any model without a specific match):
+**Adding a wildcard adaptation fallback** (applies to any model without a specific match):
 
 ```sql
 INSERT INTO model_output_directives (
@@ -195,9 +195,9 @@ INSERT INTO model_output_directives (
 );
 ```
 
-To deactivate a FOS or MOD entry without deleting it, set `active = 0` (FOS) or `enabled = 0` (MOD). To switch between multiple FOS records, set `active = 1` on only one — `getActiveFOS()` selects the highest-version active record.
+To deactivate a behavior or adaptation entry without deleting it, set `active = 0` (behavior) or `enabled = 0` (adaptation). To switch between multiple behavior records, set `active = 1` on only one — `getActiveFOS()` selects the highest-version active record.
 
-**Important:** Only one FOS record can be active at a time. MOD supports multiple entries — they're matched by model ID and the best match wins.
+**Important:** Only one behavior record can be active at a time. Adaptation supports multiple entries — they're matched by model ID and the best match wins.
 
 ---
 
@@ -245,7 +245,7 @@ The compositor fills slots in priority order. Each slot consumes tokens from the
 |---|---|---|---|
 | 1 | System prompt | Never truncated | Fixed — part of the agent definition |
 | 2 | Identity (SOUL.md, USER.md, etc.) | Never truncated | Fixed — OpenClaw workspace files |
-| 3 | Hyperform (FOS + MOD) | Capped at FOS/MOD token budgets | `hyperformProfile`, `enableFOS`, `enableMOD` |
+| 3 | Hyperform (behavior + adaptation) | Capped at tier token budgets | `hyperformProfile`, `enableFOS`, `enableMOD` |
 | 4 | Conversation history | Largest slot; fills with tool-compressed history | `maxHistoryMessages`, `keystoneHistoryFraction` |
 | 5 | Facts (L4) | Top N facts by confidence × recency | `maxFacts` |
 | 6 | Wiki/knowledge | Compiled topic pages | `wikiTokenCap`, `maxTotalTriggerTokens` |

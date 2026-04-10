@@ -446,27 +446,48 @@ export interface CompositorConfig {
   /**
    * Fraction of the detected context window to use as the input token budget.
    * The effective budget is: detectedContextWindow × budgetFraction.
-   * contextWindowReserve is then subtracted from this for output headroom.
+   * reserveFraction is then subtracted for output/tool-call headroom.
    *
    * Range: 0.3–0.85. Default: 0.70
-   * Light: 0.625 (40k/64k), Standard: 0.703 (90k/128k), Full: 0.60 (160k/272k)
    */
   budgetFraction?: number;
+  /**
+   * Fraction of the total token budget to reserve for model output and tool
+   * call responses. Higher = more headroom for large tool results.
+   *
+   * Range: 0.10–0.50. Default: 0.25
+   */
+  reserveFraction?: number;
+  /**
+   * Fraction of the effective token budget (post-reserve) allocated to
+   * conversation history. History fills up to this cap before context slots run.
+   *
+   * Range: 0.20–0.60. Default: 0.40
+   */
+  historyFraction?: number;
+  /**
+   * Fraction of the effective token budget (post-reserve) allocated to the
+   * memory pool: facts, wiki, semantic recall, cross-session context, and
+   * trigger-fired doc chunks all draw from this shared pool.
+   *
+   * Range: 0.20–0.70. Default: 0.45
+   * Note: historyFraction + memoryFraction should be ≤ 0.90 to leave room
+   * for fixed-cost slots (system, identity, HyperForm: typically 3–8k tokens).
+   */
+  memoryFraction?: number;
   /**
    * @deprecated Use budgetFraction instead. Absolute token fallback used when
    * model detection fails and budgetFraction is not set.
    */
   defaultTokenBudget: number;
   maxHistoryMessages: number;
+  /** @advanced Replaced by memoryFraction for primary tuning. Hard per-fetch fact count cap. */
   maxFacts: number;
   maxCrossSessionContext: number;  // tokens
   /**
-   * Aggregate token ceiling across all trigger-fired doc chunk collections in a
-   * single compose pass. When unset, hypermem uses a dynamic ceiling of 40% of
-   * the remaining budget at the start of trigger retrieval.
-   *
-   * This prevents pathological prompts from firing many trigger collections at
-   * once and starving the rest of the prompt budget.
+   * @advanced Aggregate token ceiling across all trigger-fired doc chunk
+   * collections in a single compose pass. When unset, draws from the memoryFraction
+   * pool. Rarely needs manual tuning.
    */
   maxTotalTriggerTokens?: number;
   /**
@@ -489,15 +510,9 @@ export interface CompositorConfig {
    */
   warmHistoryBudgetFraction: number;
   /**
-   * Fraction of the model context window to reserve for output tokens and
-   * hypermem operational overhead. The compositor's effective input budget is
-   * (contextWindow × (1 - contextWindowReserve)).
-   *
-   * Higher values = more headroom for large operations, fewer turns before
-   * session break. Lower values = more context available, higher saturation risk.
-   *
-   * Default: 0.25 (25% reserve — leaves 75% for input context)
-   * Previous default was 0.10 (10% reserve).
+   * @advanced Use reserveFraction instead.
+   * Fraction of the model context window to reserve for output tokens.
+   * Falls back to reserveFraction when set. Default: 0.25
    */
   contextWindowReserve?: number;
   /**
@@ -536,16 +551,10 @@ export interface CompositorConfig {
    */
   keystoneMinSignificance?: number;
   /**
-   * Fraction of the effective token budget to target for context assembly.
-   * The compositor fills slots until this fraction is consumed, leaving the
-   * remainder for conversation history and response headroom.
-   *
-   * Lower values = lighter context, faster turns, less memory surfaced.
-   * Higher values = richer context, more memory, higher saturation risk.
-   *
+   * @advanced Use memoryFraction instead.
+   * Fraction of the effective budget to target for context assembly.
+   * Honored as a fallback when memoryFraction is not set.
    * Range: 0.3–0.85. Default: 0.65
-   * Typical lightweight config: 0.45
-   * Typical fleet/multi-agent config: 0.65
    */
   targetBudgetFraction?: number;
   /**

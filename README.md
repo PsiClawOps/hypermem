@@ -127,7 +127,7 @@ When it fills:                          When budget is exceeded:
 
 | | Standard | hypercompositor |
 |---|---|---|
-| Context source | Growing transcript | 4 independent storage layers |
+| Context source | Growing transcript only | Transcript + 3 additional storage layers |
 | When context fills | Trim + summarize (lossy) | Budget allocation (lossless storage) |
 | Old decisions | Lost after compaction | Retrievable via keystones + semantic recall |
 | Topic changes | All history competes equally | Scoped retrieval by active topic |
@@ -136,7 +136,7 @@ When it fills:                          When budget is exceeded:
 
 High-signal turns are marked as keystones and survive pressure trimming ahead of ordinary history.
 
-### Budget fill order
+### How the compositor fills the budget
 
 The compositor fills slots in priority order. Each slot takes what it needs from the remaining budget before the next slot runs (greedy fill, not proportional allocation):
 
@@ -144,7 +144,7 @@ The compositor fills slots in priority order. Each slot takes what it needs from
 |---|---|---|---|
 | 1 | System prompt | Never truncated | Fixed |
 | 2 | Identity (SOUL.md, USER.md, etc.) | Never truncated | Fixed |
-| 3 | Hyperform (FOS + MOD) | Capped at FOS/MOD token budgets | `hyperformProfile` |
+| 3 | Hyperform (behavioral standards + model adaptation) | Capped at tier token budgets | `hyperformProfile` |
 | 4 | Conversation history | Largest slot; fills with tool-compressed history | `maxHistoryMessages`, `keystoneHistoryFraction` |
 | 5 | Facts (L4) | Top N facts by confidence × recency | `maxFacts` |
 | 6 | Wiki/knowledge | Compiled topic pages | `wikiTokenCap`, `maxTotalTriggerTokens` |
@@ -152,11 +152,11 @@ The compositor fills slots in priority order. Each slot takes what it needs from
 | 8 | Cross-session context | Other active sessions | `maxCrossSessionContext` |
 | 9 | Action summary | Recent tool actions | Pressure-gated |
 
-The budget formula: `detectedWindow × budgetFraction × (1 - contextWindowReserve)` = tokens for context + history. Then `targetBudgetFraction` splits that between context assembly (facts, wiki, recall) and conversation history.
+The budget formula: `detectedWindow × budgetFraction × (1 - reserveFraction)` = usable tokens. `historyFraction` caps conversation history; `memoryFraction` caps the shared pool for facts, wiki, and semantic recall.
 
-**Greedy fill means** if history consumes most of the budget, slots 5-8 get whatever remains. If you want more facts or wiki content, lower `targetBudgetFraction` (more context, less history) or raise `budgetFraction` (use more of the window).
+**Greedy fill means** if history consumes its full `historyFraction` cap, the memory pool (`memoryFraction`) is still available for facts, wiki, and semantic recall. Raise `memoryFraction` if you want more facts surfaced. Raise `historyFraction` if long conversations are getting truncated. Keep the sum ≤ 0.85.
 
-For full knob reference and worked configuration examples, see **[docs/TUNING.md](./docs/TUNING.md)**.
+For full tuning references and working configuration examples, see **[docs/TUNING.md](./docs/TUNING.md)**.
 
 ---
 
@@ -166,27 +166,27 @@ Raw model output has two problems. It drifts from your standards (sycophancy, he
 
 Consistent output isn't just aesthetic. A model that paginates short answers, preambles with filler, or inflates lists uses more output tokens per turn. Over hundreds of turns, that compounds into real cost. hyperform directives compress output at the source: fewer tokens generated means lower API spend per session, and less context pressure for subsequent turns.
 
-### Behavior (FOS — Fleet Output Standard)
+### Behavior standards
 
-FOS defines how your agents write. Anti-sycophancy rules prevent filler openings. Density targets compress answers. Anti-pattern bans remove common AI markers (em dashes, AI vocabulary, inflated significance). These rules apply to all models equally.
+Behavior standards define how your agents write. Anti-sycophancy rules prevent filler openings. Density targets compress answers. Anti-pattern bans remove common AI markers (em dashes, AI vocabulary, inflated significance). These rules apply to all models equally.
 
 | Tier | Tokens | What it injects |
 |---|---|---|
 | `light` | ~100 | 9 standalone directives: lead with answer, no sycophancy, no em dashes, AI vocab ban, length targets (simple/analysis/code), filler ban, no pagination of short answers, evidence calibration, numbers over adjectives. No database required. |
-| `standard` | ~250 | Full FOS directive set from the `fleet_output_standard` table: structural rules, density targets per task type, anti-patterns, format rules, compression ratios, voice directives, and task-context overrides. Falls back to `light` directives if no FOS record exists. |
-| `full` | ~250 + MOD | Same FOS as `standard`, plus model adaptation (see below). |
+| `standard` | ~250 | Full directive set from the `fleet_output_standard` table: structural rules, density targets per task type, anti-patterns, format rules, compression ratios, voice directives, and task-context overrides. Falls back to `light` directives if no record exists. |
+| `full` | ~250 + adaptation | Same directives as `standard`, plus model adaptation (see below). |
 
-### Model Adaptation (MOD — Model Output Directives)
+### Model adaptation
 
-Different models have different default behaviors. GPT-5.4 tends toward 2x verbosity and long lists. Claude Opus defaults to hedging and preambles. Gemini produces bulleted summaries where prose would be more direct. MOD corrects for these tendencies per model.
+Different models have different default behaviors. GPT-5.4 tends toward 2x verbosity and long lists. Claude Opus defaults to hedging and preambles. Gemini produces bulleted summaries where prose would be more direct. Model adaptation corrects for these tendencies per model.
 
-MOD entries are stored in the `model_output_directives` table and matched by model ID using exact match, then glob pattern (longest wins), then wildcard fallback. Each entry contains:
+Adaptation entries are stored in the `model_output_directives` table and matched by model ID using exact match, then glob pattern (longest wins), then wildcard fallback. Each entry contains:
 
 - **Calibration** — known model tendencies and specific adjustments (e.g., "2x verbosity: cut first drafts in half")
 - **Corrections** — hard/medium/soft severity rules applied in order (e.g., "No preamble before the answer")
 - **Task overrides** — per-task-type adjustments
 
-MOD is only active at the `full` tier. At `light` and `standard`, model-specific corrections are suppressed.
+Model adaptation is only active at the `full` tier. At `light` and `standard`, model-specific corrections are suppressed.
 
 The `model_output_directives` table starts empty. You populate it with corrections for the models you run. See [docs/TUNING.md](./docs/TUNING.md#creating-custom-fosmod-entries) for the schema and SQL examples.
 
@@ -214,7 +214,7 @@ Would you like me to go deeper on any of these?
 WITH outputProfile: "light":
 For a 128k window: reserve 14k for identity/system, target 46k for history, 10k for recent
 tool context, and leave ~30k as allocator reserve. hypermem handles slot competition
-automatically -- set contextWindowReserve to your preferred floor and let the compositor fill.
+automatically — set `reserveFraction` to your preferred floor and let the compositor fill.
 ```
 
 **Confabulation resistance** checks output against stored facts before claims are recorded. No LLM call. Pattern matching against the fact corpus, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
@@ -236,7 +236,7 @@ Set `compositor.hyperformProfile` in your hypermem config file (`~/.openclaw/hyp
 | Single agent, 64k or smaller model | `light` | Minimal token overhead, no DB dependency |
 | Single agent, 128k+ model | `standard` | Richer output control, worth the extra ~150 tokens |
 | Fleet with mixed models | `full` | Different models need different corrections |
-| Cost-sensitive deployment | `light` or `standard` | Consistent FOS already reduces output tokens |
+| Cost-sensitive deployment | `light` or `standard` | Consistent behavior standards already reduce output tokens |
 | Benchmarking model quality | `light` with `enableFOS: false` | Minimal interference for comparison |
 
 Backward-compatible aliases: `"starter"` maps to `"light"`, `"fleet"` maps to `"full"`.
@@ -249,9 +249,9 @@ Fine-grained control:
 | `enableFOS` | `true` | Set `false` to suppress all behavior directives |
 | `enableMOD` | `true` | Set `false` to suppress model adaptation |
 
-At `light` tier, both FOS and MOD are effectively off — the 9 light directives are injected directly, not through the FOS/MOD pipeline. At `standard`, FOS is active and MOD is suppressed. At `full`, both are active unless explicitly disabled.
+At `light` tier, both are effectively off — the 9 light directives are injected directly, not through the behavior/adaptation pipeline. At `standard`, behavior standards are active and model adaptation is suppressed. At `full`, both are active unless explicitly disabled.
 
-For full tuning details, custom FOS/MOD entries, and worked configuration examples, see **[docs/TUNING.md](./docs/TUNING.md)**.
+For full tuning details, custom behavior/adaptation entries, and worked configuration examples, see **[docs/TUNING.md](./docs/TUNING.md)**.
 
 ---
 
@@ -483,17 +483,17 @@ If you prefer, hand the install to your OpenClaw agent:
 
 ### Tuning
 
-hypermem has two independent tuning surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model's response is shaped). Most users pick a profile and override one or two knobs.
+hypermem has two independent tuning surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model's response is shaped). Most users pick a profile and adjust one or two settings.
 
 #### Profiles
 
-Three pre-built profiles ship with hypermem. Each sets every compositor knob to a coherent default:
+Three pre-built profiles ship. Each sets every compositor knob to a coherent default:
 
-| Profile | Target window | `budgetFraction` | `targetBudgetFraction` | `hyperformProfile` | Best for |
-|---|---|---|---|---|---|
-| `light` | 64k | 0.625 | 0.50 | `light` | Single-agent installs, small models |
-| `standard` | 128k | 0.703 | 0.65 | `standard` | Normal deployments, small fleets |
-| `full` | 200k+ | 0.588 | 0.55 | `full` | Multi-agent fleets, large-context models |
+| Profile | Target window | `budgetFraction` | `reserveFraction` | `historyFraction` | `memoryFraction` | `hyperformProfile` |
+|---|---|---|---|---|---|---|
+| `light` | 64k | 0.625 | 0.35 | 0.35 | 0.30 | `light` |
+| `standard` | 128k | 0.703 | 0.25 | 0.40 | 0.40 | `standard` |
+| `full` | 200k+ | 0.588 | 0.20 | 0.45 | 0.40 | `full` |
 
 Start with `light`. Move up when you need richer context and have the headroom.
 
@@ -501,34 +501,51 @@ Start with `light`. Move up when you need richer context and have the headroom.
 import { lightProfile, standardProfile, fullProfile } from '@psiclawops/hypermem';
 ```
 
-Pass to `HyperMem.create()` as the base config, or use `mergeProfile()` to override individual knobs.
+Pass to `HyperMem.create()` as the base config, or use `mergeProfile()` to adjust individual settings.
 
 #### Context assembly
 
-The budget formula: `detectedWindow × budgetFraction × (1 - contextWindowReserve)` = tokens for context + history. Then `targetBudgetFraction` splits that between context assembly and history.
+Budget flows through four fractions applied in sequence:
 
-The compositor fills slots in priority order (greedy fill, not proportional). See [Budget fill order](#budget-fill-order) for the full slot list.
+```
+detectedWindow × budgetFraction                 = total input budget
+total × reserveFraction                         = reserved (output + tool calls)
+total × (1 − reserveFraction)                   = usable budget
+usable × historyFraction                        = history cap
+usable × memoryFraction                         = memory pool cap
+remainder                                        = system / identity / HyperForm (~3–8k)
+```
 
-Key knobs (all live under `compositor` in `~/.openclaw/hypermem/config.json`):
+The compositor fills slots in priority order (greedy fill, not proportional). See [Budget fill order](#budget-fill-order). History fills first up to its cap, then facts/wiki/semantic fill from the memory pool, then HyperForm/identity/system take what they need from the remainder.
 
 | Knob | Default | What it controls |
 |---|---|---|
-| `budgetFraction` | 0.703 | Fraction of detected context window used as input budget. Primary dial. |
-| `contextWindowReserve` | 0.25 | Fraction reserved for output and tool responses. |
-| `targetBudgetFraction` | 0.65 | Context vs. history split within the effective budget. |
-| `maxFacts` | 30 | Maximum facts surfaced per compose pass. |
-| `wikiTokenCap` | 600 | Hard ceiling on wiki/knowledge injection per pass. |
-| `maxTotalTriggerTokens` | 4000 | Ceiling across all trigger-fired doc chunk collections. |
-| `keystoneHistoryFraction` | 0.20 | Fraction of history budget reserved for keystones. |
-| `keystoneMaxMessages` | 15 | Max keystone messages per pass. |
-| `maxCrossSessionContext` | 4000 | Token ceiling for cross-session context. |
-| `maxRecentToolPairs` | 3 | Tool pairs kept at full fidelity. |
-| `maxProseToolPairs` | 10 | Older pairs converted to prose stubs before dropping. |
-| `dynamicReserveEnabled` | true | Enable dynamic reserve adjustment based on turn cost. |
-| `dynamicReserveTurnHorizon` | 5 | Turns to project forward for reserve calculation. |
-| `dynamicReserveMax` | 0.50 | Hard ceiling on dynamic reserve fraction. |
+| `budgetFraction` | 0.703 | Fraction of detected context window to use as total input budget. |
+| `reserveFraction` | 0.25 | Fraction of total budget held back for model output and tool call responses. |
+| `historyFraction` | 0.40 | Fraction of usable budget (post-reserve) allocated to conversation history. |
+| `memoryFraction` | 0.40 | Fraction of usable budget (post-reserve) shared across facts, wiki, semantic recall, cross-session, and trigger-fired doc chunks. |
+
+`historyFraction + memoryFraction` should stay at or below 0.85 to leave room for fixed-cost slots (system, identity, HyperForm). At 0.85 sum with typical prompts, you have ~15% (≈10–20k tokens) for those slots.
 
 `budgetFraction` replaces the old `defaultTokenBudget` (absolute token number). `defaultTokenBudget` is still honored as a fallback when model detection fails.
+
+**Tool pair handling is automatic.** The tool gradient preserves recent turns at full fidelity and progressively compresses older ones. There is no user-facing knob for this; the safe floor is enforced internally.
+
+#### Advanced context knobs
+
+These are internal knobs that rarely need adjustment. If you are customizing these, you probably already know why:
+
+| Knob | Default | What it controls |
+|---|---|---|
+| `maxHistoryMessages` | 500 | Hard message-count cap on history. Rarely the bottleneck on token-budgeted sessions. |
+| `wikiTokenCap` | 600 | Hard ceiling on wiki/knowledge injection per pass, within the memory pool. |
+| `maxTotalTriggerTokens` | 4000 | Ceiling across all trigger-fired doc chunk collections per pass. |
+| `keystoneHistoryFraction` | 0.20 | Fraction of history budget for keystone (recalled older) messages. |
+| `keystoneMaxMessages` | 15 | Max keystone messages per pass. |
+| `maxCrossSessionContext` | 4000 | Token ceiling for cross-session context injection. |
+| `dynamicReserveEnabled` | true | Auto-adjust reserve based on recent turn cost. |
+| `dynamicReserveTurnHorizon` | 5 | Turns projected forward for reserve calculation. |
+| `dynamicReserveMax` | 0.50 | Hard ceiling on dynamic reserve. |
 
 #### Output shaping (HyperForm)
 
@@ -537,14 +554,14 @@ Key knobs (all live under `compositor` in `~/.openclaw/hypermem/config.json`):
 | Value | Tokens | What it injects |
 |---|---|---|
 | `"light"` | ~100 | Anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration |
-| `"standard"` | ~250 | Full FOS directive set plus pagination rules and hedging policy |
-| `"full"` | ~400 | FOS + MOD: complete normalization with model-specific calibration and cross-agent coordination |
+| `"standard"` | ~250 | Full directive set plus pagination rules and hedging policy |
+| `"full"` | ~400 | Complete directives with model-specific adaptation and cross-agent coordination |
 
 See the [hyperform section](#hyperform) above for behavior vs. model adaptation details and before/after examples.
 
 Backward-compatible aliases: `"starter"` maps to `"light"`, `"fleet"` maps to `"full"`. The old field name `outputProfile` still works but `hyperformProfile` is preferred.
 
-Fine-grained FOS/MOD control: set `enableFOS: false` or `enableMOD: false` to suppress individual layers without changing the profile tier.
+Fine-grained control: set `enableFOS: false` or `enableMOD: false` to suppress individual layers without changing the profile tier.
 
 #### Example config
 
@@ -552,20 +569,17 @@ Drop a `~/.openclaw/hypermem/config.json` to override defaults. Takes effect on 
 
 ```json
 {
-  "deferToolPruning": true,
   "compositor": {
     "budgetFraction": 0.70,
-    "contextWindowReserve": 0.25,
-    "targetBudgetFraction": 0.65,
-    "maxFacts": 18,
+    "reserveFraction": 0.25,
+    "historyFraction": 0.40,
+    "memoryFraction": 0.45,
     "hyperformProfile": "standard"
   }
 }
 ```
 
-`deferToolPruning: true` tells hypermem to skip its own T0/T1/T2/T3 tool gradient when OpenClaw's native `contextPruning` extension is active (Anthropic and Google providers). On those providers, OpenClaw's pruner handles tool result trimming: ratio-driven at >30% context fill, soft-trim head+tail for results over 4,000 chars, hard-clear above 50k total, with the last 3 assistant turns always protected. hypermem's gradient remains active as fallback for other providers (GPT-5.4, etc.). Default: `true` for Anthropic installs.
-
-**Full tuning reference with all knobs, worked examples, and custom FOS/MOD entries: [docs/TUNING.md](./docs/TUNING.md)**
+**Full tuning reference with all adjustments, worked examples, and custom entries: [docs/TUNING.md](./docs/TUNING.md)**
 
 ---
 

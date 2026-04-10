@@ -156,7 +156,7 @@ function computeDynamicReserve(
   totalWindow: number,
   config: CompositorConfig,
 ): { reserve: number; avgTurnCost: number; dynamic: boolean; pressureHigh: boolean } {
-  const base = config.contextWindowReserve ?? 0.15;
+  const base = config.reserveFraction ?? config.contextWindowReserve ?? 0.25;
   const horizon = config.dynamicReserveTurnHorizon ?? 5;
   const max = config.dynamicReserveMax ?? 0.50;
   const enabled = config.dynamicReserveEnabled ?? true;
@@ -193,18 +193,26 @@ function computeDynamicReserve(
 }
 
 const DEFAULT_CONFIG: CompositorConfig = {
+  // Primary budget controls
   budgetFraction: 0.703,
+  reserveFraction: 0.25,
+  historyFraction: 0.40,
+  memoryFraction: 0.40,
+  // Absolute fallback
   defaultTokenBudget: 90000,
+  // History internals
   maxHistoryMessages: 250,
-  maxFacts: 28,
-  maxCrossSessionContext: 6000,
-  maxRecentToolPairs: 3,
-  maxProseToolPairs: 10,
   warmHistoryBudgetFraction: 0.4,
   keystoneHistoryFraction: 0.2,
   keystoneMaxMessages: 15,
   keystoneMinSignificance: 0.5,
-  contextWindowReserve: 0.15,
+  // Memory internals
+  maxFacts: 28,
+  maxCrossSessionContext: 6000,
+  // Tool gradient (internal)
+  maxRecentToolPairs: 3,
+  maxProseToolPairs: 10,
+  // Dynamic reserve
   dynamicReserveTurnHorizon: 5,
   dynamicReserveMax: 0.50,
   dynamicReserveEnabled: true,
@@ -1127,9 +1135,17 @@ export class Compositor {
       let historyTokens = 0;
       const includedClusters: NeutralMessageCluster<NeutralMessage>[] = [];
 
+      // Pre-allocate history budget. historyFraction is a fraction of the
+      // effective token budget (post-reserve). Falls back to unbounded fill
+      // (remaining) when historyFraction is not set.
+      const historyBudget = this.config.historyFraction != null
+        ? Math.floor(budget * this.config.historyFraction)
+        : remaining;
+      const historyFillCap = Math.min(historyBudget, remaining);
+
       for (let i = budgetClusters.length - 1; i >= 0; i--) {
         const cluster = budgetClusters[i];
-        if (historyTokens + cluster.tokenCost > remaining && includedClusters.length > 0) {
+        if (historyTokens + cluster.tokenCost > historyFillCap && includedClusters.length > 0) {
           const droppedMsgCount = budgetClusters.slice(0, i + 1).reduce((s, c) => s + c.messages.length, 0);
           warnings.push(`History truncated at cluster ${i + 1}/${budgetClusters.length} (${droppedMsgCount} messages dropped)`);
           break;
@@ -1262,13 +1278,22 @@ export class Compositor {
         remaining -= historyTokens;
       }
 
-      // targetBudgetFraction cap: limit total context slots to a fraction of the
-      // effective budget. This gives operators a single knob to make the system
-      // lighter without tuning individual slot fractions.
-      const targetFraction = this.config.targetBudgetFraction ?? 0.65;
-      const contextCap = Math.floor(budget * targetFraction);
-      if (remaining > contextCap) {
-        remaining = contextCap;
+      // Memory budget pool: facts, wiki, semantic recall, cross-session, and
+      // trigger-fired doc chunks all draw from this shared pool via `remaining`.
+      // memoryFraction is a fraction of the effective token budget (post-reserve).
+      // Falls back to targetBudgetFraction cap behavior when memoryFraction is not set.
+      let memoryBudget: number;
+      if (this.config.memoryFraction != null) {
+        memoryBudget = Math.floor(budget * this.config.memoryFraction);
+        if (remaining > memoryBudget) {
+          remaining = memoryBudget;
+        }
+      } else {
+        const targetFraction = this.config.targetBudgetFraction ?? 0.65;
+        memoryBudget = Math.floor(budget * targetFraction);
+        if (remaining > memoryBudget) {
+          remaining = memoryBudget;
+        }
       }
 
       // T1.3: Ghost message suppression.
@@ -1317,19 +1342,18 @@ export class Compositor {
 
     // ── Wiki Page (L4: Library — active topic synthesis) ──────
     // Inject synthesized wiki page for the active topic before general knowledge.
-    // Token budget: capped at 15% of remaining.
+    // Draws from the shared memory budget pool (remaining is pre-capped by memoryBudget).
     if (request.includeLibrary !== false && remaining > 300 && libDb && composedActiveTopicName) {
       const wikiContent = this.buildWikiPageContext(request.agentId, composedActiveTopicName, libDb);
       if (wikiContent) {
         const tokens = estimateTokens(wikiContent);
-        const cap = Math.floor(remaining * 0.15);
-        if (tokens <= cap) {
+        if (tokens <= remaining) {
           contextParts.push(wikiContent);
           contextTokens += tokens;
           remaining -= tokens;
           slots.library += tokens;
-        } else {
-          const truncated = this.truncateToTokens(wikiContent, cap);
+        } else if (remaining > 200) {
+          const truncated = this.truncateToTokens(wikiContent, remaining);
           const truncTokens = estimateTokens(truncated);
           contextParts.push(truncated);
           contextTokens += truncTokens;
@@ -1341,6 +1365,7 @@ export class Compositor {
 
     // ── Facts (L4: Library) ──────────────────────────────────
     // scope: agent — filtered by agentId via filterByScope after fetch
+    // Draws from the shared memory budget pool (remaining is pre-capped by memoryBudget).
     if (request.includeFacts !== false && remaining > 500) {
       const factsContent = this.buildFactsFromDb(request.agentId, request.sessionKey, libDb || db);
       if (factsContent !== null) {
@@ -1349,20 +1374,19 @@ export class Compositor {
         diagScopeFiltered += scopeFiltered;
         if (content) {
           const tokens = estimateTokens(content);
-          if (tokens <= remaining * 0.25) { // Cap facts at 25% of remaining (W4: was 0.3)
+          if (tokens <= remaining) {
             contextParts.push(`## Active Facts\n${content}`);
             contextTokens += tokens;
             remaining -= tokens;
             slots.facts = tokens;
-          } else {
-            // Truncate to budget
-            const truncated = this.truncateToTokens(content, Math.floor(remaining * 0.25));
+          } else if (remaining > 200) {
+            const truncated = this.truncateToTokens(content, remaining);
             const truncTokens = estimateTokens(truncated);
             contextParts.push(`## Active Facts (truncated)\n${truncated}`);
             contextTokens += truncTokens;
             remaining -= truncTokens;
             slots.facts = truncTokens;
-            warnings.push('Facts truncated to fit budget');
+            warnings.push('Facts truncated to fit memory budget');
           }
         }
       }
