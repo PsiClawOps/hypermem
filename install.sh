@@ -316,15 +316,45 @@ EOF
 # ─────────────────────────────────────────────
 register_plugin() {
   if ! command -v openclaw &>/dev/null; then
+    warn "OpenClaw CLI not found, skipping plugin registration"
+    echo -e "  ${DIM}Run these manually after installing OpenClaw:${NC}"
+    echo -e "  ${DIM}  openclaw plugins install file:$INSTALL_DIR/plugin${NC}"
+    echo -e "  ${DIM}  openclaw plugins install file:$INSTALL_DIR/memory-plugin${NC}"
     return
   fi
 
   echo ""
-  if confirm "Register HyperMem as an OpenClaw plugin?"; then
-    info "Registering plugin..."
-    openclaw plugins install "file:$INSTALL_DIR/plugin" 2>/dev/null \
-      && success "Plugin registered — restart OpenClaw to activate" \
-      || warn "Plugin registration failed — run 'openclaw plugins install file:$INSTALL_DIR/plugin' manually"
+  if confirm "Register HyperMem plugins with OpenClaw?"; then
+    # Context engine plugin (hypercompositor)
+    info "Registering context engine plugin (hypercompositor)..."
+    if openclaw plugins install "file:$INSTALL_DIR/plugin" 2>/dev/null; then
+      success "hypercompositor registered"
+    else
+      warn "Context engine registration failed — run: openclaw plugins install file:$INSTALL_DIR/plugin"
+    fi
+
+    # Memory plugin (hypermem)
+    info "Registering memory plugin (hypermem)..."
+    if openclaw plugins install "file:$INSTALL_DIR/memory-plugin" 2>/dev/null; then
+      success "hypermem registered"
+    else
+      warn "Memory plugin registration failed — run: openclaw plugins install file:$INSTALL_DIR/memory-plugin"
+    fi
+
+    # Configure plugin slots
+    info "Configuring plugin slots..."
+    local SLOT_OK=true
+    openclaw config set plugins.slots.contextEngine hypercompositor 2>/dev/null || SLOT_OK=false
+    openclaw config set plugins.slots.memory hypermem 2>/dev/null || SLOT_OK=false
+    if $SLOT_OK; then
+      success "Plugin slots configured"
+    else
+      warn "Slot config failed — set manually:"
+      echo -e "  ${DIM}  openclaw config set plugins.slots.contextEngine hypercompositor${NC}"
+      echo -e "  ${DIM}  openclaw config set plugins.slots.memory hypermem${NC}"
+    fi
+
+    success "Restart OpenClaw to activate: openclaw gateway restart"
   fi
 }
 
@@ -343,14 +373,24 @@ if (!cfg.installDir) throw new Error('missing installDir');
 if (!existsSync(cfg.installDir)) throw new Error('installDir does not exist: ' + cfg.installDir);
 EOF
 
-  # Verify HyperMem module loads
+  # Verify HyperMem core module loads
   node --input-type=module <<EOF 2>/dev/null \
-    && success "HyperMem module loads" \
-    || warn "HyperMem module load failed — check $INSTALL_DIR"
+    && success "HyperMem core module loads" \
+    || warn "HyperMem core module load failed — check $INSTALL_DIR"
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 require('$INSTALL_DIR/dist/index.js');
 EOF
+
+  # Verify context engine plugin dist exists
+  [[ -f "$INSTALL_DIR/plugin/dist/index.js" ]] \
+    && success "hypercompositor plugin built" \
+    || warn "hypercompositor plugin not built — run: npm --prefix $INSTALL_DIR/plugin run build"
+
+  # Verify memory plugin dist exists
+  [[ -f "$INSTALL_DIR/memory-plugin/dist/index.js" ]] \
+    && success "hypermem memory plugin built" \
+    || warn "hypermem memory plugin not built — run: npm --prefix $INSTALL_DIR/memory-plugin run build"
 
   # Tier 2: verify transformers package is present
   if [[ "$SELECTED_TIER" == "2" ]]; then
@@ -377,8 +417,9 @@ summary() {
   echo -e "${CYAN}${BOLD}  ─────────────────────────────────────────${NC}"
   echo ""
   echo -e "  ${BOLD}Tier:${NC}    $SELECTED_TIER"
-  echo -e "  ${BOLD}Install:${NC} $INSTALL_DIR"
-  echo -e "  ${BOLD}Config:${NC}  $HOME/.openclaw/hypermem/config.json"
+  echo -e "  ${BOLD}Install:${NC}  $INSTALL_DIR"
+  echo -e "  ${BOLD}Config:${NC}   $HOME/.openclaw/hypermem/config.json"
+  echo -e "  ${BOLD}Plugins:${NC}  hypercompositor (context-engine) + hypermem (memory)"
   echo ""
 
   case "$SELECTED_TIER" in
