@@ -255,7 +255,8 @@ export interface ComposeRequest {
   topicId?: string;
   /**
    * When true, skip the C4 window cache fast-exit even if the cursor is fresh.
-   * Useful when the caller needs a fresh compose (e.g. after a config change).
+   * Use this when external L4 state changed between turns, for example facts,
+   * wiki pages, or other library-backed context updated out of band.
    */
   skipWindowCache?: boolean;
 }
@@ -306,6 +307,8 @@ export interface ComposeDiagnostics {
   sessionPressureHigh?: boolean;
   /** Number of items filtered across all dedup paths (temporal, open-domain, semantic, cross-session) */
   fingerprintDedups?: number;
+  /** Number of duplicate-prefix matches where the full normalized content differed */
+  fingerprintCollisions?: number;
   /** True when the window cache fast-exit fired and full compose was skipped */
   windowCacheHit?: boolean;
 }

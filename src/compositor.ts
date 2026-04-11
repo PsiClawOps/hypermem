@@ -953,6 +953,13 @@ export class Compositor {
   async compose(request: ComposeRequest, db: DatabaseSync, libraryDb?: DatabaseSync): Promise<ComposeResult> {
     const store = new MessageStore(db);
     const libDb = libraryDb || this.libraryDb;
+    const toComposeOutputMessages = (inputMessages: NeutralMessage[]): ProviderMessage[] => {
+      // When skipProviderTranslation is set, compose returns the neutral window
+      // typed as ProviderMessage[] by contract. The runtime translates later.
+      return request.skipProviderTranslation
+        ? inputMessages as unknown as ProviderMessage[]
+        : toProviderFormat(inputMessages, request.provider ?? request.model ?? null);
+    };
 
     // ── C4: Window cache fast-exit ────────────────────────────
     // If nothing has changed since the last compose (cursor.lastSentId >= newest
@@ -967,49 +974,34 @@ export class Compositor {
         ).get(request.agentId) as { maxId: number | null } | undefined;
         const newestMsgId = newestRow?.maxId;
         if (newestMsgId != null) {
-          const cachedWindow = await this.cache.getWindowIfFresh(
+          const cachedBundle = await this.cache.getFreshWindowBundle(
             request.agentId, request.sessionKey, newestMsgId
           );
-          if (cachedWindow) {
-            const cachedMeta = await this.cache.getWindowMeta(
-              request.agentId, request.sessionKey
-            );
-            if (cachedMeta) {
-              const cachedSlots: SlotTokenCounts = {
-                system: cachedMeta.slots['system'] ?? 0,
-                identity: cachedMeta.slots['identity'] ?? 0,
-                history: cachedMeta.slots['history'] ?? 0,
-                facts: cachedMeta.slots['facts'] ?? 0,
-                context: cachedMeta.slots['context'] ?? 0,
-                library: cachedMeta.slots['library'] ?? 0,
-              };
-              const outputMessages = request.skipProviderTranslation
-                ? cachedWindow as unknown as import('./types.js').ProviderMessage[]
-                : toProviderFormat(cachedWindow, request.provider ?? request.model ?? null);
-              return {
-                messages: outputMessages,
-                tokenCount: cachedMeta.totalTokens,
-                slots: cachedSlots,
-                truncated: false,
-                hasWarnings: cachedMeta.warnings.length > 0,
-                warnings: cachedMeta.warnings,
-                diagnostics: {
-                  triggerHits: 0,
-                  triggerFallbackUsed: false,
-                  factsIncluded: 0,
-                  semanticResultsIncluded: 0,
-                  docChunksCollections: 0,
-                  scopeFiltered: 0,
-                  retrievalMode: 'none',
-                  windowCacheHit: true,
-                  fingerprintDedups: 0,
-                },
-              };
-            }
+          if (cachedBundle) {
+            const cachedSlots: SlotTokenCounts = {
+              system: cachedBundle.meta.slots['system'] ?? 0,
+              identity: cachedBundle.meta.slots['identity'] ?? 0,
+              history: cachedBundle.meta.slots['history'] ?? 0,
+              facts: cachedBundle.meta.slots['facts'] ?? 0,
+              context: cachedBundle.meta.slots['context'] ?? 0,
+              library: cachedBundle.meta.slots['library'] ?? 0,
+            };
+            return {
+              messages: toComposeOutputMessages(cachedBundle.messages),
+              tokenCount: cachedBundle.meta.totalTokens,
+              slots: cachedSlots,
+              truncated: false,
+              hasWarnings: cachedBundle.meta.warnings.length > 0,
+              warnings: cachedBundle.meta.warnings,
+              diagnostics: {
+                ...cachedBundle.meta.diagnostics,
+                windowCacheHit: true,
+              },
+            };
           }
         }
       } catch {
-        // Cache fast-exit is best-effort — fall through to full compose
+        // Cache fast-exit is best-effort, fall through to full compose
       }
     }
 
@@ -1406,15 +1398,7 @@ export class Compositor {
     // 120-char prefix catches rephrased duplicates the old 60-char includes()
     // match missed without needing a hash.
     const contextFingerprints = new Set<string>();
-    function contentFingerprint(text: string): string {
-      return text.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 120);
-    }
-    function addFingerprint(text: string): void {
-      contextFingerprints.add(contentFingerprint(text));
-    }
-    function isDuplicate(text: string): boolean {
-      return contextFingerprints.has(contentFingerprint(text));
-    }
+    const fingerprintEntries = new Map<string, Set<string>>();
 
     // ── Compose-level diagnostics tracking vars ──────────────
     let diagTriggerHits = 0;
@@ -1424,8 +1408,31 @@ export class Compositor {
     let diagDocChunkCollections = 0;
     let diagScopeFiltered = 0;
     let diagFingerprintDedups = 0;
-    let diagWindowCacheHit = false;
+    let diagFingerprintCollisions = 0;
     let diagRetrievalMode: ComposeDiagnostics['retrievalMode'] = 'none';
+
+    function normalizeFingerprintText(text: string): string {
+      return text.toLowerCase().replace(/\s+/g, ' ').trim();
+    }
+    function contentFingerprint(text: string): string {
+      return normalizeFingerprintText(text).slice(0, 120);
+    }
+    function addFingerprint(text: string): void {
+      const normalized = normalizeFingerprintText(text);
+      const fingerprint = normalized.slice(0, 120);
+      contextFingerprints.add(fingerprint);
+      const entries = fingerprintEntries.get(fingerprint) ?? new Set<string>();
+      entries.add(normalized);
+      fingerprintEntries.set(fingerprint, entries);
+    }
+    function isDuplicate(text: string): boolean {
+      const normalized = normalizeFingerprintText(text);
+      const fingerprint = normalized.slice(0, 120);
+      if (!contextFingerprints.has(fingerprint)) return false;
+      const entries = fingerprintEntries.get(fingerprint);
+      if (entries && !entries.has(normalized)) diagFingerprintCollisions += 1;
+      return true;
+    }
 
     // ── Wiki Page (L4: Library — active topic synthesis) ──────
     // Inject synthesized wiki page for the active topic before general knowledge.
@@ -1547,9 +1554,9 @@ export class Compositor {
       // questions. Primary fix for LoCoMo open-domain F1 gap (0.133 baseline).
       if (request.includeSemanticRecall !== false && queryText && isOpenDomainQuery(queryText) && db && remaining > 300) {
         try {
-          const existingContent = contextParts.join('\n');
-          // C1: Filter open-domain results with fingerprint dedup after retrieval
-          const rawOdResults = searchOpenDomain(db, queryText, existingContent, 10);
+          // searchOpenDomain still does intra-result dedup. Existing-context dedup
+          // now happens here via fingerprints so we keep one dedup path.
+          const rawOdResults = searchOpenDomain(db, queryText, '', 10);
           const beforeOd = rawOdResults.length;
           const odResults = rawOdResults.filter(r => !isDuplicate(r.content));
           diagFingerprintDedups += beforeOd - odResults.length;
@@ -1985,9 +1992,7 @@ export class Compositor {
     // When skipProviderTranslation is set, return NeutralMessages directly.
     // The context engine plugin uses this: the OpenClaw runtime handles its
     // own provider translation, so double-translating corrupts tool calls.
-    const outputMessages = request.skipProviderTranslation
-      ? messages as unknown as ProviderMessage[]
-      : toProviderFormat(messages, request.provider ?? request.model ?? null);
+    const outputMessages = toComposeOutputMessages(messages);
 
     // T1.3: Strip warm-replay provenance flags before output.
     // _warmed is an internal tag added by warmSession() to mark messages
@@ -2017,80 +2022,6 @@ export class Compositor {
       const delta = totalTokens - slotSum;
       if (delta !== 0) {
         slots.history = (slots.history ?? 0) + delta;
-      }
-    }
-
-    // ─── Write Window Cache ─────────────────────────────
-    // Cache the composed message array so the plugin can serve it directly
-    // on the next assemble() call without re-running the full compose pipeline.
-    // Short TTL (120s) — invalidated by afterTurn when new messages arrive.
-    //
-    // VS-1: Dual-write — session-scoped key for backwards compat;
-    // topic-scoped key for per-topic window retrieval when activeTopicId is set.
-    try {
-      await this.cache.setWindow(request.agentId, request.sessionKey, messages, 120);
-      // C4: Also write window metadata so the fast-exit can reconstruct ComposeResult
-      await this.cache.setWindowMeta(request.agentId, request.sessionKey, {
-        slots: slots as unknown as Record<string, number>,
-        totalTokens,
-        warnings,
-      }, 120);
-    } catch {
-      // Window cache write is best-effort
-    }
-    // VS-1: Topic-scoped window dual-write
-    if (composedActiveTopicId) {
-      try {
-        await this.cache.setTopicWindow(request.agentId, request.sessionKey, composedActiveTopicId, messages, 120);
-      } catch {
-        // Topic window write is best-effort
-      }
-    }
-
-    // ─── Write Session Cursor ─────────────────────────────────
-    // Record the newest message included in the submission window.
-    // Background indexer uses this to find unprocessed high-signal content.
-    if (request.includeHistory !== false && slots.history > 0) {
-      try {
-        const historyMsgs = messages.filter(m => m.role !== 'system');
-        const lastHistoryMsg = historyMsgs.length > 0 ? historyMsgs[historyMsgs.length - 1] : null;
-        if (lastHistoryMsg) {
-          const sm = lastHistoryMsg as import('./types.js').StoredMessage;
-          if (sm.id != null && sm.messageIndex != null) {
-            const cursor: SessionCursor = {
-              lastSentId: sm.id,
-              lastSentIndex: sm.messageIndex,
-              lastSentAt: new Date().toISOString(),
-              windowSize: historyMsgs.length,
-              tokenCount: totalTokens,
-            };
-            await this.cache.setCursor(request.agentId, request.sessionKey, cursor);
-
-            // Dual-write cursor to SQLite for durability across Redis eviction (P1.3)
-            try {
-              db.prepare(`
-                UPDATE conversations
-                SET cursor_last_sent_id = ?,
-                    cursor_last_sent_index = ?,
-                    cursor_last_sent_at = ?,
-                    cursor_window_size = ?,
-                    cursor_token_count = ?
-                WHERE session_key = ?
-              `).run(
-                cursor.lastSentId,
-                cursor.lastSentIndex,
-                cursor.lastSentAt,
-                cursor.windowSize,
-                cursor.tokenCount,
-                request.sessionKey
-              );
-            } catch {
-              // SQLite cursor write is best-effort — don't block compose
-            }
-          }
-        }
-      } catch {
-        // Cursor write is best-effort
       }
     }
 
@@ -2162,13 +2093,89 @@ export class Compositor {
       dynamicReserveActive: isDynamic,
       sessionPressureHigh: pressureHigh,
       fingerprintDedups: diagFingerprintDedups,
-      windowCacheHit: diagWindowCacheHit,
+      fingerprintCollisions: diagFingerprintCollisions,
+      windowCacheHit: false,
     };
 
     if (pressureHigh) {
       warnings.push(`SESSION_PRESSURE_HIGH: avg_turn_cost=${avgTurnCost} tokens, dynamic reserve capped at ${Math.round(dynamicReserve * 100)}%`);
     } else if (dynamicReserve > 0.40) {
       console.info(`[hypermem:compositor] dynamic_reserve=${Math.round(dynamicReserve * 100)}% avg_turn_cost=${Math.round(avgTurnCost / 1000)}k horizon=${this.config.dynamicReserveTurnHorizon ?? 5}`);
+    }
+
+    const composedAt = new Date().toISOString();
+
+    // ─── Write Window Cache ─────────────────────────────
+    // Cache the composed message array so the plugin can serve it directly
+    // on the next assemble() call without re-running the full compose pipeline.
+    // Short TTL (120s). External L4 mutations should set skipWindowCache=true.
+    //
+    // VS-1: Dual-write, session-scoped key for backwards compat;
+    // topic-scoped key for per-topic window retrieval when activeTopicId is set.
+    try {
+      await this.cache.setWindow(request.agentId, request.sessionKey, messages, 120);
+      await this.cache.setWindowMeta(request.agentId, request.sessionKey, {
+        slots: slots as unknown as Record<string, number>,
+        totalTokens,
+        warnings,
+        diagnostics,
+        composedAt,
+      }, 120);
+    } catch {
+      // Window cache write is best-effort
+    }
+    if (composedActiveTopicId) {
+      try {
+        await this.cache.setTopicWindow(request.agentId, request.sessionKey, composedActiveTopicId, messages, 120);
+      } catch {
+        // Topic window write is best-effort
+      }
+    }
+
+    // ─── Write Session Cursor ─────────────────────────────────
+    // Record the newest message included in the submission window.
+    // Background indexer uses this to find unprocessed high-signal content.
+    if (request.includeHistory !== false && slots.history > 0) {
+      try {
+        const historyMsgs = messages.filter(m => m.role !== 'system');
+        const lastHistoryMsg = historyMsgs.length > 0 ? historyMsgs[historyMsgs.length - 1] : null;
+        if (lastHistoryMsg) {
+          const sm = lastHistoryMsg as import('./types.js').StoredMessage;
+          if (sm.id != null && sm.messageIndex != null) {
+            const cursor: SessionCursor = {
+              lastSentId: sm.id,
+              lastSentIndex: sm.messageIndex,
+              lastSentAt: composedAt,
+              windowSize: historyMsgs.length,
+              tokenCount: totalTokens,
+            };
+            await this.cache.setCursor(request.agentId, request.sessionKey, cursor);
+
+            try {
+              db.prepare(`
+                UPDATE conversations
+                SET cursor_last_sent_id = ?,
+                    cursor_last_sent_index = ?,
+                    cursor_last_sent_at = ?,
+                    cursor_window_size = ?,
+                    cursor_token_count = ?
+                WHERE session_key = ?
+              `).run(
+                cursor.lastSentId,
+                cursor.lastSentIndex,
+                cursor.lastSentAt,
+                cursor.windowSize,
+                cursor.tokenCount,
+                request.sessionKey
+              );
+            } catch {
+              // SQLite cursor write is best-effort, don't block compose
+            }
+          }
+        }
+      } catch {
+        // Cursor write is best-effort
+      }
     }
 
     console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode} crossTopicKeystones=${diagCrossTopicKeystones}`);

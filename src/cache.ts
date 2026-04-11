@@ -6,7 +6,7 @@
  */
 
 import { DatabaseSync, StatementSync } from 'node:sqlite';
-import type { CacheConfig, SessionMeta, SessionCursor, StoredMessage, NeutralMessage } from './types.js';
+import type { CacheConfig, ComposeDiagnostics, SessionMeta, SessionCursor, StoredMessage, NeutralMessage } from './types.js';
 
 export interface ModelState {
   model: string;
@@ -14,6 +14,14 @@ export interface ModelState {
   composedAt: string;
   historyDepth: number;
   reshapedAt?: string;
+}
+
+export interface WindowCacheMeta {
+  slots: Record<string, number>;
+  totalTokens: number;
+  warnings: string[];
+  diagnostics: ComposeDiagnostics;
+  composedAt: string;
 }
 
 const DEFAULT_CONFIG: CacheConfig = {
@@ -55,6 +63,7 @@ export class CacheLayer {
   private stmtEvictHistory!: StatementSync;
   private stmtSetWindow!: StatementSync;
   private stmtGetWindow!: StatementSync;
+  private stmtGetFreshWindowBundle!: StatementSync;
   private stmtDeleteWindow!: StatementSync;
   private stmtEvictWindows!: StatementSync;
   private stmtSetKv!: StatementSync;
@@ -107,6 +116,23 @@ export class CacheLayer {
     this.stmtEvictHistory = db.prepare("DELETE FROM cache.history WHERE agent_id=? AND session_key=?");
     this.stmtSetWindow = db.prepare("INSERT OR REPLACE INTO cache.windows (agent_id,session_key,topic_id,messages,expires_at) VALUES (?,?,?,?,?)");
     this.stmtGetWindow = db.prepare("SELECT messages FROM cache.windows WHERE agent_id=? AND session_key=? AND topic_id=? AND expires_at>?");
+    this.stmtGetFreshWindowBundle = db.prepare(`
+      SELECT
+        w.messages AS messages,
+        wm.value AS meta,
+        c.value AS cursor
+      FROM cache.windows w
+      LEFT JOIN cache.kv wm
+        ON wm.key = ?
+       AND (wm.expires_at = 0 OR wm.expires_at > ?)
+      LEFT JOIN cache.kv c
+        ON c.key = ?
+       AND (c.expires_at = 0 OR c.expires_at > ?)
+      WHERE w.agent_id = ?
+        AND w.session_key = ?
+        AND w.topic_id = ''
+        AND w.expires_at > ?
+    `);
     this.stmtDeleteWindow = db.prepare("DELETE FROM cache.windows WHERE agent_id=? AND session_key=? AND topic_id=?");
     this.stmtEvictWindows = db.prepare("DELETE FROM cache.windows WHERE agent_id=? AND session_key=?");
     this.stmtSetKv = db.prepare("INSERT OR REPLACE INTO cache.kv (key,value,expires_at) VALUES (?,?,?)");
@@ -356,23 +382,43 @@ export class CacheLayer {
   async invalidateWindow(agentId: string, sessionKey: string): Promise<void> {
     if (!this.isConnected) return;
     this.stmtDeleteWindow.run(agentId, sessionKey, '');
+    this.stmtDeleteKv.run(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:windowmeta`);
   }
 
   /**
-   * Returns the cached window only if the cursor indicates nothing has changed
-   * since the last compose (i.e. cursor.lastSentId >= lastMessageId).
+   * Returns the cached window + metadata only if a single read shows the cache
+   * and cursor still refer to the same composed window.
    * Used for C4 window cache fast-exit in compositor.ts.
    */
-  async getWindowIfFresh(
+  async getFreshWindowBundle(
     agentId: string,
     sessionKey: string,
     lastMessageId: number
-  ): Promise<NeutralMessage[] | null> {
-    const cached = await this.getWindow(agentId, sessionKey);
-    if (!cached) return null;
-    const cursor = await this.getCursor(agentId, sessionKey);
-    if (cursor && cursor.lastSentId >= lastMessageId) return cached;
-    return null; // Stale — recompose
+  ): Promise<{ messages: NeutralMessage[]; meta: WindowCacheMeta } | null> {
+    if (!this.isConnected) return null;
+    const ts = now();
+    const metaKey = `${this.config.keyPrefix}${agentId}:s:${sessionKey}:windowmeta`;
+    const cursorKey = `${this.config.keyPrefix}${agentId}:s:${sessionKey}:cursor`;
+    const row = this.stmtGetFreshWindowBundle.get(
+      metaKey,
+      ts,
+      cursorKey,
+      ts,
+      agentId,
+      sessionKey,
+      ts
+    ) as { messages: string; meta: string | null; cursor: string | null } | undefined;
+    if (!row?.messages || !row.meta || !row.cursor) return null;
+
+    const meta = JSON.parse(row.meta) as Partial<WindowCacheMeta>;
+    const cursor = JSON.parse(row.cursor) as SessionCursor;
+    if (!meta.composedAt || !meta.diagnostics || cursor.lastSentId < lastMessageId) return null;
+    if (cursor.lastSentAt !== meta.composedAt) return null;
+
+    return {
+      messages: JSON.parse(row.messages) as NeutralMessage[],
+      meta: meta as WindowCacheMeta,
+    };
   }
 
   /**
@@ -382,7 +428,7 @@ export class CacheLayer {
   async setWindowMeta(
     agentId: string,
     sessionKey: string,
-    meta: { slots: Record<string, number>; totalTokens: number; warnings: string[] },
+    meta: WindowCacheMeta,
     ttl: number
   ): Promise<void> {
     if (!this.isConnected) return;
@@ -396,13 +442,13 @@ export class CacheLayer {
   async getWindowMeta(
     agentId: string,
     sessionKey: string
-  ): Promise<{ slots: Record<string, number>; totalTokens: number; warnings: string[] } | null> {
+  ): Promise<WindowCacheMeta | null> {
     if (!this.isConnected) return null;
     const row = this.stmtGetKv.get(
       `${this.config.keyPrefix}${agentId}:s:${sessionKey}:windowmeta`,
       now()
     ) as { value: string } | undefined;
-    return row ? JSON.parse(row.value) : null;
+    return row ? JSON.parse(row.value) as WindowCacheMeta : null;
   }
 
   // ─── Session Cursor Operations ────────────────────────────────
@@ -458,8 +504,9 @@ export class CacheLayer {
     this.stmtEvictHistory.run(agentId, sessionKey);
     this.stmtEvictWindows.run(agentId, sessionKey);
     this.stmtDeactivateSession.run(agentId, sessionKey);
-    // cursor
+    // cursor + window metadata
     this.stmtDeleteKv.run(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:cursor`);
+    this.stmtDeleteKv.run(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:windowmeta`);
   }
 
   // ─── Touch / TTL ─────────────────────────────────────────────
