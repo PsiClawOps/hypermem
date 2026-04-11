@@ -136,27 +136,9 @@ When it fills:                          When budget is exceeded:
 
 High-signal turns are marked as keystones and survive pressure trimming ahead of ordinary history.
 
-### How the compositor fills the budget
+The compositor fills 9 slots in priority order (system prompt → identity → hyperform → history → facts → wiki → semantic recall → cross-session → action summary). Each slot consumes tokens from the remaining budget before the next slot runs. Slots that don't fit this turn stay in storage, not destroyed.
 
-The compositor fills slots in priority order. Each slot takes what it needs from the remaining budget before the next slot runs (greedy fill, not proportional allocation):
-
-| Order | Slot | Behavior | Knob |
-|---|---|---|---|
-| 1 | System prompt | Never truncated | Fixed |
-| 2 | Identity (SOUL.md, USER.md, etc.) | Never truncated | Fixed |
-| 3 | Hyperform (behavioral standards + model adaptation) | Capped at tier token budgets | `hyperformProfile` |
-| 4 | Conversation history | Largest slot; fills with tool-compressed history | `maxHistoryMessages`, `keystoneHistoryFraction` |
-| 5 | Facts (L4) | Top N facts by confidence × recency | `maxFacts` |
-| 6 | Wiki/knowledge | Compiled topic pages | `wikiTokenCap`, `maxTotalTriggerTokens` |
-| 7 | Semantic recall (L3) | Hybrid FTS5 + KNN retrieval | Trigger budget, fallback KNN |
-| 8 | Cross-session context | Other active sessions | `maxCrossSessionContext` |
-| 9 | Action summary | Recent tool actions | Pressure-gated |
-
-The budget formula: `detectedWindow × budgetFraction × (1 - reserveFraction)` = usable tokens. `historyFraction` caps conversation history; `memoryFraction` caps the shared pool for facts, wiki, and semantic recall.
-
-**Greedy fill means** if history consumes its full `historyFraction` cap, the memory pool (`memoryFraction`) is still available for facts, wiki, and semantic recall. Raise `memoryFraction` if you want more facts surfaced. Raise `historyFraction` if long conversations are getting truncated. Keep the sum ≤ 0.85.
-
-For full tuning references and working configuration examples, see **[docs/TUNING.md](./docs/TUNING.md)**.
+For the full fill order, budget formula, and all configuration knobs, see **[Tuning](#tuning)** below and **[docs/TUNING.md](./docs/TUNING.md)**.
 
 ---
 
@@ -219,39 +201,7 @@ automatically — set `reserveFraction` to your preferred floor and let the comp
 
 **Confabulation resistance** checks output against stored facts before claims are recorded. No LLM call. Pattern matching against the fact corpus, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
 
-### Configuring hyperform
-
-Set `compositor.hyperformProfile` in your hypermem config file (`~/.openclaw/hypermem/config.json`):
-
-```json
-{
-  "compositor": {
-    "hyperformProfile": "standard"
-  }
-}
-```
-
-| Situation | Tier | Reason |
-|---|---|---|
-| Single agent, 64k or smaller model | `light` | Minimal token overhead, no DB dependency |
-| Single agent, 128k+ model | `standard` | Richer output control, worth the extra ~150 tokens |
-| Fleet with mixed models | `full` | Different models need different corrections |
-| Cost-sensitive deployment | `light` or `standard` | Consistent behavior standards already reduce output tokens |
-| Benchmarking model quality | `light` with `enableFOS: false` | Minimal interference for comparison |
-
-Backward-compatible aliases: `"starter"` maps to `"light"`, `"fleet"` maps to `"full"`.
-
-Fine-grained control:
-
-| Knob | Default | Effect |
-|---|---|---|
-| `hyperformProfile` | `'full'` (existing) / `'light'` (new) | Sets the tier |
-| `enableFOS` | `true` | Set `false` to suppress all behavior directives |
-| `enableMOD` | `true` | Set `false` to suppress model adaptation |
-
-At `light` tier, both are effectively off — the 9 light directives are injected directly, not through the behavior/adaptation pipeline. At `standard`, behavior standards are active and model adaptation is suppressed. At `full`, both are active unless explicitly disabled.
-
-For full tuning details, custom behavior/adaptation entries, and worked configuration examples, see **[docs/TUNING.md](./docs/TUNING.md)**.
+Set `compositor.hyperformProfile` to `light`, `standard`, or `full`. For tier selection guidance, configuration details, and custom entry creation, see **[Tuning](#tuning)** below and **[docs/TUNING.md](./docs/TUNING.md)**.
 
 ---
 

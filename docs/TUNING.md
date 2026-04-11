@@ -40,48 +40,33 @@ Start with `light`. Move up when you need richer context and have the headroom.
 
 ## Hyperform: Output Shaping
 
-Hyperform controls what normalization directives are injected into every composed context. It has two independent layers: **behavior** (how the model writes) and **model adaptation** (corrections for specific model tendencies). The `hyperformProfile` setting determines which layers are active.
-
-### Why this matters
-
-Hyperform directives compress output at the source: fewer tokens generated per turn means lower API spend and less context pressure for subsequent turns. See the [README](../README.md#hyperform) for the full rationale.
+Hyperform controls output normalization directives injected into every composed context. Two independent layers: **behavior** (how the model writes) and **model adaptation** (corrections for specific model tendencies). See the [README](../README.md#hyperform) for the full rationale and before/after examples.
 
 ### The two layers
 
 #### Behavior standards
 
-Behavior standards define how your agents write. Anti-sycophancy rules prevent "Great question!" openings. Density targets compress answers. Anti-pattern bans remove the most common AI markers (em dashes, AI vocabulary, inflated significance). These rules apply to all models equally.
-
-**What each tier injects:**
+Shared rules that apply to all models equally (anti-sycophancy, density targets, anti-pattern bans).
 
 | Tier | Tokens | What's included |
 |---|---|---|
-| `light` | ~100 | 9 standalone directives: lead with answer, no sycophancy, no em dashes, AI vocab ban, length targets, filler ban, no pagination of short answers, evidence calibration, numbers over adjectives. No database required. |
-| `standard` | ~250 | Full directive set from the `fleet_output_standard` DB table: structural rules, density targets (simple/analysis/code), anti-patterns, format rules, compression ratios, and task-context overrides. |
-| `full` | ~250 + adaptation | Same directives as `standard`, plus model adaptation layer (see below). |
+| `light` | ~100 | 9 standalone directives. No database required. |
+| `standard` | ~250 | Full directive set from the `fleet_output_standard` DB table. Falls back to `light` if no record exists. |
+| `full` | ~250 + adaptation | Same as `standard`, plus model adaptation (see below). |
 
-The `light` tier is hardcoded and works without any database. The `standard` and `full` tiers read from the `fleet_output_standard` table in `library.db`. If no record exists (fresh install), `standard` falls back to the `light` directives automatically.
+The `light` tier is hardcoded. `standard` and `full` read from `fleet_output_standard` in `library.db`.
 
 #### Model adaptation
 
-Model adaptation corrects for known model tendencies. Different models have different default behaviors: GPT-5.4 tends toward 2x verbosity and long lists. Claude Opus defaults to hedging and preambles. Gemini produces bulleted summaries where prose would be more direct.
+Per-model corrections for known tendencies (verbosity, hedging, list inflation). Only active at the `full` tier.
 
-Adaptation entries are stored in the `model_output_directives` DB table and matched by model ID:
-
-**Match hierarchy:**
-1. Exact match on model ID (case-insensitive)
-2. Glob pattern match (e.g., `gpt-5.4*` matches `gpt-5.4-turbo`) — longest pattern wins ties
+Entries in the `model_output_directives` DB table are matched by model ID:
+1. Exact match (case-insensitive)
+2. Glob pattern (longest wins)
 3. Wildcard `*` fallback
-4. No adaptation (if nothing matches)
+4. No adaptation
 
-**What an adaptation entry contains:**
-- **Calibration** — known model tendencies (e.g., "2x verbosity, 1.8x list length") plus specific adjustments (e.g., "Actively compress. Cut first drafts in half.")
-- **Corrections** — hard/medium/soft severity rules applied in order (e.g., "Do not open with I. No preamble before the answer.")
-- **Task overrides** — per-task-type adjustments (e.g., different compression for code generation vs. analysis)
-
-Model adaptation is only active at the `full` tier. At `light` and `standard`, model-specific corrections are suppressed and only the shared behavior rules apply.
-
-**Does hypermem ship with pre-populated adaptation entries?** No. The `model_output_directives` table starts empty. You populate it with corrections specific to the models you run. See [Creating custom entries](#creating-custom-entries) below.
+Each entry contains calibration (known tendencies + adjustments), corrections (hard/medium/soft severity), and task overrides. The table starts empty; populate it for the models you run (see [Creating custom entries](#creating-custom-entries) below).
 
 ### Choosing a tier
 
