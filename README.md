@@ -337,13 +337,13 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
        │
   topic detection ──► scope retrieval to active thread
        │
-  ┌────┴────────────────────────────────────────────┐
-  │              query 4 layers (parallel)           │
-  │                                                  │
-  │  L1 in-memory  L2 History    L3 Vectors  L4 Library │
+  ┌────┴───────────────────────────────────────────────┐
+  │              query 4 layers (parallel)             │
+  │                                                    │
+  │  L1 in-memory  L2 History   L3 Vectors  L4 Library │
   │  hot state    durable       semantic    facts/wiki │
   │  0.1ms        0.16ms        0.29ms      0.08ms     │
-  └────┬────────────────────────────────────────────┘
+  └────┬───────────────────────────────────────────────┘
        │
   budget allocator ──► 10 slots, fixed token cap
        │
