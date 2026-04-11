@@ -1789,15 +1789,20 @@ export class Compositor {
               return bLen - aLen; // Most specific match first
             });
 
+            // Sanitize FTS5 terms: quote each word, strip internal quotes, add prefix wildcard.
+            // Matches the pattern used in the keystone history FTS path.
+            const sanitizeFtsTerm = (w: string) => `"${w.replace(/"/g, '')}"*`;
             const ftsTerms = sortedWords.length > 0
-              ? sortedWords.slice(0, 6).map(w => `${w}*`).join(' OR ')
+              ? sortedWords.slice(0, 6).map(sanitizeFtsTerm).join(' OR ')
               : matchedKeywords
                   .sort((a, b) => b.length - a.length)
                   .slice(0, 3)
-                  .map(kw => `${kw}*`)
+                  .map(sanitizeFtsTerm)
                   .join(' OR ');
 
-            const ftsKeyword = ftsTerms || lastMsg.split(/\s+/).slice(0, 3).join(' ');
+            // Fallback uses raw message words — also sanitize to prevent FTS5 syntax errors.
+            const ftsKeyword = ftsTerms || lastMsg.split(/\s+/).slice(0, 3)
+              .map(sanitizeFtsTerm).join(' OR ');
 
             const chunks = docChunkStore.queryChunks({
               collection: trigger.collection,

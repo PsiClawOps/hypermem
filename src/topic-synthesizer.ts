@@ -219,9 +219,10 @@ export class TopicSynthesizer {
         SELECT * FROM topics
         WHERE agent_id = ?
           AND message_count >= ?
-          AND updated_at < datetime('now', '-${staleThresholdMinutes} minutes')
+          AND updated_at < datetime('now', '-' || ? || ' minutes')
+          -- safe: staleThresholdMinutes is a validated integer
         ORDER BY updated_at ASC
-      `).all(agentId, cfg.SYNTHESIS_MIN_MESSAGES) as unknown as TopicRow[];
+      `).all(agentId, cfg.SYNTHESIS_MIN_MESSAGES, Math.floor(staleThresholdMinutes)) as unknown as TopicRow[];
     } catch {
       return result;
     }
