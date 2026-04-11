@@ -171,8 +171,15 @@ function computeDynamicReserve(
   const max = config.dynamicReserveMax ?? 0.50;
   const enabled = config.dynamicReserveEnabled ?? true;
 
-  if (!enabled || recentMessages.length === 0 || totalWindow <= 0) {
-    return { reserve: base, avgTurnCost: 0, dynamic: false, pressureHigh: false };
+  // Cold sessions (no message history) use a minimal floor so the full window
+  // stays available. The static reserveFraction applies only once the session
+  // has messages and dynamic sampling can compute a meaningful estimate.
+  const COLD_SESSION_FLOOR = 0.15;
+  if (!enabled || totalWindow <= 0) {
+    return { reserve: COLD_SESSION_FLOOR, avgTurnCost: 0, dynamic: false, pressureHigh: false };
+  }
+  if (recentMessages.length === 0) {
+    return { reserve: COLD_SESSION_FLOOR, avgTurnCost: 0, dynamic: false, pressureHigh: false };
   }
 
   // Sample the last 20 user+assistant messages for turn cost estimation.
@@ -978,26 +985,47 @@ export class Compositor {
             request.agentId, request.sessionKey, newestMsgId
           );
           if (cachedBundle) {
-            const cachedSlots: SlotTokenCounts = {
-              system: cachedBundle.meta.slots['system'] ?? 0,
-              identity: cachedBundle.meta.slots['identity'] ?? 0,
-              history: cachedBundle.meta.slots['history'] ?? 0,
-              facts: cachedBundle.meta.slots['facts'] ?? 0,
-              context: cachedBundle.meta.slots['context'] ?? 0,
-              library: cachedBundle.meta.slots['library'] ?? 0,
-            };
-            return {
-              messages: toComposeOutputMessages(cachedBundle.messages),
-              tokenCount: cachedBundle.meta.totalTokens,
-              slots: cachedSlots,
-              truncated: false,
-              hasWarnings: cachedBundle.meta.warnings.length > 0,
-              warnings: cachedBundle.meta.warnings,
-              diagnostics: {
-                ...cachedBundle.meta.diagnostics,
-                windowCacheHit: true,
-              },
-            };
+            // Validate the cached bundle is compatible with this request.
+            // A mismatch on any of these means we must do a full compose:
+            //   - tokenBudget: cached total exceeds the requested cap
+            //   - slot flags: caller disabled slots that the cache populated
+            //   - historyDepth: caller wants fewer messages than the cache holds
+            const cachedTotal = cachedBundle.meta.totalTokens;
+            const budgetOk = !request.tokenBudget ||
+              cachedTotal <= request.tokenBudget * 1.05;
+            const factsOk = request.includeFacts !== false ||
+              (cachedBundle.meta.slots['facts'] ?? 0) === 0;
+            const libraryOk = request.includeLibrary !== false ||
+              (cachedBundle.meta.slots['library'] ?? 0) === 0;
+            const contextOk = request.includeContext !== false ||
+              (cachedBundle.meta.slots['context'] ?? 0) === 0;
+            // historyDepth constrains how many messages the caller wants;
+            // we can't slice a cached bundle safely, so skip cache.
+            const depthOk = !request.historyDepth;
+
+            if (budgetOk && factsOk && libraryOk && contextOk && depthOk) {
+              const cachedSlots: SlotTokenCounts = {
+                system: cachedBundle.meta.slots['system'] ?? 0,
+                identity: cachedBundle.meta.slots['identity'] ?? 0,
+                history: cachedBundle.meta.slots['history'] ?? 0,
+                facts: cachedBundle.meta.slots['facts'] ?? 0,
+                context: cachedBundle.meta.slots['context'] ?? 0,
+                library: cachedBundle.meta.slots['library'] ?? 0,
+              };
+              return {
+                messages: toComposeOutputMessages(cachedBundle.messages),
+                tokenCount: cachedBundle.meta.totalTokens,
+                slots: cachedSlots,
+                truncated: false,
+                hasWarnings: cachedBundle.meta.warnings.length > 0,
+                warnings: cachedBundle.meta.warnings,
+                diagnostics: {
+                  ...cachedBundle.meta.diagnostics,
+                  windowCacheHit: true,
+                },
+              };
+            }
+            // Incompatible request — fall through to full compose
           }
         }
       } catch {
@@ -2250,6 +2278,11 @@ export class Compositor {
     // compose() calls buildFactsFromDb() and buildCrossSessionContext() directly
     // from SQLite on every turn (~0.3ms each) — faster than a Redis GET round-trip.
     // Caching them here would create stale entries that compose() ignores anyway.
+
+    // Invalidate the window cache so the next compose rebuilds with the fresh
+    // system/identity slots. Without this, the fast-exit returns a stale bundle
+    // that predates the warm and reports identity=0.
+    await this.cache.invalidateWindow(agentId, sessionKey);
 
     await this.cache.warmSession(agentId, sessionKey, {
       system: opts?.systemPrompt,
