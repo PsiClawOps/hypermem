@@ -116,7 +116,7 @@ send transcript to model                tool compression by turn age
 model responds → append again           keystone guard + hyperform profile
                                         composed prompt → model
      ┌──────────────────┐               model responds → afterTurn ingest
-     │  loop until full  │               → write back to all 4 layers
+     │ loop until full  │               → write back to all 4 layers
      └──────────────────┘
 
 When it fills:                          When budget is exceeded:
