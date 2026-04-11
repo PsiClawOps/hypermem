@@ -555,6 +555,12 @@ Design guide: [PsiClawOps/AgenticCognitiveArchitecture](https://github.com/PsiCl
 
 ---
 
+## Acknowledgments
+
+The embedding-space fidelity threshold used in compaction validation was informed by the geometric preservation mathematics published by the [libravdb](https://github.com/xDarkicex/openclaw-memory-libravdb) project.
+
+---
+
 ## License
 
 Apache-2.0, [PsiClawOps](https://github.com/PsiClawOps)
