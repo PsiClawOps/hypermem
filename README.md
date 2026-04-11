@@ -366,11 +366,15 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.5.4.** Topic-aware memory and compiled-knowledge system, optimized to run light by default and scale up when operators need richer context.
+**Current release: hypermem 0.5.5.** Topic-aware memory and compiled-knowledge system, optimized to run light by default and scale up when operators need richer context.
 
-What 0.5.4 includes:
+What 0.5.5 includes:
 - Topic-aware context tracking
 - Compiled knowledge / wiki-like synthesis and recall
+- Plugin config schema (all tuning knobs declarable in `openclaw.json`)
+- Runtime path resolution (pluginConfig > npm resolve > dev fallback)
+- Identity and doc chunk dedup against OpenClaw bootstrap injection
+- Content fingerprint dedup across all compose-time retrieval paths
 - Metrics dashboard primitives
 - Obsidian import and export
 - Aligned runtime profiles: `light`, `standard`, `full`
@@ -386,9 +390,8 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.5.4'
+  ENGINE_VERSION,        // '0.5.5'
   MIN_NODE_VERSION,      // '22.0.0'
-  MIN_SQLITE_VERSION,    // '3.35.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
   MAIN_SCHEMA_VERSION,   // 6  (hypermem.db)
   LIBRARY_SCHEMA_VERSION_EXPORT, // 12 (library.db)
@@ -458,6 +461,25 @@ Drop a `~/.openclaw/hypermem/config.json` to override defaults (takes effect on 
   }
 }
 ```
+
+Or configure through `openclaw.json` (preferred for managed deployments):
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "hypercompositor": {
+        "config": {
+          "compositor": { "budgetFraction": 0.70 },
+          "hyperformProfile": "standard"
+        }
+      }
+    }
+  }
+}
+```
+
+Plugin config in `openclaw.json` takes precedence over `config.json`. Both sources are merged, with plugin config winning on overlap. The config schema is validated on gateway start and visible via `openclaw config get plugins.entries.hypercompositor.config`.
 
 Full reference: **[docs/TUNING.md](./docs/TUNING.md)**
 

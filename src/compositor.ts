@@ -954,6 +954,65 @@ export class Compositor {
     const store = new MessageStore(db);
     const libDb = libraryDb || this.libraryDb;
 
+    // ── C4: Window cache fast-exit ────────────────────────────
+    // If nothing has changed since the last compose (cursor.lastSentId >= newest
+    // message id in the DB), skip the full pipeline and return the cached window.
+    // Particularly effective for low-frequency sessions (heartbeat agents, council
+    // seats between rounds). TTL on the cache write remains 120s — this is a
+    // conservative early-exit before the TTL expires, not a TTL extension.
+    if (request.includeHistory !== false && request.skipWindowCache !== true) {
+      try {
+        const newestRow = db.prepare(
+          'SELECT MAX(id) AS maxId FROM messages WHERE agent_id = ?'
+        ).get(request.agentId) as { maxId: number | null } | undefined;
+        const newestMsgId = newestRow?.maxId;
+        if (newestMsgId != null) {
+          const cachedWindow = await this.cache.getWindowIfFresh(
+            request.agentId, request.sessionKey, newestMsgId
+          );
+          if (cachedWindow) {
+            const cachedMeta = await this.cache.getWindowMeta(
+              request.agentId, request.sessionKey
+            );
+            if (cachedMeta) {
+              const cachedSlots: SlotTokenCounts = {
+                system: cachedMeta.slots['system'] ?? 0,
+                identity: cachedMeta.slots['identity'] ?? 0,
+                history: cachedMeta.slots['history'] ?? 0,
+                facts: cachedMeta.slots['facts'] ?? 0,
+                context: cachedMeta.slots['context'] ?? 0,
+                library: cachedMeta.slots['library'] ?? 0,
+              };
+              const outputMessages = request.skipProviderTranslation
+                ? cachedWindow as unknown as import('./types.js').ProviderMessage[]
+                : toProviderFormat(cachedWindow, request.provider ?? request.model ?? null);
+              return {
+                messages: outputMessages,
+                tokenCount: cachedMeta.totalTokens,
+                slots: cachedSlots,
+                truncated: false,
+                hasWarnings: cachedMeta.warnings.length > 0,
+                warnings: cachedMeta.warnings,
+                diagnostics: {
+                  triggerHits: 0,
+                  triggerFallbackUsed: false,
+                  factsIncluded: 0,
+                  semanticResultsIncluded: 0,
+                  docChunksCollections: 0,
+                  scopeFiltered: 0,
+                  retrievalMode: 'none',
+                  windowCacheHit: true,
+                  fingerprintDedups: 0,
+                },
+              };
+            }
+          }
+        }
+      } catch {
+        // Cache fast-exit is best-effort — fall through to full compose
+      }
+    }
+
     // Dynamic reserve: use a lightweight SQLite sample to estimate avg turn cost
     // BEFORE assembling the full context. This gives us the reserve fraction we
     // need to compute the effective token budget at the start of compose.
@@ -1341,6 +1400,22 @@ export class Compositor {
     const contextParts: string[] = [];
     let contextTokens = 0;
 
+    // ── C1: Content fingerprint dedup set ────────────────────
+    // Replaces fragile substring-match dedup across temporal, open-domain,
+    // semantic recall, and cross-session paths. O(1) lookup on a normalized
+    // 120-char prefix catches rephrased duplicates the old 60-char includes()
+    // match missed without needing a hash.
+    const contextFingerprints = new Set<string>();
+    function contentFingerprint(text: string): string {
+      return text.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 120);
+    }
+    function addFingerprint(text: string): void {
+      contextFingerprints.add(contentFingerprint(text));
+    }
+    function isDuplicate(text: string): boolean {
+      return contextFingerprints.has(contentFingerprint(text));
+    }
+
     // ── Compose-level diagnostics tracking vars ──────────────
     let diagTriggerHits = 0;
     let diagTriggerFallbackUsed = false;
@@ -1348,6 +1423,8 @@ export class Compositor {
     let diagSemanticResults = 0;
     let diagDocChunkCollections = 0;
     let diagScopeFiltered = 0;
+    let diagFingerprintDedups = 0;
+    let diagWindowCacheHit = false;
     let diagRetrievalMode: ComposeDiagnostics['retrievalMode'] = 'none';
 
     // ── Wiki Page (L4: Library — active topic synthesis) ──────
@@ -1398,6 +1475,13 @@ export class Compositor {
             slots.facts = truncTokens;
             warnings.push('Facts truncated to fit memory budget');
           }
+          // C1: Fingerprint each fact line so downstream dedup paths can skip duplicates
+          const factLines = content.split('\n');
+          for (const line of factLines) {
+            if (line.startsWith('- [')) {
+              addFingerprint(line);
+            }
+          }
         }
       }
 
@@ -1417,17 +1501,18 @@ export class Compositor {
           });
 
           if (temporalFacts.length > 0) {
-            // Deduplicate against facts already in context
-            const existingContent = contextParts.join('\n');
-            const novel = temporalFacts.filter(
-              f => !existingContent.includes(f.content.slice(0, 60))
-            );
+            // C1: Use fingerprint dedup instead of fragile substring match
+            const beforeCount = temporalFacts.length;
+            const novel = temporalFacts.filter(f => !isDuplicate(f.content));
+            diagFingerprintDedups += beforeCount - novel.length;
 
             if (novel.length > 0) {
               const temporalBlock = novel
                 .map(f => {
                   const ts = new Date(f.occurredAt).toISOString().slice(0, 10);
-                  return `[${ts}] ${f.content}`;
+                  const line = `[${ts}] ${f.content}`;
+                  addFingerprint(f.content);
+                  return line;
                 })
                 .join('\n');
 
@@ -1463,11 +1548,16 @@ export class Compositor {
       if (request.includeSemanticRecall !== false && queryText && isOpenDomainQuery(queryText) && db && remaining > 300) {
         try {
           const existingContent = contextParts.join('\n');
-          const odResults = searchOpenDomain(db, queryText, existingContent, 10);
+          // C1: Filter open-domain results with fingerprint dedup after retrieval
+          const rawOdResults = searchOpenDomain(db, queryText, existingContent, 10);
+          const beforeOd = rawOdResults.length;
+          const odResults = rawOdResults.filter(r => !isDuplicate(r.content));
+          diagFingerprintDedups += beforeOd - odResults.length;
 
           if (odResults.length > 0) {
             const odBlock = odResults
               .map(r => {
+                addFingerprint(r.content);
                 const ts = r.createdAt
                   ? new Date(r.createdAt).toISOString().slice(0, 10)
                   : '';
@@ -1568,7 +1658,8 @@ export class Compositor {
             request.agentId,
             Math.floor(remaining * 0.12), // Cap at 12% of remaining (W4: was 0.15)
             libDb || undefined,
-            precomputedEmbedding
+            precomputedEmbedding,
+            contextFingerprints  // C2: skip results already in Active Facts
           );
           if (semanticContent) {
             const tokens = estimateTokens(semanticContent);
@@ -1724,6 +1815,8 @@ export class Compositor {
               request.agentId,
               Math.floor(remaining * 0.10),
               libDb || undefined,
+              undefined,
+              contextFingerprints  // C2: skip results already in Active Facts
             ),
             new Promise<null>((_, reject) =>
               setTimeout(() => reject(new Error('fallback_knn_timeout')), 3000)
@@ -1784,7 +1877,8 @@ export class Compositor {
         request.agentId,
         request.sessionKey,
         db,
-        libDb
+        libDb,
+        contextFingerprints  // C3: skip entries already in facts/semantic recall
       );
 
       if (crossSessionContent) {
@@ -1935,6 +2029,12 @@ export class Compositor {
     // topic-scoped key for per-topic window retrieval when activeTopicId is set.
     try {
       await this.cache.setWindow(request.agentId, request.sessionKey, messages, 120);
+      // C4: Also write window metadata so the fast-exit can reconstruct ComposeResult
+      await this.cache.setWindowMeta(request.agentId, request.sessionKey, {
+        slots: slots as unknown as Record<string, number>,
+        totalTokens,
+        warnings,
+      }, 120);
     } catch {
       // Window cache write is best-effort
     }
@@ -2061,6 +2161,8 @@ export class Compositor {
       avgTurnCostTokens: avgTurnCost,
       dynamicReserveActive: isDynamic,
       sessionPressureHigh: pressureHigh,
+      fingerprintDedups: diagFingerprintDedups,
+      windowCacheHit: diagWindowCacheHit,
     };
 
     if (pressureHigh) {
@@ -2458,10 +2560,16 @@ export class Compositor {
     agentId: string,
     maxTokens: number,
     libraryDb?: DatabaseSync,
-    precomputedEmbedding?: Float32Array
+    precomputedEmbedding?: Float32Array,
+    existingFingerprints?: Set<string>  // C2: skip results already in Active Facts
   ): Promise<string | null> {
     const libDb = libraryDb || this.libraryDb;
     if (!libDb && !this.vectorStore) return null;
+
+    // Inline fingerprint helper (mirrors compose-scope version; C2 dedup only used here)
+    const fpCheck = existingFingerprints
+      ? (text: string) => existingFingerprints.has(text.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 120))
+      : () => false;
 
     // Use hybrid search when library DB is available
     if (libDb) {
@@ -2518,6 +2626,9 @@ export class Compositor {
         // session context and contaminate current session. Require fts+knn agreement
         // (score >= 0.04) for episodes to make it into assembled context.
         if (result.sourceTable === 'episodes' && result.score < 0.04) continue;
+        // C2: Skip results whose content is already fingerprinted (e.g. in Active Facts)
+        // Dedup count is not tracked separately here — compose-level counter covers the other paths.
+        if (fpCheck(result.content)) continue;
         const label = this.formatHybridResult(result);
         const lineTokens = estimateTokens(label);
         if (tokens + lineTokens > maxTokens) break;
@@ -2604,7 +2715,8 @@ export class Compositor {
     agentId: string,
     currentSessionKey: string,
     db: DatabaseSync,
-    _libraryDb?: DatabaseSync | null
+    _libraryDb?: DatabaseSync | null,
+    existingFingerprints?: Set<string>  // C3: skip entries already in facts/semantic recall
   ): string | null {
     const conversation = db.prepare(
       'SELECT id FROM conversations WHERE session_key = ?'
@@ -2635,12 +2747,19 @@ export class Compositor {
 
     if (rows.length === 0) return null;
 
-    const lines = rows.map(r => {
-      const preview = r.text_content.substring(0, 200);
-      return `- [${r.channel_type}/${r.role} @ ${r.created_at}] ${preview}`;
-    });
+    const fpCheck = existingFingerprints
+      ? (text: string) => existingFingerprints.has(text.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 120))
+      : () => false;
 
-    return lines.join('\n');
+    const lines: string[] = [];
+    for (const r of rows) {
+      // C3: Skip cross-session entries whose content fingerprint already appears in context
+      if (fpCheck(r.text_content)) continue;
+      const preview = r.text_content.substring(0, 200);
+      lines.push(`- [${r.channel_type}/${r.role} @ ${r.created_at}] ${preview}`);
+    }
+
+    return lines.length > 0 ? lines.join('\n') : null;
   }
 
   // ─── Utilities ───────────────────────────────────────────────

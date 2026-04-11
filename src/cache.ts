@@ -358,6 +358,53 @@ export class CacheLayer {
     this.stmtDeleteWindow.run(agentId, sessionKey, '');
   }
 
+  /**
+   * Returns the cached window only if the cursor indicates nothing has changed
+   * since the last compose (i.e. cursor.lastSentId >= lastMessageId).
+   * Used for C4 window cache fast-exit in compositor.ts.
+   */
+  async getWindowIfFresh(
+    agentId: string,
+    sessionKey: string,
+    lastMessageId: number
+  ): Promise<NeutralMessage[] | null> {
+    const cached = await this.getWindow(agentId, sessionKey);
+    if (!cached) return null;
+    const cursor = await this.getCursor(agentId, sessionKey);
+    if (cursor && cursor.lastSentId >= lastMessageId) return cached;
+    return null; // Stale — recompose
+  }
+
+  /**
+   * Store compose result metadata alongside the window cache.
+   * Enables the C4 fast-exit to return a complete ComposeResult without re-running.
+   */
+  async setWindowMeta(
+    agentId: string,
+    sessionKey: string,
+    meta: { slots: Record<string, number>; totalTokens: number; warnings: string[] },
+    ttl: number
+  ): Promise<void> {
+    if (!this.isConnected) return;
+    this.stmtSetKv.run(
+      `${this.config.keyPrefix}${agentId}:s:${sessionKey}:windowmeta`,
+      JSON.stringify(meta),
+      now() + ttl
+    );
+  }
+
+  async getWindowMeta(
+    agentId: string,
+    sessionKey: string
+  ): Promise<{ slots: Record<string, number>; totalTokens: number; warnings: string[] } | null> {
+    if (!this.isConnected) return null;
+    const row = this.stmtGetKv.get(
+      `${this.config.keyPrefix}${agentId}:s:${sessionKey}:windowmeta`,
+      now()
+    ) as { value: string } | undefined;
+    return row ? JSON.parse(row.value) : null;
+  }
+
   // ─── Session Cursor Operations ────────────────────────────────
 
   async setCursor(agentId: string, sessionKey: string, cursor: SessionCursor): Promise<void> {

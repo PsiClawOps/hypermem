@@ -253,6 +253,11 @@ export interface ComposeRequest {
    * P3.4: topic-aware compositor.
    */
   topicId?: string;
+  /**
+   * When true, skip the C4 window cache fast-exit even if the cursor is fresh.
+   * Useful when the caller needs a fresh compose (e.g. after a config change).
+   */
+  skipWindowCache?: boolean;
 }
 
 export interface SlotTokenCounts {
@@ -299,6 +304,10 @@ export interface ComposeDiagnostics {
   dynamicReserveActive?: boolean;
   /** True if dynamic reserve was clamped at dynamicReserveMax and SESSION_PRESSURE_HIGH emitted */
   sessionPressureHigh?: boolean;
+  /** Number of items filtered across all dedup paths (temporal, open-domain, semantic, cross-session) */
+  fingerprintDedups?: number;
+  /** True when the window cache fast-exit fired and full compose was skipped */
+  windowCacheHit?: boolean;
 }
 
 export interface ComposeResult {
