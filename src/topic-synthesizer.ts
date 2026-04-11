@@ -102,7 +102,7 @@ function keystoneScore(msg: MessageRow): number {
   score += backtickMatches.length * 0.2;
 
   // Agent mentions (known patterns)
-  const agentMentions = text.match(/\b(forge|compass|clarity|sentinel|vanguard|anvil|pylon|vigil|bastion|relay|crucible)\b/gi) || [];
+  const agentMentions = text.match(/\b(alice|bob|clarity|dave|oscar|carol|hank|jack|leo|nancy|mike)\b/gi) || [];
   score += agentMentions.length * 0.25;
 
   // Quoted content

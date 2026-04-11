@@ -819,6 +819,15 @@ export class VectorStore {
    * Get index statistics.
    */
   getStats(): VectorIndexStats {
+    // Guard: vec_index_map may not exist yet if ensureTables() hasn't been called
+    // (e.g. openclaw status calls getStats via memory-plugin before first agent session)
+    const tableExists = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vec_index_map' LIMIT 1")
+      .get();
+    if (!tableExists) {
+      return { totalVectors: 0, tableBreakdown: {}, lastIndexedAt: null };
+    }
+
     const breakdown: Record<string, number> = {};
     let total = 0;
 

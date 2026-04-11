@@ -48,8 +48,8 @@ async function run() {
       Object.keys(fallbackReg.agents).length === Object.keys(hardcoded.agents).length,
       `empty fleet returns hardcoded registry (${Object.keys(fallbackReg.agents).length} agents)`
     );
-    assert('forge' in fallbackReg.agents, 'forge present in fallback');
-    assert('pylon' in fallbackReg.agents, 'pylon present in fallback');
+    assert('alice' in fallbackReg.agents, 'alice present in fallback');
+    assert('hank' in fallbackReg.agents, 'hank present in fallback');
 
     // ── With DB agents ────────────────────────────────────────
     console.log('\n  With seeded fleet:');
@@ -58,59 +58,59 @@ async function run() {
     const { FleetStore } = await import('../dist/fleet-store.js');
     const fleetStore = new FleetStore(libDb);
 
-    hm.dbManager.ensureAgent('forge', { displayName: 'Forge', tier: 'council' });
-    hm.dbManager.ensureAgent('pylon', { displayName: 'Pylon', tier: 'director', org: 'forge-org' });
+    hm.dbManager.ensureAgent('alice', { displayName: 'alice', tier: 'council' });
+    hm.dbManager.ensureAgent('hank', { displayName: 'hank', tier: 'director', org: 'alice-org' });
     hm.dbManager.ensureAgent('newagent', { displayName: 'NewAgent', tier: 'specialist' });
 
     // Set reportsTo via FleetStore upsert (ensureAgent doesn't support it directly)
-    fleetStore.upsertAgent('pylon', {
-      displayName: 'Pylon',
+    fleetStore.upsertAgent('hank', {
+      displayName: 'hank',
       tier: 'director',
-      orgId: 'forge-org',
-      reportsTo: 'forge',
+      orgId: 'alice-org',
+      reportsTo: 'alice',
     });
 
     const liveReg = buildOrgRegistryFromDb(libDb);
 
-    assert('forge' in liveReg.agents, 'forge loaded from DB');
-    assert(liveReg.agents['forge'].tier === 'council', 'forge tier is council');
+    assert('alice' in liveReg.agents, 'alice loaded from DB');
+    assert(liveReg.agents['alice'].tier === 'council', 'alice tier is council');
 
-    assert('pylon' in liveReg.agents, 'pylon loaded from DB');
-    assert(liveReg.agents['pylon'].councilLead === 'forge', 'pylon reports to forge');
-    assert(liveReg.agents['pylon'].org === 'forge-org', 'pylon in forge-org');
+    assert('hank' in liveReg.agents, 'hank loaded from DB');
+    assert(liveReg.agents['hank'].councilLead === 'alice', 'hank reports to alice');
+    assert(liveReg.agents['hank'].org === 'alice-org', 'hank in alice-org');
 
     assert('newagent' in liveReg.agents, 'newagent loaded from DB (not in hardcoded)');
     assert(liveReg.agents['newagent'].tier === 'specialist', 'newagent tier is specialist');
 
     // Agents not seeded to DB but in hardcoded registry should still be present (merge)
-    assert('compass' in liveReg.agents, 'compass preserved from hardcoded fallback (not in DB)');
+    assert('bob' in liveReg.agents, 'bob preserved from hardcoded fallback (not in DB)');
 
-    // Org membership: pylon should be in forge-org
+    // Org membership: hank should be in alice-org
     assert(
-      liveReg.orgs['forge-org']?.includes('pylon'),
-      'pylon is in forge-org in live registry'
+      liveReg.orgs['alice-org']?.includes('hank'),
+      'hank is in alice-org in live registry'
     );
 
     // ── Access control using live registry ────────────────────
     console.log('\n  Access control with live registry:');
     const { visibilityFilter } = await import('../dist/cross-agent.js');
 
-    const forgeIdentity = liveReg.agents['forge'];
-    const pylonIdentity = liveReg.agents['pylon'];
+    const forgeIdentity = liveReg.agents['alice'];
+    const pylonIdentity = liveReg.agents['hank'];
 
-    // Forge (council) can read pylon's org-visible content
-    const forgeFilterForPylon = visibilityFilter(forgeIdentity, 'pylon', liveReg);
-    assert(forgeFilterForPylon.canReadOrg, 'forge can read pylon org-visible (same org)');
+    // alice (council) can read hank's org-visible content
+    const forgeFilterForPylon = visibilityFilter(forgeIdentity, 'hank', liveReg);
+    assert(forgeFilterForPylon.canReadOrg, 'alice can read hank org-visible (same org)');
 
-    // Pylon can read forge's org-visible content (council lead)
-    const pylonFilterForForge = visibilityFilter(pylonIdentity, 'forge', liveReg);
-    assert(pylonFilterForForge.canReadCouncil, 'pylon can read forge council-visible (reports to forge)');
+    // hank can read alice's org-visible content (council lead)
+    const pylonFilterForForge = visibilityFilter(pylonIdentity, 'alice', liveReg);
+    assert(pylonFilterForForge.canReadCouncil, 'hank can read alice council-visible (reports to alice)');
 
-    // NewAgent (specialist, no org) should only see fleet-visible from pylon
+    // NewAgent (specialist, no org) should only see fleet-visible from hank
     const newAgentIdentity = liveReg.agents['newagent'];
-    const newAgentFilterForPylon = visibilityFilter(newAgentIdentity, 'pylon', liveReg);
-    assert(!newAgentFilterForPylon.canReadOrg, 'newagent cannot read pylon org-visible (different org)');
-    assert(!newAgentFilterForPylon.canReadCouncil, 'newagent cannot read pylon council-visible');
+    const newAgentFilterForPylon = visibilityFilter(newAgentIdentity, 'hank', liveReg);
+    assert(!newAgentFilterForPylon.canReadOrg, 'newagent cannot read hank org-visible (different org)');
+    assert(!newAgentFilterForPylon.canReadCouncil, 'newagent cannot read hank council-visible');
 
     // ── Compositor wiring: orgRegistry cached at init ──────────────────────
     console.log('\n  Compositor.orgRegistry (cached on init):');
@@ -120,19 +120,19 @@ async function run() {
 
     // Registry should be live (has the seeded agents)
     const cached = compositor.orgRegistry;
-    assert('forge' in cached.agents, 'compositor: forge in cached registry');
+    assert('alice' in cached.agents, 'compositor: alice in cached registry');
     assert('newagent' in cached.agents, 'compositor: newagent from DB in cached registry');
 
     // refreshOrgRegistry() should return the live registry
     const refreshed = compositor.refreshOrgRegistry();
-    assert('forge' in refreshed.agents, 'compositor.refreshOrgRegistry returns forge');
+    assert('alice' in refreshed.agents, 'compositor.refreshOrgRegistry returns alice');
     assert('newagent' in refreshed.agents, 'compositor.refreshOrgRegistry returns newagent');
     assert(compositor.orgRegistry === refreshed, 'compositor._orgRegistry updated after refresh');
 
     // Minimal constructor falls back to hardcoded registry
     const minimalCompositor = new Compositor({ cache: hm.cache });
     const minimalReg = minimalCompositor.orgRegistry;
-    assert('forge' in minimalReg.agents, 'minimal compositor: forge in fallback registry');
+    assert('alice' in minimalReg.agents, 'minimal compositor: alice in fallback registry');
     // Fallback registry is hardcoded, not DB-loaded (no newagent)
     assert(!('newagent' in minimalReg.agents), 'minimal compositor: newagent NOT in hardcoded registry');
     // refreshOrgRegistry on minimal (no libraryDb) returns existing registry unchanged

@@ -116,7 +116,7 @@ send transcript to model                tool compression by turn age
 model responds → append again           keystone guard + hyperform profile
                                         composed prompt → model
      ┌──────────────────┐               model responds → afterTurn ingest
-     │  loop until full  │               → write back to all 4 layers
+     │ loop until full  │               → write back to all 4 layers
      └──────────────────┘
 
 When it fills:                          When budget is exceeded:
@@ -127,7 +127,7 @@ When it fills:                          When budget is exceeded:
 
 | | Standard | hypercompositor |
 |---|---|---|
-| Context source | Growing transcript | 4 independent storage layers |
+| Context source | Growing transcript only | Transcript + 3 additional storage layers |
 | When context fills | Trim + summarize (lossy) | Budget allocation (lossless storage) |
 | Old decisions | Lost after compaction | Retrievable via keystones + semantic recall |
 | Topic changes | All history competes equally | Scoped retrieval by active topic |
@@ -136,21 +136,45 @@ When it fills:                          When budget is exceeded:
 
 High-signal turns are marked as keystones and survive pressure trimming ahead of ordinary history.
 
+The compositor fills 9 slots in priority order (system prompt → identity → hyperform → history → facts → wiki → semantic recall → cross-session → action summary). Each slot consumes tokens from the remaining budget before the next slot runs. Slots that don't fit this turn stay in storage, not destroyed.
+
+For the full fill order, budget formula, and all configuration knobs, see **[Tuning](#tuning)** below and **[docs/TUNING.md](./docs/TUNING.md)**.
+
 ---
 
 ## hyperform
 
 Raw model output has two problems. It drifts from your standards (sycophancy, hedging, pagination, formatting) and it drifts from your facts (confabulation, contradiction, stale claims). hyperform handles both: normalization enforces consistency, confabulation resistance checks output against what's actually stored.
 
-**Normalization** shapes output to match a profile you define. Three presets ship with hypermem:
+Consistent output isn't just aesthetic. A model that paginates short answers, preambles with filler, or inflates lists uses more output tokens per turn. Over hundreds of turns, that compounds into real cost. hyperform directives compress output at the source: fewer tokens generated means lower API spend per session, and less context pressure for subsequent turns.
 
-| Profile | Tokens | Covers |
+### Behavior standards
+
+Behavior standards define how your agents write. Anti-sycophancy rules prevent filler openings. Density targets compress answers. Anti-pattern bans remove common AI markers (em dashes, AI vocabulary, inflated significance). These rules apply to all models equally.
+
+| Tier | Tokens | What it injects |
 |---|---|---|
-| `light` | ~100 | Anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration |
-| `standard` | ~250 | Full directive set plus pagination rules and hedging policy |
-| `full` | ~400 | Complete normalization with full directive set and model-specific calibration |
+| `light` | ~100 | 9 standalone directives: lead with answer, no sycophancy, no em dashes, AI vocab ban, length targets (simple/analysis/code), filler ban, no pagination of short answers, evidence calibration, numbers over adjectives. No database required. |
+| `standard` | ~250 | Full directive set from the `fleet_output_standard` table: structural rules, density targets per task type, anti-patterns, format rules, compression ratios, voice directives, and task-context overrides. Falls back to `light` directives if no record exists. |
+| `full` | ~250 + adaptation | Same directives as `standard`, plus model adaptation (see below). |
 
-The same prompt, GPT-5.4, with and without `outputProfile: "light"`:
+### Model adaptation
+
+Different models have different default behaviors. GPT-5.4 tends toward 2x verbosity and long lists. Claude Opus defaults to hedging and preambles. Gemini produces bulleted summaries where prose would be more direct. Model adaptation corrects for these tendencies per model.
+
+Adaptation entries are stored in the `model_output_directives` table and matched by model ID using exact match, then glob pattern (longest wins), then wildcard fallback. Each entry contains:
+
+- **Calibration** — known model tendencies and specific adjustments (e.g., "2x verbosity: cut first drafts in half")
+- **Corrections** — hard/medium/soft severity rules applied in order (e.g., "No preamble before the answer")
+- **Task overrides** — per-task-type adjustments
+
+Model adaptation is only active at the `full` tier. At `light` and `standard`, model-specific corrections are suppressed.
+
+The `model_output_directives` table starts empty. You populate it with corrections for the models you run. See [docs/TUNING.md](./docs/TUNING.md#creating-custom-entries) for the schema and SQL examples.
+
+### Before and after
+
+The same prompt, GPT-5.4, with and without `hyperformProfile: "light"`:
 
 ```
 Prompt: "How should I size my context window budget for a long-running agent session?"
@@ -172,10 +196,12 @@ Would you like me to go deeper on any of these?
 WITH outputProfile: "light":
 For a 128k window: reserve 14k for identity/system, target 46k for history, 10k for recent
 tool context, and leave ~30k as allocator reserve. hypermem handles slot competition
-automatically -- set contextWindowReserve to your preferred floor and let the compositor fill.
+automatically — set `reserveFraction` to your preferred floor and let the compositor fill.
 ```
 
 **Confabulation resistance** checks output against stored facts before claims are recorded. No LLM call. Pattern matching against the fact corpus, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
+
+Set `compositor.hyperformProfile` to `light`, `standard`, or `full`. For tier selection guidance, configuration details, and custom entry creation, see **[Tuning](#tuning)** below and **[docs/TUNING.md](./docs/TUNING.md)**.
 
 ---
 
@@ -311,13 +337,13 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
        │
   topic detection ──► scope retrieval to active thread
        │
-  ┌────┴────────────────────────────────────────────┐
-  │              query 4 layers (parallel)           │
-  │                                                  │
-  │  L1 in-memory  L2 History    L3 Vectors  L4 Library │
+  ┌────┴───────────────────────────────────────────────┐
+  │              query 4 layers (parallel)             │
+  │                                                    │
+  │  L1 in-memory  L2 History   L3 Vectors  L4 Library │
   │  hot state    durable       semantic    facts/wiki │
   │  0.1ms        0.16ms        0.29ms      0.08ms     │
-  └────┬────────────────────────────────────────────┘
+  └────┬───────────────────────────────────────────────┘
        │
   budget allocator ──► 10 slots, fixed token cap
        │
@@ -340,11 +366,15 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.5.4.** Topic-aware memory and compiled-knowledge system, optimized to run light by default and scale up when operators need richer context.
+**Current release: hypermem 0.5.5.** Topic-aware memory and compiled-knowledge system, optimized to run light by default and scale up when operators need richer context.
 
-What 0.5.4 includes:
+What 0.5.5 includes:
 - Topic-aware context tracking
 - Compiled knowledge / wiki-like synthesis and recall
+- Plugin config schema (all tuning knobs declarable in `openclaw.json`)
+- Runtime path resolution (pluginConfig > npm resolve > dev fallback)
+- Identity and doc chunk dedup against OpenClaw bootstrap injection
+- Content fingerprint dedup across all compose-time retrieval paths
 - Metrics dashboard primitives
 - Obsidian import and export
 - Aligned runtime profiles: `light`, `standard`, `full`
@@ -360,9 +390,8 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.5.4'
+  ENGINE_VERSION,        // '0.5.5'
   MIN_NODE_VERSION,      // '22.0.0'
-  MIN_SQLITE_VERSION,    // '3.35.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
   MAIN_SCHEMA_VERSION,   // 6  (hypermem.db)
   LIBRARY_SCHEMA_VERSION_EXPORT, // 12 (library.db)
@@ -407,49 +436,52 @@ If you prefer, hand the install to your OpenClaw agent:
 
 ### Tuning
 
-hypermem ships three aligned operating profiles: `light`, `standard`, and `full`. Pick one and set `outputProfile` in your config. Everything else follows.
+Two independent surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model writes). Pick a profile first — most deployments adjust one or two settings on top.
 
-| Profile | Context window | Budget fraction | Best for |
-|---|---|---|---|
-| `light` | 64k | 0.50 | Single-agent installs, minimal parallel work |
-| `standard` | 128k | 0.65 | Normal OpenClaw deployments |
-| `full` | 200k+ | 0.55 | Large-context or multi-agent installs, maximum richness |
+| Profile | Target window | Best for |
+|---|---|---|
+| `light` | 64k | Single agent, small models, constrained resources |
+| `standard` | 128k | Normal deployments, small fleets |
+| `full` | 200k+ | Multi-agent fleets, large-context models |
 
-**Start with `light`** on 64k models or single-agent systems. Move to `standard` once the system has stable latency and headroom. Use `full` only when you want maximum context richness and have the budget for it.
+Start with `light`. Use `mergeProfile()` to adjust individual settings:
 
-Primary tuning knobs:
+```typescript
+import { mergeProfile } from '@psiclawops/hypermem';
+const config = mergeProfile('standard', { compositor: { maxFacts: 40 } });
+```
 
-- **`targetBudgetFraction`**: caps total non-history context weight. Lower values force lighter composition.
-- **`wikiTokenCap`**: caps compiled-knowledge/wiki contribution.
-- **`outputProfile`**: `light`, `standard`, or `full`. Controls how much hyperform guidance is injected per turn.
-
-Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes effect on gateway restart:
+Drop a `~/.openclaw/hypermem/config.json` to override defaults (takes effect on gateway restart):
 
 ```json
 {
-  "deferToolPruning": true,
   "compositor": {
-    "defaultTokenBudget": 60000,
-    "maxFacts": 18,
-    "contextWindowReserve": 0.25,
-    "outputProfile": "standard"
+    "budgetFraction": 0.70,
+    "hyperformProfile": "standard"
   }
 }
 ```
 
-Additional compositor knobs: `maxCrossSessionContext`, `maxRecentToolPairs`, `maxProseToolPairs`, see INSTALL.md for full descriptions.
+Or configure through `openclaw.json` (preferred for managed deployments):
 
-`deferToolPruning: true` tells hypermem to skip its own T0/T1/T2/T3 gradient when OpenClaw's native `contextPruning` extension is active (Anthropic and Google providers). On those providers, OpenClaw's pruner handles tool result trimming: ratio-driven at >30% context fill, soft-trim head+tail for results over 4,000 chars, hard-clear above 50k total, with the last 3 assistant turns always protected. hypermem's gradient remains active as fallback for other providers (GPT-5.4, etc.). Default: `true` for Anthropic installs.
-
-`outputProfile` valid values: `"light"` (~100 tokens: anti-sycophancy, em dash ban, AI vocab ban, length targets, evidence calibration), `"standard"` (~250 tokens: full directive set plus pagination and hedging rules), `"full"` (~400 tokens: complete normalization with full directive set and model-specific calibration). Default: `"standard"`.
-
-Context presets ship as named profiles importable from the package:
-
-```typescript
-import { lightProfile, standardProfile, fullProfile } from '@psiclawops/hypermem';
+```json
+{
+  "plugins": {
+    "entries": {
+      "hypercompositor": {
+        "config": {
+          "compositor": { "budgetFraction": 0.70 },
+          "hyperformProfile": "standard"
+        }
+      }
+    }
+  }
+}
 ```
 
-Pass to `HyperMem.create()` as the base config. Full tuning notes are in INSTALL.md.
+Plugin config in `openclaw.json` takes precedence over `config.json`. Both sources are merged, with plugin config winning on overlap. The config schema is validated on gateway start and visible via `openclaw config get plugins.entries.hypercompositor.config`.
+
+Full reference: **[docs/TUNING.md](./docs/TUNING.md)**
 
 ---
 
@@ -468,18 +500,18 @@ const hm = await HyperMem.create({
 });
 
 // Record and compose
-await hm.recordUserMessage('forge', 'agent:forge:webchat:main', 'How does drift detection work?');
+await hm.recordUserMessage('alice', 'agent:alice:webchat:main', 'How does drift detection work?');
 
 const composed = await hm.compose({
-  agentId: 'forge',
-  sessionKey: 'agent:forge:webchat:main',
+  agentId: 'alice',
+  sessionKey: 'agent:alice:webchat:main',
   prompt: 'How does drift detection work?',
   tokenBudget: 4000,
   provider: 'anthropic',
 });
 
 // Refresh tool compression after each turn
-await hm.refreshCacheGradient('forge', 'agent:forge:webchat:main');
+await hm.refreshCacheGradient('alice', 'agent:alice:webchat:main');
 ```
 
 Spawning a subagent with parent context:
@@ -488,10 +520,10 @@ Spawning a subagent with parent context:
 import { buildSpawnContext, MessageStore, DocChunkStore } from '@psiclawops/hypermem';
 
 const spawn = await buildSpawnContext(
-  new MessageStore(hm.dbManager.getMessageDb('forge')),
+  new MessageStore(hm.dbManager.getMessageDb('alice')),
   new DocChunkStore(hm.dbManager.getLibraryDb()),
-  'forge',
-  { parentSessionKey: 'agent:forge:webchat:main', workingSnapshot: 12 }
+  'alice',
+  { parentSessionKey: 'agent:alice:webchat:main', workingSnapshot: 12 }
 );
 ```
 
@@ -503,7 +535,7 @@ const spawn = await buildSpawnContext(
 
 ```bash
 node bin/hypermem-status.mjs              # full dashboard
-node bin/hypermem-status.mjs --agent forge   # scoped to one agent
+node bin/hypermem-status.mjs --agent alice   # scoped to one agent
 node bin/hypermem-status.mjs --json          # machine-readable output
 node bin/hypermem-status.mjs --health        # health checks only (exit 1 on failure)
 ```
@@ -542,6 +574,12 @@ Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 hypermem handles context and output normalization. The Agentic Cognitive Architecture handles identity: self-authored SOUL files, structured communication contracts, and identity persistence across sessions. Same team, complementary layers.
 
 Design guide: [PsiClawOps/AgenticCognitiveArchitecture](https://github.com/PsiClawOps/AgenticCognitiveArchitecture/)
+
+---
+
+## Acknowledgments
+
+The embedding-space fidelity threshold used in compaction validation was informed by the geometric preservation mathematics published by the [libravdb](https://github.com/xDarkicex/openclaw-memory-libravdb) project.
 
 ---
 

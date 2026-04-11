@@ -4,7 +4,7 @@
  *
  * Usage:
  *   node bin/hypermem-status.mjs              # full dashboard
- *   node bin/hypermem-status.mjs --agent forge # scoped to one agent
+ *   node bin/hypermem-status.mjs --agent alice # scoped to one agent
  *   node bin/hypermem-status.mjs --json        # machine-readable output
  *   node bin/hypermem-status.mjs --health      # health checks only (exit 1 on failure)
  *

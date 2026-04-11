@@ -16,11 +16,11 @@
  *   - Wrapped in transactions (atomic)
  *   - Best-effort: catch all errors, log, and return a zero-change result
  *
- * Ported and adapted from ClawText proactive-pass.ts.
- * hypermem schema differences vs ClawText:
+ * Ported and adapted from Memory Engine proactive-pass.ts.
+ * hypermem schema differences vs Memory Engine:
  *   - No content_type column — we classify on the fly via classifyContentType()
  *   - No external payload store — we truncate content inline in tool_results JSON
- *   - No ClawText-specific dependencies (payload-store, tool-tracker, etc.)
+ *   - No Memory Engine-specific dependencies (payload-store, tool-tracker, etc.)
  */
 
 import type { DatabaseSync } from 'node:sqlite';
@@ -43,7 +43,7 @@ export interface ToolDecayResult {
 
 /**
  * Resolve the safe window to a finite positive integer.
- * Mirrors the ClawText resolveSafeWindow() guard.
+ * Mirrors the Memory Engine resolveSafeWindow() guard.
  */
 function resolveSafeWindow(recentWindowSize: number): number {
   if (Number.isFinite(recentWindowSize) && recentWindowSize > 0) {

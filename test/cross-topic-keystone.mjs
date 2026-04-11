@@ -57,7 +57,7 @@ function makeCompositor() {
   });
 }
 
-function seedConversation(db, sessionKey, agentId = 'forge') {
+function seedConversation(db, sessionKey, agentId = 'alice') {
   db.prepare(`
     INSERT INTO conversations (
       session_key, session_id, agent_id, channel_type, status,
@@ -75,7 +75,7 @@ function seedTopic(db, sessionKey, id, name, lastActiveAt) {
   `).run(id, sessionKey, name, lastActiveAt - 1000, lastActiveAt);
 }
 
-function seedMessage(db, convId, { agentId = 'forge', role, text, idx, topicId, createdAt }) {
+function seedMessage(db, convId, { agentId = 'alice', role, text, idx, topicId, createdAt }) {
   db.prepare(`
     INSERT INTO messages (
       conversation_id, agent_id, role, text_content,
@@ -118,8 +118,8 @@ async function run() {
   console.log('  HyperMem Cross-Topic Keystone Test (P3.5)');
   console.log('═══════════════════════════════════════════════════\n');
 
-  const sessionKey = 'agent:forge:webchat:main';
-  const agentId = 'forge';
+  const sessionKey = 'agent:alice:webchat:main';
+  const agentId = 'alice';
 
   // ── 1. No other topics -> empty + compose succeeds ─────────────
   console.log('── 1. No other topics ──\n');

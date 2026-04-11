@@ -48,7 +48,7 @@ prompt() {
   else
     echo -ne "  ${BOLD}${question}${NC} "
   fi
-  read -r reply
+  read -r reply </dev/tty || { [[ -n "$default" ]] && reply="$default" || die "Cannot read input (not a terminal?). Run: bash <(curl -fsSL ...) instead."; }
   [[ -z "$reply" && -n "$default" ]] && reply="$default"
   printf -v "$var" '%s' "$reply"
 }
@@ -56,7 +56,7 @@ prompt() {
 confirm() {
   # confirm <question> — returns 0 for yes, 1 for no
   echo -ne "  ${BOLD}$1${NC} ${DIM}[y/N]${NC} "
-  read -r reply
+  read -r reply </dev/tty || return 1
   [[ "$reply" =~ ^[Yy] ]]
 }
 

@@ -44,7 +44,7 @@ assert(!requiresScan('private'), 'private does not require scan');
 // ─── Clean content ─────────────────────────────────────────────
 console.log('\n─── Clean content ───');
 assert(isSafeForSharedVisibility(''), 'empty string is clean');
-assert(isSafeForSharedVisibility('Completed the ClawText migration today'), 'normal text is clean');
+assert(isSafeForSharedVisibility('Completed the Memory Engine migration today'), 'normal text is clean');
 assert(isSafeForSharedVisibility('password=example_password_here'), 'low-entropy password is clean (skip)');
 assert(isSafeForSharedVisibility('https://example.com/webhook/callback'), 'normal URL is clean');
 

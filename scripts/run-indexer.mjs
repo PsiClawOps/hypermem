@@ -9,7 +9,7 @@
  *   node scripts/run-indexer.mjs                    # One-shot
  *   node scripts/run-indexer.mjs --daemon            # Run continuously (5 min interval)
  *   node scripts/run-indexer.mjs --stats             # Show watermark stats only
- *   node scripts/run-indexer.mjs --agent forge       # Process single agent
+ *   node scripts/run-indexer.mjs --agent alice       # Process single agent
  */
 
 import path from 'node:path';

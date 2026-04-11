@@ -76,7 +76,7 @@ console.log('── VS-5: stripMessageMetadata ──');
 {
   // Sender (untrusted metadata) block
   const senderBlock =
-    'Sender (untrusted metadata): channel=webchat user=ragesaq\n' +
+    'Sender (untrusted metadata): channel=webchat user=operator\n' +
     '\n' +
     'Can you deploy to staging?';
   const stripped = stripMessageMetadata(senderBlock);
@@ -89,7 +89,7 @@ console.log('── VS-5: stripMessageMetadata ──');
   // JSON block with openclaw schema marker
   const jsonBlock =
     '```json\n' +
-    '{"schema": "openclaw/inbound", "version": 1, "sender": "ragesaq"}\n' +
+    '{"schema": "openclaw/inbound", "version": 1, "sender": "operator"}\n' +
     '```\n' +
     'Please summarize the recent changes.';
   const stripped = stripMessageMetadata(jsonBlock);
@@ -137,7 +137,7 @@ console.log('── VS-5: stripMessageMetadata ──');
   const stored = await hm.recordUserMessage(
     'test-vs5-agent',
     'agent:test-vs5-agent:webchat:main',
-    'Sender (untrusted metadata):\n```json\n{"label":"ragesaq (gateway-client)","id":"gateway-client"}\n```\n\nPlease review the deploy plan.'
+    'Sender (untrusted metadata):\n```json\n{"label":"operator (gateway-client)","id":"gateway-client"}\n```\n\nPlease review the deploy plan.'
   );
   assert(!stored.textContent.includes('Sender (untrusted metadata)'), 'recordUserMessage strips sender metadata before storage');
   assert(stored.textContent.includes('Please review the deploy plan.'), 'recordUserMessage preserves user content after stripping metadata');
@@ -170,7 +170,7 @@ console.log('\n── VS-5: detectTopicShift noise immunity ──');
     role: 'user',
     textContent:
       '[Sun 2026-04-05 02:43 MST]\n' +
-      'Sender (untrusted metadata): channel=webchat user=ragesaq\n' +
+      'Sender (untrusted metadata): channel=webchat user=operator\n' +
       '\n',
     toolCalls: null,
     toolResults: null,
@@ -216,7 +216,7 @@ console.log('\n── VS-5 plugin fix: message count increments on new topic ─
 {
   const db = makeDb();
   const topicMap = new SessionTopicMap(db);
-  const SK = 'agent:forge:webchat:main';
+  const SK = 'agent:alice:webchat:main';
 
   // Create a topic (simulates the plugin path before the fix)
   const topicId = topicMap.createTopic(SK, 'Deploy discussion');

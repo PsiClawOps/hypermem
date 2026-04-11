@@ -42,7 +42,7 @@ async function createHarness(label = 'default') {
     dataDir: tmpDir,
   });
 
-  const agentId = 'forge';
+  const agentId = 'alice';
   const sessionKey = `agent:${agentId}:webchat:${label}`;
   const msgDb = hm.dbManager.getMessageDb(agentId);
   const libDb = hm.dbManager.getLibraryDb();
@@ -199,13 +199,13 @@ async function testContentExtraction() {
 
   seedTopicMessages(h, topicId, [
     {
-      agentId: 'forge',
+      agentId: 'alice',
       text: 'We decided to keep topic synthesis heuristic-only and write compiled markdown into knowledge.',
       toolCalls: JSON.stringify([{ name: 'write', arguments: { path: '/home/lumadmin/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts' } }]),
     },
     {
-      agentId: 'forge',
-      text: 'This message cites /home/lumadmin/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md and mentions forge and compass for scoring.',
+      agentId: 'alice',
+      text: 'This message cites /home/lumadmin/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md and mentions alice and bob for scoring.',
     },
     {
       agentId: 'clarity',
@@ -213,15 +213,15 @@ async function testContentExtraction() {
       toolCalls: JSON.stringify([{ input: { filePath: '/home/lumadmin/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md' } }]),
     },
     {
-      agentId: 'forge',
+      agentId: 'alice',
       text: longText,
     },
     {
-      agentId: 'compass',
+      agentId: 'bob',
       text: 'Another long reference-rich message with `code refs`, /home/lumadmin/project/file.ts, and enough body to force summary truncation once combined with the others.'.repeat(8),
     },
     {
-      agentId: 'compass',
+      agentId: 'bob',
       text: 'What should happen with open questions that never got an explicit decision follow-up?',
     },
   ]);
@@ -236,8 +236,8 @@ async function testContentExtraction() {
   assert(row.content.includes('/home/lumadmin/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts'), 'synthesis content includes artifact paths from tool calls');
   assert(
     row.content.includes('**Participants:**') &&
-    row.content.includes('forge') &&
-    row.content.includes('compass') &&
+    row.content.includes('alice') &&
+    row.content.includes('bob') &&
     row.content.includes('clarity'),
     'synthesis content includes participant list'
   );

@@ -57,9 +57,9 @@ async function run() {
     process.exit(1);
   }
 
-  const agentId = 'forge';
-  const parentSk = 'agent:forge:webchat:main';
-  const subagentSk = 'subagent:forge:task-abc123';
+  const agentId = 'alice';
+  const parentSk = 'agent:alice:webchat:main';
+  const subagentSk = 'subagent:alice:task-abc123';
   const msgDb = hm.dbManager.getMessageDb(agentId);
   const libDb = hm.dbManager.getLibraryDb();
 

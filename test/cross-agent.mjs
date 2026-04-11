@@ -44,140 +44,140 @@ async function run() {
     // ── Set up agents ──
     console.log('── Setting up agents ──');
 
-    // Forge (council, infra org lead)
-    hm.dbManager.ensureAgent('forge', { displayName: 'Forge', tier: 'council' });
-    // Pylon (director, forge-org)
-    hm.dbManager.ensureAgent('pylon', { displayName: 'Pylon', tier: 'director', org: 'forge-org' });
-    // Set reportsTo for pylon via FleetStore (ensureAgent doesn't support it)
+    // alice (council, infra org lead)
+    hm.dbManager.ensureAgent('alice', { displayName: 'alice', tier: 'council' });
+    // hank (director, alice-org)
+    hm.dbManager.ensureAgent('hank', { displayName: 'hank', tier: 'director', org: 'alice-org' });
+    // Set reportsTo for hank via FleetStore (ensureAgent doesn't support it)
     const { FleetStore } = await import('../dist/fleet-store.js');
     const fleetStore = new FleetStore(hm.dbManager.getLibraryDb());
-    fleetStore.upsertAgent('pylon', { reportsTo: 'forge', orgId: 'forge-org' });
-    // Compass (council, product org lead)
-    hm.dbManager.ensureAgent('compass', { displayName: 'Compass', tier: 'council' });
-    // Crucible (specialist, no org)
-    hm.dbManager.ensureAgent('crucible', { displayName: 'Crucible', tier: 'specialist' });
+    fleetStore.upsertAgent('hank', { reportsTo: 'alice', orgId: 'alice-org' });
+    // bob (council, product org lead)
+    hm.dbManager.ensureAgent('bob', { displayName: 'bob', tier: 'council' });
+    // mike (specialist, no org)
+    hm.dbManager.ensureAgent('mike', { displayName: 'mike', tier: 'specialist' });
 
-    // ── Populate Forge's memory ──
-    console.log('\n── Populating Forge memory ──');
+    // ── Populate alice's memory ──
+    console.log('\n── Populating alice memory ──');
 
     // All structured knowledge goes in the library DB
     const libDb = hm.dbManager.getLibraryDb();
 
-    // Private fact (only Forge should see)
+    // Private fact (only alice should see)
     libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
       VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
-      .run('forge', 'agent', 'operations', 'I prefer deploying at 2am when traffic is lowest', 1.0, 'private');
+      .run('alice', 'agent', 'operations', 'I prefer deploying at 2am when traffic is lowest', 1.0, 'private');
 
-    // Org-visible fact (Forge + Pylon/Vigil/Plane should see)
+    // Org-visible fact (alice + hank/jack/irene should see)
     libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
       VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
-      .run('forge', 'agent', 'infrastructure', 'Redis 7.0.15 is running on the host', 1.0, 'org');
+      .run('alice', 'agent', 'infrastructure', 'Redis 7.0.15 is running on the host', 1.0, 'org');
 
     // Council-visible fact
     libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
       VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
-      .run('forge', 'agent', 'architecture', 'HyperMem replaces ClawText as the memory architecture', 0.95, 'council');
+      .run('alice', 'agent', 'architecture', 'HyperMem replaces Memory Engine as the memory architecture', 0.95, 'council');
 
     // Fleet-visible fact
     libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
       VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
-      .run('forge', 'agent', 'infrastructure', 'Gateway restart required after config changes', 0.9, 'fleet');
+      .run('alice', 'agent', 'infrastructure', 'Gateway restart required after config changes', 0.9, 'fleet');
 
     // Identity-domain fact (should ALWAYS be blocked, even if marked fleet)
     libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
       VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
-      .run('forge', 'agent', 'identity', 'I am Forge, the infrastructure seat', 1.0, 'fleet');
+      .run('alice', 'agent', 'identity', 'I am alice, the infrastructure seat', 1.0, 'fleet');
 
     // Session-scoped fact (should be excluded from cross-agent)
     libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
       VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
-      .run('forge', 'session', 'operations', 'Currently debugging Redis connection', 1.0, 'fleet');
+      .run('alice', 'session', 'operations', 'Currently debugging Redis connection', 1.0, 'fleet');
 
     // Knowledge entries
     libDb.prepare(`INSERT INTO knowledge (agent_id, domain, key, content, confidence, visibility, source_type, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
-      .run('forge', 'operations', 'deploy-process', 'Run preflight, push containers, health check, traffic shift', 0.9, 'org', 'conversation');
+      .run('alice', 'operations', 'deploy-process', 'Run preflight, push containers, health check, traffic shift', 0.9, 'org', 'conversation');
 
     libDb.prepare(`INSERT INTO knowledge (agent_id, domain, key, content, confidence, visibility, source_type, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
-      .run('forge', 'identity', 'soul-anchor', 'Infrastructure seat, pragmatic, calm under pressure', 1.0, 'fleet', 'file');
+      .run('alice', 'identity', 'soul-anchor', 'Infrastructure seat, pragmatic, calm under pressure', 1.0, 'fleet', 'file');
 
     // Episodes
     libDb.prepare(`INSERT INTO episodes (agent_id, event_type, summary, significance, visibility, participants, created_at, decay_score)
       VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 0.0)`)
-      .run('forge', 'deployment', 'Deployed HyperMem Phase 1 to production', 8, 'council', JSON.stringify(['forge', 'ragesaq']));
+      .run('alice', 'deployment', 'Deployed HyperMem Phase 1 to production', 8, 'council', JSON.stringify(['alice', 'operator']));
 
     libDb.prepare(`INSERT INTO episodes (agent_id, event_type, summary, significance, visibility, participants, created_at, decay_score)
       VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 0.0)`)
-      .run('forge', 'incident', 'Fixed ClawText graft hook poisoning fleet transcripts', 9, 'fleet', JSON.stringify(['forge', 'pylon']));
+      .run('alice', 'incident', 'Fixed Memory Engine graft hook poisoning fleet transcripts', 9, 'fleet', JSON.stringify(['alice', 'hank']));
 
     // Messages (should NEVER be accessible cross-agent)
-    await hm.recordUserMessage('forge', 'agent:forge:webchat:main', 'Secret operational discussion', {
+    await hm.recordUserMessage('alice', 'agent:alice:webchat:main', 'Secret operational discussion', {
       channelType: 'webchat',
     });
 
-    assert(true, 'Populated Forge memory (6 facts, 2 knowledge, 2 episodes, 1 message)');
+    assert(true, 'Populated alice memory (6 facts, 2 knowledge, 2 episodes, 1 message)');
 
-    // ── Test: Forge reads own data (self-access) ──
-    console.log('\n── Self-access (Forge → Forge) ──');
-    const selfFacts = hm.queryAgent('forge', 'forge', { memoryType: 'facts' });
-    assert(selfFacts.length === 4, `Forge sees all 4 own non-session facts (got ${selfFacts.length})`);
+    // ── Test: alice reads own data (self-access) ──
+    console.log('\n── Self-access (alice → alice) ──');
+    const selfFacts = hm.queryAgent('alice', 'alice', { memoryType: 'facts' });
+    assert(selfFacts.length === 4, `alice sees all 4 own non-session facts (got ${selfFacts.length})`);
     // Identity facts are excluded even for self via cross-agent query
     const selfIdentityFacts = selfFacts.filter(f => f.domain === 'identity');
     assert(selfIdentityFacts.length === 0, `Identity facts excluded even in self-query (got ${selfIdentityFacts.length})`);
 
-    // ── Test: Pylon reads Forge (same org) ──
-    console.log('\n── Org access (Pylon → Forge) ──');
-    const pylonFacts = hm.queryAgent('pylon', 'forge', { memoryType: 'facts' });
-    // Pylon should see: org + council + fleet (director can see council lead's council-visible data)
+    // ── Test: hank reads alice (same org) ──
+    console.log('\n── Org access (hank → alice) ──');
+    const pylonFacts = hm.queryAgent('hank', 'alice', { memoryType: 'facts' });
+    // hank should see: org + council + fleet (director can see council lead's council-visible data)
     // NOT private, NOT identity, NOT session
     const pylonDomains = pylonFacts.map(f => `${f.domain}:${f.visibility}`);
-    assert(pylonFacts.length === 3, `Pylon sees 3 Forge facts: org + council + fleet (got ${pylonFacts.length}: ${pylonDomains})`);
-    assert(!pylonFacts.some(f => f.visibility === 'private'), 'Pylon cannot see private facts');
-    assert(!pylonFacts.some(f => f.domain === 'identity'), 'Pylon cannot see identity facts');
+    assert(pylonFacts.length === 3, `hank sees 3 alice facts: org + council + fleet (got ${pylonFacts.length}: ${pylonDomains})`);
+    assert(!pylonFacts.some(f => f.visibility === 'private'), 'hank cannot see private facts');
+    assert(!pylonFacts.some(f => f.domain === 'identity'), 'hank cannot see identity facts');
 
-    const pylonKnowledge = hm.queryAgent('pylon', 'forge', { memoryType: 'knowledge' });
-    assert(pylonKnowledge.length === 1, `Pylon sees 1 Forge knowledge entry (org-visible, not identity) (got ${pylonKnowledge.length})`);
-    assert(pylonKnowledge[0].domain !== 'identity', 'Identity knowledge blocked for Pylon');
+    const pylonKnowledge = hm.queryAgent('hank', 'alice', { memoryType: 'knowledge' });
+    assert(pylonKnowledge.length === 1, `hank sees 1 alice knowledge entry (org-visible, not identity) (got ${pylonKnowledge.length})`);
+    assert(pylonKnowledge[0].domain !== 'identity', 'Identity knowledge blocked for hank');
 
-    // ── Test: Compass reads Forge (different org, council seat) ──
-    console.log('\n── Council access (Compass → Forge) ──');
-    const compassFacts = hm.queryAgent('compass', 'forge', { memoryType: 'facts' });
-    // Compass should see: council + fleet (NOT private, NOT org, NOT identity, NOT session)
-    assert(compassFacts.length === 2, `Compass sees 2 Forge facts: council + fleet (got ${compassFacts.length})`);
-    assert(!compassFacts.some(f => f.visibility === 'private'), 'Compass cannot see private facts');
-    assert(!compassFacts.some(f => f.visibility === 'org'), 'Compass cannot see org-only facts');
+    // ── Test: bob reads alice (different org, council seat) ──
+    console.log('\n── Council access (bob → alice) ──');
+    const compassFacts = hm.queryAgent('bob', 'alice', { memoryType: 'facts' });
+    // bob should see: council + fleet (NOT private, NOT org, NOT identity, NOT session)
+    assert(compassFacts.length === 2, `bob sees 2 alice facts: council + fleet (got ${compassFacts.length})`);
+    assert(!compassFacts.some(f => f.visibility === 'private'), 'bob cannot see private facts');
+    assert(!compassFacts.some(f => f.visibility === 'org'), 'bob cannot see org-only facts');
 
-    const compassEpisodes = hm.queryAgent('compass', 'forge', { memoryType: 'episodes' });
+    const compassEpisodes = hm.queryAgent('bob', 'alice', { memoryType: 'episodes' });
     // Both episodes: one council, one fleet
-    assert(compassEpisodes.length === 2, `Compass sees 2 Forge episodes (got ${compassEpisodes.length})`);
+    assert(compassEpisodes.length === 2, `bob sees 2 alice episodes (got ${compassEpisodes.length})`);
 
-    // ── Test: Crucible reads Forge (specialist, no org) ──
-    console.log('\n── Fleet access (Crucible → Forge) ──');
-    const crucibleFacts = hm.queryAgent('crucible', 'forge', { memoryType: 'facts' });
-    // Crucible should see: fleet only (NOT private, NOT org, NOT council, NOT identity, NOT session)
-    assert(crucibleFacts.length === 1, `Crucible sees 1 Forge fact: fleet only (got ${crucibleFacts.length})`);
-    assert(crucibleFacts[0].visibility === 'fleet', `Crucible's fact is fleet-visible`);
+    // ── Test: mike reads alice (specialist, no org) ──
+    console.log('\n── Fleet access (mike → alice) ──');
+    const crucibleFacts = hm.queryAgent('mike', 'alice', { memoryType: 'facts' });
+    // mike should see: fleet only (NOT private, NOT org, NOT council, NOT identity, NOT session)
+    assert(crucibleFacts.length === 1, `mike sees 1 alice fact: fleet only (got ${crucibleFacts.length})`);
+    assert(crucibleFacts[0].visibility === 'fleet', `mike's fact is fleet-visible`);
 
-    const crucibleEpisodes = hm.queryAgent('crucible', 'forge', { memoryType: 'episodes' });
-    assert(crucibleEpisodes.length === 1, `Crucible sees 1 Forge episode: fleet only (got ${crucibleEpisodes.length})`);
+    const crucibleEpisodes = hm.queryAgent('mike', 'alice', { memoryType: 'episodes' });
+    assert(crucibleEpisodes.length === 1, `mike sees 1 alice episode: fleet only (got ${crucibleEpisodes.length})`);
 
     // ── Test: Messages are ALWAYS private ──
     console.log('\n── Message privacy ──');
-    const pylonMsgs = hm.queryAgent('pylon', 'forge', { memoryType: 'messages' });
-    assert(pylonMsgs.length === 0, 'Pylon cannot read Forge messages (always private)');
+    const pylonMsgs = hm.queryAgent('hank', 'alice', { memoryType: 'messages' });
+    assert(pylonMsgs.length === 0, 'hank cannot read alice messages (always private)');
 
-    const compassMsgs = hm.queryAgent('compass', 'forge', { memoryType: 'messages' });
-    assert(compassMsgs.length === 0, 'Compass cannot read Forge messages (always private)');
+    const compassMsgs = hm.queryAgent('bob', 'alice', { memoryType: 'messages' });
+    assert(compassMsgs.length === 0, 'bob cannot read alice messages (always private)');
 
     // ── Test: Fleet-wide query ──
     console.log('\n── Fleet-wide query ──');
-    // Populate Compass with some fleet-visible data (in library DB)
+    // Populate bob with some fleet-visible data (in library DB)
     libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
       VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
-      .run('compass', 'agent', 'product', 'ClawCanvas is the primary user surface', 0.95, 'fleet');
+      .run('bob', 'agent', 'product', 'Canvas is the primary user surface', 0.95, 'fleet');
 
-    const fleetResults = hm.queryFleet('crucible', { memoryType: 'facts' });
+    const fleetResults = hm.queryFleet('mike', { memoryType: 'facts' });
     assert(fleetResults.length >= 2, `Fleet query returns facts from multiple agents (got ${fleetResults.length})`);
     const agents = [...new Set(fleetResults.map(r => r.sourceAgent))];
     assert(agents.length >= 2, `Fleet results span ${agents.length} agents: ${agents.join(', ')}`);

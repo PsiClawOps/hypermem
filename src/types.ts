@@ -87,7 +87,7 @@ export type FactScope = 'agent' | 'session' | 'user';
 /**
  * Memory visibility levels:
  * - private:  Only the owning agent can read. Identity, SOUL, personal reflections.
- * - org:      Agents in the same org (e.g., Forge's directors: Pylon, Vigil, Plane).
+ * - org:      Agents in the same org (e.g., alice's directors: hank, jack, irene).
  * - council:  All council seats can read.
  * - fleet:    Any agent in the fleet can read.
  */
@@ -118,8 +118,8 @@ export interface CrossAgentQuery {
 export interface AgentIdentity {
   agentId: string;
   tier: 'council' | 'director' | 'specialist' | 'worker';
-  org?: string;         // e.g., 'forge-org', 'compass-org', 'sentinel-org'
-  councilLead?: string; // director's council lead, e.g., 'forge' for Pylon
+  org?: string;         // e.g., 'alice-org', 'bob-org', 'dave-org'
+  councilLead?: string; // director's council lead, e.g., 'alice' for hank
 }
 
 export interface Fact {
@@ -253,6 +253,12 @@ export interface ComposeRequest {
    * P3.4: topic-aware compositor.
    */
   topicId?: string;
+  /**
+   * When true, skip the C4 window cache fast-exit even if the cursor is fresh.
+   * Use this when external L4 state changed between turns, for example facts,
+   * wiki pages, or other library-backed context updated out of band.
+   */
+  skipWindowCache?: boolean;
 }
 
 export interface SlotTokenCounts {
@@ -299,6 +305,12 @@ export interface ComposeDiagnostics {
   dynamicReserveActive?: boolean;
   /** True if dynamic reserve was clamped at dynamicReserveMax and SESSION_PRESSURE_HIGH emitted */
   sessionPressureHigh?: boolean;
+  /** Number of items filtered across all dedup paths (temporal, open-domain, semantic, cross-session) */
+  fingerprintDedups?: number;
+  /** Number of duplicate-prefix matches where the full normalized content differed */
+  fingerprintCollisions?: number;
+  /** True when the window cache fast-exit fired and full compose was skipped */
+  windowCacheHit?: boolean;
 }
 
 export interface ComposeResult {
@@ -339,7 +351,7 @@ export interface ProviderMessage {
  * to identify high-signal unprocessed messages.
  *
  * Stored in Redis (hm:{a}:s:{s}:cursor) with dual-write to SQLite for
- * durability across Redis eviction (Compass Gate 2).
+ * durability across Redis eviction (bob Gate 2).
  */
 export interface SessionCursor {
   /** StoredMessage.id of the newest message included in the last window */
@@ -443,17 +455,51 @@ export interface CacheConfig {
 export type RedisConfig = CacheConfig;
 
 export interface CompositorConfig {
+  /**
+   * Fraction of the detected context window to use as the input token budget.
+   * The effective budget is: detectedContextWindow × budgetFraction.
+   * reserveFraction is then subtracted for output/tool-call headroom.
+   *
+   * Range: 0.3–0.85. Default: 0.70
+   */
+  budgetFraction?: number;
+  /**
+   * Fraction of the total token budget to reserve for model output and tool
+   * call responses. Higher = more headroom for large tool results.
+   *
+   * Range: 0.10–0.50. Default: 0.25
+   */
+  reserveFraction?: number;
+  /**
+   * Fraction of the effective token budget (post-reserve) allocated to
+   * conversation history. History fills up to this cap before context slots run.
+   *
+   * Range: 0.20–0.60. Default: 0.40
+   */
+  historyFraction?: number;
+  /**
+   * Fraction of the effective token budget (post-reserve) allocated to the
+   * memory pool: facts, wiki, semantic recall, cross-session context, and
+   * trigger-fired doc chunks all draw from this shared pool.
+   *
+   * Range: 0.20–0.70. Default: 0.45
+   * Note: historyFraction + memoryFraction should be ≤ 0.90 to leave room
+   * for fixed-cost slots (system, identity, HyperForm: typically 3–8k tokens).
+   */
+  memoryFraction?: number;
+  /**
+   * @deprecated Use budgetFraction instead. Absolute token fallback used when
+   * model detection fails and budgetFraction is not set.
+   */
   defaultTokenBudget: number;
   maxHistoryMessages: number;
+  /** @advanced Replaced by memoryFraction for primary tuning. Hard per-fetch fact count cap. */
   maxFacts: number;
   maxCrossSessionContext: number;  // tokens
   /**
-   * Aggregate token ceiling across all trigger-fired doc chunk collections in a
-   * single compose pass. When unset, hypermem uses a dynamic ceiling of 40% of
-   * the remaining budget at the start of trigger retrieval.
-   *
-   * This prevents pathological prompts from firing many trigger collections at
-   * once and starving the rest of the prompt budget.
+   * @advanced Aggregate token ceiling across all trigger-fired doc chunk
+   * collections in a single compose pass. When unset, draws from the memoryFraction
+   * pool. Rarely needs manual tuning.
    */
   maxTotalTriggerTokens?: number;
   /**
@@ -476,15 +522,9 @@ export interface CompositorConfig {
    */
   warmHistoryBudgetFraction: number;
   /**
-   * Fraction of the model context window to reserve for output tokens and
-   * hypermem operational overhead. The compositor's effective input budget is
-   * (contextWindow × (1 - contextWindowReserve)).
-   *
-   * Higher values = more headroom for large operations, fewer turns before
-   * session break. Lower values = more context available, higher saturation risk.
-   *
-   * Default: 0.25 (25% reserve — leaves 75% for input context)
-   * Previous default was 0.10 (10% reserve).
+   * @advanced Use reserveFraction instead.
+   * Fraction of the model context window to reserve for output tokens.
+   * Falls back to reserveFraction when set. Default: 0.25
    */
   contextWindowReserve?: number;
   /**
@@ -523,16 +563,10 @@ export interface CompositorConfig {
    */
   keystoneMinSignificance?: number;
   /**
-   * Fraction of the effective token budget to target for context assembly.
-   * The compositor fills slots until this fraction is consumed, leaving the
-   * remainder for conversation history and response headroom.
-   *
-   * Lower values = lighter context, faster turns, less memory surfaced.
-   * Higher values = richer context, more memory, higher saturation risk.
-   *
+   * @advanced Use memoryFraction instead.
+   * Fraction of the effective budget to target for context assembly.
+   * Honored as a fallback when memoryFraction is not set.
    * Range: 0.3–0.85. Default: 0.65
-   * Typical lightweight config: 0.45
-   * Typical fleet/multi-agent config: 0.65
    */
   targetBudgetFraction?: number;
   /**
@@ -551,19 +585,19 @@ export interface CompositorConfig {
    */
   enableMOD?: boolean;
   /**
-   * Output profile tier. Controls what FOS content is injected.
+   * HyperForm output shaping profile. Controls what FOS/MOD content is injected.
    *
    * 'light'    — ~100 token standalone directives. No MOD, no fleet concepts.
-   *             Works on any single-agent 64k setup. No DB required.
-   * 'standard' — Full FOS: density targets, format rules, compression ratios,
-   *              task-context scoping. No MOD.
+   * 'standard' — Full FOS: density targets, format rules, compression ratios.
    * 'full'     — FOS + MOD. Cross-agent coordination, full spec.
    *
    * Backward compat: 'starter' maps to 'light', 'fleet' maps to 'full'.
    * Default: 'full' (backward-compatible). New install default: 'light'.
    */
+  hyperformProfile?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
+  /** @deprecated Use hyperformProfile */
   outputProfile?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
-  /** @deprecated Use outputProfile */
+  /** @deprecated Use hyperformProfile */
   outputStandard?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
   /**
    * Hard token ceiling for wiki page injection per compose pass.

@@ -50,6 +50,16 @@ import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
 import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
 
 /**
+ * Files that OpenClaw's contextInjection injects into the system prompt.
+ * HyperMem must not re-inject these via doc chunk retrieval to avoid duplication.
+ * Exported so plugin and other consumers can share the same dedup set.
+ */
+export const OPENCLAW_BOOTSTRAP_FILES = new Set([
+  'SOUL.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md',
+  'AGENTS.md', 'HEARTBEAT.md', 'MEMORY.md', 'BOOTSTRAP.md',
+]);
+
+/**
  * Model context window sizes by provider/model string (or partial match).
  * Used as fallback when tokenBudget is not passed by the runtime.
  * Order matters: first match wins. Partial substring match on the model string.
@@ -91,7 +101,31 @@ const MODEL_CONTEXT_WINDOWS: Array<{ pattern: string; tokens: number }> = [
  * Default reserve: 25% (leaves 75% for input context).
  * Falls back to defaultTokenBudget if no model match.
  */
-function resolveModelBudget(model: string | undefined, defaultBudget: number, reserve = 0.15): number {
+/**
+ * Resolve effective input token budget for a model.
+ *
+ * Priority:
+ * 1. If budgetFraction is set AND model window is detected: window × budgetFraction × (1 - reserve)
+ * 2. If model window detected but no budgetFraction: window × (1 - reserve)
+ * 3. Fallback to defaultTokenBudget (absolute number)
+ */
+function resolveModelBudget(
+  model: string | undefined,
+  defaultBudget: number,
+  reserve = 0.15,
+  budgetFraction?: number,
+): number {
+  const window = resolveModelWindow(model, defaultBudget);
+  // If we detected an actual model window (not the fallback derivation)
+  if (model && budgetFraction != null) {
+    const normalized = model.toLowerCase();
+    for (const entry of MODEL_CONTEXT_WINDOWS) {
+      if (normalized.includes(entry.pattern)) {
+        return Math.floor(entry.tokens * budgetFraction * (1 - reserve));
+      }
+    }
+  }
+  // Original path: detected window × (1 - reserve), or absolute fallback
   if (!model) return defaultBudget;
   const normalized = model.toLowerCase();
   for (const entry of MODEL_CONTEXT_WINDOWS) {
@@ -132,7 +166,7 @@ function computeDynamicReserve(
   totalWindow: number,
   config: CompositorConfig,
 ): { reserve: number; avgTurnCost: number; dynamic: boolean; pressureHigh: boolean } {
-  const base = config.contextWindowReserve ?? 0.15;
+  const base = config.reserveFraction ?? config.contextWindowReserve ?? 0.25;
   const horizon = config.dynamicReserveTurnHorizon ?? 5;
   const max = config.dynamicReserveMax ?? 0.50;
   const enabled = config.dynamicReserveEnabled ?? true;
@@ -169,17 +203,26 @@ function computeDynamicReserve(
 }
 
 const DEFAULT_CONFIG: CompositorConfig = {
+  // Primary budget controls
+  budgetFraction: 0.703,
+  reserveFraction: 0.25,
+  historyFraction: 0.40,
+  memoryFraction: 0.40,
+  // Absolute fallback
   defaultTokenBudget: 90000,
+  // History internals
   maxHistoryMessages: 250,
-  maxFacts: 28,
-  maxCrossSessionContext: 6000,
-  maxRecentToolPairs: 3,
-  maxProseToolPairs: 10,
   warmHistoryBudgetFraction: 0.4,
   keystoneHistoryFraction: 0.2,
   keystoneMaxMessages: 15,
   keystoneMinSignificance: 0.5,
-  contextWindowReserve: 0.15,
+  // Memory internals
+  maxFacts: 28,
+  maxCrossSessionContext: 6000,
+  // Tool gradient (internal)
+  maxRecentToolPairs: 3,
+  maxProseToolPairs: 10,
+  // Dynamic reserve
   dynamicReserveTurnHorizon: 5,
   dynamicReserveMax: 0.50,
   dynamicReserveEnabled: true,
@@ -394,7 +437,7 @@ function stripSecurityPreamble(content: string): string {
 }
 
 // Minimum floor: if trimming would leave less than 30% of original content, return a
-// stripped sentinel instead of a misleading fragment. A partial result that looks
+// stripped dave instead of a misleading fragment. A partial result that looks
 // complete is worse than a clear signal that the result was dropped.
 // Applied only in applyTierPayloadCap (pressure-driven trimming), not in structural
 // truncation paths where head+tail is always semantically useful.
@@ -703,9 +746,9 @@ function applyTierPayloadCap(msg: NeutralMessage, perResultCap: number, perTurnC
       // render the truncated result as: [security notice] + [middle marker] + [last line].
       const stripped = stripSecurityPreamble(content);
       // Floor check (TUNE-015): if the cap would leave less than 30% of the stripped content
-      // AND less than 2000 chars absolute, return a sentinel instead of a misleading fragment.
+      // AND less than 2000 chars absolute, return a dave instead of a misleading fragment.
       // Partial results that look complete are worse than a clear dropped-result signal.
-      // The absolute floor prevents the sentinel from firing on large natural truncations
+      // The absolute floor prevents the dave from firing on large natural truncations
       // (e.g., 110k → 16k is a meaningful slice, not a misleading fragment).
       if (perResultCap < stripped.length * TOOL_GRADIENT_MIN_USEFUL_FRACTION && perResultCap < 2_000) {
         content = `[result too large for current context budget \u2014 ${stripped.length} chars stripped]`;
@@ -910,6 +953,57 @@ export class Compositor {
   async compose(request: ComposeRequest, db: DatabaseSync, libraryDb?: DatabaseSync): Promise<ComposeResult> {
     const store = new MessageStore(db);
     const libDb = libraryDb || this.libraryDb;
+    const toComposeOutputMessages = (inputMessages: NeutralMessage[]): ProviderMessage[] => {
+      // When skipProviderTranslation is set, compose returns the neutral window
+      // typed as ProviderMessage[] by contract. The runtime translates later.
+      return request.skipProviderTranslation
+        ? inputMessages as unknown as ProviderMessage[]
+        : toProviderFormat(inputMessages, request.provider ?? request.model ?? null);
+    };
+
+    // ── C4: Window cache fast-exit ────────────────────────────
+    // If nothing has changed since the last compose (cursor.lastSentId >= newest
+    // message id in the DB), skip the full pipeline and return the cached window.
+    // Particularly effective for low-frequency sessions (heartbeat agents, council
+    // seats between rounds). TTL on the cache write remains 120s — this is a
+    // conservative early-exit before the TTL expires, not a TTL extension.
+    if (request.includeHistory !== false && request.skipWindowCache !== true) {
+      try {
+        const newestRow = db.prepare(
+          'SELECT MAX(id) AS maxId FROM messages WHERE agent_id = ?'
+        ).get(request.agentId) as { maxId: number | null } | undefined;
+        const newestMsgId = newestRow?.maxId;
+        if (newestMsgId != null) {
+          const cachedBundle = await this.cache.getFreshWindowBundle(
+            request.agentId, request.sessionKey, newestMsgId
+          );
+          if (cachedBundle) {
+            const cachedSlots: SlotTokenCounts = {
+              system: cachedBundle.meta.slots['system'] ?? 0,
+              identity: cachedBundle.meta.slots['identity'] ?? 0,
+              history: cachedBundle.meta.slots['history'] ?? 0,
+              facts: cachedBundle.meta.slots['facts'] ?? 0,
+              context: cachedBundle.meta.slots['context'] ?? 0,
+              library: cachedBundle.meta.slots['library'] ?? 0,
+            };
+            return {
+              messages: toComposeOutputMessages(cachedBundle.messages),
+              tokenCount: cachedBundle.meta.totalTokens,
+              slots: cachedSlots,
+              truncated: false,
+              hasWarnings: cachedBundle.meta.warnings.length > 0,
+              warnings: cachedBundle.meta.warnings,
+              diagnostics: {
+                ...cachedBundle.meta.diagnostics,
+                windowCacheHit: true,
+              },
+            };
+          }
+        }
+      } catch {
+        // Cache fast-exit is best-effort, fall through to full compose
+      }
+    }
 
     // Dynamic reserve: use a lightweight SQLite sample to estimate avg turn cost
     // BEFORE assembling the full context. This gives us the reserve fraction we
@@ -922,7 +1016,7 @@ export class Compositor {
       : [];
     const { reserve: dynamicReserve, avgTurnCost, dynamic: isDynamic, pressureHigh } =
       computeDynamicReserve(sampleMessages, totalWindow, this.config);
-    const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget, dynamicReserve);
+    const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget, dynamicReserve, this.config.budgetFraction);
     let remaining = budget;
     const warnings: string[] = [];
     const slots: SlotTokenCounts = {
@@ -983,7 +1077,7 @@ export class Compositor {
       const fosEnabled = this.config?.enableFOS !== false;
       const modEnabled = this.config?.enableMOD !== false;
       const outputTier = resolveOutputTier(
-        (this.config?.outputProfile ?? this.config?.outputStandard) as any,
+        (this.config?.hyperformProfile ?? this.config?.outputProfile ?? this.config?.outputStandard) as any,
         fosEnabled,
         modEnabled
       );
@@ -1102,9 +1196,17 @@ export class Compositor {
       let historyTokens = 0;
       const includedClusters: NeutralMessageCluster<NeutralMessage>[] = [];
 
+      // Pre-allocate history budget. historyFraction is a fraction of the
+      // effective token budget (post-reserve). Falls back to unbounded fill
+      // (remaining) when historyFraction is not set.
+      const historyBudget = this.config.historyFraction != null
+        ? Math.floor(budget * this.config.historyFraction)
+        : remaining;
+      const historyFillCap = Math.min(historyBudget, remaining);
+
       for (let i = budgetClusters.length - 1; i >= 0; i--) {
         const cluster = budgetClusters[i];
-        if (historyTokens + cluster.tokenCost > remaining && includedClusters.length > 0) {
+        if (historyTokens + cluster.tokenCost > historyFillCap && includedClusters.length > 0) {
           const droppedMsgCount = budgetClusters.slice(0, i + 1).reduce((s, c) => s + c.messages.length, 0);
           warnings.push(`History truncated at cluster ${i + 1}/${budgetClusters.length} (${droppedMsgCount} messages dropped)`);
           break;
@@ -1237,13 +1339,22 @@ export class Compositor {
         remaining -= historyTokens;
       }
 
-      // targetBudgetFraction cap: limit total context slots to a fraction of the
-      // effective budget. This gives operators a single knob to make the system
-      // lighter without tuning individual slot fractions.
-      const targetFraction = this.config.targetBudgetFraction ?? 0.65;
-      const contextCap = Math.floor(budget * targetFraction);
-      if (remaining > contextCap) {
-        remaining = contextCap;
+      // Memory budget pool: facts, wiki, semantic recall, cross-session, and
+      // trigger-fired doc chunks all draw from this shared pool via `remaining`.
+      // memoryFraction is a fraction of the effective token budget (post-reserve).
+      // Falls back to targetBudgetFraction cap behavior when memoryFraction is not set.
+      let memoryBudget: number;
+      if (this.config.memoryFraction != null) {
+        memoryBudget = Math.floor(budget * this.config.memoryFraction);
+        if (remaining > memoryBudget) {
+          remaining = memoryBudget;
+        }
+      } else {
+        const targetFraction = this.config.targetBudgetFraction ?? 0.65;
+        memoryBudget = Math.floor(budget * targetFraction);
+        if (remaining > memoryBudget) {
+          remaining = memoryBudget;
+        }
       }
 
       // T1.3: Ghost message suppression.
@@ -1281,6 +1392,14 @@ export class Compositor {
     const contextParts: string[] = [];
     let contextTokens = 0;
 
+    // ── C1: Content fingerprint dedup set ────────────────────
+    // Replaces fragile substring-match dedup across temporal, open-domain,
+    // semantic recall, and cross-session paths. O(1) lookup on a normalized
+    // 120-char prefix catches rephrased duplicates the old 60-char includes()
+    // match missed without needing a hash.
+    const contextFingerprints = new Set<string>();
+    const fingerprintEntries = new Map<string, Set<string>>();
+
     // ── Compose-level diagnostics tracking vars ──────────────
     let diagTriggerHits = 0;
     let diagTriggerFallbackUsed = false;
@@ -1288,23 +1407,47 @@ export class Compositor {
     let diagSemanticResults = 0;
     let diagDocChunkCollections = 0;
     let diagScopeFiltered = 0;
+    let diagFingerprintDedups = 0;
+    let diagFingerprintCollisions = 0;
     let diagRetrievalMode: ComposeDiagnostics['retrievalMode'] = 'none';
+
+    function normalizeFingerprintText(text: string): string {
+      return text.toLowerCase().replace(/\s+/g, ' ').trim();
+    }
+    function contentFingerprint(text: string): string {
+      return normalizeFingerprintText(text).slice(0, 120);
+    }
+    function addFingerprint(text: string): void {
+      const normalized = normalizeFingerprintText(text);
+      const fingerprint = normalized.slice(0, 120);
+      contextFingerprints.add(fingerprint);
+      const entries = fingerprintEntries.get(fingerprint) ?? new Set<string>();
+      entries.add(normalized);
+      fingerprintEntries.set(fingerprint, entries);
+    }
+    function isDuplicate(text: string): boolean {
+      const normalized = normalizeFingerprintText(text);
+      const fingerprint = normalized.slice(0, 120);
+      if (!contextFingerprints.has(fingerprint)) return false;
+      const entries = fingerprintEntries.get(fingerprint);
+      if (entries && !entries.has(normalized)) diagFingerprintCollisions += 1;
+      return true;
+    }
 
     // ── Wiki Page (L4: Library — active topic synthesis) ──────
     // Inject synthesized wiki page for the active topic before general knowledge.
-    // Token budget: capped at 15% of remaining.
+    // Draws from the shared memory budget pool (remaining is pre-capped by memoryBudget).
     if (request.includeLibrary !== false && remaining > 300 && libDb && composedActiveTopicName) {
       const wikiContent = this.buildWikiPageContext(request.agentId, composedActiveTopicName, libDb);
       if (wikiContent) {
         const tokens = estimateTokens(wikiContent);
-        const cap = Math.floor(remaining * 0.15);
-        if (tokens <= cap) {
+        if (tokens <= remaining) {
           contextParts.push(wikiContent);
           contextTokens += tokens;
           remaining -= tokens;
           slots.library += tokens;
-        } else {
-          const truncated = this.truncateToTokens(wikiContent, cap);
+        } else if (remaining > 200) {
+          const truncated = this.truncateToTokens(wikiContent, remaining);
           const truncTokens = estimateTokens(truncated);
           contextParts.push(truncated);
           contextTokens += truncTokens;
@@ -1316,6 +1459,7 @@ export class Compositor {
 
     // ── Facts (L4: Library) ──────────────────────────────────
     // scope: agent — filtered by agentId via filterByScope after fetch
+    // Draws from the shared memory budget pool (remaining is pre-capped by memoryBudget).
     if (request.includeFacts !== false && remaining > 500) {
       const factsContent = this.buildFactsFromDb(request.agentId, request.sessionKey, libDb || db);
       if (factsContent !== null) {
@@ -1324,20 +1468,26 @@ export class Compositor {
         diagScopeFiltered += scopeFiltered;
         if (content) {
           const tokens = estimateTokens(content);
-          if (tokens <= remaining * 0.25) { // Cap facts at 25% of remaining (W4: was 0.3)
+          if (tokens <= remaining) {
             contextParts.push(`## Active Facts\n${content}`);
             contextTokens += tokens;
             remaining -= tokens;
             slots.facts = tokens;
-          } else {
-            // Truncate to budget
-            const truncated = this.truncateToTokens(content, Math.floor(remaining * 0.25));
+          } else if (remaining > 200) {
+            const truncated = this.truncateToTokens(content, remaining);
             const truncTokens = estimateTokens(truncated);
             contextParts.push(`## Active Facts (truncated)\n${truncated}`);
             contextTokens += truncTokens;
             remaining -= truncTokens;
             slots.facts = truncTokens;
-            warnings.push('Facts truncated to fit budget');
+            warnings.push('Facts truncated to fit memory budget');
+          }
+          // C1: Fingerprint each fact line so downstream dedup paths can skip duplicates
+          const factLines = content.split('\n');
+          for (const line of factLines) {
+            if (line.startsWith('- [')) {
+              addFingerprint(line);
+            }
           }
         }
       }
@@ -1358,17 +1508,18 @@ export class Compositor {
           });
 
           if (temporalFacts.length > 0) {
-            // Deduplicate against facts already in context
-            const existingContent = contextParts.join('\n');
-            const novel = temporalFacts.filter(
-              f => !existingContent.includes(f.content.slice(0, 60))
-            );
+            // C1: Use fingerprint dedup instead of fragile substring match
+            const beforeCount = temporalFacts.length;
+            const novel = temporalFacts.filter(f => !isDuplicate(f.content));
+            diagFingerprintDedups += beforeCount - novel.length;
 
             if (novel.length > 0) {
               const temporalBlock = novel
                 .map(f => {
                   const ts = new Date(f.occurredAt).toISOString().slice(0, 10);
-                  return `[${ts}] ${f.content}`;
+                  const line = `[${ts}] ${f.content}`;
+                  addFingerprint(f.content);
+                  return line;
                 })
                 .join('\n');
 
@@ -1403,12 +1554,17 @@ export class Compositor {
       // questions. Primary fix for LoCoMo open-domain F1 gap (0.133 baseline).
       if (request.includeSemanticRecall !== false && queryText && isOpenDomainQuery(queryText) && db && remaining > 300) {
         try {
-          const existingContent = contextParts.join('\n');
-          const odResults = searchOpenDomain(db, queryText, existingContent, 10);
+          // searchOpenDomain still does intra-result dedup. Existing-context dedup
+          // now happens here via fingerprints so we keep one dedup path.
+          const rawOdResults = searchOpenDomain(db, queryText, '', 10);
+          const beforeOd = rawOdResults.length;
+          const odResults = rawOdResults.filter(r => !isDuplicate(r.content));
+          diagFingerprintDedups += beforeOd - odResults.length;
 
           if (odResults.length > 0) {
             const odBlock = odResults
               .map(r => {
+                addFingerprint(r.content);
                 const ts = r.createdAt
                   ? new Date(r.createdAt).toISOString().slice(0, 10)
                   : '';
@@ -1509,7 +1665,8 @@ export class Compositor {
             request.agentId,
             Math.floor(remaining * 0.12), // Cap at 12% of remaining (W4: was 0.15)
             libDb || undefined,
-            precomputedEmbedding
+            precomputedEmbedding,
+            contextFingerprints  // C2: skip results already in Active Facts
           );
           if (semanticContent) {
             const tokens = estimateTokens(semanticContent);
@@ -1629,6 +1786,9 @@ export class Compositor {
 
             for (const chunk of chunks) {
               if (chunkTokens + chunk.tokenEstimate > maxTokens) break;
+              // Skip chunks from files OpenClaw already injects into the system prompt
+              const chunkBasename = chunk.sourcePath.split('/').pop() || '';
+              if (OPENCLAW_BOOTSTRAP_FILES.has(chunkBasename)) continue;
               chunkLines.push(`### ${chunk.sectionPath}\n${chunk.content}`);
               chunkTokens += chunk.tokenEstimate;
             }
@@ -1662,6 +1822,8 @@ export class Compositor {
               request.agentId,
               Math.floor(remaining * 0.10),
               libDb || undefined,
+              undefined,
+              contextFingerprints  // C2: skip results already in Active Facts
             ),
             new Promise<null>((_, reject) =>
               setTimeout(() => reject(new Error('fallback_knn_timeout')), 3000)
@@ -1722,7 +1884,8 @@ export class Compositor {
         request.agentId,
         request.sessionKey,
         db,
-        libDb
+        libDb,
+        contextFingerprints  // C3: skip entries already in facts/semantic recall
       );
 
       if (crossSessionContent) {
@@ -1829,9 +1992,7 @@ export class Compositor {
     // When skipProviderTranslation is set, return NeutralMessages directly.
     // The context engine plugin uses this: the OpenClaw runtime handles its
     // own provider translation, so double-translating corrupts tool calls.
-    const outputMessages = request.skipProviderTranslation
-      ? messages as unknown as ProviderMessage[]
-      : toProviderFormat(messages, request.provider ?? request.model ?? null);
+    const outputMessages = toComposeOutputMessages(messages);
 
     // T1.3: Strip warm-replay provenance flags before output.
     // _warmed is an internal tag added by warmSession() to mark messages
@@ -1861,74 +2022,6 @@ export class Compositor {
       const delta = totalTokens - slotSum;
       if (delta !== 0) {
         slots.history = (slots.history ?? 0) + delta;
-      }
-    }
-
-    // ─── Write Window Cache ─────────────────────────────
-    // Cache the composed message array so the plugin can serve it directly
-    // on the next assemble() call without re-running the full compose pipeline.
-    // Short TTL (120s) — invalidated by afterTurn when new messages arrive.
-    //
-    // VS-1: Dual-write — session-scoped key for backwards compat;
-    // topic-scoped key for per-topic window retrieval when activeTopicId is set.
-    try {
-      await this.cache.setWindow(request.agentId, request.sessionKey, messages, 120);
-    } catch {
-      // Window cache write is best-effort
-    }
-    // VS-1: Topic-scoped window dual-write
-    if (composedActiveTopicId) {
-      try {
-        await this.cache.setTopicWindow(request.agentId, request.sessionKey, composedActiveTopicId, messages, 120);
-      } catch {
-        // Topic window write is best-effort
-      }
-    }
-
-    // ─── Write Session Cursor ─────────────────────────────────
-    // Record the newest message included in the submission window.
-    // Background indexer uses this to find unprocessed high-signal content.
-    if (request.includeHistory !== false && slots.history > 0) {
-      try {
-        const historyMsgs = messages.filter(m => m.role !== 'system');
-        const lastHistoryMsg = historyMsgs.length > 0 ? historyMsgs[historyMsgs.length - 1] : null;
-        if (lastHistoryMsg) {
-          const sm = lastHistoryMsg as import('./types.js').StoredMessage;
-          if (sm.id != null && sm.messageIndex != null) {
-            const cursor: SessionCursor = {
-              lastSentId: sm.id,
-              lastSentIndex: sm.messageIndex,
-              lastSentAt: new Date().toISOString(),
-              windowSize: historyMsgs.length,
-              tokenCount: totalTokens,
-            };
-            await this.cache.setCursor(request.agentId, request.sessionKey, cursor);
-
-            // Dual-write cursor to SQLite for durability across Redis eviction (P1.3)
-            try {
-              db.prepare(`
-                UPDATE conversations
-                SET cursor_last_sent_id = ?,
-                    cursor_last_sent_index = ?,
-                    cursor_last_sent_at = ?,
-                    cursor_window_size = ?,
-                    cursor_token_count = ?
-                WHERE session_key = ?
-              `).run(
-                cursor.lastSentId,
-                cursor.lastSentIndex,
-                cursor.lastSentAt,
-                cursor.windowSize,
-                cursor.tokenCount,
-                request.sessionKey
-              );
-            } catch {
-              // SQLite cursor write is best-effort — don't block compose
-            }
-          }
-        }
-      } catch {
-        // Cursor write is best-effort
       }
     }
 
@@ -1999,12 +2092,90 @@ export class Compositor {
       avgTurnCostTokens: avgTurnCost,
       dynamicReserveActive: isDynamic,
       sessionPressureHigh: pressureHigh,
+      fingerprintDedups: diagFingerprintDedups,
+      fingerprintCollisions: diagFingerprintCollisions,
+      windowCacheHit: false,
     };
 
     if (pressureHigh) {
       warnings.push(`SESSION_PRESSURE_HIGH: avg_turn_cost=${avgTurnCost} tokens, dynamic reserve capped at ${Math.round(dynamicReserve * 100)}%`);
     } else if (dynamicReserve > 0.40) {
       console.info(`[hypermem:compositor] dynamic_reserve=${Math.round(dynamicReserve * 100)}% avg_turn_cost=${Math.round(avgTurnCost / 1000)}k horizon=${this.config.dynamicReserveTurnHorizon ?? 5}`);
+    }
+
+    const composedAt = new Date().toISOString();
+
+    // ─── Write Window Cache ─────────────────────────────
+    // Cache the composed message array so the plugin can serve it directly
+    // on the next assemble() call without re-running the full compose pipeline.
+    // Short TTL (120s). External L4 mutations should set skipWindowCache=true.
+    //
+    // VS-1: Dual-write, session-scoped key for backwards compat;
+    // topic-scoped key for per-topic window retrieval when activeTopicId is set.
+    try {
+      await this.cache.setWindow(request.agentId, request.sessionKey, messages, 120);
+      await this.cache.setWindowMeta(request.agentId, request.sessionKey, {
+        slots: slots as unknown as Record<string, number>,
+        totalTokens,
+        warnings,
+        diagnostics,
+        composedAt,
+      }, 120);
+    } catch {
+      // Window cache write is best-effort
+    }
+    if (composedActiveTopicId) {
+      try {
+        await this.cache.setTopicWindow(request.agentId, request.sessionKey, composedActiveTopicId, messages, 120);
+      } catch {
+        // Topic window write is best-effort
+      }
+    }
+
+    // ─── Write Session Cursor ─────────────────────────────────
+    // Record the newest message included in the submission window.
+    // Background indexer uses this to find unprocessed high-signal content.
+    if (request.includeHistory !== false && slots.history > 0) {
+      try {
+        const historyMsgs = messages.filter(m => m.role !== 'system');
+        const lastHistoryMsg = historyMsgs.length > 0 ? historyMsgs[historyMsgs.length - 1] : null;
+        if (lastHistoryMsg) {
+          const sm = lastHistoryMsg as import('./types.js').StoredMessage;
+          if (sm.id != null && sm.messageIndex != null) {
+            const cursor: SessionCursor = {
+              lastSentId: sm.id,
+              lastSentIndex: sm.messageIndex,
+              lastSentAt: composedAt,
+              windowSize: historyMsgs.length,
+              tokenCount: totalTokens,
+            };
+            await this.cache.setCursor(request.agentId, request.sessionKey, cursor);
+
+            try {
+              db.prepare(`
+                UPDATE conversations
+                SET cursor_last_sent_id = ?,
+                    cursor_last_sent_index = ?,
+                    cursor_last_sent_at = ?,
+                    cursor_window_size = ?,
+                    cursor_token_count = ?
+                WHERE session_key = ?
+              `).run(
+                cursor.lastSentId,
+                cursor.lastSentIndex,
+                cursor.lastSentAt,
+                cursor.windowSize,
+                cursor.tokenCount,
+                request.sessionKey
+              );
+            } catch {
+              // SQLite cursor write is best-effort, don't block compose
+            }
+          }
+        }
+      } catch {
+        // Cursor write is best-effort
+      }
     }
 
     console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode} crossTopicKeystones=${diagCrossTopicKeystones}`);
@@ -2048,7 +2219,7 @@ export class Compositor {
     // Warm budget uses the same reserve fraction as compose() so warm history
     // never pre-fills more than compose() would actually allow.
     const reserve = this.config.contextWindowReserve ?? 0.15;
-    const effectiveBudget = resolveModelBudget(opts?.model, this.config.defaultTokenBudget, reserve);
+    const effectiveBudget = resolveModelBudget(opts?.model, this.config.defaultTokenBudget, reserve, this.config.budgetFraction);
     const warmBudget = Math.floor(
       effectiveBudget * (this.config.warmHistoryBudgetFraction ?? 0.4)
     );
@@ -2396,10 +2567,16 @@ export class Compositor {
     agentId: string,
     maxTokens: number,
     libraryDb?: DatabaseSync,
-    precomputedEmbedding?: Float32Array
+    precomputedEmbedding?: Float32Array,
+    existingFingerprints?: Set<string>  // C2: skip results already in Active Facts
   ): Promise<string | null> {
     const libDb = libraryDb || this.libraryDb;
     if (!libDb && !this.vectorStore) return null;
+
+    // Inline fingerprint helper (mirrors compose-scope version; C2 dedup only used here)
+    const fpCheck = existingFingerprints
+      ? (text: string) => existingFingerprints.has(text.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 120))
+      : () => false;
 
     // Use hybrid search when library DB is available
     if (libDb) {
@@ -2456,6 +2633,9 @@ export class Compositor {
         // session context and contaminate current session. Require fts+knn agreement
         // (score >= 0.04) for episodes to make it into assembled context.
         if (result.sourceTable === 'episodes' && result.score < 0.04) continue;
+        // C2: Skip results whose content is already fingerprinted (e.g. in Active Facts)
+        // Dedup count is not tracked separately here — compose-level counter covers the other paths.
+        if (fpCheck(result.content)) continue;
         const label = this.formatHybridResult(result);
         const lineTokens = estimateTokens(label);
         if (tokens + lineTokens > maxTokens) break;
@@ -2542,7 +2722,8 @@ export class Compositor {
     agentId: string,
     currentSessionKey: string,
     db: DatabaseSync,
-    _libraryDb?: DatabaseSync | null
+    _libraryDb?: DatabaseSync | null,
+    existingFingerprints?: Set<string>  // C3: skip entries already in facts/semantic recall
   ): string | null {
     const conversation = db.prepare(
       'SELECT id FROM conversations WHERE session_key = ?'
@@ -2573,12 +2754,19 @@ export class Compositor {
 
     if (rows.length === 0) return null;
 
-    const lines = rows.map(r => {
-      const preview = r.text_content.substring(0, 200);
-      return `- [${r.channel_type}/${r.role} @ ${r.created_at}] ${preview}`;
-    });
+    const fpCheck = existingFingerprints
+      ? (text: string) => existingFingerprints.has(text.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 120))
+      : () => false;
 
-    return lines.join('\n');
+    const lines: string[] = [];
+    for (const r of rows) {
+      // C3: Skip cross-session entries whose content fingerprint already appears in context
+      if (fpCheck(r.text_content)) continue;
+      const preview = r.text_content.substring(0, 200);
+      lines.push(`- [${r.channel_type}/${r.role} @ ${r.created_at}] ${preview}`);
+    }
+
+    return lines.length > 0 ? lines.join('\n') : null;
   }
 
   // ─── Utilities ───────────────────────────────────────────────

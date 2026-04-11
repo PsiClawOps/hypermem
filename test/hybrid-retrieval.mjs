@@ -100,7 +100,7 @@ async function run() {
     process.exit(1);
   }
 
-  const agentId = 'forge';
+  const agentId = 'alice';
   const libDb = hm.dbManager.getLibraryDb();
 
   // Seed facts

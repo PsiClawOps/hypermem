@@ -38,22 +38,22 @@ import type { VectorStore } from './vector-store.js';
 // domain-scoped retrieval (e.g. getActiveFacts({ domain: 'infrastructure' }))
 // returns results. New agents default to 'general'.
 const AGENT_DOMAIN_MAP: Record<string, string> = {
-  forge:        'infrastructure',
-  vigil:        'infrastructure',
-  pylon:        'infrastructure',
-  plane:        'infrastructure',
-  compass:      'product',
-  helm:         'product',
-  chisel:       'product',
-  facet:        'product',
-  sentinel:     'security',
-  bastion:      'security',
-  gauge:        'security',
+  alice:        'infrastructure',
+  jack:        'infrastructure',
+  hank:        'infrastructure',
+  irene:        'infrastructure',
+  bob:      'product',
+  eve:         'product',
+  frank:       'product',
+  grace:        'product',
+  dave:     'security',
+  leo:      'security',
+  kate:        'security',
   clarity:      'ux',
-  anvil:        'governance',
-  vanguard:     'strategy',
-  crucible:     'development',
-  relay:        'communications',
+  carol:        'governance',
+  oscar:     'strategy',
+  mike:     'development',
+  nancy:        'communications',
   main:         'general',
   'channel-mini': 'general',
 };
@@ -136,7 +136,7 @@ function extractFactCandidates(content: string): FactCandidate[] {
   // Preference patterns — medium confidence (0.60)
   const preferencePatterns = [
     /(?:prefer|always use|never use|don't use|avoid) (.{10,150})/gi,
-    /(?:ragesaq|operator) (?:wants|prefers|likes|hates|dislikes) (.{10,150})/gi,
+    /(?:operator|operator) (?:wants|prefers|likes|hates|dislikes) (.{10,150})/gi,
   ];
 
   // Operational patterns: deployments, incidents, fixes — high confidence (0.70)
@@ -194,7 +194,7 @@ const OPERATIONAL_BOILERPLATE: RegExp[] = [
   /still\s*waiting/i,
   /will\s*pick\s*(it\s*)?up\s*(on\s*(next|the))?/i,
   /message\s*is\s*in\s*(his|her|their|the)\s*queue/i,
-  /sent\s+to\s+(anvil|compass|clarity|sentinel|vanguard|forge)/i,
+  /sent\s+to\s+(carol|bob|clarity|dave|oscar|alice)/i,
   /dispatched\s+(it\s+)?to/i,
   /timed\s*out\s*after/i,
   /\bNO_REPLY\b/,
@@ -458,7 +458,7 @@ function detectTopic(content: string): string | null {
 
   // Product/project name detection
   const productMatch = content.match(
-    /\b(HyperMem|ClawText|ClawDash|ClawCanvas|ClawCouncil|ClawTomation|OpenClaw|ClawDispatch)\b/i
+    /\b(HyperMem|Memory Engine|Dashboard|Canvas|Governance|Automation|OpenClaw|Dispatch)\b/i
   );
   if (productMatch) return productMatch[1];
 

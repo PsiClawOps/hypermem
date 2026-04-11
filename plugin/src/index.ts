@@ -20,7 +20,9 @@
  * Session key format expected: "agent:<agentId>:<channel>:<name>"
  */
 
-import { definePluginEntry, emptyPluginConfigSchema } from 'openclaw/plugin-sdk/plugin-entry';
+import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
+import { buildPluginConfigSchema } from 'openclaw/plugin-sdk/core';
+import { z } from 'zod';
 import type { ContextEngine, ContextEngineInfo } from 'openclaw/plugin-sdk';
 import type {
   NeutralMessage,
@@ -32,7 +34,7 @@ import type {
   BackgroundIndexer,
   FleetStore,
 } from '@psiclawops/hypermem';
-import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow, canPersistReshapedHistory } from '@psiclawops/hypermem';
+import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow, canPersistReshapedHistory, OPENCLAW_BOOTSTRAP_FILES } from '@psiclawops/hypermem';
 import { evictStaleContent } from '@psiclawops/hypermem/image-eviction';
 import { repairToolPairs } from '@psiclawops/hypermem';
 import os from 'os';
@@ -49,7 +51,8 @@ export type { NeutralMessage, NeutralToolCall, NeutralToolResult, ComposeRequest
 // not installed via npm). Types come from the core package devDependency.
 // This pattern keeps the runtime path stable while TypeScript resolves types
 // from the canonical source — no more local shim drift.
-const HYPERMEM_PATH = path.join(os.homedir(), '.openclaw/workspace/repo/hypermem/dist/index.js');
+// Resolved at init time: pluginConfig.hyperMemPath > require.resolve('@psiclawops/hypermem') > dev fallback
+let HYPERMEM_PATH = '';
 const require = createRequire(import.meta.url);
 
 // hypermemInstance is the resolved return type of hypermem.create().
@@ -153,10 +156,15 @@ function computeEffectiveBudget(tokenBudget?: number): number {
   return Math.floor(_contextWindowSize * (1 - _contextWindowReserve));
 }
 
+// ─── Plugin config cache ───────────────────────────────────────
+// Populated from openclaw.json plugins.entries.hypercompositor.config
+// during register(). loadUserConfig() merges this over config.json.
+let _pluginConfig: HypercompositorConfig = {};
+
 /**
- * Load optional user config from ~/.openclaw/hypermem/config.json.
- * Supports overriding compositor tuning knobs without editing plugin source.
- * Unknown keys are ignored. Missing file is silently skipped.
+ * Load user config with priority: pluginConfig (openclaw.json) > config.json (legacy).
+ * pluginConfig values win; config.json provides fallback for keys not set in openclaw.json.
+ * This allows gradual migration from the shadow config.json to central config.
  */
 async function loadUserConfig(): Promise<{
   compositor?: Partial<{
@@ -228,18 +236,37 @@ async function loadUserConfig(): Promise<{
    */
   subagentWarming?: 'full' | 'light' | 'off';
 }> {
-  const configPath = path.join(os.homedir(), '.openclaw/hypermem/config.json');
+  // Resolve data dir: pluginConfig > default
+  const dataDir = _pluginConfig.dataDir ?? path.join(os.homedir(), '.openclaw/hypermem');
+  const configPath = path.join(dataDir, 'config.json');
+  let fileConfig: Record<string, unknown> = {};
   try {
     const raw = await fs.readFile(configPath, 'utf-8');
-    const parsed = JSON.parse(raw);
-    console.log(`[hypermem-plugin] Loaded user config from ${configPath}`);
-    return parsed as ReturnType<typeof loadUserConfig> extends Promise<infer T> ? T : never;
+    fileConfig = JSON.parse(raw) as Record<string, unknown>;
+    console.log(`[hypermem-plugin] Loaded legacy config from ${configPath}`);
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       console.warn(`[hypermem-plugin] Failed to parse config.json (using defaults):`, (err as Error).message);
     }
-    return {};
   }
+
+  // Merge: pluginConfig (openclaw.json) wins over fileConfig (legacy config.json).
+  // Top-level scalar keys from pluginConfig override fileConfig.
+  // Nested objects (compositor, eviction, embedding) are shallow-merged.
+  const merged = { ...fileConfig } as ReturnType<typeof loadUserConfig> extends Promise<infer T> ? T : never;
+  if (_pluginConfig.contextWindowSize != null) merged.contextWindowSize = _pluginConfig.contextWindowSize;
+  if (_pluginConfig.contextWindowReserve != null) merged.contextWindowReserve = _pluginConfig.contextWindowReserve;
+  if (_pluginConfig.deferToolPruning != null) merged.deferToolPruning = _pluginConfig.deferToolPruning;
+  if (_pluginConfig.subagentWarming != null) merged.subagentWarming = _pluginConfig.subagentWarming;
+  if (_pluginConfig.compositor) merged.compositor = { ...merged.compositor, ..._pluginConfig.compositor };
+  if (_pluginConfig.eviction) merged.eviction = { ...merged.eviction, ..._pluginConfig.eviction };
+  if (_pluginConfig.embedding) merged.embedding = { ...merged.embedding, ..._pluginConfig.embedding };
+
+  if (Object.keys(fileConfig).length > 0 && Object.keys(_pluginConfig).filter(k => k !== 'hyperMemPath' && k !== 'dataDir').length > 0) {
+    console.log('[hypermem-plugin] Note: migrating config.json keys to plugins.entries.hypercompositor.config in openclaw.json is recommended');
+  }
+
+  return merged;
 }
 
 async function getHyperMem(): Promise<HyperMemInstance> {
@@ -315,7 +342,7 @@ async function getHyperMem(): Promise<HyperMemInstance> {
     );
 
     const instance = await HyperMem.create({
-      dataDir: path.join(os.homedir(), '.openclaw/hypermem'),
+      dataDir: _pluginConfig.dataDir ?? path.join(os.homedir(), '.openclaw/hypermem'),
       cache: {
         keyPrefix: 'hm:',
         sessionTTL: 14400,     // 4h for system/identity/meta slots
@@ -944,10 +971,12 @@ function createHyperMemEngine(): ContextEngine {
         }
 
         // Cold start: warm Redis with the session — pre-loads history + slots
-        // CRIT-002: Load identity block (SOUL.md + IDENTITY.md + MOTIVATIONS.md)
-        // and pass into warm() so the compositor identity slot is populated.
-        // Previously opts.identity was always undefined — the slot was allocated
-        // but always empty. Non-fatal: missing files are silently skipped.
+        // CRIT-002: Load supplemental identity files (MOTIVATIONS.md, STYLE.md) that are
+        // NOT already injected by OpenClaw's contextInjection into the system prompt.
+        // SOUL.md and IDENTITY.md are filtered out here because OpenClaw injects them
+        // via workspace bootstrap — re-injecting them via the identity slot would cause
+        // duplication. Only agent-specific extras (MOTIVATIONS.md, STYLE.md) are included.
+        // Non-fatal: missing files are silently skipped.
         let identityBlock: string | undefined;
         try {
           // Council agents live at workspace-council/<agentId>/
@@ -961,7 +990,8 @@ function createHyperMemEngine(): ContextEngine {
           } catch {
             wsPath = workspacePath;
           }
-          const identityFiles = ['SOUL.md', 'IDENTITY.md', 'MOTIVATIONS.md', 'STYLE.md'];
+          const identityFiles = ['SOUL.md', 'IDENTITY.md', 'MOTIVATIONS.md', 'STYLE.md']
+            .filter(f => !OPENCLAW_BOOTSTRAP_FILES.has(f));
           const parts: string[] = [];
           for (const fname of identityFiles) {
             try {
@@ -1014,7 +1044,7 @@ function createHyperMemEngine(): ContextEngine {
         // Post-warm pressure check: if messages.db had accumulated history,
         // warm() may have loaded the session straight to 80%+. Pre-trim now
         // so the first turn has headroom instead of starting saturated.
-        // This is the "restart at 98%" failure mode reported by Helm 2026-04-05:
+        // This is the "restart at 98%" failure mode reported by eve 2026-04-05:
         // JSONL truncation + Redis flush isn't enough if messages.db is still full
         // and warm() reloads it. Trim here closes the loop.
         try {
@@ -1989,7 +2019,7 @@ function createHyperMemEngine(): ContextEngine {
         // gradient-compressed window to budget before writing to Redis. Without
         // this, afterTurn writes up to 250 messages regardless of budget, causing
         // trimHistoryToTokenBudget to fire and trim ~200 messages on every
-        // subsequent assemble() — the churn loop seen in Helm's logs.
+        // subsequent assemble() — the churn loop seen in eve's logs.
         if (hm.cache.isConnected) {
           try {
             const modelState = await hm.cache.getModelState(agentId, sk);
@@ -2012,7 +2042,7 @@ function createHyperMemEngine(): ContextEngine {
         // If a session just finished a turn at >80% pressure, the NEXT turn's
         // incoming tool results (parallel web searches, large exec output, etc.)
         // will hit a window with no headroom — the ingestion wave failure mode
-        // (reported by Helm, 2026-04-05). Pre-trim here so the tool-loop
+        // (reported by eve, 2026-04-05). Pre-trim here so the tool-loop
         // assemble() path starts the next turn with meaningful space.
         //
         // Uses modelState.tokenBudget if cached; skips if unavailable (non-fatal).
@@ -2190,7 +2220,7 @@ function createHyperMemEngine(): ContextEngine {
  * but the runtime's ToolCall.arguments is Record<string, any>. We parse it here.
  *
  * Missing metadata fields (api, provider, model, usage, stopReason) are filled with
- * sentinel values. The runtime's convertToLlm strips them before the API call, and
+ * dave values. The runtime's convertToLlm strips them before the API call, and
  * the session transcript already has the real values. These are just structural stubs
  * so the AgentMessage type is satisfied at runtime.
  */
@@ -2288,6 +2318,59 @@ export async function bustAssemblyCache(agentId: string, sessionKey: string): Pr
   }
 }
 
+// ─── Plugin Config Schema ────────────────────────────────────────
+// Exposed via openclaw.json → plugins.entries.hypercompositor.config
+// Validated by OpenClaw on gateway start. Visible via `openclaw config get`.
+
+const hypercompositorConfigSchema = z.object({
+  /** Path to HyperMem core dist/index.js. Auto-resolved if omitted. */
+  hyperMemPath: z.string().optional(),
+  /** HyperMem data directory. Default: ~/.openclaw/hypermem */
+  dataDir: z.string().optional(),
+  /** Full model context window size in tokens. Default: 128000 */
+  contextWindowSize: z.number().int().positive().optional(),
+  /** Fraction [0.0–0.5] reserved for system prompts + headroom. Default: 0.25 */
+  contextWindowReserve: z.number().min(0).max(0.5).optional(),
+  /** Defer tool pruning to OpenClaw's contextPruning. Default: false */
+  deferToolPruning: z.boolean().optional(),
+  /** Subagent context injection: 'full' | 'light' | 'off'. Default: 'light' */
+  subagentWarming: z.enum(['full', 'light', 'off']).optional(),
+  /** Compositor tuning overrides */
+  compositor: z.object({
+    defaultTokenBudget: z.number().int().positive().optional(),
+    maxHistoryMessages: z.number().int().positive().optional(),
+    maxFacts: z.number().int().positive().optional(),
+    maxCrossSessionContext: z.number().int().nonnegative().optional(),
+    maxRecentToolPairs: z.number().int().nonnegative().optional(),
+    maxProseToolPairs: z.number().int().nonnegative().optional(),
+    warmHistoryBudgetFraction: z.number().min(0).max(1).optional(),
+    keystoneHistoryFraction: z.number().min(0).max(1).optional(),
+    keystoneMaxMessages: z.number().int().nonnegative().optional(),
+    keystoneMinSignificance: z.number().min(0).max(1).optional(),
+  }).optional(),
+  /** Image/tool eviction settings */
+  eviction: z.object({
+    enabled: z.boolean().optional(),
+    imageAgeTurns: z.number().int().nonnegative().optional(),
+    toolResultAgeTurns: z.number().int().nonnegative().optional(),
+    minTokensToEvict: z.number().int().nonnegative().optional(),
+    keepPreviewChars: z.number().int().nonnegative().optional(),
+  }).optional(),
+  /** Embedding provider config */
+  embedding: z.object({
+    provider: z.enum(['ollama', 'openai']).optional(),
+    ollamaUrl: z.string().optional(),
+    openaiApiKey: z.string().optional(),
+    openaiBaseUrl: z.string().optional(),
+    model: z.string().optional(),
+    dimensions: z.number().int().positive().optional(),
+    timeout: z.number().int().positive().optional(),
+    batchSize: z.number().int().positive().optional(),
+  }).optional(),
+});
+
+type HypercompositorConfig = z.infer<typeof hypercompositorConfigSchema>;
+
 // ─── Plugin Entry ───────────────────────────────────────────────
 
 const engine = createHyperMemEngine();
@@ -2297,8 +2380,27 @@ export default definePluginEntry({
   name: 'HyperCompositor — context engine',
   description: 'Four-layer memory architecture for OpenClaw agents: Redis hot cache, message history, vector search, and structured library.',
   kind: 'context-engine',
-  configSchema: emptyPluginConfigSchema(),
+  configSchema: buildPluginConfigSchema(hypercompositorConfigSchema),
   register(api) {
+    // ── Resolve plugin config from openclaw.json ──
+    const pluginCfg = (api.pluginConfig ?? {}) as HypercompositorConfig;
+    _pluginConfig = pluginCfg;
+
+    // ── Resolve HYPERMEM_PATH: pluginConfig > npm resolve > dev fallback ──
+    if (pluginCfg.hyperMemPath) {
+      HYPERMEM_PATH = pluginCfg.hyperMemPath;
+      console.log(`[hypermem-plugin] Using configured hyperMemPath: ${HYPERMEM_PATH}`);
+    } else {
+      try {
+        HYPERMEM_PATH = require.resolve('@psiclawops/hypermem');
+        console.log(`[hypermem-plugin] Resolved @psiclawops/hypermem from node_modules: ${HYPERMEM_PATH}`);
+      } catch {
+        // Dev fallback: repo clone in the standard location
+        HYPERMEM_PATH = path.join(os.homedir(), '.openclaw/workspace/repo/hypermem/dist/index.js');
+        console.log(`[hypermem-plugin] Falling back to dev path: ${HYPERMEM_PATH}`);
+      }
+    }
+
     api.registerContextEngine('hypercompositor', () => engine);
 
     // P1.7: Bind TaskFlow runtime for task visibility — best-effort.

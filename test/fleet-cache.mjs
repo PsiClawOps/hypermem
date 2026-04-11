@@ -58,16 +58,16 @@ async function run() {
   // ── Test 2: Agent cache operations ──
   console.log('\n── Agent Cache Operations ──');
 
-  await hm.cache.cacheFleetAgent('forge', {
-    id: 'forge', tier: 'council', status: 'active', domains: ['infra'],
+  await hm.cache.cacheFleetAgent('alice', {
+    id: 'alice', tier: 'council', status: 'active', domains: ['infra'],
   });
-  const cached = await hm.cache.getCachedFleetAgent('forge');
+  const cached = await hm.cache.getCachedFleetAgent('alice');
   assert(cached !== null, 'Cached fleet agent');
-  assert(cached.id === 'forge', 'Agent ID matches');
+  assert(cached.id === 'alice', 'Agent ID matches');
   assert(cached.tier === 'council', 'Agent tier matches');
 
-  await hm.cache.invalidateFleetAgent('forge');
-  const invalidated = await hm.cache.getCachedFleetAgent('forge');
+  await hm.cache.invalidateFleetAgent('alice');
+  const invalidated = await hm.cache.getCachedFleetAgent('alice');
   assert(invalidated === null, 'Invalidation clears agent cache');
 
   // ── Test 3: Fleet summary cache ──
@@ -87,27 +87,27 @@ async function run() {
   console.log('\n── Fleet Hydration ──');
 
   // Seed fleet data
-  hm.upsertFleetAgent('forge', {
-    displayName: 'Forge', tier: 'council',
+  hm.upsertFleetAgent('alice', {
+    displayName: 'alice', tier: 'council',
     domains: ['infrastructure', 'architecture'],
     status: 'active',
   });
-  hm.upsertFleetAgent('compass', {
-    displayName: 'Compass', tier: 'council',
+  hm.upsertFleetAgent('bob', {
+    displayName: 'bob', tier: 'council',
     domains: ['product', 'strategy'],
     status: 'active',
   });
-  hm.upsertFleetAgent('sentinel', {
-    displayName: 'Sentinel', tier: 'council',
+  hm.upsertFleetAgent('dave', {
+    displayName: 'dave', tier: 'council',
     domains: ['security'],
     status: 'active',
   });
 
   // Seed desired state
-  hm.setDesiredState('forge', 'model', 'anthropic/claude-opus-4-6');
-  hm.setDesiredState('forge', 'thinkingDefault', 'high');
-  hm.reportActualState('forge', 'model', 'anthropic/claude-opus-4-6');
-  hm.reportActualState('forge', 'thinkingDefault', 'medium'); // drift!
+  hm.setDesiredState('alice', 'model', 'anthropic/claude-opus-4-6');
+  hm.setDesiredState('alice', 'thinkingDefault', 'high');
+  hm.reportActualState('alice', 'model', 'anthropic/claude-opus-4-6');
+  hm.reportActualState('alice', 'thinkingDefault', 'medium'); // drift!
 
   // Flush cache first
 
@@ -117,11 +117,11 @@ async function run() {
   assert(result.summary === true, 'Summary hydrated');
 
   // Verify cached agents
-  const forgeCache = await hm.cache.getCachedFleetAgent('forge');
-  assert(forgeCache !== null, 'Forge in cache after hydration');
-  assert(forgeCache.tier === 'council', 'Forge tier correct');
+  const forgeCache = await hm.cache.getCachedFleetAgent('alice');
+  assert(forgeCache !== null, 'alice in cache after hydration');
+  assert(forgeCache.tier === 'council', 'alice tier correct');
   assert(Array.isArray(forgeCache.desiredState), 'Desired state included');
-  assert(forgeCache.desiredState.length === 2, `Forge has ${forgeCache.desiredState.length} desired state entries`);
+  assert(forgeCache.desiredState.length === 2, `alice has ${forgeCache.desiredState.length} desired state entries`);
 
   // Verify drift is captured
   const driftedEntries = forgeCache.desiredState.filter(d => d.driftStatus === 'drifted');
@@ -139,36 +139,36 @@ async function run() {
 
 
   // First call — cache miss, should fall through to SQLite
-  const first = await hm.getFleetAgentCached('forge');
+  const first = await hm.getFleetAgentCached('alice');
   assert(first !== null, 'Cache miss returns SQLite result');
-  assert(first.displayName === 'Forge', 'Correct data from SQLite');
+  assert(first.displayName === 'alice', 'Correct data from SQLite');
 
   // Second call — should be cache hit
-  const second = await hm.getFleetAgentCached('forge');
+  const second = await hm.getFleetAgentCached('alice');
   assert(second !== null, 'Cache hit returns result');
-  assert(second.displayName === 'Forge', 'Correct data from cache');
+  assert(second.displayName === 'alice', 'Correct data from cache');
 
   // ── Test 6: Write-through invalidation ──
   console.log('\n── Write-Through Invalidation ──');
 
   // Warm cache
-  await hm.getFleetAgentCached('forge');
+  await hm.getFleetAgentCached('alice');
 
   // Mutate fleet agent — should invalidate
-  hm.upsertFleetAgent('forge', { status: 'degraded' });
+  hm.upsertFleetAgent('alice', { status: 'degraded' });
 
   // Small delay for async invalidation
   await new Promise(r => setTimeout(r, 50));
 
-  const afterMutation = await hm.cache.getCachedFleetAgent('forge');
+  const afterMutation = await hm.cache.getCachedFleetAgent('alice');
   assert(afterMutation === null, 'Cache invalidated after mutation');
 
   // Mutate desired state — should invalidate
-  await hm.getFleetAgentCached('forge');
-  hm.setDesiredState('forge', 'model', 'anthropic/claude-sonnet-4-6');
+  await hm.getFleetAgentCached('alice');
+  hm.setDesiredState('alice', 'model', 'anthropic/claude-sonnet-4-6');
   await new Promise(r => setTimeout(r, 50));
 
-  const afterDesired = await hm.cache.getCachedFleetAgent('forge');
+  const afterDesired = await hm.cache.getCachedFleetAgent('alice');
   assert(afterDesired === null, 'Cache invalidated after desired state change');
 
   // ── Test 7: Hook handler dispatch ──
@@ -192,7 +192,7 @@ async function run() {
     const mockEvent = {
       type: 'message',
       action: 'received',
-      sessionKey: 'agent:forge:webchat:main',
+      sessionKey: 'agent:alice:webchat:main',
       context: {
         from: 'test-user',
         content: 'Hello from test',
