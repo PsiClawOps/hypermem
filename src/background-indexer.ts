@@ -485,6 +485,10 @@ export class BackgroundIndexer {
   private vectorStore: VectorStore | null = null;
   private synthesizer: TopicSynthesizer | null = null;
   private tickCount: number = 0;
+  /** Circuit breaker: consecutive tick failure count. Resets on success. */
+  private consecutiveFailures: number = 0;
+  /** True when the indexer is running in backoff mode due to repeated failures. */
+  private inBackoff: boolean = false;
 
   constructor(
     config?: Partial<IndexerConfig>,
@@ -537,9 +541,33 @@ export class BackgroundIndexer {
     if (!this.config.enabled) return;
     if (this.intervalHandle) return;
 
+    // Startup integrity check — catch corruption before the first tick writes anything.
+    if (this.getLibraryDb) {
+      try {
+        const libDb = this.getLibraryDb();
+        if (libDb) {
+          const row = libDb.prepare('PRAGMA quick_check').get() as { integrity_check?: string } | undefined;
+          if (row?.integrity_check && row.integrity_check !== 'ok') {
+            console.error(
+              '[indexer] ⚠️  library.db integrity check failed: ' + row.integrity_check + '\n' +
+              '[indexer] Recovery: stop OpenClaw, run ' +
+              '`sqlite3 ~/.openclaw/hypermem/library.db ".recover" | sqlite3 ~/.openclaw/hypermem/library_recovered.db`' +
+              ', swap the files, and restart. If recovery fails, delete library.db — the indexer rebuilds from message history.'
+            );
+            // Don't start the interval — nothing will succeed with a corrupt DB.
+            return;
+          }
+        }
+      } catch (err) {
+        // If we can't even open the DB, log and bail — don't start the interval.
+        console.error('[indexer] Could not open library.db for integrity check:', (err as Error).message);
+        return;
+      }
+    }
+
     // Run once immediately
     this.tick().catch(err => {
-      console.error('[indexer] Initial tick failed:', err);
+      this._handleTickError(err, 'initial');
     });
 
     // Run episode vector backfill once at startup (no-op if already done)
@@ -552,11 +580,90 @@ export class BackgroundIndexer {
     // Then periodically
     this.intervalHandle = setInterval(() => {
       this.tick().catch(err => {
-        console.error('[indexer] Periodic tick failed:', err);
+        this._handleTickError(err, 'periodic');
       });
     }, this.config.periodicInterval);
 
     console.log(`[indexer] Started with interval ${this.config.periodicInterval}ms, batchSize ${this.config.batchSize}, maxPerTick ${this.config.maxMessagesPerTick}`);
+  }
+
+  /**
+   * Circuit breaker for tick failures.
+   *
+   * - Tracks consecutive failures.
+   * - After 3 failures, logs actionable recovery guidance once, then switches
+   *   the indexer to 10× backoff interval so it stops spamming the log.
+   * - On the next successful tick, resets state and restores normal interval.
+   */
+  private _handleTickError(err: unknown, phase: 'initial' | 'periodic'): void {
+    this.consecutiveFailures++;
+    const msg = err instanceof Error ? err.message : String(err);
+    const isSqliteCorrupt = msg.includes('database disk image is malformed') ||
+      msg.includes('SQLITE_CORRUPT') ||
+      (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ERR_SQLITE_ERROR');
+
+    if (this.consecutiveFailures < 3) {
+      // First 1–2 failures: log normally.
+      console.error(`[indexer] ${phase === 'initial' ? 'Initial' : 'Periodic'} tick failed (attempt ${this.consecutiveFailures}/3):`, err);
+      return;
+    }
+
+    if (this.consecutiveFailures === 3) {
+      // Third failure: log once with recovery instructions, then enter backoff.
+      if (isSqliteCorrupt) {
+        console.error(
+          `[indexer] ⛔ Tick failed 3 times consecutively — library.db appears corrupted. Entering backoff mode.\n` +
+          `[indexer] Recovery steps:\n` +
+          `[indexer]   1. Stop OpenClaw: openclaw gateway stop\n` +
+          `[indexer]   2. Check damage: sqlite3 ~/.openclaw/hypermem/library.db "PRAGMA integrity_check"\n` +
+          `[indexer]   3. Attempt recovery: sqlite3 ~/.openclaw/hypermem/library.db ".recover" | sqlite3 ~/.openclaw/hypermem/library_recovered.db\n` +
+          `[indexer]   4. Swap: mv library.db library_corrupt.bak && mv library_recovered.db library.db\n` +
+          `[indexer]   5. If recovery fails, delete library.db — the indexer rebuilds from message history on next start.\n` +
+          `[indexer]   6. Restart: openclaw gateway start\n` +
+          `[indexer] Indexer will retry every ${(this.config.periodicInterval * 10) / 60000} minutes until then.`
+        );
+      } else {
+        console.error(
+          `[indexer] ⛔ Tick failed 3 times consecutively (${msg}). Entering backoff mode. ` +
+          `Will retry every ${(this.config.periodicInterval * 10) / 60000} minutes.`
+        );
+      }
+
+      // Switch to backoff interval.
+      this.inBackoff = true;
+      if (this.intervalHandle) {
+        clearInterval(this.intervalHandle);
+      }
+      this.intervalHandle = setInterval(() => {
+        this.tick().catch(backoffErr => {
+          this._handleTickError(backoffErr, 'periodic');
+        });
+      }, this.config.periodicInterval * 10);
+      return;
+    }
+
+    // Beyond 3: silent (already logged, in backoff — don't spam).
+  }
+
+  /**
+   * Reset the circuit breaker and restore normal interval after a successful tick.
+   * Called at the end of a successful tick().
+   */
+  private _resetCircuitBreaker(): void {
+    if (this.consecutiveFailures === 0) return;
+    const wasInBackoff = this.inBackoff;
+    this.consecutiveFailures = 0;
+    this.inBackoff = false;
+    if (wasInBackoff) {
+      // Restore normal interval.
+      if (this.intervalHandle) clearInterval(this.intervalHandle);
+      this.intervalHandle = setInterval(() => {
+        this.tick().catch(err => {
+          this._handleTickError(err, 'periodic');
+        });
+      }, this.config.periodicInterval);
+      console.log('[indexer] Circuit breaker reset — tick succeeded, restored normal interval.');
+    }
   }
 
   /**
@@ -580,6 +687,7 @@ export class BackgroundIndexer {
 
     this.running = true;
     const results: IndexerStats[] = [];
+    let tickSucceeded = false;
 
     try {
       if (!this.listAgents || !this.getMessageDb || !this.getLibraryDb) {
@@ -699,7 +807,11 @@ export class BackgroundIndexer {
         }
       }
 
+      // If we reach here, the tick completed without throwing.
+      tickSucceeded = true;
+
     } finally {
+      if (tickSucceeded) this._resetCircuitBreaker();
       this.running = false;
     }
 
