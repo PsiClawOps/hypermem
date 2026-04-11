@@ -50,6 +50,16 @@ import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
 import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
 
 /**
+ * Files that OpenClaw's contextInjection injects into the system prompt.
+ * HyperMem must not re-inject these via doc chunk retrieval to avoid duplication.
+ * Exported so plugin and other consumers can share the same dedup set.
+ */
+export const OPENCLAW_BOOTSTRAP_FILES = new Set([
+  'SOUL.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md',
+  'AGENTS.md', 'HEARTBEAT.md', 'MEMORY.md', 'BOOTSTRAP.md',
+]);
+
+/**
  * Model context window sizes by provider/model string (or partial match).
  * Used as fallback when tokenBudget is not passed by the runtime.
  * Order matters: first match wins. Partial substring match on the model string.
@@ -1678,6 +1688,9 @@ export class Compositor {
 
             for (const chunk of chunks) {
               if (chunkTokens + chunk.tokenEstimate > maxTokens) break;
+              // Skip chunks from files OpenClaw already injects into the system prompt
+              const chunkBasename = chunk.sourcePath.split('/').pop() || '';
+              if (OPENCLAW_BOOTSTRAP_FILES.has(chunkBasename)) continue;
               chunkLines.push(`### ${chunk.sectionPath}\n${chunk.content}`);
               chunkTokens += chunk.tokenEstimate;
             }

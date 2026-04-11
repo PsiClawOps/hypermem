@@ -170,7 +170,7 @@ Adaptation entries are stored in the `model_output_directives` table and matched
 
 Model adaptation is only active at the `full` tier. At `light` and `standard`, model-specific corrections are suppressed.
 
-The `model_output_directives` table starts empty. You populate it with corrections for the models you run. See [docs/TUNING.md](./docs/TUNING.md#creating-custom-fosmod-entries) for the schema and SQL examples.
+The `model_output_directives` table starts empty. You populate it with corrections for the models you run. See [docs/TUNING.md](./docs/TUNING.md#creating-custom-entries) for the schema and SQL examples.
 
 ### Before and after
 

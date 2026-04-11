@@ -381,18 +381,16 @@ Large T0 results (>40k chars) at high context pressure (>80%) get head-and-tail 
 
 ## Cache / TTL
 
-Controls how long data survives in Redis before expiry.
+Controls how long data survives in the in-memory SQLite cache before expiry.
 
 | Knob | Default | What it does |
 |---|---|---|
-| `redis.sessionTTL` | `14400` (4h) | TTL in seconds for non-history slots (system prompt, identity, meta) |
-| `redis.historyTTL` | `604800` (7d) | TTL in seconds for the message history list |
-| `redis.flushInterval` | `1000` (1s) | How often Redis write-buffer flushes, in ms |
+| `cache.sessionTTL` | `14400` (4h) | TTL in seconds for non-history slots (system prompt, identity, meta) |
+| `cache.historyTTL` | `86400` (24h) | TTL in seconds for the message history list |
 
 **When to adjust:**
 - **Short sessions** (CI pipelines, one-shot tasks): lower both to `3600`/`86400`
 - **Long-lived agents** (persistent council seats): raise `historyTTL` to `1209600` (14d)
-- **Memory-constrained Redis**: lower `sessionTTL` first; history is more expensive to rebuild
 
 ---
 
