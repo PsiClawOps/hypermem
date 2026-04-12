@@ -51,12 +51,7 @@ openclaw plugins list | grep hypermem
 ls ~/.openclaw/hypermem/library.db   # must exist — send one message first if not
 ```
 
-If `library.db` doesn't exist yet, start the gateway with hypermem enabled, send one message to any agent, then come back:
-```bash
-openclaw plugins install clawhub:hypermem
-openclaw gateway restart
-# send one message, then continue
-```
+If `library.db` doesn't exist yet, start the gateway with hypermem enabled, send one message to any agent, then come back. See [INSTALL.md](../INSTALL.md) for the full installation steps (git clone, build, wire both plugins), then restart and continue.
 
 **2. Back up your existing data:**
 ```bash
@@ -79,14 +74,7 @@ cp -r ~/.cognee ~/.cognee.pre-hypermem 2>/dev/null || true
 
 ## Fresh install
 
-Nothing to migrate. Install and go:
-
-```bash
-openclaw plugins install clawhub:hypermem
-openclaw gateway restart
-```
-
-hypermem begins building context from your first conversation. The background indexer starts automatically.
+Nothing to migrate. Follow the [INSTALL.md](../INSTALL.md) guide (clone, build, wire plugins, restart). hypermem begins building context from your first conversation. The background indexer starts automatically.
 
 ---
 
@@ -162,11 +150,11 @@ If you used QMD session indexing (`memory.qmd.sessions.enabled: true`), hypermem
 
 **Switch:**
 ```bash
-# Disable memory-core + QMD
-openclaw config set plugins.slots.memory none
+# Disable memory-core + QMD, replace with hypermem memory plugin
+openclaw config set plugins.slots.memory hypermem
 
-# Enable hypermem
-openclaw config set plugins.slots.contextEngine hypermem
+# Enable hypercompositor as the context engine
+openclaw config set plugins.slots.contextEngine hypercompositor
 
 # Remove QMD backend config if set
 openclaw config unset agents.defaults.memory
@@ -373,7 +361,8 @@ node import-from-cognee.mjs main cognee_export.json --apply
 
 Stop the Cognee process / MCP server if running, then:
 ```bash
-openclaw config set plugins.slots.contextEngine hypermem
+openclaw config set plugins.slots.contextEngine hypercompositor
+openclaw config set plugins.slots.memory hypermem
 openclaw gateway restart
 ```
 
@@ -758,7 +747,8 @@ node scripts/migrate-honcho.mjs main honcho_export.json --apply
 
 ```bash
 openclaw plugins uninstall @honcho-ai/openclaw-honcho
-openclaw config set plugins.slots.contextEngine hypermem
+openclaw config set plugins.slots.contextEngine hypercompositor
+openclaw config set plugins.slots.memory hypermem
 openclaw gateway restart
 ```
 
@@ -869,9 +859,9 @@ node scripts/migrate-lancedb.mjs lancedb_export.json --apply
 **Step 4: Disable memory-lancedb and enable hypermem**
 
 ```bash
-# Uninstall or just disable the slot
-openclaw config set plugins.slots.memory none
-openclaw config set plugins.slots.contextEngine hypermem
+# Replace memory-lancedb with hypermem memory plugin
+openclaw config set plugins.slots.memory hypermem
+openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw gateway restart
 ```
 
@@ -961,17 +951,15 @@ openclaw gateway restart
 
 ## Enabling hypermem
 
-Once your data is imported, switch the context engine:
+Once your data is imported, enable both plugins:
 
 ```bash
-openclaw config set plugins.slots.contextEngine hypermem
+openclaw config set plugins.slots.contextEngine hypercompositor
+openclaw config set plugins.slots.memory hypermem
 openclaw gateway restart
 ```
 
-If you were on memory-core or QMD, also disable the memory slot:
-```bash
-openclaw config set plugins.slots.memory none
-```
+If you were on memory-core or QMD, the `slots.memory hypermem` line above already replaces the old memory provider. No separate disable step needed.
 
 ---
 
@@ -1015,10 +1003,10 @@ for (const agent of fs.readdirSync(agentsDir)) {
 hypermem does not modify or delete any source data. To roll back from any path:
 
 ```bash
-# Remove hypermem context engine
+# Remove hypercompositor context engine
 openclaw config unset plugins.slots.contextEngine
 
-# Restore the memory slot if you disabled it
+# Restore the memory slot to your previous provider
 openclaw config set plugins.slots.memory memory-core
 
 # Restore QMD backend if that's where you came from
