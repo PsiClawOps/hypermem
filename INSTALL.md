@@ -68,10 +68,10 @@ Multiple named agents sharing one OpenClaw gateway. Council setups, director/spe
 ~/.openclaw/hypermem/
 ├── library.db              ← shared fleet knowledge (facts, episodes, fleet registry)
 └── agents/
-    ├── alice/
-    │   ├── messages.db     ← alice's conversation history only
-    │   └── vectors.db      ← alice's semantic index
-    ├── dave/
+    ├── forge/
+    │   ├── messages.db     ← Forge's conversation history only
+    │   └── vectors.db      ← Forge's semantic index
+    ├── sentinel/
     │   ├── messages.db
     │   └── vectors.db
     └── {agentId}/
@@ -270,7 +270,7 @@ openclaw config set sessions.maintenance.maxEntries 200 --strict-json
 
 **OpenClaw defaults:** `pruneAfter: 30d`, `maxEntries: 500`.
 
-**Tradeoff to discuss:** If you use Dashboard or `sessions_list` to browse conversation history older than 14 days, you still need those entries in `sessions.json`. hypermem's SQLite store is the durable record — session metadata in `sessions.json` is just an index. Ask your agent: "Does anything I use depend on sessions older than 14 days being in the session store?"
+**Tradeoff to discuss:** If you use ClawDash or `sessions_list` to browse conversation history older than 14 days, you still need those entries in `sessions.json`. hypermem's SQLite store is the durable record — session metadata in `sessions.json` is just an index. Ask your agent: "Does anything I use depend on sessions older than 14 days being in the session store?"
 
 ---
 
@@ -601,8 +601,8 @@ agent:{agentId}:{channel}:{name}
 
 Examples:
 - `agent:main:webchat:main`
-- `agent:alice:discord:main`
-- `agent:dave:webchat:scratchpad`
+- `agent:forge:discord:main`
+- `agent:sentinel:webchat:scratchpad`
 
 OpenClaw sets this automatically. If you're calling the hypermem API directly, follow this format — the compositor uses it to scope history and facts correctly.
 

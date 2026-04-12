@@ -171,8 +171,15 @@ function computeDynamicReserve(
   const max = config.dynamicReserveMax ?? 0.50;
   const enabled = config.dynamicReserveEnabled ?? true;
 
-  if (!enabled || recentMessages.length === 0 || totalWindow <= 0) {
-    return { reserve: base, avgTurnCost: 0, dynamic: false, pressureHigh: false };
+  // Cold sessions (no message history) use a minimal floor so the full window
+  // stays available. The static reserveFraction applies only once the session
+  // has messages and dynamic sampling can compute a meaningful estimate.
+  const COLD_SESSION_FLOOR = 0.15;
+  if (!enabled || totalWindow <= 0) {
+    return { reserve: COLD_SESSION_FLOOR, avgTurnCost: 0, dynamic: false, pressureHigh: false };
+  }
+  if (recentMessages.length === 0) {
+    return { reserve: COLD_SESSION_FLOOR, avgTurnCost: 0, dynamic: false, pressureHigh: false };
   }
 
   // Sample the last 20 user+assistant messages for turn cost estimation.
@@ -437,7 +444,7 @@ function stripSecurityPreamble(content: string): string {
 }
 
 // Minimum floor: if trimming would leave less than 30% of original content, return a
-// stripped dave instead of a misleading fragment. A partial result that looks
+// stripped sentinel instead of a misleading fragment. A partial result that looks
 // complete is worse than a clear signal that the result was dropped.
 // Applied only in applyTierPayloadCap (pressure-driven trimming), not in structural
 // truncation paths where head+tail is always semantically useful.
@@ -746,9 +753,9 @@ function applyTierPayloadCap(msg: NeutralMessage, perResultCap: number, perTurnC
       // render the truncated result as: [security notice] + [middle marker] + [last line].
       const stripped = stripSecurityPreamble(content);
       // Floor check (TUNE-015): if the cap would leave less than 30% of the stripped content
-      // AND less than 2000 chars absolute, return a dave instead of a misleading fragment.
+      // AND less than 2000 chars absolute, return a sentinel instead of a misleading fragment.
       // Partial results that look complete are worse than a clear dropped-result signal.
-      // The absolute floor prevents the dave from firing on large natural truncations
+      // The absolute floor prevents the sentinel from firing on large natural truncations
       // (e.g., 110k → 16k is a meaningful slice, not a misleading fragment).
       if (perResultCap < stripped.length * TOOL_GRADIENT_MIN_USEFUL_FRACTION && perResultCap < 2_000) {
         content = `[result too large for current context budget \u2014 ${stripped.length} chars stripped]`;
@@ -978,26 +985,47 @@ export class Compositor {
             request.agentId, request.sessionKey, newestMsgId
           );
           if (cachedBundle) {
-            const cachedSlots: SlotTokenCounts = {
-              system: cachedBundle.meta.slots['system'] ?? 0,
-              identity: cachedBundle.meta.slots['identity'] ?? 0,
-              history: cachedBundle.meta.slots['history'] ?? 0,
-              facts: cachedBundle.meta.slots['facts'] ?? 0,
-              context: cachedBundle.meta.slots['context'] ?? 0,
-              library: cachedBundle.meta.slots['library'] ?? 0,
-            };
-            return {
-              messages: toComposeOutputMessages(cachedBundle.messages),
-              tokenCount: cachedBundle.meta.totalTokens,
-              slots: cachedSlots,
-              truncated: false,
-              hasWarnings: cachedBundle.meta.warnings.length > 0,
-              warnings: cachedBundle.meta.warnings,
-              diagnostics: {
-                ...cachedBundle.meta.diagnostics,
-                windowCacheHit: true,
-              },
-            };
+            // Validate the cached bundle is compatible with this request.
+            // A mismatch on any of these means we must do a full compose:
+            //   - tokenBudget: cached total exceeds the requested cap
+            //   - slot flags: caller disabled slots that the cache populated
+            //   - historyDepth: caller wants fewer messages than the cache holds
+            const cachedTotal = cachedBundle.meta.totalTokens;
+            const budgetOk = !request.tokenBudget ||
+              cachedTotal <= request.tokenBudget * 1.05;
+            const factsOk = request.includeFacts !== false ||
+              (cachedBundle.meta.slots['facts'] ?? 0) === 0;
+            const libraryOk = request.includeLibrary !== false ||
+              (cachedBundle.meta.slots['library'] ?? 0) === 0;
+            const contextOk = request.includeContext !== false ||
+              (cachedBundle.meta.slots['context'] ?? 0) === 0;
+            // historyDepth constrains how many messages the caller wants;
+            // we can't slice a cached bundle safely, so skip cache.
+            const depthOk = !request.historyDepth;
+
+            if (budgetOk && factsOk && libraryOk && contextOk && depthOk) {
+              const cachedSlots: SlotTokenCounts = {
+                system: cachedBundle.meta.slots['system'] ?? 0,
+                identity: cachedBundle.meta.slots['identity'] ?? 0,
+                history: cachedBundle.meta.slots['history'] ?? 0,
+                facts: cachedBundle.meta.slots['facts'] ?? 0,
+                context: cachedBundle.meta.slots['context'] ?? 0,
+                library: cachedBundle.meta.slots['library'] ?? 0,
+              };
+              return {
+                messages: toComposeOutputMessages(cachedBundle.messages),
+                tokenCount: cachedBundle.meta.totalTokens,
+                slots: cachedSlots,
+                truncated: false,
+                hasWarnings: cachedBundle.meta.warnings.length > 0,
+                warnings: cachedBundle.meta.warnings,
+                diagnostics: {
+                  ...cachedBundle.meta.diagnostics,
+                  windowCacheHit: true,
+                },
+              };
+            }
+            // Incompatible request — fall through to full compose
           }
         }
       } catch {
@@ -1761,15 +1789,20 @@ export class Compositor {
               return bLen - aLen; // Most specific match first
             });
 
+            // Sanitize FTS5 terms: quote each word, strip internal quotes, add prefix wildcard.
+            // Matches the pattern used in the keystone history FTS path.
+            const sanitizeFtsTerm = (w: string) => `"${w.replace(/"/g, '')}"*`;
             const ftsTerms = sortedWords.length > 0
-              ? sortedWords.slice(0, 6).map(w => `${w}*`).join(' OR ')
+              ? sortedWords.slice(0, 6).map(sanitizeFtsTerm).join(' OR ')
               : matchedKeywords
                   .sort((a, b) => b.length - a.length)
                   .slice(0, 3)
-                  .map(kw => `${kw}*`)
+                  .map(sanitizeFtsTerm)
                   .join(' OR ');
 
-            const ftsKeyword = ftsTerms || lastMsg.split(/\s+/).slice(0, 3).join(' ');
+            // Fallback uses raw message words — also sanitize to prevent FTS5 syntax errors.
+            const ftsKeyword = ftsTerms || lastMsg.split(/\s+/).slice(0, 3)
+              .map(sanitizeFtsTerm).join(' OR ');
 
             const chunks = docChunkStore.queryChunks({
               collection: trigger.collection,
@@ -2250,6 +2283,11 @@ export class Compositor {
     // compose() calls buildFactsFromDb() and buildCrossSessionContext() directly
     // from SQLite on every turn (~0.3ms each) — faster than a Redis GET round-trip.
     // Caching them here would create stale entries that compose() ignores anyway.
+
+    // Invalidate the window cache so the next compose rebuilds with the fresh
+    // system/identity slots. Without this, the fast-exit returns a stale bundle
+    // that predates the warm and reports identity=0.
+    await this.cache.invalidateWindow(agentId, sessionKey);
 
     await this.cache.warmSession(agentId, sessionKey, {
       system: opts?.systemPrompt,

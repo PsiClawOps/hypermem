@@ -1044,7 +1044,7 @@ function createHyperMemEngine(): ContextEngine {
         // Post-warm pressure check: if messages.db had accumulated history,
         // warm() may have loaded the session straight to 80%+. Pre-trim now
         // so the first turn has headroom instead of starting saturated.
-        // This is the "restart at 98%" failure mode reported by eve 2026-04-05:
+        // This is the "restart at 98%" failure mode reported by Helm 2026-04-05:
         // JSONL truncation + Redis flush isn't enough if messages.db is still full
         // and warm() reloads it. Trim here closes the loop.
         try {
@@ -2019,7 +2019,7 @@ function createHyperMemEngine(): ContextEngine {
         // gradient-compressed window to budget before writing to Redis. Without
         // this, afterTurn writes up to 250 messages regardless of budget, causing
         // trimHistoryToTokenBudget to fire and trim ~200 messages on every
-        // subsequent assemble() — the churn loop seen in eve's logs.
+        // subsequent assemble() — the churn loop seen in Helm's logs.
         if (hm.cache.isConnected) {
           try {
             const modelState = await hm.cache.getModelState(agentId, sk);
@@ -2042,7 +2042,7 @@ function createHyperMemEngine(): ContextEngine {
         // If a session just finished a turn at >80% pressure, the NEXT turn's
         // incoming tool results (parallel web searches, large exec output, etc.)
         // will hit a window with no headroom — the ingestion wave failure mode
-        // (reported by eve, 2026-04-05). Pre-trim here so the tool-loop
+        // (reported by Helm, 2026-04-05). Pre-trim here so the tool-loop
         // assemble() path starts the next turn with meaningful space.
         //
         // Uses modelState.tokenBudget if cached; skips if unavailable (non-fatal).
@@ -2220,7 +2220,7 @@ function createHyperMemEngine(): ContextEngine {
  * but the runtime's ToolCall.arguments is Record<string, any>. We parse it here.
  *
  * Missing metadata fields (api, provider, model, usage, stopReason) are filled with
- * dave values. The runtime's convertToLlm strips them before the API call, and
+ * sentinel values. The runtime's convertToLlm strips them before the API call, and
  * the session transcript already has the real values. These are just structural stubs
  * so the AgentMessage type is satisfied at runtime.
  */

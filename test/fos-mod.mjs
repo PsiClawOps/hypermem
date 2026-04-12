@@ -208,8 +208,8 @@ const metricId = `test-metric-${Date.now()}`;
 recordOutputMetrics(db, {
   id: metricId,
   timestamp: now,
-  agent_id: 'alice',
-  session_key: 'agent:alice:webchat:test',
+  agent_id: 'forge',
+  session_key: 'agent:forge:webchat:test',
   model_id: 'gpt-5.4',
   provider: 'openai',
   fos_version: 1,
@@ -224,7 +224,7 @@ recordOutputMetrics(db, {
 
 const recorded = db.prepare('SELECT * FROM output_metrics WHERE id = ?').get(metricId);
 assert(recorded !== undefined, 'recordOutputMetrics inserts a row');
-assertEq(recorded?.agent_id, 'alice', 'Metric agent_id is alice');
+assertEq(recorded?.agent_id, 'forge', 'Metric agent_id is forge');
 assertEq(recorded?.model_id, 'gpt-5.4', 'Metric model_id is gpt-5.4');
 assertEq(recorded?.output_tokens, 42, 'Metric output_tokens is 42');
 
@@ -233,7 +233,7 @@ assertEq(recorded?.output_tokens, 42, 'Metric output_tokens is 42');
 recordOutputMetrics(db, {
   id: metricId, // duplicate id
   timestamp: now,
-  agent_id: 'alice',
+  agent_id: 'forge',
   session_key: 'test',
   model_id: 'gpt-5.4',
   provider: 'openai',

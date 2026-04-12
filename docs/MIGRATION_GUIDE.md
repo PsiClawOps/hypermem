@@ -11,7 +11,7 @@ _One guide for all migration paths. Find your current system in the table below 
 | No memory system (starting fresh) | [Fresh install](#fresh-install) |
 | OpenClaw built-in memory (`memory.db`) | [From OpenClaw memory.db](#from-openclaw-memorydb) |
 | OpenClaw QMD backend | [From QMD](#from-qmd) |
-| Memory Engine context engine | [From Memory Engine](#from-clawtext) |
+| ClawText context engine | [From ClawText](#from-clawtext) |
 | Cognee (ECL pipeline) | [From Cognee](#from-cognee) |
 | Mem0 (cloud or OSS) | [From Mem0](#from-mem0) |
 | Zep (cloud or self-hosted) | [From Zep](#from-zep) |
@@ -63,7 +63,7 @@ openclaw gateway restart
 # OpenClaw built-in memory
 cp ~/.openclaw/memory.db ~/.openclaw/memory.db.pre-hypermem 2>/dev/null || true
 
-# Memory Engine
+# ClawText
 cp ~/.openclaw/workspace/.clawtext/session-intelligence.db \
    ~/.openclaw/workspace/.clawtext/session-intelligence.db.pre-hypermem 2>/dev/null || true
 
@@ -234,13 +234,13 @@ if (dryRun) console.log('Run with --apply to write data.');
 
 ---
 
-## From Memory Engine
+## From ClawText
 
-Memory Engine stores full conversation history in `session-intelligence.db`. This script imports all conversations with automatic agent identification from identity anchors.
+ClawText stores full conversation history in `session-intelligence.db`. This script imports all conversations with automatic agent identification from identity anchors.
 
 **What maps to what:**
 
-| Memory Engine | hypermem |
+| ClawText | hypermem |
 |---|---|
 | Conversation history | Per-agent `messages.db` |
 | Identity anchors | Used to route messages to correct agent DB |
@@ -899,7 +899,7 @@ node scripts/migrate-memory-md.mjs --apply
 
 Or for a single agent:
 ```bash
-node scripts/migrate-memory-md.mjs --agent alice --apply
+node scripts/migrate-memory-md.mjs --agent forge --apply
 ```
 
 **Step 3: Restart**
@@ -1028,7 +1028,7 @@ openclaw config set plugins.slots.memory memory-core
 openclaw gateway restart
 ```
 
-Original data (memory.db, Memory Engine database, QMD collections, Cognee data directory, MEMORY.md files) is untouched throughout.
+Original data (memory.db, ClawText database, QMD collections, Cognee data directory, MEMORY.md files) is untouched throughout.
 
 ---
 
@@ -1057,7 +1057,7 @@ All scripts check for duplicates before inserting. Re-running is safe. If you se
 
 **Agent routed to wrong database**
 
-Memory Engine and MEMORY.md scripts infer agent identity from workspace paths and content. If an agent was misidentified, re-run with `--agent <correct-id>` — the idempotency check skips already-imported entries.
+ClawText and MEMORY.md scripts infer agent identity from workspace paths and content. If an agent was misidentified, re-run with `--agent <correct-id>` — the idempotency check skips already-imported entries.
 
 **Cognee export is empty or has unexpected format**
 

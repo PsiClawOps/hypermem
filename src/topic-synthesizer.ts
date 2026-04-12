@@ -102,7 +102,7 @@ function keystoneScore(msg: MessageRow): number {
   score += backtickMatches.length * 0.2;
 
   // Agent mentions (known patterns)
-  const agentMentions = text.match(/\b(alice|bob|clarity|dave|oscar|carol|hank|jack|leo|nancy|mike)\b/gi) || [];
+  const agentMentions = text.match(/\b(forge|compass|clarity|sentinel|vanguard|anvil|pylon|vigil|bastion|relay|crucible)\b/gi) || [];
   score += agentMentions.length * 0.25;
 
   // Quoted content
@@ -219,9 +219,10 @@ export class TopicSynthesizer {
         SELECT * FROM topics
         WHERE agent_id = ?
           AND message_count >= ?
-          AND updated_at < datetime('now', '-${staleThresholdMinutes} minutes')
+          AND updated_at < datetime('now', '-' || ? || ' minutes')
+          -- safe: staleThresholdMinutes is a validated integer
         ORDER BY updated_at ASC
-      `).all(agentId, cfg.SYNTHESIS_MIN_MESSAGES) as unknown as TopicRow[];
+      `).all(agentId, cfg.SYNTHESIS_MIN_MESSAGES, Math.floor(staleThresholdMinutes)) as unknown as TopicRow[];
     } catch {
       return result;
     }

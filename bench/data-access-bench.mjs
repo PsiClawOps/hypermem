@@ -202,7 +202,7 @@ if (libDb) {
     ORDER BY confidence DESC, updated_at DESC
     LIMIT ?
   `);
-  for (const agent of ['alice', 'main', 'hank']) {
+  for (const agent of ['forge', 'main', 'pylon']) {
     allResults.push(bench(`library: activeFacts(${agent}, limit=50)`, () => {
       stmtFacts.all(agent, 50);
     }));
@@ -216,7 +216,7 @@ if (libDb) {
     ORDER BY created_at DESC
     LIMIT ?
   `);
-  for (const agent of ['alice', 'main']) {
+  for (const agent of ['forge', 'main']) {
     allResults.push(bench(`library: recentEpisodes(${agent}, limit=20)`, () => {
       stmtEpisodes.all(agent, 20);
     }));
@@ -228,15 +228,15 @@ if (libDb) {
     SELECT * FROM topics WHERE agent_id = ? AND status = 'active'
     ORDER BY updated_at DESC LIMIT ?
   `);
-  allResults.push(bench(`library: activeTopics(alice)`, () => {
-    stmtTopics.all('alice', 20);
+  allResults.push(bench(`library: activeTopics(forge)`, () => {
+    stmtTopics.all('forge', 20);
   }));
   printResult(allResults[allResults.length - 1]);
 
   // 11. Fleet agent lookup
   const stmtFleet = libDb.prepare('SELECT * FROM fleet_agents WHERE id = ?');
   allResults.push(bench(`library: fleetAgent lookup`, () => {
-    stmtFleet.get('alice');
+    stmtFleet.get('forge');
   }));
   printResult(allResults[allResults.length - 1]);
 
@@ -267,8 +267,8 @@ if (libDb) {
   const stmtEpType = libDb.prepare(`
     SELECT * FROM episodes WHERE agent_id = ? AND event_type = ? ORDER BY created_at DESC LIMIT ?
   `);
-  allResults.push(bench(`library: episodes(alice, type=decision)`, () => {
-    stmtEpType.all('alice', 'decision', 20);
+  allResults.push(bench(`library: episodes(forge, type=decision)`, () => {
+    stmtEpType.all('forge', 'decision', 20);
   }));
   printResult(allResults[allResults.length - 1]);
 
@@ -288,8 +288,8 @@ if (libDb) {
       const stmtChunks = libDb.prepare(`
         SELECT * FROM doc_chunks WHERE agent_id = ? AND collection = ? ORDER BY chunk_index LIMIT ?
       `);
-      allResults.push(bench(`library: docChunks(alice, policy, limit=20) [${chunkCount} total]`, () => {
-        stmtChunks.all('alice', 'policy', 20);
+      allResults.push(bench(`library: docChunks(forge, policy, limit=20) [${chunkCount} total]`, () => {
+        stmtChunks.all('forge', 'policy', 20);
       }));
       printResult(allResults[allResults.length - 1]);
     }
@@ -302,7 +302,7 @@ if (libDb) {
 
 // ── Compaction Fence (new module) ────────────────────────────
 
-const forgeDb = openDb(path.join(agentsDir, 'alice', 'messages.db'));
+const forgeDb = openDb(path.join(agentsDir, 'forge', 'messages.db'));
 if (forgeDb) {
   try {
     const hasFence = forgeDb.prepare("SELECT count(*) as c FROM sqlite_master WHERE type='table' AND name='compaction_fences'").get().c;
@@ -310,7 +310,7 @@ if (forgeDb) {
       const stmtFence = forgeDb.prepare('SELECT * FROM compaction_fences WHERE conversation_id = ?');
       const someConvId = forgeDb.prepare('SELECT id FROM conversations LIMIT 1').get()?.id;
       if (someConvId) {
-        allResults.push(bench(`alice: compactionFence lookup`, () => {
+        allResults.push(bench(`forge: compactionFence lookup`, () => {
           stmtFence.get(someConvId);
         }));
         printResult(allResults[allResults.length - 1]);

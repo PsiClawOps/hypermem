@@ -2,14 +2,14 @@
 # flush-agent-session.sh — self-service emergency flush for saturated sessions
 #
 # Usage: bash flush-agent-session.sh <agentId>
-# Example: bash flush-agent-session.sh eve
+# Example: bash flush-agent-session.sh helm
 #
 # What it does:
 #   1. Truncates the agent's active session JSONL to 0 bytes
 #   2. Flushes all Redis keys for the agent
 #   3. Reports what was cleared
 #
-# After running: ask operator for a gateway restart.
+# After running: ask ragesaq for a gateway restart.
 # Next session starts at near-zero pressure.
 #
 # Safe to run while the session is active — the current in-memory session
@@ -20,7 +20,7 @@ set -euo pipefail
 AGENT="${1:-}"
 if [ -z "$AGENT" ]; then
   echo "Usage: $0 <agentId>"
-  echo "Example: $0 eve"
+  echo "Example: $0 helm"
   exit 1
 fi
 
@@ -72,5 +72,5 @@ else
 fi
 
 echo ""
-echo "Done. Ask operator to restart the gateway."
+echo "Done. Ask ragesaq to restart the gateway."
 echo "Your next session will start at near-zero pressure."

@@ -7,7 +7,7 @@
  *   - Background indexer for extraction priority
  *   - Compaction for retention decisions
  *
- * Ported from Memory Engine content-type-classifier.ts — adapted for
+ * Ported from ClawText content-type-classifier.ts — adapted for
  * hypermem's NeutralMessage interface.
  *
  * No LLM dependency. Pure pattern matching + heuristics.

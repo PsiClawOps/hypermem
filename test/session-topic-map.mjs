@@ -37,8 +37,8 @@ function run() {
   console.log('  SessionTopicMap tests');
   console.log('═══════════════════════════════════════════════════\n');
 
-  const SK = 'agent:alice:webchat:main';
-  const SK2 = 'agent:alice:webchat:other';
+  const SK = 'agent:forge:webchat:main';
+  const SK2 = 'agent:forge:webchat:other';
 
   // ── createTopic ──────────────────────────────────────────────
   console.log('── createTopic ──');

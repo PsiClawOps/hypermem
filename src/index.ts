@@ -231,7 +231,7 @@ const DEFAULT_CONFIG: HyperMemConfig = {
   cache: {
     keyPrefix: 'hm:',
     sessionTTL: 14400,      // 4 hours — system/identity/meta slots
-    historyTTL: 604800,     // 7 days — extended for Canvas display
+    historyTTL: 604800,     // 7 days — extended for ClawCanvas display
   },
   compositor: {
     // TUNE-010 (2026-04-02): Raised from 65000 → 90000.
@@ -272,8 +272,8 @@ const DEFAULT_CONFIG: HyperMemConfig = {
  *
  * Usage:
  *   const hm = await hypermem.create({ dataDir: '~/.openclaw/hypermem' });
- *   await hm.record('alice', 'agent:alice:webchat:main', userMsg);
- *   const result = await hm.compose({ agentId: 'alice', sessionKey: '...', ... });
+ *   await hm.record('forge', 'agent:forge:webchat:main', userMsg);
+ *   const result = await hm.compose({ agentId: 'forge', sessionKey: '...', ... });
  */
 export class HyperMem {
   readonly dbManager: DatabaseManager;

@@ -10,7 +10,7 @@ Supported `--source` values:
 
 | Source | Underlying script | Purpose |
 |---|---|---|
-| `clawtext` | `scripts/migrate-clawtext.mjs` | Import legacy Memory Engine session history into HyperMem messages DB |
+| `clawtext` | `scripts/migrate-clawtext.mjs` | Import legacy ClawText session history into HyperMem messages DB |
 | `memory-db` | `scripts/migrate-memory-db.mjs` | Import OpenClaw built-in `memory.db` facts into HyperMem library DB |
 | `memory-md` | `scripts/migrate-memory-md.mjs` | Import MEMORY.md daily checkpoint files into HyperMem library DB |
 
