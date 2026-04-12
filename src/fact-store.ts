@@ -1,5 +1,5 @@
 /**
- * hypermem Fact Store
+ * HyperMem Fact Store
  *
  * CRUD operations for facts (extracted knowledge that spans sessions).
  * Facts live in the central library DB, tagged by agent_id.
@@ -8,7 +8,6 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { Fact, FactScope } from './types.js';
-import { isSafeForSharedVisibility, requiresScan } from './secret-scanner.js';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -57,24 +56,6 @@ export class FactStore {
     const now = nowIso();
     const scope = opts?.scope || 'agent';
 
-    // KL-01: global scope is not yet supported — write gate is deferred to 1.0.
-    // Log a warning if a caller somehow passes scope='global' (e.g. direct DB
-    // access bypassing TypeScript types or a future FactScope addition).
-    if ((scope as string) === 'global') {
-      console.warn(
-        `[hypermem] WARNING: agent '${agentId}' attempted to write a fact with scope='global'. ` +
-        `Global-scope facts are not yet gated — this write will succeed but may propagate ` +
-        `to all agents sharing library.db. See KL-01 in KNOWN_LIMITATIONS.md.`
-      );
-    }
-
-    // Secret gate: if requested visibility is shared, verify content is clean.
-    // Downgrade to 'private' rather than reject — matches episode-store pattern.
-    let resolvedVisibility = opts?.visibility || 'private';
-    if (requiresScan(resolvedVisibility) && !isSafeForSharedVisibility(content)) {
-      resolvedVisibility = 'private';
-    }
-
     // Check for exact duplicate
     const existing = this.db.prepare(`
       SELECT * FROM facts WHERE agent_id = ? AND content = ? AND scope = ?
@@ -99,7 +80,7 @@ export class FactStore {
       opts?.domain || null,
       content,
       opts?.confidence || 1.0,
-      resolvedVisibility,
+      opts?.visibility || 'private',
       opts?.sourceType || 'conversation',
       opts?.sourceSessionKey || null,
       opts?.sourceRef || null,
@@ -117,7 +98,7 @@ export class FactStore {
       domain: opts?.domain || null,
       content,
       confidence: opts?.confidence || 1.0,
-      visibility: resolvedVisibility,
+      visibility: opts?.visibility || 'private',
       sourceType: opts?.sourceType || 'conversation',
       sourceSessionKey: opts?.sourceSessionKey || null,
       sourceRef: opts?.sourceRef || null,

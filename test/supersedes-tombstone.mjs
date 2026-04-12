@@ -106,7 +106,7 @@ async function run() {
     const store = new FactStore(libDb);
 
     const oldFact = store.addFact('agent1', 'decided to use Redis for hot cache because latency is critical in production');
-    const newFact = store.addFact('agent1', 'decided to use Redis for hot cache with sentinel HA mode in production env');
+    const newFact = store.addFact('agent1', 'decided to use Redis for hot cache with agent4 HA mode in production env');
 
     assert(oldFact.supersededBy === null, 'Old fact starts with supersededBy=null');
     assert(newFact.supersededBy === null, 'New fact starts with supersededBy=null');
@@ -201,7 +201,7 @@ async function run() {
 
     const activeFact = factStore.addFact('agent1', 'decided to deploy containers via Kubernetes for production workloads always');
     const oldFact   = factStore.addFact('agent1', 'decided to deploy containers via Docker Compose for production workloads only');
-    const newFact   = factStore.addFact('agent1', 'decided to deploy containers via Kubernetes with Helm for production workloads');
+    const newFact   = factStore.addFact('agent1', 'decided to deploy containers via Kubernetes with Eve for production workloads');
     factStore.markSuperseded(oldFact.id, newFact.id);
 
     // Simulate all three having been indexed

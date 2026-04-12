@@ -1,5 +1,5 @@
 /**
- * hypermem Provider Translator
+ * HyperMem Provider Translator
  *
  * Converts between provider-neutral (NeutralMessage) and provider-specific formats.
  * This is the ONLY place where provider-specific formatting exists.
@@ -15,71 +15,6 @@ import type {
   NeutralToolResult,
   ProviderMessage,
 } from './types.js';
-
-function summarizeOrphanToolResult(tr: NeutralToolResult): string {
-  const toolName = tr.name || 'tool';
-  const status = tr.isError ? 'error' : 'result';
-  const content = (tr.content || '').replace(/\s+/g, ' ').trim();
-  const preview = content.length > 160 ? `${content.slice(0, 157)}...` : content;
-  return preview
-    ? `[${toolName} ${status} omitted: missing matching tool call] ${preview}`
-    : `[${toolName} ${status} omitted: missing matching tool call]`;
-}
-
-/**
- * Final pair-integrity sweep before provider translation.
- *
- * Invariant: never emit a tool_result unless its matching tool_use/tool_call
- * exists in the immediately prior assistant message with the same ID.
- *
- * If the pair is broken, degrade the orphan tool_result into plain user text
- * so providers never see an invalid tool_result block.
- */
-export function repairToolCallPairs(messages: NeutralMessage[]): NeutralMessage[] {
-  const repaired: NeutralMessage[] = [];
-
-  for (const msg of messages) {
-    if (msg.role !== 'user' || !msg.toolResults || msg.toolResults.length === 0) {
-      repaired.push(msg);
-      continue;
-    }
-
-    const prev = repaired[repaired.length - 1];
-    const validCallIds = new Set(
-      prev?.role === 'assistant' && prev.toolCalls
-        ? prev.toolCalls.map(tc => tc.id)
-        : []
-    );
-
-    const keptResults = msg.toolResults.filter(tr => validCallIds.has(tr.callId));
-    const orphanResults = msg.toolResults.filter(tr => !validCallIds.has(tr.callId));
-
-    if (orphanResults.length === 0) {
-      repaired.push(msg);
-      continue;
-    }
-
-    const orphanText = orphanResults.map(summarizeOrphanToolResult).join('\n');
-    const mergedText = [msg.textContent, orphanText].filter(Boolean).join('\n');
-
-    if (keptResults.length > 0) {
-      repaired.push({
-        ...msg,
-        textContent: mergedText || msg.textContent,
-        toolResults: keptResults,
-      });
-      continue;
-    }
-
-    repaired.push({
-      ...msg,
-      textContent: mergedText || msg.textContent || '[tool result omitted: missing matching tool call]',
-      toolResults: null,
-    });
-  }
-
-  return repaired;
-}
 import { createHash } from 'node:crypto';
 
 // ─── ID Generation ───────────────────────────────────────────────
@@ -87,7 +22,7 @@ import { createHash } from 'node:crypto';
 let idCounter = 0;
 
 /**
- * Generate a hypermem-native tool call ID.
+ * Generate a HyperMem-native tool call ID.
  * These are provider-neutral and deterministic within a session.
  */
 export function generateToolCallId(): string {
@@ -98,7 +33,7 @@ export function generateToolCallId(): string {
 }
 
 /**
- * Convert a provider-specific tool call ID to a hypermem ID.
+ * Convert a provider-specific tool call ID to a HyperMem ID.
  * Deterministic: same input always produces same output.
  */
 export function normalizeToolCallId(providerId: string): string {
@@ -130,8 +65,8 @@ export function detectProvider(providerString: string | null | undefined): Provi
  * The last system message BEFORE the dynamicBoundary marker gets
  * cache_control: {type: "ephemeral"} to mark the static/dynamic boundary.
  *
- * Static (cacheable): system prompt + identity + stable output profile prefix
- * Dynamic (not cacheable): context block (facts/recall/recent actions), conversation history
+ * Static (cacheable): system prompt + identity — stable across sessions
+ * Dynamic (not cacheable): context block (facts/recall), conversation history
  *
  * This allows Anthropic to cache the static prefix and skip re-tokenizing it.
  */
@@ -317,19 +252,18 @@ export function toProviderFormat(
   messages: NeutralMessage[],
   provider: string | null | undefined
 ): ProviderMessage[] {
-  const repairedMessages = repairToolCallPairs(messages);
   const providerType = detectProvider(provider);
 
   switch (providerType) {
     case 'anthropic':
-      return toAnthropic(repairedMessages);
+      return toAnthropic(messages);
     case 'openai':
-      return toOpenAI(repairedMessages);
+      return toOpenAI(messages);
     case 'openai-responses':
-      return toOpenAIResponses(repairedMessages);
+      return toOpenAIResponses(messages);
     default:
       // Default to OpenAI format as it's most widely compatible
-      return toOpenAI(repairedMessages);
+      return toOpenAI(messages);
   }
 }
 

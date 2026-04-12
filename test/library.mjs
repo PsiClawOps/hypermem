@@ -41,7 +41,9 @@ async function run() {
   try {
     hm = await HyperMem.create({
       dataDir: tmpDir,
+      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm-library:', sessionTTL: 60 },
     });
+    await hm.redis.flushPrefix();
   } catch (err) {
     console.log(`  ❌ Failed to create HyperMem: ${err.message}`);
     process.exit(1);
@@ -50,81 +52,81 @@ async function run() {
   // ── Preferences ──
   console.log('── Preferences ──');
 
-  const pref1 = hm.setPreference('ragesaq', 'coding_style', 'Prefers architecture over speed, comprehensive and explicit', {
+  const pref1 = hm.setPreference('testuser', 'coding_style', 'Prefers architecture over speed, comprehensive and explicit', {
     domain: 'development',
-    agentId: 'forge',
+    agentId: 'agent-alpha',
     confidence: 0.95,
   });
-  assert(pref1.subject === 'ragesaq', 'Preference created');
+  assert(pref1.subject === 'testuser', 'Preference created');
   assert(pref1.key === 'coding_style', `Key: ${pref1.key}`);
 
-  hm.setPreference('ragesaq', 'timezone', 'MST (Arizona, no DST)', {
+  hm.setPreference('testuser', 'timezone', 'MST (Arizona, no DST)', {
     domain: 'personal',
-    agentId: 'compass',
+    agentId: 'agent-beta',
   });
 
-  hm.setPreference('ragesaq', 'communication', 'Direct, no hedging, no corporate speak', {
+  hm.setPreference('testuser', 'communication', 'Direct, no hedging, no corporate speak', {
     domain: 'personal',
-    agentId: 'clarity',
+    agentId: 'agent-zeta',
   });
 
-  const prefs = hm.getPreferences('ragesaq');
+  const prefs = hm.getPreferences('testuser');
   assert(prefs.length === 3, `All preferences: ${prefs.length}`);
 
-  const tzPref = hm.getPreference('ragesaq', 'timezone', 'personal');
+  const tzPref = hm.getPreference('testuser', 'timezone', 'personal');
   assert(tzPref !== null, 'Get specific preference');
   assert(tzPref.value.includes('MST'), `Timezone value: ${tzPref.value}`);
 
   // Update a preference (upsert)
-  hm.setPreference('ragesaq', 'coding_style', 'Architecture > speed, explicit > implicit, automation-first', {
+  hm.setPreference('testuser', 'coding_style', 'Architecture > speed, explicit > implicit, automation-first', {
     domain: 'development',
-    agentId: 'forge',
+    agentId: 'agent-alpha',
     confidence: 0.98,
   });
-  const updated = hm.getPreference('ragesaq', 'coding_style', 'development');
+  const updated = hm.getPreference('testuser', 'coding_style', 'development');
   assert(updated.value.includes('automation-first'), 'Preference updated via upsert');
   assert(updated.confidence === 0.98, `Confidence updated: ${updated.confidence}`);
 
   // ── Fleet Registry ──
   console.log('\n── Fleet Registry ──');
 
-  const forge = hm.upsertFleetAgent('forge', {
-    displayName: 'Forge',
+  const agentAlpha = hm.upsertFleetAgent('agent-alpha', {
+    displayName: 'Agent Alpha',
     tier: 'council',
-    orgId: 'forge-org',
+    orgId: 'alpha-org',
     domains: ['infrastructure', 'architecture', 'reliability'],
     metadata: { role: 'Infrastructure seat' },
   });
-  assert(forge.id === 'forge', 'Fleet agent registered');
-  assert(forge.tier === 'council', `Tier: ${forge.tier}`);
-  assert(forge.domains.includes('infrastructure'), 'Domains set');
+  assert(agentAlpha.id === 'agent-alpha', 'Fleet agent registered');
+  assert(agentAlpha.tier === 'council', `Tier: ${agentAlpha.tier}`);
+  assert(agentAlpha.domains.includes('infrastructure'), 'Domains set');
 
-  hm.upsertFleetAgent('pylon', {
-    displayName: 'Pylon',
+  hm.upsertFleetAgent('agent-gamma', {
+    displayName: 'Agent Gamma',
     tier: 'director',
-    orgId: 'forge-org',
-    reportsTo: 'forge',
+    orgId: 'alpha-org',
+    reportsTo: 'agent-alpha',
     domains: ['infrastructure', 'clawtext'],
   });
 
-  hm.upsertFleetAgent('compass', {
-    displayName: 'Compass',
+  hm.upsertFleetAgent('agent-beta', {
+    displayName: 'Agent Beta',
     tier: 'council',
-    orgId: 'compass-org',
+    orgId: 'beta-org',
     domains: ['product', 'strategy'],
   });
 
-  const org = hm.upsertFleetOrg('forge-org', {
+  const org = hm.upsertFleetOrg('alpha-org', {
     name: 'Infrastructure Org',
-    leadAgentId: 'forge',
+    leadAgentId: 'agent-alpha',
     mission: 'Build and run the platform the fleet depends on',
   });
-  assert(org.id === 'forge-org', 'Org registered');
-  assert(org.leadAgentId === 'forge', `Lead: ${org.leadAgentId}`);
+  assert(org.id === 'alpha-org', 'Org registered');
+  assert(org.leadAgentId === 'agent-alpha', `Lead: ${org.leadAgentId}`);
 
-  hm.upsertFleetOrg('compass-org', {
+  hm.upsertFleetOrg('beta-org', {
     name: 'Product Org',
-    leadAgentId: 'compass',
+    leadAgentId: 'agent-beta',
     mission: 'Ship great products',
   });
 
@@ -137,8 +139,8 @@ async function run() {
   const orgs = hm.listFleetOrgs();
   assert(orgs.length === 2, `Orgs: ${orgs.length}`);
 
-  const forgeAgent = hm.getFleetAgent('forge');
-  assert(forgeAgent.metadata.role === 'Infrastructure seat', 'Metadata preserved');
+  const alphaAgent = hm.getFleetAgent('agent-alpha');
+  assert(alphaAgent.metadata.role === 'Infrastructure seat', 'Metadata preserved');
 
   // ── System Registry ──
   console.log('\n── System Registry ──');
@@ -147,7 +149,7 @@ async function run() {
     status: 'running',
     port: 6379,
     version: '7.0.15',
-  }, { updatedBy: 'forge' });
+  }, { updatedBy: 'agent-alpha' });
   assert(redisState.category === 'service', 'System state set');
   assert(redisState.value.status === 'running', `Redis status: ${redisState.value.status}`);
 
@@ -155,12 +157,12 @@ async function run() {
     status: 'running',
     models: ['nomic-embed-text'],
     gpu: false,
-  }, { updatedBy: 'forge' });
+  }, { updatedBy: 'agent-alpha' });
 
   hm.setSystemState('flag', 'reboot_needed', {
     value: false,
     reason: null,
-  }, { updatedBy: 'vigil' });
+  }, { updatedBy: 'agent-eta' });
 
   const services = hm.getSystemCategory('service');
   assert(services.length === 2, `Services: ${services.length}`);
@@ -173,14 +175,14 @@ async function run() {
     status: 'running',
     port: 6379,
     version: '7.2.0',
-  }, { updatedBy: 'pylon' });
+  }, { updatedBy: 'agent-gamma' });
 
   const updatedRedis = hm.getSystemState('service', 'redis');
   assert(updatedRedis.value.version === '7.2.0', 'State updated');
 
   // TTL test
   hm.setSystemState('flag', 'temp_flag', { active: true }, {
-    updatedBy: 'forge',
+    updatedBy: 'agent-alpha',
     ttl: new Date(Date.now() - 1000).toISOString(), // already expired
   });
   const expired = hm.getSystemState('flag', 'temp_flag');
@@ -193,8 +195,8 @@ async function run() {
     title: 'Restructure DatabaseManager for three-file split',
     description: 'messages.db + vectors.db per agent, library.db fleet-wide',
     priority: 1,
-    agentId: 'forge',
-    createdBy: 'ragesaq',
+    agentId: 'agent-alpha',
+    createdBy: 'testuser',
     domain: 'infrastructure',
   });
   assert(wi1.id.startsWith('WQ-'), `Work item created: ${wi1.id}`);
@@ -204,36 +206,36 @@ async function run() {
   const wi2 = hm.createWorkItem({
     title: 'Build Redis registry cache layer',
     priority: 2,
-    agentId: 'forge',
-    createdBy: 'forge',
+    agentId: 'agent-alpha',
+    createdBy: 'agent-alpha',
     domain: 'infrastructure',
   });
 
   const wi3 = hm.createWorkItem({
     title: 'Design knowledge graph schema',
     priority: 3,
-    agentId: 'compass',
-    createdBy: 'ragesaq',
+    agentId: 'agent-beta',
+    createdBy: 'testuser',
     domain: 'product',
   });
 
   // Status transitions
-  const started = hm.updateWorkStatus(wi1.id, 'active', 'forge', 'Starting restructure');
+  const started = hm.updateWorkStatus(wi1.id, 'active', 'agent-alpha', 'Starting restructure');
   assert(started.status === 'active', 'Work item started');
   assert(started.startedAt !== null, 'start time recorded');
 
-  const completed = hm.updateWorkStatus(wi1.id, 'completed', 'forge', 'Restructure done, 85 tests passing');
+  const completed = hm.updateWorkStatus(wi1.id, 'completed', 'agent-alpha', 'Restructure done, 85 tests passing');
   assert(completed.status === 'completed', 'Work item completed');
   assert(completed.completedAt !== null, 'completion time recorded');
 
-  hm.updateWorkStatus(wi2.id, 'active', 'forge');
+  hm.updateWorkStatus(wi2.id, 'active', 'agent-alpha');
 
   // Kanban views
   const kanban = hm.getFleetKanban();
   assert(kanban.length === 2, `Fleet kanban: ${kanban.length} items (excludes completed)`);
 
-  const forgeWork = hm.getAgentWork('forge');
-  assert(forgeWork.length === 1, `Forge active work: ${forgeWork.length}`);
+  const alphaWork = hm.getAgentWork('agent-alpha');
+  assert(alphaWork.length === 1, `Agent Alpha active work: ${alphaWork.length}`);
 
   // Stats
   const stats = hm.getWorkStats();
@@ -249,7 +251,7 @@ async function run() {
   console.log('\n── Agent Capabilities ──');
 
   // Register individual capabilities
-  const skillCap = hm.upsertCapability('forge', {
+  const skillCap = hm.upsertCapability('agent-alpha', {
     capType: 'skill',
     name: 'skill-vetter',
     version: '1.0.0',
@@ -259,31 +261,31 @@ async function run() {
   assert(skillCap.name === 'skill-vetter', `Skill name: ${skillCap.name}`);
   assert(skillCap.version === '1.0.0', `Skill version: ${skillCap.version}`);
 
-  hm.upsertCapability('forge', {
+  hm.upsertCapability('agent-alpha', {
     capType: 'tool',
     name: 'exec',
     config: { scopes: ['sandbox', 'host'] },
   });
 
-  hm.upsertCapability('forge', {
+  hm.upsertCapability('agent-alpha', {
     capType: 'tool',
     name: 'web_search',
     config: { provider: 'brave' },
   });
 
-  hm.upsertCapability('forge', {
+  hm.upsertCapability('agent-alpha', {
     capType: 'mcp_server',
     name: 'filesystem',
     config: { transport: 'stdio' },
   });
 
-  hm.upsertCapability('compass', {
+  hm.upsertCapability('agent-beta', {
     capType: 'tool',
     name: 'web_search',
     config: { provider: 'brave' },
   });
 
-  hm.upsertCapability('compass', {
+  hm.upsertCapability('agent-beta', {
     capType: 'skill',
     name: 'product-research',
     version: '0.2.0',
@@ -291,14 +293,14 @@ async function run() {
   });
 
   // Query capabilities
-  const forgeCaps = hm.getAgentCapabilities('forge');
-  assert(forgeCaps.length === 4, `Forge capabilities: ${forgeCaps.length}`);
+  const alphaCaps = hm.getAgentCapabilities('agent-alpha');
+  assert(alphaCaps.length === 4, `Agent Alpha capabilities: ${alphaCaps.length}`);
 
-  const forgeSkills = hm.getAgentCapabilities('forge', 'skill');
-  assert(forgeSkills.length === 1, `Forge skills: ${forgeSkills.length}`);
+  const alphaSkills = hm.getAgentCapabilities('agent-alpha', 'skill');
+  assert(alphaSkills.length === 1, `Agent Alpha skills: ${alphaSkills.length}`);
 
-  const forgeTools = hm.getAgentCapabilities('forge', 'tool');
-  assert(forgeTools.length === 2, `Forge tools: ${forgeTools.length}`);
+  const alphaTools = hm.getAgentCapabilities('agent-alpha', 'tool');
+  assert(alphaTools.length === 2, `Agent Alpha tools: ${alphaTools.length}`);
 
   // Find agents by capability
   const webSearchAgents = hm.findAgentsByCapability('tool', 'web_search');
@@ -306,20 +308,20 @@ async function run() {
 
   const vetterAgents = hm.findAgentsByCapability('skill', 'skill-vetter');
   assert(vetterAgents.length === 1, `Agents with skill-vetter: ${vetterAgents.length}`);
-  assert(vetterAgents[0].id === 'forge', `Vetter agent: ${vetterAgents[0].id}`);
+  assert(vetterAgents[0].id === 'agent-alpha', `Vetter agent: ${vetterAgents[0].id}`);
 
   // Denormalized capabilities on FleetAgent
-  const forgeWithCaps = hm.getFleetAgent('forge');
-  assert(forgeWithCaps.capabilities !== null, 'Fleet agent has capabilities JSON');
-  assert(forgeWithCaps.capabilities.length === 4, `Denormalized caps: ${forgeWithCaps.capabilities.length}`);
+  const alphaWithCaps = hm.getFleetAgent('agent-alpha');
+  assert(alphaWithCaps.capabilities !== null, 'Fleet agent has capabilities JSON');
+  assert(alphaWithCaps.capabilities.length === 4, `Denormalized caps: ${alphaWithCaps.capabilities.length}`);
 
   // Bulk sync (should mark missing ones as removed)
-  hm.syncCapabilities('forge', 'tool', [
+  hm.syncCapabilities('agent-alpha', 'tool', [
     { name: 'exec', config: { scopes: ['sandbox'] } },
     { name: 'image', config: { provider: 'anthropic' } },
   ]);
 
-  const afterSync = hm.getAgentCapabilities('forge', 'tool');
+  const afterSync = hm.getAgentCapabilities('agent-alpha', 'tool');
   assert(afterSync.length === 2, `Tools after sync: ${afterSync.length} (exec + image, web_search removed)`);
   const toolNames = afterSync.map(c => c.name).sort();
   assert(toolNames[0] === 'exec' && toolNames[1] === 'image', `Tool names: ${toolNames.join(', ')}`);
@@ -327,48 +329,48 @@ async function run() {
   // ── Agent Desired State ──
   console.log('\n── Agent Desired State ──');
 
-  // Set desired config for forge
-  const modelState = hm.setDesiredState('forge', 'model', 'anthropic/claude-opus-4-6', {
+  // Set desired config for agent-alpha
+  const modelState = hm.setDesiredState('agent-alpha', 'model', 'anthropic/claude-opus-4-6', {
     source: 'operator',
-    setBy: 'ragesaq',
+    setBy: 'testuser',
     notes: 'Moved to anthropic direct — copilot-local had issues',
   });
   assert(modelState.configKey === 'model', 'Desired state set');
   assert(modelState.desiredValue === 'anthropic/claude-opus-4-6', `Desired model: ${modelState.desiredValue}`);
   assert(modelState.driftStatus === 'unknown', `Initial drift: ${modelState.driftStatus}`);
 
-  hm.setDesiredState('forge', 'thinkingDefault', 'high', { setBy: 'ragesaq' });
-  hm.setDesiredState('forge', 'provider', 'anthropic', { setBy: 'ragesaq' });
-  hm.setDesiredState('forge', 'tools.exec.host', 'sandbox', { setBy: 'ragesaq' });
+  hm.setDesiredState('agent-alpha', 'thinkingDefault', 'high', { setBy: 'testuser' });
+  hm.setDesiredState('agent-alpha', 'provider', 'anthropic', { setBy: 'testuser' });
+  hm.setDesiredState('agent-alpha', 'tools.exec.host', 'sandbox', { setBy: 'testuser' });
 
-  // Set desired config for compass
-  hm.setDesiredState('compass', 'model', 'anthropic/claude-opus-4-6', { setBy: 'ragesaq' });
-  hm.setDesiredState('compass', 'thinkingDefault', 'high', { setBy: 'ragesaq' });
+  // Set desired config for agent-beta
+  hm.setDesiredState('agent-beta', 'model', 'anthropic/claude-opus-4-6', { setBy: 'testuser' });
+  hm.setDesiredState('agent-beta', 'thinkingDefault', 'high', { setBy: 'testuser' });
 
   // Get all config for an agent
-  const forgeConfig = hm.getDesiredConfig('forge');
-  assert(Object.keys(forgeConfig).length === 4, `Forge config keys: ${Object.keys(forgeConfig).length}`);
-  assert(forgeConfig.model === 'anthropic/claude-opus-4-6', 'Config map works');
+  const alphaConfig = hm.getDesiredConfig('agent-alpha');
+  assert(Object.keys(forgeConfig).length === 4, `Agent Alpha config keys: ${Object.keys(forgeConfig).length}`);
+  assert(alphaConfig.model === 'anthropic/claude-opus-4-6', 'Config map works');
 
   // Report actual state — matches desired (no drift)
-  const okDrift = hm.reportActualState('forge', 'model', 'anthropic/claude-opus-4-6');
+  const okDrift = hm.reportActualState('agent-alpha', 'model', 'anthropic/claude-opus-4-6');
   assert(okDrift === 'ok', `Matching model drift: ${okDrift}`);
 
   // Report actual state — differs from desired (drift!)
-  const driftedResult = hm.reportActualState('forge', 'thinkingDefault', 'medium');
+  const driftedResult = hm.reportActualState('agent-alpha', 'thinkingDefault', 'medium');
   assert(driftedResult === 'drifted', `Mismatched thinking drift: ${driftedResult}`);
 
   // Bulk report
-  const bulkDrift = hm.reportActualStateBulk('compass', {
+  const bulkDrift = hm.reportActualStateBulk('agent-beta', {
     model: 'anthropic/claude-opus-4-6',
     thinkingDefault: 'low',
   });
-  assert(bulkDrift.model === 'ok', `Compass model: ${bulkDrift.model}`);
-  assert(bulkDrift.thinkingDefault === 'drifted', `Compass thinking: ${bulkDrift.thinkingDefault}`);
+  assert(bulkDrift.model === 'ok', `Agent Beta model: ${bulkDrift.model}`);
+  assert(bulkDrift.thinkingDefault === 'drifted', `Agent Beta thinking: ${bulkDrift.thinkingDefault}`);
 
   // Fleet-wide drift view
   const drifted = hm.getDriftedState();
-  assert(drifted.length === 2, `Drifted entries: ${drifted.length} (forge thinking + compass thinking)`);
+  assert(drifted.length === 2, `Drifted entries: ${drifted.length} (agent-alpha thinking + agent-beta thinking)`);
 
   // Fleet-wide config key view
   const fleetModels = hm.getFleetConfigKey('model');
@@ -382,53 +384,54 @@ async function run() {
   assert(summary.total === 6, `Total: ${summary.total}`);
 
   // Update desired state and verify history
-  hm.setDesiredState('forge', 'model', 'anthropic/claude-sonnet-4-6', { setBy: 'ragesaq' });
-  const history = hm.getConfigHistory('forge', 'model');
+  hm.setDesiredState('agent-alpha', 'model', 'anthropic/claude-sonnet-4-6', { setBy: 'testuser' });
+  const history = hm.getConfigHistory('agent-alpha', 'model');
   assert(history.length === 2, `History events: ${history.length} (set + changed)`);
   assert(history[0].eventType === 'desired_changed', `Latest event: ${history[0].eventType}`);
 
   // ── Facts via Facade ──
   console.log('\n── Facts via Facade ──');
 
-  const fact = hm.addFact('forge', 'Redis 7.0.15 is running on the host', {
+  const fact = hm.addFact('agent-alpha', 'Redis 7.0.15 is running on the host', {
     domain: 'infrastructure',
     visibility: 'fleet',
-    sourceSessionKey: 'agent:forge:webchat:main',
+    sourceSessionKey: 'agent:agent-alpha:webchat:main',
   });
-  assert(fact.agentId === 'forge', 'Fact added via facade');
+  assert(fact.agentId === 'agent-alpha', 'Fact added via facade');
 
-  const facts = hm.getActiveFacts('forge');
+  const facts = hm.getActiveFacts('agent-alpha');
   assert(facts.length === 1, `Active facts: ${facts.length}`);
 
   // ── Knowledge via Facade ──
   console.log('\n── Knowledge via Facade ──');
 
-  hm.upsertKnowledge('forge', 'architecture', 'memory-layers',
+  hm.upsertKnowledge('agent-alpha', 'architecture', 'memory-layers',
     'L1 Redis, L2 messages.db, L3 vectors.db, L4 library.db');
-  const knowledge = hm.getKnowledge('forge');
+  const knowledge = hm.getKnowledge('agent-alpha');
   assert(knowledge.length === 1, `Knowledge entries: ${knowledge.length}`);
 
   // ── Topics via Facade ──
   console.log('\n── Topics via Facade ──');
 
-  hm.createTopic('forge', 'HyperMem Architecture', 'Four-layer memory architecture design');
-  const topics = hm.getActiveTopics('forge');
+  hm.createTopic('agent-alpha', 'HyperMem Architecture', 'Four-layer memory architecture design');
+  const topics = hm.getActiveTopics('agent-alpha');
   assert(topics.length === 1, `Active topics: ${topics.length}`);
 
   // ── Episodes via Facade ──
   console.log('\n── Episodes via Facade ──');
 
-  hm.recordEpisode('forge', 'architecture', 'Redesigned HyperMem to three-file split', {
+  hm.recordEpisode('agent-alpha', 'architecture', 'Redesigned HyperMem to three-file split', {
     significance: 0.9,
     visibility: 'council',
-    participants: ['forge', 'ragesaq'],
-    sessionKey: 'agent:forge:webchat:main',
+    participants: ['agent-alpha', 'testuser'],
+    sessionKey: 'agent:agent-alpha:webchat:main',
   });
-  const episodes = hm.getRecentEpisodes('forge');
+  const episodes = hm.getRecentEpisodes('agent-alpha');
   assert(episodes.length === 1, `Recent episodes: ${episodes.length}`);
 
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
+  await hm.redis.flushPrefix();
   await hm.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
   assert(true, 'Cleaned up');

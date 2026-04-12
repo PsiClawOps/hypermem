@@ -1,9 +1,9 @@
 /**
- * hypermem Message Store
+ * HyperMem Message Store
  *
  * CRUD operations for conversations and messages in SQLite.
  * All messages are stored in provider-neutral format.
- * This is the write-through layer: Redis → here.
+ * This is the write-through layer: hot cache → here.
  */
 
 import type { DatabaseSync } from 'node:sqlite';

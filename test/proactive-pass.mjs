@@ -34,6 +34,7 @@ let hm;
 async function setup() {
   hm = await HyperMem.create({
     dataDir: tmpDir,
+    redis: { host: '127.0.0.1', port: 6379, keyPrefix: 'hm_proactive_test:', sessionTTL: 60, flushInterval: 100 },
   });
 }
 
@@ -42,7 +43,7 @@ async function setup() {
  * Returns { db, convId } so tests can query directly.
  *
  * Message layout (201 messages, indices 0–200):
- *   - Indices 0–159: OUTSIDE tool decay window (cutoff = 200 - 40 = 160)
+ *   - Indices 0–119: OUTSIDE tool decay window (cutoff = 200 - 80 = 120)
  *     - 0: heartbeat (is_heartbeat=1) → noise sweep target
  *     - 1: "ok" (ack) → noise sweep target
  *     - 2: "👍" (ack) → noise sweep target
@@ -52,11 +53,11 @@ async function setup() {
  *     - 6–9: normal messages → NOT deleted
  *     - 10–19: messages with large tool_results (>2000 chars) → tool decay target
  *     - 20–24: messages with small tool_results (<2000 chars) → NOT decayed
- *     - 25–159: normal messages → NOT touched
- *   - Indices 160–179: INSIDE tool decay window, OUTSIDE noise sweep window
- *     - 160–164: normal messages → NOT touched
- *     - 165–174: messages with large tool_results → NOT decayed (in decay window)
- *     - 175–179: normal messages → NOT touched
+ *     - 25–119: normal messages → NOT touched
+ *   - Indices 120–179: INSIDE tool decay window, OUTSIDE noise sweep window
+ *     - 120–129: normal messages → NOT touched
+ *     - 130–139: messages with large tool_results → NOT decayed (in decay window)
+ *     - 140–179: normal messages → NOT touched
  *   - Indices 180–200: INSIDE recent window for both passes (cutoff = 200 - 20 = 180)
  *     - 180: heartbeat (is_heartbeat=1) → NOT deleted (in window)
  *     - 181: "ok" (ack) → NOT deleted (in window)
@@ -66,7 +67,7 @@ async function setup() {
  *
  * With maxIndex=200:
  *   - Noise sweep cutoff = 200 - 20 = 180, so indices < 180 are eligible
- *   - Tool decay cutoff = 200 - 40 = 160, so indices < 160 are eligible
+ *   - Tool decay cutoff = 200 - 80 = 120, so indices < 120 are eligible
  */
 function seedConversation(db, convId, agentId) {
   const LARGE_CONTENT = 'x'.repeat(600);  // >500 chars → triggers per-result truncation
@@ -100,7 +101,7 @@ function seedConversation(db, convId, agentId) {
 
   // 201 messages (indices 0–200). maxIndex=200.
   // Noise sweep cutoff = 200 - 20 = 180 (indices < 180 eligible)
-  // Tool decay cutoff  = 200 - 40 = 160 (indices < 160 eligible)
+  // Tool decay cutoff  = 200 - 80 = 120 (indices < 120 eligible)
   for (let i = 0; i <= 200; i++) {
     let textContent = `Normal message number ${i} with enough content to be significant.`;
     let toolResults = null;
@@ -121,7 +122,7 @@ function seedConversation(db, convId, agentId) {
     } else if (i === 5) {
       textContent = 'hi';
     } else if (i >= 10 && i <= 19) {
-      // Outside tool decay window (< 160) — large tool_results → decay targets
+      // Outside tool decay window (< 120) — large tool_results → decay targets
       textContent = null;
       toolResults = largeToolResults();
       role = 'tool';
@@ -130,8 +131,8 @@ function seedConversation(db, convId, agentId) {
       textContent = null;
       toolResults = smallToolResults();
       role = 'tool';
-    } else if (i >= 165 && i <= 174) {
-      // Inside tool decay window (>= 160) — large tool_results → NOT decayed
+    } else if (i >= 130 && i <= 139) {
+      // Inside tool decay window (>= 120) — large tool_results → NOT decayed
       textContent = null;
       toolResults = largeToolResults();
       role = 'tool';
@@ -231,11 +232,11 @@ async function testToolDecay() {
 
   const originalLarge = getToolResultsAtIndex(db, convId, 10);
   const originalSmall = getToolResultsAtIndex(db, convId, 20);
-  const originalInWindow = getToolResultsAtIndex(db, convId, 165);
+  const originalInWindow = getToolResultsAtIndex(db, convId, 133);
 
   assert(originalLarge !== null, 'Setup: large tool_results exist at idx 10');
   assert(originalSmall !== null, 'Setup: small tool_results exist at idx 20');
-  assert(originalInWindow !== null, 'Setup: large tool_results exist at idx 165 (in decay window)');
+  assert(originalInWindow !== null, 'Setup: large tool_results exist at idx 133 (in decay window)');
   assert(originalLarge.length > 2000, `Setup: large tool_results > 2000 chars (${originalLarge.length})`);
 
   const result = runToolDecay(db, convId);
@@ -268,8 +269,8 @@ async function testToolDecay() {
   const unchangedSmall = getToolResultsAtIndex(db, convId, 20);
   assert(unchangedSmall === originalSmall, 'Small tool_results at idx 20 unchanged (<2000 chars total)');
 
-  const unchangedInWindow = getToolResultsAtIndex(db, convId, 165);
-  assert(unchangedInWindow === originalInWindow, 'Large tool_results at idx 165 (inside decay window) unchanged');
+  const unchangedInWindow = getToolResultsAtIndex(db, convId, 133);
+  assert(unchangedInWindow === originalInWindow, 'Large tool_results at idx 133 (inside decay window) unchanged');
 
   assert(result.messagesUpdated === 10, `messagesUpdated = 10 (indices 10–19) (got ${result.messagesUpdated})`);
   assert(result.bytesFreed > 0, `bytesFreed > 0 (got ${result.bytesFreed})`);
@@ -375,7 +376,7 @@ async function testIndexerIntegration() {
   assert(beforeCount === 201, `Before tick: 201 messages (got ${beforeCount})`);
 
   const largeBefore = db.prepare(
-    `SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND message_index < 160 AND tool_results IS NOT NULL AND length(tool_results) > 2000`
+    `SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND message_index < 120 AND tool_results IS NOT NULL AND length(tool_results) > 2000`
   ).get(convId).n;
   assert(largeBefore === 10, `Before tick: 10 large tool_results outside decay window (got ${largeBefore})`);
 
@@ -395,7 +396,7 @@ async function testIndexerIntegration() {
   assert(afterCount === 195, `After tick: exactly 195 messages remain (got ${afterCount})`);
 
   const largeAfter = db.prepare(
-    `SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND message_index < 160 AND tool_results IS NOT NULL AND length(tool_results) > 2000`
+    `SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND message_index < 120 AND tool_results IS NOT NULL AND length(tool_results) > 2000`
   ).get(convId).n;
   assert(largeAfter === 0, `After tick: 0 large tool_results outside decay window (got ${largeAfter})`);
 

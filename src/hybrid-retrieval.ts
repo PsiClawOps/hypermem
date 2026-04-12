@@ -1,5 +1,5 @@
 /**
- * hypermem Hybrid Retrieval — FTS5 + KNN Score Fusion
+ * HyperMem Hybrid Retrieval — FTS5 + KNN Score Fusion
  *
  * Merges keyword (FTS5/BM25) and semantic (KNN/vector) results into a
  * single ranked list using Reciprocal Rank Fusion (RRF). This avoids
@@ -26,8 +26,6 @@ export interface HybridSearchResult {
   domain?: string;
   agentId?: string;
   metadata?: string;
-  /** ISO timestamp from source row — used for recency decay (TUNE-015) */
-  createdAt?: string;
   /** Combined RRF score (higher = more relevant) */
   score: number;
   /** Which retrieval paths contributed */
@@ -106,7 +104,6 @@ interface FtsResult {
   domain?: string;
   agentId?: string;
   metadata?: string;
-  createdAt?: string;
 }
 
 /**
@@ -214,7 +211,7 @@ function searchEpisodesFts(
     // SQLite uses the agent_id index to narrow first, then checks FTS5 membership.
     // Benchmarked: 2.3ms avg vs 8.5ms avg for the post-join approach (13k+ episodes).
     sql = `
-      SELECT e.id, 0 as rank, e.summary, e.event_type, e.agent_id, e.participants, e.created_at
+      SELECT e.id, 0 as rank, e.summary, e.event_type, e.agent_id, e.participants
       FROM episodes e
       WHERE e.agent_id = ?
         AND e.decay_score < 0.8
@@ -225,7 +222,7 @@ function searchEpisodesFts(
     params = [agentId, query, limit];
   } else {
     sql = `
-      SELECT e.id, sub.rank, e.summary, e.event_type, e.agent_id, e.participants, e.created_at
+      SELECT e.id, sub.rank, e.summary, e.event_type, e.agent_id, e.participants
       FROM (
         SELECT rowid, rank FROM episodes_fts WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?
       ) sub
@@ -237,7 +234,7 @@ function searchEpisodesFts(
   }
 
   const rows = db.prepare(sql).all(...params) as Array<{
-    id: number; rank: number; summary: string; event_type: string; agent_id: string; participants: string | null; created_at: string;
+    id: number; rank: number; summary: string; event_type: string; agent_id: string; participants: string | null;
   }>;
 
   return rows.map(r => ({
@@ -247,7 +244,6 @@ function searchEpisodesFts(
     domain: r.event_type,
     agentId: r.agent_id,
     metadata: r.participants || undefined,
-    createdAt: r.created_at || undefined,
   }));
 }
 
@@ -262,7 +258,6 @@ interface FusionEntry {
   domain?: string;
   agentId?: string;
   metadata?: string;
-  createdAt?: string;
   ftsRank?: number;       // Position in FTS result list (1-based)
   knnRank?: number;       // Position in KNN result list (1-based)
   knnDistance?: number;
@@ -391,7 +386,6 @@ export async function hybridSearch(
             domain: r.domain,
             agentId: r.agentId,
             metadata: r.metadata,
-            createdAt: r.createdAt,
             ftsRank: i + 1,
             score: 0,
             sources: ['fts'],
@@ -476,7 +470,6 @@ function toHybridResult(entry: FusionEntry): HybridSearchResult {
     domain: entry.domain,
     agentId: entry.agentId,
     metadata: entry.metadata,
-    createdAt: entry.createdAt,
     score: entry.score,
     sources: entry.sources,
   };

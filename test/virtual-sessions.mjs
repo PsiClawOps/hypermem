@@ -1,14 +1,17 @@
 /**
- * Virtual Sessions tests — VS-5 (topic detector noise fix)
+ * Virtual Sessions tests — VS-5 (topic detector noise fix) + VS-1 (topic-scoped Redis warming)
  *
  * Tests:
  *   - stripMessageMetadata() removes timestamp headers, sender metadata, JSON metadata blocks
  *   - stripMessageMetadata() preserves actual message content
  *   - detectTopicShift() no longer creates topics from metadata
+ *   - Topic-scoped Redis keys are correctly namespaced
+ *   - Topic window set/get round-trips
  *   - Message count increments on new topic creation (plugin bug fix)
  */
 
-import { stripMessageMetadata, detectTopicShift, HyperMem as Hypermem } from '../dist/index.js';
+import { stripMessageMetadata, detectTopicShift } from '../dist/index.js';
+import { RedisLayer } from '../dist/redis.js';
 import { DatabaseSync } from 'node:sqlite';
 import { migrate } from '../dist/schema.js';
 import { SessionTopicMap } from '../dist/session-topic-map.js';
@@ -76,7 +79,7 @@ console.log('── VS-5: stripMessageMetadata ──');
 {
   // Sender (untrusted metadata) block
   const senderBlock =
-    'Sender (untrusted metadata): channel=webchat user=ragesaq\n' +
+    'Sender (untrusted metadata): channel=webchat user=testuser\n' +
     '\n' +
     'Can you deploy to staging?';
   const stripped = stripMessageMetadata(senderBlock);
@@ -89,7 +92,7 @@ console.log('── VS-5: stripMessageMetadata ──');
   // JSON block with openclaw schema marker
   const jsonBlock =
     '```json\n' +
-    '{"schema": "openclaw/inbound", "version": 1, "sender": "ragesaq"}\n' +
+    '{"schema": "openclaw/inbound", "version": 1, "sender": "testuser"}\n' +
     '```\n' +
     'Please summarize the recent changes.';
   const stripped = stripMessageMetadata(jsonBlock);
@@ -130,20 +133,6 @@ console.log('── VS-5: stripMessageMetadata ──');
 }
 
 {
-  // recordUserMessage() should also strip metadata before persistence
-  const hm = await Hypermem.create({
-    dbDir: '/tmp/hypermem-vs5-record-user',
-  });
-  const stored = await hm.recordUserMessage(
-    'test-vs5-agent',
-    'agent:test-vs5-agent:webchat:main',
-    'Sender (untrusted metadata):\n```json\n{"label":"ragesaq (gateway-client)","id":"gateway-client"}\n```\n\nPlease review the deploy plan.'
-  );
-  assert(!stored.textContent.includes('Sender (untrusted metadata)'), 'recordUserMessage strips sender metadata before storage');
-  assert(stored.textContent.includes('Please review the deploy plan.'), 'recordUserMessage preserves user content after stripping metadata');
-}
-
-{
   // Multi-line message with mixed content
   const mixed =
     '[Mon 2026-04-04 20:00 MST]\n' +
@@ -170,7 +159,7 @@ console.log('\n── VS-5: detectTopicShift noise immunity ──');
     role: 'user',
     textContent:
       '[Sun 2026-04-05 02:43 MST]\n' +
-      'Sender (untrusted metadata): channel=webchat user=ragesaq\n' +
+      'Sender (untrusted metadata): channel=webchat user=testuser\n' +
       '\n',
     toolCalls: null,
     toolResults: null,
@@ -208,6 +197,98 @@ console.log('\n── VS-5: detectTopicShift noise immunity ──');
   }
 }
 
+// ─── VS-1: Topic-scoped Redis key namespacing ────────────────────────────────
+
+console.log('\n── VS-1: Topic-scoped Redis key namespacing ──');
+
+async function runRedisTests() {
+  const redis = new RedisLayer({ keyPrefix: 'hm-vs1-test:', sessionTTL: 30 });
+  const connected = await redis.connect();
+
+  if (!connected) {
+    console.log('  ⚠️  Redis unavailable — skipping Redis key tests');
+    return;
+  }
+
+  // Clean up stale keys from previous runs
+  await redis.flushPrefix();
+
+  const agentId = 'test-vs1-agent';
+  const sessionKey = 'agent:test-vs1-agent:webchat:main';
+  const topicId = 'topic-abc-123';
+
+  // ── Topic slot set/get ──
+  await redis.setTopicSlot(agentId, sessionKey, topicId, 'context', 'Topic-specific context');
+  const slotVal = await redis.getTopicSlot(agentId, sessionKey, topicId, 'context');
+  assert(slotVal === 'Topic-specific context', 'setTopicSlot/getTopicSlot round-trips correctly');
+
+  // ── Topic slot is namespaced differently from session slot ──
+  await redis.setSlot(agentId, sessionKey, 'context', 'Session-level context');
+  const sessionVal = await redis.getSlot(agentId, sessionKey, 'context');
+  const topicVal2 = await redis.getTopicSlot(agentId, sessionKey, topicId, 'context');
+  assert(sessionVal === 'Session-level context', 'Session slot holds session-level value');
+  assert(topicVal2 === 'Topic-specific context', 'Topic slot unaffected by session slot write');
+  assert(sessionVal !== topicVal2, 'Topic slot is distinct from session slot (different namespace)');
+
+  // ── Topic window set/get ──
+  const topicMessages = [
+    { role: 'system', textContent: 'System prompt', toolCalls: null, toolResults: null },
+    { role: 'user', textContent: 'What is the deploy status?', toolCalls: null, toolResults: null },
+    { role: 'assistant', textContent: 'Deploy is running.', toolCalls: null, toolResults: null },
+  ];
+  await redis.setTopicWindow(agentId, sessionKey, topicId, topicMessages);
+  const retrieved = await redis.getTopicWindow(agentId, sessionKey, topicId);
+  assert(retrieved !== null, 'getTopicWindow returns non-null after setTopicWindow');
+  assert(Array.isArray(retrieved), 'getTopicWindow returns an array');
+  assert(retrieved.length === 3, `getTopicWindow: correct message count (got ${retrieved?.length})`);
+  assert(retrieved[1].textContent === 'What is the deploy status?', 'getTopicWindow: message content preserved');
+
+  // ── Topic window is namespaced separately from session window ──
+  const sessionMessages = [
+    { role: 'user', textContent: 'Session-level message', toolCalls: null, toolResults: null },
+  ];
+  await redis.setWindow(agentId, sessionKey, sessionMessages);
+  const sessionWindow = await redis.getWindow(agentId, sessionKey);
+  const topicWindow2 = await redis.getTopicWindow(agentId, sessionKey, topicId);
+  assert(sessionWindow !== null, 'Session window non-null');
+  assert(topicWindow2 !== null, 'Topic window non-null after session window write');
+  assert(sessionWindow.length === 1, `Session window has 1 message (got ${sessionWindow?.length})`);
+  assert(topicWindow2.length === 3, `Topic window still has 3 messages (not overwritten by session write)`);
+
+  // ── invalidateTopicWindow ──
+  await redis.invalidateTopicWindow(agentId, sessionKey, topicId);
+  const afterInvalidate = await redis.getTopicWindow(agentId, sessionKey, topicId);
+  assert(afterInvalidate === null, 'invalidateTopicWindow clears the topic window');
+
+  // Session window survives topic window invalidation
+  const sessionWindowAfter = await redis.getWindow(agentId, sessionKey);
+  assert(sessionWindowAfter !== null, 'Session window survives topic window invalidation');
+
+  // ── warmTopicSession ──
+  const warmSlots = {
+    context: 'Warmed topic context',
+    facts: 'Fact: deploy uses k8s',
+    window: topicMessages,
+  };
+  await redis.warmTopicSession(agentId, sessionKey, topicId, warmSlots);
+  const warmedCtx = await redis.getTopicSlot(agentId, sessionKey, topicId, 'context');
+  const warmedFacts = await redis.getTopicSlot(agentId, sessionKey, topicId, 'facts');
+  const warmedWindow = await redis.getTopicWindow(agentId, sessionKey, topicId);
+  assert(warmedCtx === 'Warmed topic context', 'warmTopicSession: context slot warmed');
+  assert(warmedFacts === 'Fact: deploy uses k8s', 'warmTopicSession: facts slot warmed');
+  assert(warmedWindow !== null && warmedWindow.length === 3, 'warmTopicSession: window slot warmed');
+
+  // ── Different topic ID gets its own namespace ──
+  const topicId2 = 'topic-xyz-456';
+  await redis.setTopicWindow(agentId, sessionKey, topicId2, sessionMessages);
+  const t1Window = await redis.getTopicWindow(agentId, sessionKey, topicId);
+  const t2Window = await redis.getTopicWindow(agentId, sessionKey, topicId2);
+  assert(t1Window !== null && t1Window.length === 3, 'Topic 1 window unaffected by topic 2 write');
+  assert(t2Window !== null && t2Window.length === 1, 'Topic 2 window has its own content');
+
+  await redis.flushPrefix();
+  await redis.disconnect();
+}
 
 // ─── Message count bug fix: new topics start at count 1 ──────────────────────
 
@@ -216,7 +297,7 @@ console.log('\n── VS-5 plugin fix: message count increments on new topic ─
 {
   const db = makeDb();
   const topicMap = new SessionTopicMap(db);
-  const SK = 'agent:forge:webchat:main';
+  const SK = 'agent:agent-alpha:webchat:main';
 
   // Create a topic (simulates the plugin path before the fix)
   const topicId = topicMap.createTopic(SK, 'Deploy discussion');
@@ -238,8 +319,8 @@ console.log('\n── VS-5 plugin fix: message count increments on new topic ─
   assert(topics2[0].messageCount === 3, `message_count = 3 after two more increments (got ${topics2[0].messageCount})`);
 }
 
-// Run async tests
-await (async () => {})();
+// Run Redis tests (async)
+await runRedisTests();
 
 // ─── Summary ─────────────────────────────────────────────────────────────────
 

@@ -64,7 +64,7 @@ async function run() {
   console.log('  HyperMem Multi-Turn Session Validation');
   console.log('═══════════════════════════════════════════════════\n');
 
-  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+  const repoRoot = '/home/testuser/.openclaw/workspace/repo/hypermem';
   const realHome = process.env.HOME;
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-multi-turn-'));
   const dataDir = path.join(tmpHome, '.openclaw', 'hypermem');
@@ -89,6 +89,7 @@ async function run() {
     // ── Seed HyperMem with history ─────────────────────────────
     hm = await HyperMem.create({
       dataDir,
+      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm:mt:' },
     });
 
     hm.dbManager.ensureAgent(agentId, { displayName: 'Multi-Turn Test Agent', tier: 'test' });

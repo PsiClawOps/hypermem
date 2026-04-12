@@ -1,5 +1,5 @@
 /**
- * hypermem Database Manager
+ * HyperMem Database Manager
  *
  * Three-file architecture per agent:
  *   agents/{agentId}/messages.db  — write-heavy conversation log (rotatable)
@@ -15,7 +15,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { migrate } from './schema.js';
 import { migrateLibrary } from './library-schema.js';
-import { ENGINE_VERSION } from './version.js';
 
 // sqlite-vec extension loading — optional dependency
 import { createRequire } from 'node:module';
@@ -203,7 +202,7 @@ export class DatabaseManager {
     const dbPath = path.join(this.dataDir, 'library.db');
     this.libraryDb = new DatabaseSync(dbPath);
     applyPragmas(this.libraryDb);
-    migrateLibrary(this.libraryDb, ENGINE_VERSION);
+    migrateLibrary(this.libraryDb);
 
     return this.libraryDb;
   }

@@ -1,5 +1,5 @@
 /**
- * hypermem Core Types
+ * HyperMem Core Types
  *
  * Provider-neutral message format and compositor interfaces.
  * These types are the internal representation — never sent directly to an LLM.
@@ -15,7 +15,7 @@ export type MessageRole = 'user' | 'assistant' | 'system';
  * Stored as JSON in the tool_calls column.
  */
 export interface NeutralToolCall {
-  id: string;                    // hypermem-assigned ID (hm_xxxx), never provider-format
+  id: string;                    // HyperMem-assigned ID (hm_xxxx), never provider-format
   name: string;                  // tool/function name
   arguments: string;             // JSON string of arguments
 }
@@ -87,7 +87,7 @@ export type FactScope = 'agent' | 'session' | 'user';
 /**
  * Memory visibility levels:
  * - private:  Only the owning agent can read. Identity, SOUL, personal reflections.
- * - org:      Agents in the same org (e.g., Forge's directors: Pylon, Vigil, Plane).
+ * - org:      Agents in the same org (e.g., a lead's direct reports).
  * - council:  All council seats can read.
  * - fleet:    Any agent in the fleet can read.
  */
@@ -118,8 +118,8 @@ export interface CrossAgentQuery {
 export interface AgentIdentity {
   agentId: string;
   tier: 'council' | 'director' | 'specialist' | 'worker';
-  org?: string;         // e.g., 'forge-org', 'compass-org', 'sentinel-org'
-  councilLead?: string; // director's council lead, e.g., 'forge' for Pylon
+  org?: string;         // e.g., 'infra-org', 'security-org'
+  councilLead?: string; // director's council lead, e.g., 'infra' for a director agent
 }
 
 export interface Fact {
@@ -219,10 +219,6 @@ export interface ComposeRequest {
   includeFacts?: boolean;
   includeContext?: boolean;
   includeLibrary?: boolean;
-  /** When false, skip semantic recall (vector search + FTS hybrid). Default: true. */
-  includeSemanticRecall?: boolean;
-  /** When false, skip keystone history injection (within-session + cross-topic). Default: true. */
-  includeKeystones?: boolean;
   /**
    * The current-turn prompt text. Used as the retrieval query for semantic recall
    * and doc chunk trigger matching. When provided, this is preferred over reading
@@ -253,12 +249,6 @@ export interface ComposeRequest {
    * P3.4: topic-aware compositor.
    */
   topicId?: string;
-  /**
-   * When true, skip the C4 window cache fast-exit even if the cursor is fresh.
-   * Use this when external L4 state changed between turns, for example facts,
-   * wiki pages, or other library-backed context updated out of band.
-   */
-  skipWindowCache?: boolean;
 }
 
 export interface SlotTokenCounts {
@@ -297,20 +287,6 @@ export interface ComposeDiagnostics {
   retrievalMode: 'triggered' | 'fallback_knn' | 'fallback_fts' | 'none';
   /** Number of cross-topic keystone messages injected (P3.5) */
   crossTopicKeystones?: number;
-  /** Actual reserve fraction used this compose (base or dynamic) */
-  reserveFraction?: number;
-  /** Estimated average turn cost (tokens) used in dynamic reserve calc */
-  avgTurnCostTokens?: number;
-  /** True if dynamic reserve exceeded floor and is actively adjusting budget */
-  dynamicReserveActive?: boolean;
-  /** True if dynamic reserve was clamped at dynamicReserveMax and SESSION_PRESSURE_HIGH emitted */
-  sessionPressureHigh?: boolean;
-  /** Number of items filtered across all dedup paths (temporal, open-domain, semantic, cross-session) */
-  fingerprintDedups?: number;
-  /** Number of duplicate-prefix matches where the full normalized content differed */
-  fingerprintCollisions?: number;
-  /** True when the window cache fast-exit fired and full compose was skipped */
-  windowCacheHit?: boolean;
 }
 
 export interface ComposeResult {
@@ -350,8 +326,8 @@ export interface ProviderMessage {
  * Written by compose() after every assembly, read by the background indexer
  * to identify high-signal unprocessed messages.
  *
- * Stored in Redis (hm:{a}:s:{s}:cursor) with dual-write to SQLite for
- * durability across Redis eviction (Compass Gate 2).
+ * Stored in cache (hm:{a}:s:{s}:cursor) with dual-write to SQLite for
+ * durability across cache eviction.
  */
 export interface SessionCursor {
   /** StoredMessage.id of the newest message included in the last window */
@@ -366,7 +342,7 @@ export interface SessionCursor {
   tokenCount: number;
 }
 
-// ─── Redis Slot Types ────────────────────────────────────────────
+// ─── Cache Slot Types ────────────────────────────────────────────
 
 export interface SessionSlots {
   system: string | null;
@@ -398,50 +374,18 @@ export interface HyperMemConfig {
   compositor: CompositorConfig;
   indexer: IndexerConfig;
   embedding: EmbeddingProviderConfig;
-  /** Optional dreaming/promotion config. Default: disabled. */
-  dreaming?: import('./dreaming-promoter.js').DreamerConfig;
-  /** Optional Obsidian vault integration. Default: disabled. */
-  obsidian?: import('./obsidian-watcher.js').ObsidianConfig;
-  /**
-   * Cache replay threshold (ms). When > 0, assemble() returns a cached
-   * contextBlock (systemPromptAddition) for sessions active within this
-   * window, producing byte-identical prompts and hitting provider prefix cache
-   * (Anthropic / OpenAI). Set to 0 to disable.
-   * Default: 900_000 (15 minutes).
-   */
-  warmCacheReplayThresholdMs?: number;
 }
 
 export interface EmbeddingProviderConfig {
-  /**
-   * Embedding provider. Default: 'ollama'.
-   * - 'ollama': local Ollama (nomic-embed-text or any pulled model)
-   * - 'openai': OpenAI Embeddings API (text-embedding-3-small / 3-large)
-   */
-  provider?: 'ollama' | 'openai';
   /** Ollama base URL. Default: http://localhost:11434 */
   ollamaUrl: string;
-  /** OpenAI API key. Required when provider is 'openai'. */
-  openaiApiKey?: string;
-  /** OpenAI base URL. Default: https://api.openai.com/v1 */
-  openaiBaseUrl?: string;
-  /**
-   * Embedding model name.
-   * - ollama default: nomic-embed-text (768d)
-   * - openai default: text-embedding-3-small (1536d)
-   */
+  /** Embedding model name. Default: nomic-embed-text */
   model: string;
-  /**
-   * Embedding dimensions. Must match the model.
-   * - nomic-embed-text: 768
-   * - text-embedding-3-small: 1536
-   * - text-embedding-3-large: 3072
-   * WARNING: changing providers requires a full re-index (dimensions are incompatible).
-   */
+  /** Embedding dimensions. Default: 768 */
   dimensions: number;
   /** Request timeout ms. Default: 10000 */
   timeout: number;
-  /** Max texts per batch request. Default: 32 (ollama) or 128 (openai) */
+  /** Max texts per batch request. Default: 32 */
   batchSize: number;
 }
 
@@ -455,53 +399,10 @@ export interface CacheConfig {
 export type RedisConfig = CacheConfig;
 
 export interface CompositorConfig {
-  /**
-   * Fraction of the detected context window to use as the input token budget.
-   * The effective budget is: detectedContextWindow × budgetFraction.
-   * reserveFraction is then subtracted for output/tool-call headroom.
-   *
-   * Range: 0.3–0.85. Default: 0.70
-   */
-  budgetFraction?: number;
-  /**
-   * Fraction of the total token budget to reserve for model output and tool
-   * call responses. Higher = more headroom for large tool results.
-   *
-   * Range: 0.10–0.50. Default: 0.25
-   */
-  reserveFraction?: number;
-  /**
-   * Fraction of the effective token budget (post-reserve) allocated to
-   * conversation history. History fills up to this cap before context slots run.
-   *
-   * Range: 0.20–0.60. Default: 0.40
-   */
-  historyFraction?: number;
-  /**
-   * Fraction of the effective token budget (post-reserve) allocated to the
-   * memory pool: facts, wiki, semantic recall, cross-session context, and
-   * trigger-fired doc chunks all draw from this shared pool.
-   *
-   * Range: 0.20–0.70. Default: 0.45
-   * Note: historyFraction + memoryFraction should be ≤ 0.90 to leave room
-   * for fixed-cost slots (system, identity, HyperForm: typically 3–8k tokens).
-   */
-  memoryFraction?: number;
-  /**
-   * @deprecated Use budgetFraction instead. Absolute token fallback used when
-   * model detection fails and budgetFraction is not set.
-   */
   defaultTokenBudget: number;
   maxHistoryMessages: number;
-  /** @advanced Replaced by memoryFraction for primary tuning. Hard per-fetch fact count cap. */
   maxFacts: number;
   maxCrossSessionContext: number;  // tokens
-  /**
-   * @advanced Aggregate token ceiling across all trigger-fired doc chunk
-   * collections in a single compose pass. When unset, draws from the memoryFraction
-   * pool. Rarely needs manual tuning.
-   */
-  maxTotalTriggerTokens?: number;
   /**
    * How many recent tool call/result pairs to keep verbatim in history.
    * Tool call/result content beyond this threshold gets prose-stub treatment.
@@ -522,30 +423,6 @@ export interface CompositorConfig {
    */
   warmHistoryBudgetFraction: number;
   /**
-   * @advanced Use reserveFraction instead.
-   * Fraction of the model context window to reserve for output tokens.
-   * Falls back to reserveFraction when set. Default: 0.25
-   */
-  contextWindowReserve?: number;
-  /**
-   * Number of turns to project forward when computing dynamic reserve.
-   * safety_tokens = avg_turn_cost × dynamicReserveTurnHorizon
-   * Default: 5
-   */
-  dynamicReserveTurnHorizon?: number;
-  /**
-   * Hard ceiling on the dynamic reserve fraction. When the projected safety
-   * tokens would push reserve above this, SESSION_PRESSURE_HIGH is emitted
-   * in diagnostics and reserve is clamped here.
-   * Default: 0.50
-   */
-  dynamicReserveMax?: number;
-  /**
-   * Kill switch for dynamic reserve. Set false to use fixed contextWindowReserve only.
-   * Default: true
-   */
-  dynamicReserveEnabled?: boolean;
-  /**
    * Fraction of history token budget to allocate for keystone (recalled older) messages.
    * Range: 0.0–0.5. Default: 0.2 (20% of history budget).
    * Set to 0 to disable keystone injection.
@@ -562,57 +439,10 @@ export interface CompositorConfig {
    * Default: 0.5
    */
   keystoneMinSignificance?: number;
-  /**
-   * @advanced Use memoryFraction instead.
-   * Fraction of the effective budget to target for context assembly.
-   * Honored as a fallback when memoryFraction is not set.
-   * Range: 0.3–0.85. Default: 0.65
-   */
-  targetBudgetFraction?: number;
-  /**
-   * Enable Fleet Output Standard (FOS) injection.
-   * FOS injects shared output rules (no em dashes, lead with answer, etc.) into
-   * every composed context. Disable if the operator manages output standards
-   * externally (e.g. via system prompt) to avoid redundancy.
-   * Default: true
-   */
-  enableFOS?: boolean;
-  /**
-   * Enable Model Output Directive (MOD) injection.
-   * MOD injects per-model calibration corrections (verbosity, list length, etc.).
-   * Disable if you want raw model behavior without hypermem calibration.
-   * Default: true
-   */
-  enableMOD?: boolean;
-  /**
-   * HyperForm output shaping profile. Controls what FOS/MOD content is injected.
-   *
-   * 'light'    — ~100 token standalone directives. No MOD, no fleet concepts.
-   * 'standard' — Full FOS: density targets, format rules, compression ratios.
-   * 'full'     — FOS + MOD. Cross-agent coordination, full spec.
-   *
-   * Backward compat: 'starter' maps to 'light', 'fleet' maps to 'full'.
-   * Default: 'full' (backward-compatible). New install default: 'light'.
-   */
-  hyperformProfile?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
-  /** @deprecated Use hyperformProfile */
-  outputProfile?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
-  /** @deprecated Use hyperformProfile */
-  outputStandard?: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
-  /**
-   * Hard token ceiling for wiki page injection per compose pass.
-   * Limits how much synthesized topic knowledge is inserted into context.
-   * Lower values keep context lighter; higher values surface more topic depth.
-   *
-   * Default: 600 tokens
-   * Light preset: 300 tokens
-   * Extended preset: 800 tokens
-   */
-  wikiTokenCap?: number;
   // Note: assembly order is fixed in compose() — system, identity, history,
   // facts, knowledge, preferences, semanticRecall, cross-session, library.
   //
-  // History trimming strategy: Redis stores up to maxHistoryMessages (default 1000).
+  // History trimming strategy: the hot cache stores up to maxHistoryMessages (default 1000).
   // Budget-based trimming happens at compose time, not storage time.
   // This ensures the compositor always has access to the full recent window
   // and can make intelligent decisions about what to include.
@@ -626,6 +456,4 @@ export interface IndexerConfig {
   factDecayRate: number;
   episodeSignificanceThreshold: number;
   periodicInterval: number;    // milliseconds
-  batchSize: number;           // messages per indexer tick
-  maxMessagesPerTick: number;  // total messages processed per tick (all agents)
 }

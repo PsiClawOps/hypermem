@@ -1,5 +1,5 @@
 /**
- * hypermem Document Chunk Store
+ * HyperMem Document Chunk Store
  *
  * Manages doc_chunks in library.db:
  * - Atomic re-indexing by source hash (no stale/fresh coexistence)

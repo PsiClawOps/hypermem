@@ -18,8 +18,10 @@ async function setup() {
   fs.mkdirSync(testDir, { recursive: true });
   hm = await HyperMem.create({
     dataDir: testDir,
+    redis: { host: '127.0.0.1', port: 6379, keyPrefix: 'hm_test:', sessionTTL: 60, flushInterval: 100 },
   });
   console.log('✅ HyperMem created');
+  console.log(`   Redis: ${hm.redis.isConnected ? 'connected' : 'unavailable (SQLite-only mode)'}`);
   console.log(`   Data dir: ${testDir}`);
 }
 

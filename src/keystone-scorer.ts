@@ -1,5 +1,5 @@
 /**
- * hypermem Keystone Scorer
+ * HyperMem Keystone Scorer
  *
  * Scores message candidates for inclusion in the Keystone History Slot (P2.1).
  * A "keystone" is an older, high-signal message that provides critical context

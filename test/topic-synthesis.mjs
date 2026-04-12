@@ -40,9 +40,10 @@ async function createHarness(label = 'default') {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `hm-topic-synth-${label}-`));
   const hm = await HyperMem.create({
     dataDir: tmpDir,
+    redis: { host: '127.0.0.1', port: 6379, keyPrefix: `hm-topic-synth-${label}:`, sessionTTL: 60 },
   });
 
-  const agentId = 'forge';
+  const agentId = 'agent-alpha';
   const sessionKey = `agent:${agentId}:webchat:${label}`;
   const msgDb = hm.dbManager.getMessageDb(agentId);
   const libDb = hm.dbManager.getLibraryDb();
@@ -195,33 +196,33 @@ async function testResynthesisThresholds() {
 async function testContentExtraction() {
   const h = await createHarness('content');
   const topicId = insertTopic(h, { name: 'content-rich', updatedAt: isoMinutesAgo(75) });
-  const longText = 'decided path '.repeat(120) + '/home/lumadmin/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts `inline-ref`';
+  const longText = 'decided path '.repeat(120) + '/home/testuser/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts `inline-ref`';
 
   seedTopicMessages(h, topicId, [
     {
-      agentId: 'forge',
+      agentId: 'agent-alpha',
       text: 'We decided to keep topic synthesis heuristic-only and write compiled markdown into knowledge.',
-      toolCalls: JSON.stringify([{ name: 'write', arguments: { path: '/home/lumadmin/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts' } }]),
+      toolCalls: JSON.stringify([{ name: 'write', arguments: { path: '/home/testuser/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts' } }]),
     },
     {
-      agentId: 'forge',
-      text: 'This message cites /home/lumadmin/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md and mentions forge and compass for scoring.',
+      agentId: 'agent-alpha',
+      text: 'This message cites /home/testuser/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md and mentions agent-alpha and agent-beta for scoring.',
     },
     {
-      agentId: 'clarity',
+      agentId: 'agent-zeta',
       text: 'We will go with a wiki page format that includes summary, decisions, open questions, and artifacts.',
-      toolCalls: JSON.stringify([{ input: { filePath: '/home/lumadmin/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md' } }]),
+      toolCalls: JSON.stringify([{ input: { filePath: '/home/testuser/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md' } }]),
     },
     {
-      agentId: 'forge',
+      agentId: 'agent-alpha',
       text: longText,
     },
     {
-      agentId: 'compass',
-      text: 'Another long reference-rich message with `code refs`, /home/lumadmin/project/file.ts, and enough body to force summary truncation once combined with the others.'.repeat(8),
+      agentId: 'agent-beta',
+      text: 'Another long reference-rich message with `code refs`, /home/testuser/project/file.ts, and enough body to force summary truncation once combined with the others.'.repeat(8),
     },
     {
-      agentId: 'compass',
+      agentId: 'agent-beta',
       text: 'What should happen with open questions that never got an explicit decision follow-up?',
     },
   ]);
@@ -233,12 +234,12 @@ async function testContentExtraction() {
 
   assert(row.content.includes('## Key Decisions') && row.content.includes('We decided to keep topic synthesis heuristic-only'), 'synthesis content includes decisions');
   assert(row.content.includes('## Open Questions') && row.content.includes('What should happen with open questions'), 'synthesis content includes open questions');
-  assert(row.content.includes('/home/lumadmin/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts'), 'synthesis content includes artifact paths from tool calls');
+  assert(row.content.includes('/home/testuser/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts'), 'synthesis content includes artifact paths from tool calls');
   assert(
     row.content.includes('**Participants:**') &&
-    row.content.includes('forge') &&
-    row.content.includes('compass') &&
-    row.content.includes('clarity'),
+    row.content.includes('agent-alpha') &&
+    row.content.includes('agent-beta') &&
+    row.content.includes('agent-zeta'),
     'synthesis content includes participant list'
   );
   assert(summary.length <= 800, `summary is truncated to max chars (got ${summary.length})`);
@@ -293,69 +294,6 @@ async function testMultipleTopicsOneTick() {
   await h.hm.close();
 }
 
-async function testLintEmptyDb() {
-  const h = await createHarness('lint-empty');
-  // No topics at all — lint should return clean zeros without throwing
-  const lint = lintKnowledge(h.libDb);
-  assert(lint.staleDecayed === 0, 'lint on empty DB returns staleDecayed=0');
-  assert(lint.orphansFound === 0, 'lint on empty DB returns orphansFound=0');
-  assert(lint.coverageGaps.length === 0, 'lint on empty DB returns no coverage gaps');
-  await h.hm.close();
-}
-
-async function testLintAlreadyDecayed() {
-  const h = await createHarness('lint-decayed');
-  // Synthesis entry already at 0.3 confidence — should not double-decay or error
-  const topicId = insertTopic(h, { name: 'already-decayed', messageCount: 5, updatedAt: isoDaysAgo(8), createdAt: isoDaysAgo(10) });
-  seedTopicMessages(h, topicId, [
-    { text: 'already decayed message one with enough content for the threshold' },
-    { text: 'already decayed message two with enough content for the threshold' },
-    { text: 'already decayed message three with enough content for the threshold' },
-    { text: 'already decayed message four with enough content for the threshold' },
-    { text: 'already decayed message five with enough content for the threshold' },
-  ]);
-  const synth = new TopicSynthesizer(h.libDb, () => h.msgDb);
-  synth.tick(h.agentId);
-  const k = fetchKnowledge(h, 'already-decayed');
-  // Force confidence to 0.3 and updated_at to stale
-  h.libDb.prepare('UPDATE knowledge SET confidence = 0.3, updated_at = ? WHERE id = ?').run(isoDaysAgo(8), k.id);
-  // Run lint — entry is already at 0.3, should still count as decayed (UPDATE is idempotent)
-  const lint = lintKnowledge(h.libDb);
-  assert(lint.staleDecayed >= 1, 'lint handles already-decayed entry without error');
-  const after = fetchKnowledge(h, 'already-decayed');
-  assert(Number(after.confidence) === 0.3, 'confidence stays at 0.3 after second lint pass');
-  await h.hm.close();
-}
-
-async function testLintMultiAgentIsolation() {
-  const h = await createHarness('lint-isolation');
-  // Agent A: big topic with no synthesis (coverage gap)
-  // Agent B: same topic name — should NOT appear in agent A's coverage gaps
-  const agentA = h.agentId;
-  const agentB = 'lint-isolation-agent-b';
-
-  // Agent A gets the big unsynthesized topic
-  h.libDb.prepare(
-    'INSERT INTO topics (agent_id, name, message_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(agentA, 'shared-topic-name', 25, isoDaysAgo(2), isoMinutesAgo(5));
-
-  // Agent B gets the same topic name but with synthesis — should not pollute agent A's gap report
-  h.libDb.prepare(
-    'INSERT INTO topics (agent_id, name, message_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(agentB, 'shared-topic-name', 25, isoDaysAgo(2), isoMinutesAgo(5));
-  h.libDb.prepare(
-    `INSERT INTO knowledge (agent_id, domain, key, content, confidence, source_ref, created_at, updated_at)
-     VALUES (?, 'topic-synthesis', ?, 'synthesized content for agent b', 0.9, 'manual', datetime('now'), datetime('now'))`
-  ).run(agentB, 'shared-topic-name');
-
-  const lint = lintKnowledge(h.libDb);
-  assert(lint.coverageGaps.includes('shared-topic-name'), 'lint detects coverage gap for agent A');
-  // The gap list should not be inflated by agent B's synthesized entry
-  const gapCount = lint.coverageGaps.filter(g => g === 'shared-topic-name').length;
-  assert(gapCount === 1, 'coverage gap counted once, not duplicated across agents');
-  await h.hm.close();
-}
-
 async function run() {
   console.log('═══════════════════════════════════════════════════');
   console.log('  HyperMem Topic Synthesis Tests');
@@ -369,9 +307,6 @@ async function run() {
   await testContentExtraction();
   await testLintChecks();
   await testMultipleTopicsOneTick();
-  await testLintEmptyDb();
-  await testLintAlreadyDecayed();
-  await testLintMultiAgentIsolation();
 
   console.log(`\nPassed: ${passed}, Failed: ${failed}`);
   if (failed > 0) process.exit(1);

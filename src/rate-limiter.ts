@@ -1,5 +1,5 @@
 /**
- * hypermem Rate Limiter
+ * HyperMem Rate Limiter
  *
  * Token-bucket rate limiter for embedding API calls.
  * Prevents hammering Ollama during bulk indexing.

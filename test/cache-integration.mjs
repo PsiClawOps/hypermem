@@ -1,8 +1,8 @@
 /**
- * Redis integration test — exercises Redis-specific paths:
- * - Session warming (SQLite → Redis)
+ * Cache integration test — exercises cache-specific paths:
+ * - Session warming (SQLite → cache)
  * - Slot management (set/get/clear)
- * - Graceful degradation when Redis is down
+ * - Graceful degradation when cache is unavailable
  * - Cross-session compositor queries
  * - Extended memory stores (facts, knowledge, topics, episodes)
  * - Provider translation round-trip
@@ -13,7 +13,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-redis-test-'));
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cache-test-'));
 
 let passed = 0;
 let failed = 0;
@@ -30,7 +30,7 @@ function assert(condition, msg) {
 
 async function run() {
   console.log('═══════════════════════════════════════════════════');
-  console.log('  HyperMem Redis Integration Test');
+  console.log('  HyperMem Cache Integration Test');
   console.log('═══════════════════════════════════════════════════\n');
 
   let hm;
@@ -38,23 +38,23 @@ async function run() {
     // ── Create instance with Redis ──
     hm = await HyperMem.create({
       dataDir: tmpDir,
-      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm-test:', sessionTTL: 60 },
+      cache: { keyPrefix: 'hm-test:', sessionTTL: 60, historyTTL: 86400 },
     });
 
-    assert(hm.redis != null, 'Redis layer initialized');
+    assert(hm.redis != null, 'Cache layer initialized');
 
     // Clean up stale keys from previous runs
-    const flushed = await hm.redis.flushPrefix();
-    if (flushed > 0) console.log(`  🧹 Cleaned ${flushed} stale Redis keys`);
+    const flushed = await hm.cache.flushPrefix();
+    if (flushed > 0) console.log(`  🧹 Cleaned ${flushed} stale cache keys`);
 
-    const agentId = 'test-forge';
-    const sessionKey1 = 'agent:test-forge:webchat:main';
-    const sessionKey2 = 'agent:test-forge:discord:general';
+    const agentId = 'test-agent-alpha';
+    const sessionKey1 = 'agent:test-agent-alpha:webchat:main';
+    const sessionKey2 = 'agent:test-agent-alpha:discord:general';
 
     // ── Record messages across two sessions ──
     console.log('\n── Recording messages across sessions ──');
 
-    hm.dbManager.ensureAgent(agentId, { displayName: 'Test Forge', tier: 'council' });
+    hm.dbManager.ensureAgent(agentId, { displayName: 'Test Agent Alpha', tier: 'council' });
 
     await hm.recordUserMessage(agentId, sessionKey1, 'Deploy the new service to staging', {
       channelType: 'webchat', provider: 'anthropic',
@@ -64,7 +64,7 @@ async function run() {
       textContent: 'I\'ll deploy the service to staging. Running preflight checks first.',
       toolCalls: null, toolResults: null,
     });
-    await hm.recordUserMessage(agentId, sessionKey1, 'Check if Redis is configured', {
+    await hm.recordUserMessage(agentId, sessionKey1, 'Check if cache is configured', {
       channelType: 'webchat', provider: 'anthropic',
     });
 
@@ -79,7 +79,7 @@ async function run() {
 
     assert(true, 'Recorded 5 messages across 2 sessions');
 
-    // ── Composition with Redis ──
+    // ── Composition with cache ──
     console.log('\n── Composition ──');
 
     const result1 = await hm.compose({
@@ -96,14 +96,14 @@ async function run() {
     });
     assert(result2.messages.length >= 2, `Session 2 compose: ≥2 messages (got ${result2.messages.length})`);
 
-    // ── Redis history limit passthrough ──
-    console.log('\n── Redis history limit passthrough ──');
+    // ── Cache history limit passthrough ──
+    console.log('\n── Cache history limit passthrough ──');
 
-    const limitedRedisHistory = await hm.redis.getHistory(agentId, sessionKey1, 2);
-    assert(limitedRedisHistory.length === 2, `Redis getHistory(limit=2): 2 messages (got ${limitedRedisHistory.length})`);
-    assert(limitedRedisHistory[0]?.textContent?.includes('preflight checks')
-      && limitedRedisHistory[1]?.textContent?.includes('Check if Redis is configured'),
-      'Redis getHistory(limit) returns last 2 messages in chronological order');
+    const limitedCacheHistory = await hm.cache.getHistory(agentId, sessionKey1, 2);
+    assert(limitedCacheHistory.length === 2, `Cache getHistory(limit=2): 2 messages (got ${limitedCacheHistory.length})`);
+    assert(limitedCacheHistory[0]?.textContent?.includes('preflight checks')
+      && limitedCacheHistory[1]?.textContent?.includes('Check if cache is configured'),
+      'Cache getHistory(limit) returns last 2 messages in chronological order');
 
     const limitedCompose = await hm.compose({
       agentId, sessionKey: sessionKey1, tokenBudget: 4000,
@@ -113,23 +113,23 @@ async function run() {
     });
     const limitedNonSystem = limitedCompose.messages.filter(m => m.role !== 'system');
     assert(limitedNonSystem.length === 2,
-      `Compose historyDepth=2 on hot Redis session returns 2 non-system messages (got ${limitedNonSystem.length})`);
+      `Compose historyDepth=2 on hot cache session returns 2 non-system messages (got ${limitedNonSystem.length})`);
 
     // ── Session warming test ──
     console.log('\n── Session warming (simulate cold start) ──');
 
-    const hotBeforeEvict = await hm.redis.sessionExists(agentId, sessionKey1);
+    const hotBeforeEvict = await hm.cache.sessionExists(agentId, sessionKey1);
     assert(hotBeforeEvict, 'sessionExists=true before evict');
 
-    // Clear Redis to simulate cold start
-    await hm.redis.evictSession(agentId, sessionKey1);
+    // Clear cache to simulate cold start
+    await hm.cache.evictSession(agentId, sessionKey1);
 
-    const isCleared = !(await hm.redis.sessionExists(agentId, sessionKey1));
+    const isCleared = !(await hm.cache.sessionExists(agentId, sessionKey1));
     assert(isCleared, 'sessionExists=false after evict (simulated cold start)');
 
     // Warm from SQLite
     await hm.warm(agentId, sessionKey1);
-    assert(await hm.redis.sessionExists(agentId, sessionKey1), 'sessionExists=true after warm');
+    assert(await hm.cache.sessionExists(agentId, sessionKey1), 'sessionExists=true after warm');
 
     // Verify warming restored the data
     const warmedResult = await hm.compose({
@@ -138,17 +138,17 @@ async function run() {
     });
     assert(warmedResult.messages.length >= 3, `Warmed session: ≥3 messages (got ${warmedResult.messages.length})`);
 
-    const warmedHistory = await hm.redis.getHistory(agentId, sessionKey1);
+    const warmedHistory = await hm.cache.getHistory(agentId, sessionKey1);
     await hm.warm(agentId, sessionKey1);
-    const rewarmedHistory = await hm.redis.getHistory(agentId, sessionKey1);
+    const rewarmedHistory = await hm.cache.getHistory(agentId, sessionKey1);
     assert(rewarmedHistory.length === warmedHistory.length,
-      `Repeated warm does not duplicate Redis history (${warmedHistory.length} -> ${rewarmedHistory.length})`);
+      `Repeated warm does not duplicate cache history (${warmedHistory.length} -> ${rewarmedHistory.length})`);
 
     // ── Window cache test ──
     console.log('\n── Window cache (setWindow / getWindow / invalidateWindow) ──');
 
     // Before compose, window should be null (evicted session was re-warmed)
-    const preComposeWindow = await hm.redis.getWindow(agentId, sessionKey1);
+    const preComposeWindow = await hm.cache.getWindow(agentId, sessionKey1);
     // compose() writes the window, so after our warmedResult call above it should exist
     // Let's compose fresh and check
     const windowTestResult = await hm.compose({
@@ -156,15 +156,15 @@ async function run() {
       provider: 'anthropic', model: 'claude-opus-4-6',
       includeFacts: false, includeContext: false, includeLibrary: false, includeDocChunks: false,
     });
-    const cachedWindow = await hm.redis.getWindow(agentId, sessionKey1);
+    const cachedWindow = await hm.cache.getWindow(agentId, sessionKey1);
     assert(cachedWindow !== null, 'Window cache populated after compose()');
     assert(Array.isArray(cachedWindow), 'Window cache is an array');
     assert(cachedWindow.length === windowTestResult.messages.length,
       `Window cache length matches compose output (${cachedWindow.length} === ${windowTestResult.messages.length})`);
 
     // Invalidate and verify
-    await hm.redis.invalidateWindow(agentId, sessionKey1);
-    const afterInvalidate = await hm.redis.getWindow(agentId, sessionKey1);
+    await hm.cache.invalidateWindow(agentId, sessionKey1);
+    const afterInvalidate = await hm.cache.getWindow(agentId, sessionKey1);
     assert(afterInvalidate === null, 'Window cache null after invalidateWindow()');
 
     // ── Session cursor test ──
@@ -176,7 +176,7 @@ async function run() {
       provider: 'anthropic', model: 'claude-opus-4-6',
       includeFacts: false, includeContext: false, includeLibrary: false, includeDocChunks: false,
     });
-    const cursor = await hm.redis.getCursor(agentId, sessionKey1);
+    const cursor = await hm.cache.getCursor(agentId, sessionKey1);
     assert(cursor !== null, 'Cursor written after compose()');
     assert(typeof cursor.lastSentId === 'number', 'cursor.lastSentId is a number');
     assert(typeof cursor.lastSentIndex === 'number', 'cursor.lastSentIndex is a number');
@@ -185,7 +185,7 @@ async function run() {
     assert(cursor.tokenCount > 0, `cursor.tokenCount > 0 (got ${cursor.tokenCount})`);
 
     // Cursor survives across compose() calls (refreshed, not destroyed)
-    const cursor2 = await hm.redis.getCursor(agentId, sessionKey1);
+    const cursor2 = await hm.cache.getCursor(agentId, sessionKey1);
     assert(cursor2.lastSentId === cursor.lastSentId, 'Cursor stable across reads (same lastSentId)');
 
     // ── Cross-session query ──
@@ -206,7 +206,7 @@ async function run() {
     hm.addFact(agentId, 'Staging environment uses Kubernetes', {
       domain: 'infrastructure', confidence: 0.95,
     });
-    hm.addFact(agentId, 'Redis version is 7.0.15', {
+    hm.addFact(agentId, 'Cache layer version is 1.0', {
       domain: 'infrastructure', confidence: 1.0,
     });
     const facts = hm.getActiveFacts(agentId);
@@ -226,9 +226,9 @@ async function run() {
     assert(topics.length === 1, `1 topic tracked (got ${topics.length})`);
 
     // Episodes
-    hm.recordEpisode(agentId, 'deployment', 'Forge began staging deployment with preflight checks.', {
+    hm.recordEpisode(agentId, 'deployment', 'Agent Alpha began staging deployment with preflight checks.', {
       significance: 7,
-      participants: ['ragesaq', 'forge'],
+      participants: ['testuser', 'agent-alpha'],
     });
     const episodes = hm.getRecentEpisodes(agentId, { limit: 10 });
     assert(episodes.length === 1, `1 episode recorded (got ${episodes.length})`);
@@ -270,15 +270,15 @@ async function run() {
 
     // ── Duplicate fact dedup ──
     console.log('\n── Deduplication ──');
-    hm.addFact(agentId, 'Redis version is 7.0.15', { domain: 'infrastructure', confidence: 1.0 });
+    hm.addFact(agentId, 'Cache layer version is 1.0', { domain: 'infrastructure', confidence: 1.0 });
     const factsAfterDedup = hm.getActiveFacts(agentId);
     assert(factsAfterDedup.length === 2, `Dedup: still 2 facts after duplicate add (got ${factsAfterDedup.length})`);
 
     // ── Cleanup ──
     console.log('\n── Cleanup ──');
-    await hm.redis.evictSession(agentId, sessionKey1);
-    await hm.redis.evictSession(agentId, sessionKey2);
-    assert(true, 'Redis test keys cleaned');
+    await hm.cache.evictSession(agentId, sessionKey1);
+    await hm.cache.evictSession(agentId, sessionKey2);
+    assert(true, 'Cache test keys cleaned');
 
   } catch (err) {
     console.error('\n💥 Test error:', err);
