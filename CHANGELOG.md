@@ -1,48 +1,53 @@
 # Changelog
 
-All notable changes to HyperMem are documented here.
+All notable changes to hypermem are documented here.
 
----
+## 0.5.6 — Content fingerprint dedup and hardening
 
-## [0.5.0] — 2026-04-09
+- O(1) fingerprint dedup across all retrieval paths (temporal, open-domain, semantic, cross-session). Catches rephrased near-duplicates that substring matching missed.
+- Identity bootstrap pre-fingerprinting: SOUL.md, USER.md, IDENTITY.md content already in the prompt is never double-injected by retrieval.
+- Indexer circuit breaker with startup integrity check for library.db corruption. Graceful degradation, not cascading failure.
+- SQL parameterization hardening on datetime and FTS5 paths.
 
-### Breaking Changes
+## 0.5.5 — Tuning collapse and config schema
 
-- **Redis removed.** HyperMem no longer requires or uses Redis. All session state, cursor tracking, and fleet cache have moved to SQLite. Existing installs: remove `redis` from your config and run the installer to migrate.
+- Plugin config schema: all tuning knobs declarable in `openclaw.json`. No more manual config.json edits.
+- Tuning simplified to 4 primary knobs: `budgetFraction`, `reserveFraction`, `historyFraction`, `memoryFraction`.
+- Identity and doc chunk dedup against OpenClaw bootstrap injection.
+- Window cache with freshness diagnostics.
 
-### Added
+## 0.5.0 — Redis removal and context engine
 
-- **Benchmark suite** (`npm run benchmark`). Measures compose latency, retrieval precision, and slot fill rate. Results written to `benchmarks/results.json`. Baseline: compose P50 ~34ms, P99 ~81ms on a mature 847-turn session.
-- **`deferToolPruning` config flag.** When `true`, HyperMem's internal tool gradient defers to OpenClaw's native `contextPruning` extension. Recommended for all Anthropic-backed agents. Set automatically by the installer when OpenClaw is detected.
-- **Recency decay on fact scoring.** Facts now decay by age using an exponential curve (`halfLifeDays: 14` default). Prevents stale facts from crowding out recent signal.
-- **Compound FTS5 indexes.** Added `(agent_id, content)` and `(agent_id, domain, content)` compound indexes on the knowledge and facts tables. Retrieval on filtered queries improved ~3x.
+- Redis replaced with SQLite in-memory cache. Zero external services.
+- Context engine plugin: runs as an OpenClaw `contextEngine` slot, composing prompts per-turn.
+- Transform-first assembly: tool results compressed before budget allocation, not after.
+- Cluster-aware budget shaping: related tool turns grouped and trimmed together.
+- Hybrid FTS5 + KNN retrieval with Reciprocal Rank Fusion.
+- Workspace seeding: agents auto-ingest their workspace docs on bootstrap.
+- Runtime profiles: `light`, `standard`, `full`.
+- Obsidian import and export.
+- Metrics dashboard primitives.
 
-### Changed
+## 0.4.0 — Eviction and migration
 
-- **Tool gradient is now a fallback, not primary.** When OpenClaw's `contextPruning` is active (`mode: "cache-ttl"`), HyperMem skips its own gradient pass. The two systems no longer fight over the same tool results.
-- **Two-plugin architecture.** HyperMem now ships as two OpenClaw plugins: `hypermem` (context engine, fills `contextEngine` slot) and `hypermem-memory` (lightweight memory provider, fills `memory` slot). The memory plugin provides `memory_search` backed by hybrid FTS5 + KNN retrieval against library.db. Previously, a single plugin attempted to fill both slots.
-- **`install.sh` now registers both plugin slots and load paths.** Adds `plugins.slots.contextEngine hypermem` and `plugins.slots.memory hypermem-memory` automatically on install. Previously required manual config.
-- **Knowledge lint threshold raised.** `isQualityFact()` minimum content length raised from 40 to 60 chars. Removed ~12% additional low-signal entries in production validation.
+- Image and heavy-content eviction pre-pass in assembly. Old screenshots and large tool outputs aged out before they compete for budget.
+- Engine version stamps in library.db. Schema migration runs automatically on version bump.
+- Migration guides and scripts for Cognee, QMD, Mem0, Zep, Honcho, and raw MEMORY.md files.
 
-### Fixed
+## 0.3.0 — Subagent context and retrieval
 
-- **Session dedup guard.** `sessionExists()` check now fires before bootstrap ingest, preventing duplicate history on session reload.
-- **Empty session compositor isolation.** New agent compose calls no longer inherit warm session data from a prior agent in the same process.
-- **`DEFAULT_TRIGGERS` export missing.** `dist/index.js` was not re-exporting `DEFAULT_TRIGGERS`, breaking consumers using custom trigger matching.
+- Subagent context inheritance: spawned subagents get bounded parent context, session-scoped docs, and relevant facts.
+- Tool Gradient v2: turn-age tiers with head+tail truncation on tool results.
+- Cursor-aware indexer with ghost message suppression.
 
-### Removed
+## 0.2.0 — Retrieval access control
 
-- **Redis layer** (`src/redis-layer.ts`, `src/redis-integration.ts`). All functionality migrated to SQLite cache layer.
-- **`hm.redis` public property.** Consumers using `hm.redis.*` must migrate to `hm.cache.*`.
+- Trigger registry ownership and auditability.
+- Retrieval access control, trigger fallback paths, and history rebalance.
 
-### Deferred to 0.6.0
+## 0.1.0 — Core architecture
 
-- D-009: Cross-slot dedup pass in compositor (Phase 1: exact hash, Phase 2: embedding similarity)
-- D-008: LLM reflection passes for knowledge quality
-- D-001: Topic backfill for historical NULL messages
-
----
-
-## [0.4.x] — prior
-
-See git log for pre-0.5.0 history.
+- Four-layer memory: in-memory cache, message history, vector search, structured library.
+- 8-level priority compositor with slot-based prompt assembly.
+- Cross-agent memory access with visibility-scoped permissions.
+- Knowledge graph with DAG traversal.
