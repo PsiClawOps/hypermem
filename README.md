@@ -223,17 +223,32 @@ OpenClaw 2026.4.7 ships memory wiki for structured storage. hypermem goes furthe
 
 Spawned subagents inherit a bounded context block: recent parent turns, session-scoped documents, and relevant facts. Scope is isolated from the shared library. Documents are cleaned up on completion.
 
+### Context that doesn't repeat itself
+
+Retrieval paths pull from four layers, trigger shortcuts, temporal indexes, open-domain FTS5, semantic recall, and cross-session summaries. Without dedup, the same fact surfaces through multiple paths and wastes budget on repetition.
+
+hypermem runs content fingerprint dedup across all compose-time retrieval. Every fact, temporal result, open-domain hit, and semantic recall entry is normalized and fingerprinted on a 120-char prefix. O(1) lookup in a shared set catches duplicates regardless of which retrieval path produced them, including rephrased near-duplicates that substring matching missed. Diagnostics track dedup counts and fingerprint collisions per compose call.
+
+Identity content (SOUL.md, USER.md, IDENTITY.md) and doc chunks already injected by OpenClaw's bootstrap are fingerprinted before retrieval runs, so the compositor never double-injects content the runtime already placed in the prompt.
+
+### Integrity under failure
+
+The background indexer runs a startup integrity check against `library.db` on every boot. If the schema is corrupt, tables are missing, or critical indexes are damaged, the indexer enters circuit-breaker mode: it logs the failure, skips indexing for the session, and avoids cascading writes into a broken database. The agent still runs with cached and in-memory data while the operator is notified.
+
+SQL queries that interpolate datetime values are fully parameterized. FTS5 trigger terms are quoted to prevent injection through crafted content. These aren't theoretical: agentic sessions ingest arbitrary user and tool output into the fact store, and unparameterized queries on that path were a real attack surface.
+
 ---
 
 ## Pressure management
 
-hypermem composes context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Three automatic paths handle this:
+hypermem composes context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
 
 | Path | Trigger | Action |
 |---|---|---|
 | **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures projected occupancy before results land; trims large results at 80%+ and truncates the messages[] array for the current turn |
 | **AfterTurn trim** | Every turn at >80% | Pre-emptive headroom cut after the assistant replies, before the next turn arrives |
 | **Deep compaction** | compact() at >85% | Cuts in-memory cache to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
+| **Reshape guard** | Structured tool history on downshift | `canPersistReshapedHistory()` blocks a lower-context snapshot from overwriting the full JSONL history |
 
 **The one thing these paths cannot fix:** a session whose JSONL transcript on disk is already at 98% when the gateway restarts. The JSONL loads into runtime context before any compaction runs. Check `session_status` on startup. If you're above 85%, start a fresh session.
 
@@ -307,6 +322,8 @@ Retrieval follows a fixed pipeline on every compose call:
 
 FTS5 queries use compound indexes on `agentId + sort key` and prefix optimization (3+ chars, capped at 8 terms, OR queries). These indexes yielded a 25% read improvement over baseline despite a 47% increase in stored data.
 
+### Retrieval pipeline
+
 **L4: Library DB.** Per-agent storage can't hold shared knowledge. Facts established by one agent, wiki pages synthesized from cross-agent topics, shared registry state: these belong to the system, not one agent. One shared SQLite database:
 
 | Collection | What it holds |
@@ -347,7 +364,7 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
        │
   budget allocator ──► 10 slots, fixed token cap
        │
-  tool compression ──► clusters by age, T0 3 turns full → T1 6k → T2 800 → T3 150-char stub
+  tool compression ──► clusterNeutralMessages() → T0 full → T1 6k → T2 800 → T3 150-char stub
        │
   keystone guard ──► high-signal turns survive pressure
        │
@@ -366,15 +383,18 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.5.5.** Topic-aware memory and compiled-knowledge system, optimized to run light by default and scale up when operators need richer context.
+**Current release: hypermem 0.5.6.** Topic-aware memory and compiled-knowledge system, optimized to run light by default and scale up when operators need richer context.
 
-What 0.5.5 includes:
+What 0.5.6 includes:
 - Topic-aware context tracking
 - Compiled knowledge / wiki-like synthesis and recall
 - Plugin config schema (all tuning knobs declarable in `openclaw.json`)
 - Runtime path resolution (pluginConfig > npm resolve > dev fallback)
 - Identity and doc chunk dedup against OpenClaw bootstrap injection
 - Content fingerprint dedup across all compose-time retrieval paths
+- Indexer circuit breaker with startup integrity check for library.db
+- SQL parameterization hardening (datetime interpolation, FTS5 trigger quoting)
+- Window cache validation with cold reserve floor and freshness diagnostics
 - Metrics dashboard primitives
 - Obsidian import and export
 - Aligned runtime profiles: `light`, `standard`, `full`
@@ -390,7 +410,7 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.5.5'
+  ENGINE_VERSION,        // '0.5.6'
   MIN_NODE_VERSION,      // '22.0.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
   MAIN_SCHEMA_VERSION,   // 6  (hypermem.db)
