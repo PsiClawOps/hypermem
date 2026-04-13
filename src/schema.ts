@@ -265,7 +265,13 @@ export function migrate(db: DatabaseSync): void {
   }
 
   // v7 → v8: Turn DAG Phase 3 — add context_id index for DAG-native reads
+  // Also ensures context_id column exists (idempotent with ensureContextSchema)
   if (currentVersion < 8) {
+    const msgCols8 = (db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>)
+      .map(r => r.name);
+    if (!msgCols8.includes('context_id')) {
+      db.exec('ALTER TABLE messages ADD COLUMN context_id INTEGER');
+    }
     db.exec('CREATE INDEX IF NOT EXISTS idx_messages_context_id ON messages(context_id)');
 
     db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
