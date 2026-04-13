@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import fs from 'node:fs';
 
-const DATA_DIR = path.join(process.env.HOME || '/home/lumadmin', '.openclaw', 'hypermem');
+const DATA_DIR = path.join(process.env.HOME || '/home/user', '.openclaw', 'hypermem');
 const OLLAMA_URL = 'http://localhost:11434';
 const ITERATIONS = 20;  // Per-model embed latency iterations
 

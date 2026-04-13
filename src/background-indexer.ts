@@ -144,7 +144,7 @@ function extractFactCandidates(content: string): FactCandidate[] {
   // Preference patterns — medium confidence (0.60)
   const preferencePatterns = [
     /(?:prefer|always use|never use|don't use|avoid) (.{10,150})/gi,
-    /(?:ragesaq|operator) (?:wants|prefers|likes|hates|dislikes) (.{10,150})/gi,
+    /(?:operator|operator) (?:wants|prefers|likes|hates|dislikes) (.{10,150})/gi,
   ];
 
   // Operational patterns: deployments, incidents, fixes — high confidence (0.70)

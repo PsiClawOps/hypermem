@@ -99,11 +99,11 @@ async function run() {
     'Three files per agent: messages.db (rotatable), vectors.db (reconstructable), plus fleet-wide library.db (crown jewel)');
 
   // Seed preferences
-  hm.setPreference('ragesaq', 'coding_style', 'Architecture over speed, explicit over implicit', {
+  hm.setPreference('operator', 'coding_style', 'Architecture over speed, explicit over implicit', {
     domain: 'development',
     agentId,
   });
-  hm.setPreference('ragesaq', 'communication', 'Direct, no hedging', {
+  hm.setPreference('operator', 'communication', 'Direct, no hedging', {
     domain: 'personal',
     agentId,
   });

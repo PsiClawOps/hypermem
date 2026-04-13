@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { VectorStore } from '../dist/vector-store.js';
 import { DatabaseManager } from '../dist/db.js';
 
-const DATA_DIR = '/home/lumadmin/.openclaw/hypermem';
+const DATA_DIR = '/home/user/.openclaw/hypermem';
 const MODEL = 'nomic-embed-text';
 const DIM = 768;
 

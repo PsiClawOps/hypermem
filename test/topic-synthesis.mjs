@@ -195,22 +195,22 @@ async function testResynthesisThresholds() {
 async function testContentExtraction() {
   const h = await createHarness('content');
   const topicId = insertTopic(h, { name: 'content-rich', updatedAt: isoMinutesAgo(75) });
-  const longText = 'decided path '.repeat(120) + '/home/lumadmin/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts `inline-ref`';
+  const longText = 'decided path '.repeat(120) + '/home/user/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts `inline-ref`';
 
   seedTopicMessages(h, topicId, [
     {
       agentId: 'agent1',
       text: 'We decided to keep topic synthesis heuristic-only and write compiled markdown into knowledge.',
-      toolCalls: JSON.stringify([{ name: 'write', arguments: { path: '/home/lumadmin/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts' } }]),
+      toolCalls: JSON.stringify([{ name: 'write', arguments: { path: '/home/user/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts' } }]),
     },
     {
       agentId: 'agent1',
-      text: 'This message cites /home/lumadmin/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md and mentions agent1 and agent2 for scoring.',
+      text: 'This message cites /home/user/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md and mentions agent1 and agent2 for scoring.',
     },
     {
       agentId: 'agent4',
       text: 'We will go with a wiki page format that includes summary, decisions, open questions, and artifacts.',
-      toolCalls: JSON.stringify([{ input: { filePath: '/home/lumadmin/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md' } }]),
+      toolCalls: JSON.stringify([{ input: { filePath: '/home/user/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md' } }]),
     },
     {
       agentId: 'agent1',
@@ -218,7 +218,7 @@ async function testContentExtraction() {
     },
     {
       agentId: 'agent2',
-      text: 'Another long reference-rich message with `code refs`, /home/lumadmin/project/file.ts, and enough body to force summary truncation once combined with the others.'.repeat(8),
+      text: 'Another long reference-rich message with `code refs`, /home/user/project/file.ts, and enough body to force summary truncation once combined with the others.'.repeat(8),
     },
     {
       agentId: 'agent2',
@@ -233,7 +233,7 @@ async function testContentExtraction() {
 
   assert(row.content.includes('## Key Decisions') && row.content.includes('We decided to keep topic synthesis heuristic-only'), 'synthesis content includes decisions');
   assert(row.content.includes('## Open Questions') && row.content.includes('What should happen with open questions'), 'synthesis content includes open questions');
-  assert(row.content.includes('/home/lumadmin/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts'), 'synthesis content includes artifact paths from tool calls');
+  assert(row.content.includes('/home/user/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts'), 'synthesis content includes artifact paths from tool calls');
   assert(
     row.content.includes('**Participants:**') &&
     row.content.includes('agent1') &&

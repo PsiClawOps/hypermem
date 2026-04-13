@@ -125,7 +125,7 @@ async function run() {
   // Insert episodes
   libDb.prepare(`INSERT INTO episodes (agent_id, event_type, summary, significance, visibility, participants, created_at, decay_score)
     VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 0.0)`)
-    .run('agent1', 'deployment', 'Deployed HyperMem Phase 1 with 52 passing tests', 8, 'fleet', JSON.stringify(['agent1', 'ragesaq']));
+    .run('agent1', 'deployment', 'Deployed HyperMem Phase 1 with 52 passing tests', 8, 'fleet', JSON.stringify(['agent1', 'operator']));
 
   assert(true, `Populated ${factContents.length} facts, 2 knowledge, 1 episode`);
 

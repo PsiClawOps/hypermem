@@ -50,38 +50,38 @@ async function run() {
   // ── Preferences ──
   console.log('── Preferences ──');
 
-  const pref1 = hm.setPreference('ragesaq', 'coding_style', 'Prefers architecture over speed, comprehensive and explicit', {
+  const pref1 = hm.setPreference('operator', 'coding_style', 'Prefers architecture over speed, comprehensive and explicit', {
     domain: 'development',
     agentId: 'agent1',
     confidence: 0.95,
   });
-  assert(pref1.subject === 'ragesaq', 'Preference created');
+  assert(pref1.subject === 'operator', 'Preference created');
   assert(pref1.key === 'coding_style', `Key: ${pref1.key}`);
 
-  hm.setPreference('ragesaq', 'timezone', 'MST (Arizona, no DST)', {
+  hm.setPreference('operator', 'timezone', 'MST (Arizona, no DST)', {
     domain: 'personal',
     agentId: 'agent2',
   });
 
-  hm.setPreference('ragesaq', 'communication', 'Direct, no hedging, no corporate speak', {
+  hm.setPreference('operator', 'communication', 'Direct, no hedging, no corporate speak', {
     domain: 'personal',
     agentId: 'agent4',
   });
 
-  const prefs = hm.getPreferences('ragesaq');
+  const prefs = hm.getPreferences('operator');
   assert(prefs.length === 3, `All preferences: ${prefs.length}`);
 
-  const tzPref = hm.getPreference('ragesaq', 'timezone', 'personal');
+  const tzPref = hm.getPreference('operator', 'timezone', 'personal');
   assert(tzPref !== null, 'Get specific preference');
   assert(tzPref.value.includes('MST'), `Timezone value: ${tzPref.value}`);
 
   // Update a preference (upsert)
-  hm.setPreference('ragesaq', 'coding_style', 'Architecture > speed, explicit > implicit, automation-first', {
+  hm.setPreference('operator', 'coding_style', 'Architecture > speed, explicit > implicit, automation-first', {
     domain: 'development',
     agentId: 'agent1',
     confidence: 0.98,
   });
-  const updated = hm.getPreference('ragesaq', 'coding_style', 'development');
+  const updated = hm.getPreference('operator', 'coding_style', 'development');
   assert(updated.value.includes('automation-first'), 'Preference updated via upsert');
   assert(updated.confidence === 0.98, `Confidence updated: ${updated.confidence}`);
 
@@ -194,7 +194,7 @@ async function run() {
     description: 'messages.db + vectors.db per agent, library.db fleet-wide',
     priority: 1,
     agentId: 'agent1',
-    createdBy: 'ragesaq',
+    createdBy: 'operator',
     domain: 'infrastructure',
   });
   assert(wi1.id.startsWith('WQ-'), `Work item created: ${wi1.id}`);
@@ -213,7 +213,7 @@ async function run() {
     title: 'Design knowledge graph schema',
     priority: 3,
     agentId: 'agent2',
-    createdBy: 'ragesaq',
+    createdBy: 'operator',
     domain: 'product',
   });
 
@@ -330,20 +330,20 @@ async function run() {
   // Set desired config for agent1
   const modelState = hm.setDesiredState('agent1', 'model', 'anthropic/claude-opus-4-6', {
     source: 'operator',
-    setBy: 'ragesaq',
+    setBy: 'operator',
     notes: 'Moved to anthropic direct — copilot-local had issues',
   });
   assert(modelState.configKey === 'model', 'Desired state set');
   assert(modelState.desiredValue === 'anthropic/claude-opus-4-6', `Desired model: ${modelState.desiredValue}`);
   assert(modelState.driftStatus === 'unknown', `Initial drift: ${modelState.driftStatus}`);
 
-  hm.setDesiredState('agent1', 'thinkingDefault', 'high', { setBy: 'ragesaq' });
-  hm.setDesiredState('agent1', 'provider', 'anthropic', { setBy: 'ragesaq' });
-  hm.setDesiredState('agent1', 'tools.exec.host', 'sandbox', { setBy: 'ragesaq' });
+  hm.setDesiredState('agent1', 'thinkingDefault', 'high', { setBy: 'operator' });
+  hm.setDesiredState('agent1', 'provider', 'anthropic', { setBy: 'operator' });
+  hm.setDesiredState('agent1', 'tools.exec.host', 'sandbox', { setBy: 'operator' });
 
   // Set desired config for agent2
-  hm.setDesiredState('agent2', 'model', 'anthropic/claude-opus-4-6', { setBy: 'ragesaq' });
-  hm.setDesiredState('agent2', 'thinkingDefault', 'high', { setBy: 'ragesaq' });
+  hm.setDesiredState('agent2', 'model', 'anthropic/claude-opus-4-6', { setBy: 'operator' });
+  hm.setDesiredState('agent2', 'thinkingDefault', 'high', { setBy: 'operator' });
 
   // Get all config for an agent
   const forgeConfig = hm.getDesiredConfig('agent1');
@@ -382,7 +382,7 @@ async function run() {
   assert(summary.total === 6, `Total: ${summary.total}`);
 
   // Update desired state and verify history
-  hm.setDesiredState('agent1', 'model', 'anthropic/claude-sonnet-4-6', { setBy: 'ragesaq' });
+  hm.setDesiredState('agent1', 'model', 'anthropic/claude-sonnet-4-6', { setBy: 'operator' });
   const history = hm.getConfigHistory('agent1', 'model');
   assert(history.length === 2, `History events: ${history.length} (set + changed)`);
   assert(history[0].eventType === 'desired_changed', `Latest event: ${history[0].eventType}`);
@@ -421,7 +421,7 @@ async function run() {
   hm.recordEpisode('agent1', 'architecture', 'Redesigned HyperMem to three-file split', {
     significance: 0.9,
     visibility: 'council',
-    participants: ['agent1', 'ragesaq'],
+    participants: ['agent1', 'operator'],
     sessionKey: 'agent:agent1:webchat:main',
   });
   const episodes = hm.getRecentEpisodes('agent1');

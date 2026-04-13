@@ -3,7 +3,7 @@
  *
  * Behavioral patterns observed about people, systems, and workflows.
  * Lives in the central library DB.
- * "ragesaq prefers architectural stability" is a preference, not a fact.
+ * "operator prefers architectural stability" is a preference, not a fact.
  */
 
 import type { DatabaseSync } from 'node:sqlite';

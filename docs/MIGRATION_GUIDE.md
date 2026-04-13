@@ -889,7 +889,7 @@ node scripts/migrate-memory-md.mjs --apply
 
 Or for a single agent:
 ```bash
-node scripts/migrate-memory-md.mjs --agent forge --apply
+node scripts/migrate-memory-md.mjs --agent my-agent --apply
 ```
 
 **Step 3: Restart**

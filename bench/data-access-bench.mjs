@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import fs from 'node:fs';
 
-const DATA_DIR = path.join(process.env.HOME || '/home/lumadmin', '.openclaw', 'hypermem');
+const DATA_DIR = path.join(process.env.HOME || '/home/user', '.openclaw', 'hypermem');
 const ITERATIONS = parseInt(process.argv.find((a, i) => process.argv[i - 1] === '--iterations') || '100');
 const TARGET_AGENT = process.argv.find((a, i) => process.argv[i - 1] === '--agent') || null;
 
@@ -202,7 +202,7 @@ if (libDb) {
     ORDER BY confidence DESC, updated_at DESC
     LIMIT ?
   `);
-  for (const agent of ['agent1', 'main', 'pylon']) {
+  for (const agent of ['agent1', 'main', 'director1']) {
     allResults.push(bench(`library: activeFacts(${agent}, limit=50)`, () => {
       stmtFacts.all(agent, 50);
     }));
@@ -302,13 +302,13 @@ if (libDb) {
 
 // ── Compaction Fence (new module) ────────────────────────────
 
-const forgeDb = openDb(path.join(agentsDir, 'agent1', 'messages.db'));
-if (forgeDb) {
+const agent1Db = openDb(path.join(agentsDir, 'agent1', 'messages.db'));
+if (agent1Db) {
   try {
-    const hasFence = forgeDb.prepare("SELECT count(*) as c FROM sqlite_master WHERE type='table' AND name='compaction_fences'").get().c;
+    const hasFence = agent1Db.prepare("SELECT count(*) as c FROM sqlite_master WHERE type='table' AND name='compaction_fences'").get().c;
     if (hasFence) {
-      const stmtFence = forgeDb.prepare('SELECT * FROM compaction_fences WHERE conversation_id = ?');
-      const someConvId = forgeDb.prepare('SELECT id FROM conversations LIMIT 1').get()?.id;
+      const stmtFence = agent1Db.prepare('SELECT * FROM compaction_fences WHERE conversation_id = ?');
+      const someConvId = agent1Db.prepare('SELECT id FROM conversations LIMIT 1').get()?.id;
       if (someConvId) {
         allResults.push(bench(`agent1: compactionFence lookup`, () => {
           stmtFence.get(someConvId);
@@ -319,7 +319,7 @@ if (forgeDb) {
   } catch {
     console.log('  ⚪ Compaction fence not available');
   }
-  forgeDb.close();
+  agent1Db.close();
 }
 
 // ── Summary ──────────────────────────────────────────────────

@@ -99,7 +99,7 @@ const PATH_MAP = [
 // Operator name substitutions (in code patterns, not user-facing docs)
 const OPERATOR_MAP = [
   // In regex patterns that match operator name specifically
-  { from: /\/\(\?:ragesaq\|operator\)/g, to: '/(?:operator)' },
+  { from: /\/\(\?:operator\|operator\)/g, to: '/(?:operator)' },
 ];
 
 // ─── Product name substitutions ─────────────────────────────────
@@ -118,7 +118,7 @@ const PRODUCT_NAME_MAP = [
 
 // Broad operator name substitution (in all text contexts)
 const OPERATOR_BROAD_MAP = [
-  { from: 'ragesaq', to: 'operator' },
+  { from: 'operator', to: 'operator' },
 ];
 
 // ─── Leak detection terms ───────────────────────────────────────
@@ -126,7 +126,7 @@ const OPERATOR_BROAD_MAP = [
 // Post-sanitization scan. If any of these survive in the output,
 // the sync fails. Case-insensitive matching.
 const LEAK_TERMS = [
-  'ragesaq',
+  'operator',
   'lumadmin',
   'ClawText',
   'ClawDash',
