@@ -1566,13 +1566,13 @@ function createHyperMemEngine(): ContextEngine {
           const windowTokens = await estimateWindowTokens(hm, agentId, sk);
           const overhead = _overheadCache.get(sk) ?? getOverheadFallback();
           return {
-            messages: trimmedMessages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
+            messages: trimmedMessages as any,
             estimatedTokens: windowTokens + overhead,
           };
         } catch {
           // Non-fatal: return conservative estimate so guard doesn't go blind
           return {
-            messages: messages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
+            messages: messages as any,
             estimatedTokens: Math.floor(effectiveBudget * 0.8),
           };
         }
@@ -1592,7 +1592,7 @@ function createHyperMemEngine(): ContextEngine {
       if (isSubagent && _subagentWarming === 'off') {
         console.log(`[hypermem-plugin] assemble: subagent warming=off, passthrough (sk: ${sk})`);
         return {
-          messages: messages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
+          messages: messages as any,
           estimatedTokens: messages.reduce((sum: number, m: unknown) => {
             const msg = m as Record<string, unknown>;
             return sum + Math.ceil((typeof msg.textContent === 'string' ? msg.textContent.length : 0) / 4);
