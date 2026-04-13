@@ -35,6 +35,18 @@ export interface OrgRegistry {
 
 /**
  * Default fleet org structure.
+ *
+ * ── EXAMPLE DATA ──────────────────────────────────────────────────────────
+ * The agent names below (agent1, agent2, director1, etc.) are PLACEHOLDERS.
+ * Replace them with your own agent IDs to match your fleet configuration.
+ *
+ * Single-agent installs: you don't need to edit this. Your agent ID is
+ * resolved automatically at runtime from your OpenClaw config.
+ *
+ * Multi-agent installs: edit the agents map and orgs map below, then
+ * rebuild (`npm run build`). See INSTALL.md § "Configure your fleet" for
+ * a worked example.
+ * ─────────────────────────────────────────────────────────────────────────
  */
 export function defaultOrgRegistry(): OrgRegistry {
   const agents: Record<string, AgentIdentity> = {

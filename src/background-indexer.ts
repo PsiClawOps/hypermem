@@ -37,6 +37,14 @@ import type { VectorStore } from './vector-store.js';
 // Used to populate the `domain` column on extracted facts so that
 // domain-scoped retrieval (e.g. getActiveFacts({ domain: 'infrastructure' }))
 // returns results. New agents default to 'general'.
+//
+// ── EXAMPLE DATA ──────────────────────────────────────────────────
+// The agent names below (agent1, director1, etc.) are PLACEHOLDERS.
+// Replace them with your own agent IDs and domain labels to match
+// your fleet. Single-agent installs don't need to edit this:
+// unknown agents fall through to 'general' automatically.
+// See INSTALL.md § "Configure your fleet" for details.
+// ─────────────────────────────────────────────────────────────────
 const AGENT_DOMAIN_MAP: Record<string, string> = {
   agent1:        'infrastructure',
   director2:        'infrastructure',

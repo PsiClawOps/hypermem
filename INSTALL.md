@@ -236,6 +236,51 @@ openclaw config get plugins.slots.memory           # should be: hypermem
 openclaw status                                     # look for hypermem in plugins
 ```
 
+### Step 5 — Configure your fleet (multi-agent only)
+
+> **Single-agent installs can skip this step entirely.** hypermem resolves your agent ID from your OpenClaw config at runtime. The placeholder names in source code are never used unless you run a multi-agent fleet with explicit org structures.
+
+hypermem ships with generic placeholder agent names (`agent1`, `agent2`, `director1`, etc.) in two files that define fleet topology:
+
+| File | What it defines |
+|---|---|
+| `src/cross-agent.ts` | Org membership, agent tiers, visibility scoping |
+| `src/background-indexer.ts` | Agent-to-domain mapping for fact classification |
+
+To configure for your fleet:
+
+**1. Edit `src/cross-agent.ts`** — replace the `agents` map and `orgs` map in `defaultOrgRegistry()` with your fleet:
+
+```typescript
+// Before (placeholder):
+agent1: { agentId: 'agent1', tier: 'council' },
+
+// After (your fleet):
+architect: { agentId: 'architect', tier: 'council' },
+```
+
+**2. Edit `src/background-indexer.ts`** — update `AGENT_DOMAIN_MAP` with your agent IDs and their domains:
+
+```typescript
+// Before (placeholder):
+agent1: 'infrastructure',
+
+// After (your fleet):
+architect: 'infrastructure',
+```
+
+**3. Rebuild and restart:**
+
+```bash
+npm run build
+npm --prefix plugin run build
+openclaw gateway restart
+```
+
+Agents not listed in `AGENT_DOMAIN_MAP` default to domain `'general'`, which is fine for most setups. The org registry only matters if you use cross-agent memory visibility (org-scoped or council-scoped facts). If all your facts are agent-private or fleet-wide, you can skip the org structure entirely.
+
+**Test fixtures use the placeholder names by design.** Don't rename them in `test/` — the tests validate the cross-agent logic, not your specific fleet topology.
+
 ---
 
 ## Upgrading from 0.5.x
