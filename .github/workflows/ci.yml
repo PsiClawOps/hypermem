@@ -8,19 +8,8 @@ on:
 
 jobs:
   test:
-    name: Test + Plugin Typecheck
+    name: Build, Typecheck & Test
     runs-on: ubuntu-latest
-
-    services:
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -37,11 +26,11 @@ jobs:
       - name: Build core
         run: npm run build
 
-      - name: Install plugin deps
-        run: npm ci --prefix plugin
-
       - name: Typecheck core
         run: npm run typecheck
+
+      - name: Install plugin deps
+        run: npm ci --prefix plugin
 
       - name: Plugin typecheck
         run: npm --prefix plugin run typecheck
@@ -49,7 +38,14 @@ jobs:
       - name: Build plugin
         run: npm --prefix plugin run build
 
+      - name: Install memory-plugin deps
+        run: npm ci --prefix memory-plugin
+
+      - name: Memory-plugin typecheck
+        run: npm --prefix memory-plugin run typecheck
+
+      - name: Build memory-plugin
+        run: npm --prefix memory-plugin run build
+
       - name: Run tests
         run: npm test
-        env:
-          REDIS_URL: redis://localhost:6379

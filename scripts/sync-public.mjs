@@ -165,7 +165,7 @@ const SANITIZE_EXTENSIONS = new Set([
 ]);
 
 // ─── Directories to sync ─────────────────────────────────────────
-const SYNC_DIRS = ['src', 'test', 'scripts', 'docs'];
+const SYNC_DIRS = ['src', 'test', 'scripts', 'docs', '.github'];
 const SYNC_ROOT_FILES = [
   'package.json', 'tsconfig.json',
   'README.md', 'CHANGELOG.md', 'INSTALL.md',
