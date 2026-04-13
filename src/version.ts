@@ -14,7 +14,7 @@ export const SQLITE_VEC_VERSION = '0.1.9';
  * Main DB (hypermem.db) schema version.
  * Re-exported here for convenience; authoritative value lives in schema.ts.
  */
-export const MAIN_SCHEMA_VERSION = 6;
+export const MAIN_SCHEMA_VERSION = 7;
 
 /**
  * Library DB (library.db) schema version.

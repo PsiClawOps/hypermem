@@ -202,3 +202,47 @@ export function archiveContext(
     `UPDATE contexts SET status = 'archived', updated_at = ? WHERE id = ? AND status != 'archived'`
   ).run(now, contextId);
 }
+
+/**
+ * Rotate a session's active context: archive the current active context
+ * and create a new one, optionally linking back via parent_context_id.
+ *
+ * Used on session restarts/rotations so the new context starts with a
+ * clean head pointer instead of inheriting the stale tail.
+ *
+ * Returns the newly created active context.
+ * If no active context exists, simply creates one (no archive step).
+ */
+export function rotateSessionContext(
+  db: DatabaseSync,
+  agentId: string,
+  sessionKey: string,
+  conversationId: number
+): Context {
+  const existing = getActiveContext(db, agentId, sessionKey);
+
+  if (existing) {
+    archiveContext(db, existing.id);
+  }
+
+  const now = nowIso();
+  const result = db
+    .prepare(
+      `INSERT INTO contexts (agent_id, session_key, conversation_id, head_message_id, parent_context_id, status, created_at, updated_at, metadata_json)
+       VALUES (?, ?, ?, NULL, ?, 'active', ?, ?, NULL)`
+    )
+    .run(agentId, sessionKey, conversationId, existing?.id ?? null, now, now);
+
+  return {
+    id: Number(result.lastInsertRowid),
+    agentId,
+    sessionKey,
+    conversationId,
+    headMessageId: null,
+    parentContextId: existing?.id ?? null,
+    status: 'active',
+    createdAt: now,
+    updatedAt: now,
+    metadataJson: null,
+  };
+}

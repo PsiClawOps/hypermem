@@ -8,7 +8,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LATEST_SCHEMA_VERSION = 6;
+export const LATEST_SCHEMA_VERSION = 7;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -246,6 +246,22 @@ export function migrate(db: DatabaseSync): void {
 
     db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(6, nowIso());
+  }
+
+  // v6 → v7: Turn DAG Phase 2 — add parent_id and depth to messages
+  if (currentVersion < 7) {
+    const msgCols = (db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>)
+      .map(r => r.name);
+    if (!msgCols.includes('parent_id')) {
+      db.exec('ALTER TABLE messages ADD COLUMN parent_id INTEGER REFERENCES messages(id)');
+    }
+    if (!msgCols.includes('depth')) {
+      db.exec('ALTER TABLE messages ADD COLUMN depth INTEGER NOT NULL DEFAULT 0');
+    }
+    db.exec('CREATE INDEX IF NOT EXISTS idx_messages_parent_id ON messages(parent_id)');
+
+    db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(7, nowIso());
   }
 }
 

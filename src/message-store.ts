@@ -212,6 +212,10 @@ export class MessageStore {
   /**
    * Record a message to the database.
    * Returns the stored message with its assigned ID.
+   *
+   * Phase 2 (Turn DAG): automatically sets parent_id and depth.
+   *   - parent_id = context.head_message_id (the previous message on this branch)
+   *   - depth = parent.depth + 1 (or 0 if first message)
    */
   recordMessage(
     conversationId: number,
@@ -232,9 +236,26 @@ export class MessageStore {
 
     const messageIndex = (lastRow?.max_idx ?? -1) + 1;
 
+    // Phase 2 (Turn DAG): resolve parent_id and depth from context head
+    let parentId: number | null = null;
+    let depth = 0;
+    if (opts?.contextId) {
+      const headRow = this.db
+        .prepare('SELECT head_message_id FROM contexts WHERE id = ?')
+        .get(opts.contextId) as { head_message_id: number | null } | undefined;
+
+      if (headRow?.head_message_id != null) {
+        parentId = headRow.head_message_id;
+        const parentDepthRow = this.db
+          .prepare('SELECT depth FROM messages WHERE id = ?')
+          .get(parentId) as { depth: number } | undefined;
+        depth = (parentDepthRow?.depth ?? -1) + 1;
+      }
+    }
+
     const result = this.db.prepare(`
-      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, metadata, token_count, message_index, is_heartbeat, created_at, context_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, metadata, token_count, message_index, is_heartbeat, created_at, context_id, parent_id, depth)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       conversationId,
       agentId,
@@ -247,7 +268,9 @@ export class MessageStore {
       messageIndex,
       opts?.isHeartbeat ? 1 : 0,
       now,
-      opts?.contextId ?? null
+      opts?.contextId ?? null,
+      parentId,
+      depth
     );
 
     const id = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
