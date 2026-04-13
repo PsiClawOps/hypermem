@@ -1,0 +1,65 @@
+{
+  "sprint": {
+    "name": "Turn DAG Phase 1: Context Heads",
+    "project": "hypermem",
+    "root": "/home/lumadmin/.openclaw/workspace/repo/hypermem",
+    "phase": "1 of 5",
+    "priority": "P0"
+  },
+  "execution_order": [
+    {"wave": 1, "sprints": ["p1-t1"]},
+    {"wave": 2, "sprints": ["p1-t2", "p1-t3", "p1-t5"]},
+    {"wave": 3, "sprints": ["p1-t4"]},
+    {"wave": 4, "sprints": ["p1-t6"]}
+  ],
+  "contracts": [
+    {
+      "id": "p1-t1",
+      "title": "Context schema module",
+      "type": "new-file",
+      "file": "src/context-store.ts",
+      "depends_on": [],
+      "status": "pending"
+    },
+    {
+      "id": "p1-t2",
+      "title": "Wire context into conversation creation",
+      "type": "modify",
+      "file": "src/message-store.ts",
+      "depends_on": ["p1-t1"],
+      "status": "pending"
+    },
+    {
+      "id": "p1-t3",
+      "title": "Wire context_id into message writes",
+      "type": "modify",
+      "file": "src/message-store.ts",
+      "depends_on": ["p1-t1"],
+      "status": "pending"
+    },
+    {
+      "id": "p1-t4",
+      "title": "Wire caller chain in HyperMem facade",
+      "type": "modify",
+      "file": "src/index.ts",
+      "depends_on": ["p1-t1", "p1-t2", "p1-t3"],
+      "status": "pending"
+    },
+    {
+      "id": "p1-t5",
+      "title": "Backfill existing conversations",
+      "type": "new-file",
+      "file": "src/context-backfill.ts",
+      "depends_on": ["p1-t1"],
+      "status": "pending"
+    },
+    {
+      "id": "p1-t6",
+      "title": "Schema init hook + tests",
+      "type": "modify",
+      "file": "src/index.ts",
+      "depends_on": ["p1-t1", "p1-t2", "p1-t3", "p1-t4", "p1-t5"],
+      "status": "pending"
+    }
+  ]
+}

@@ -35,31 +35,43 @@ export interface OrgRegistry {
 
 /**
  * Default fleet org structure.
+ *
+ * ── EXAMPLE DATA ──────────────────────────────────────────────────────────
+ * The agent names below (agent1, agent2, director1, etc.) are PLACEHOLDERS.
+ * Replace them with your own agent IDs to match your fleet configuration.
+ *
+ * Single-agent installs: you don't need to edit this. Your agent ID is
+ * resolved automatically at runtime from your OpenClaw config.
+ *
+ * Multi-agent installs: edit the agents map and orgs map below, then
+ * rebuild (`npm run build`). See INSTALL.md § "Configure your fleet" for
+ * a worked example.
+ * ─────────────────────────────────────────────────────────────────────────
  */
 export function defaultOrgRegistry(): OrgRegistry {
   const agents: Record<string, AgentIdentity> = {
-    forge:    { agentId: 'forge',    tier: 'council' },
-    compass:  { agentId: 'compass',  tier: 'council' },
-    clarity:  { agentId: 'clarity',  tier: 'council' },
-    sentinel: { agentId: 'sentinel', tier: 'council' },
-    anvil:    { agentId: 'anvil',    tier: 'council' },
-    vanguard: { agentId: 'vanguard', tier: 'council' },
-    pylon:    { agentId: 'pylon',  tier: 'director', org: 'forge-org', councilLead: 'forge' },
-    vigil:    { agentId: 'vigil',  tier: 'director', org: 'forge-org', councilLead: 'forge' },
-    plane:    { agentId: 'plane',  tier: 'director', org: 'forge-org', councilLead: 'forge' },
-    helm:     { agentId: 'helm',   tier: 'director', org: 'compass-org', councilLead: 'compass' },
-    chisel:   { agentId: 'chisel', tier: 'director', org: 'compass-org', councilLead: 'compass' },
-    facet:    { agentId: 'facet',  tier: 'director', org: 'compass-org', councilLead: 'compass' },
-    bastion:  { agentId: 'bastion', tier: 'director', org: 'sentinel-org', councilLead: 'sentinel' },
-    gauge:    { agentId: 'gauge',   tier: 'director', org: 'sentinel-org', councilLead: 'sentinel' },
-    crucible: { agentId: 'crucible', tier: 'specialist' },
-    relay:    { agentId: 'relay', tier: 'specialist' },
+    agent1:    { agentId: 'agent1',    tier: 'council' },
+    agent2:  { agentId: 'agent2',  tier: 'council' },
+    agent4:  { agentId: 'agent4',  tier: 'council' },
+    agent3: { agentId: 'agent3', tier: 'council' },
+    agent6:    { agentId: 'agent6',    tier: 'council' },
+    agent5: { agentId: 'agent5', tier: 'council' },
+    director1:    { agentId: 'director1',  tier: 'director', org: 'agent1-org', councilLead: 'agent1' },
+    director2:    { agentId: 'director2',  tier: 'director', org: 'agent1-org', councilLead: 'agent1' },
+    director3:    { agentId: 'director3',  tier: 'director', org: 'agent1-org', councilLead: 'agent1' },
+    director4:     { agentId: 'director4',   tier: 'director', org: 'agent2-org', councilLead: 'agent2' },
+    director5:   { agentId: 'director5', tier: 'director', org: 'agent2-org', councilLead: 'agent2' },
+    director6:    { agentId: 'director6',  tier: 'director', org: 'agent2-org', councilLead: 'agent2' },
+    director7:  { agentId: 'director7', tier: 'director', org: 'agent3-org', councilLead: 'agent3' },
+    director8:    { agentId: 'director8',   tier: 'director', org: 'agent3-org', councilLead: 'agent3' },
+    specialist1: { agentId: 'specialist1', tier: 'specialist' },
+    specialist2:    { agentId: 'specialist2', tier: 'specialist' },
   };
 
   const orgs: Record<string, string[]> = {
-    'forge-org':    ['forge', 'pylon', 'vigil', 'plane'],
-    'compass-org':  ['compass', 'helm', 'chisel', 'facet'],
-    'sentinel-org': ['sentinel', 'bastion', 'gauge'],
+    'agent1-org':    ['agent1', 'director1', 'director2', 'director3'],
+    'agent2-org':  ['agent2', 'director4', 'director5', 'director6'],
+    'agent3-org': ['agent3', 'director7', 'director8'],
   };
 
   return { orgs, agents };

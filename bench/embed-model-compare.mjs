@@ -79,13 +79,13 @@ function loadProductionData() {
   // Get a sample of facts and episodes
   const facts = db.prepare(`
     SELECT id, content, domain FROM facts 
-    WHERE agent_id = 'forge' AND superseded_by IS NULL AND decay_score > 0
+    WHERE agent_id = 'agent1' AND superseded_by IS NULL AND decay_score > 0
     ORDER BY confidence DESC LIMIT 100
   `).all();
 
   const episodes = db.prepare(`
     SELECT id, summary as content, event_type as domain FROM episodes 
-    WHERE agent_id = 'forge' AND decay_score > 0
+    WHERE agent_id = 'agent1' AND decay_score > 0
     ORDER BY created_at DESC LIMIT 200
   `).all();
 

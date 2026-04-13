@@ -37,23 +37,31 @@ import type { VectorStore } from './vector-store.js';
 // Used to populate the `domain` column on extracted facts so that
 // domain-scoped retrieval (e.g. getActiveFacts({ domain: 'infrastructure' }))
 // returns results. New agents default to 'general'.
+//
+// ── EXAMPLE DATA ──────────────────────────────────────────────────
+// The agent names below (agent1, director1, etc.) are PLACEHOLDERS.
+// Replace them with your own agent IDs and domain labels to match
+// your fleet. Single-agent installs don't need to edit this:
+// unknown agents fall through to 'general' automatically.
+// See INSTALL.md § "Configure your fleet" for details.
+// ─────────────────────────────────────────────────────────────────
 const AGENT_DOMAIN_MAP: Record<string, string> = {
-  forge:        'infrastructure',
-  vigil:        'infrastructure',
-  pylon:        'infrastructure',
-  plane:        'infrastructure',
-  compass:      'product',
-  helm:         'product',
-  chisel:       'product',
-  facet:        'product',
-  sentinel:     'security',
-  bastion:      'security',
-  gauge:        'security',
-  clarity:      'ux',
-  anvil:        'governance',
-  vanguard:     'strategy',
-  crucible:     'development',
-  relay:        'communications',
+  agent1:        'infrastructure',
+  director2:        'infrastructure',
+  director1:        'infrastructure',
+  director3:        'infrastructure',
+  agent2:      'product',
+  director4:         'product',
+  director5:       'product',
+  director6:        'product',
+  agent3:     'security',
+  director7:      'security',
+  director8:        'security',
+  agent4:      'ux',
+  agent6:        'governance',
+  agent5:     'strategy',
+  specialist1:     'development',
+  specialist2:        'communications',
   main:         'general',
   'channel-mini': 'general',
 };
@@ -194,7 +202,7 @@ const OPERATIONAL_BOILERPLATE: RegExp[] = [
   /still\s*waiting/i,
   /will\s*pick\s*(it\s*)?up\s*(on\s*(next|the))?/i,
   /message\s*is\s*in\s*(his|her|their|the)\s*queue/i,
-  /sent\s+to\s+(anvil|compass|clarity|sentinel|vanguard|forge)/i,
+  /sent\s+to\s+(agent6|agent2|agent4|agent3|agent5|agent1)/i,
   /dispatched\s+(it\s+)?to/i,
   /timed\s*out\s*after/i,
   /\bNO_REPLY\b/,

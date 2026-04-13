@@ -48,12 +48,12 @@ if (!commitMsg) {
 // Fleet name mapping (internal agent names → generic public names):
 const AGENT_NAME_MAP = [
   // Council seats
-  { from: 'forge',    to: 'alice'   },
-  { from: 'compass',  to: 'bob'     },
-  // clarity stays as 'clarity' — generic enough, no substitution
-  { from: 'sentinel', to: 'dave'    },
-  { from: 'anvil',    to: 'carol'   },
-  { from: 'vanguard', to: 'oscar'   },
+  { from: 'agent1',    to: 'alice'   },
+  { from: 'agent2',  to: 'bob'     },
+  // agent4 stays as 'agent4' — generic enough, no substitution
+  { from: 'agent3', to: 'dave'    },
+  { from: 'agent6',    to: 'carol'   },
+  { from: 'agent5', to: 'oscar'   },
   // Directors
   { from: 'pylon',    to: 'hank'    },
   { from: 'vigil',    to: 'jack'    },
@@ -70,21 +70,21 @@ const AGENT_NAME_MAP = [
 
 // Org name mapping (derived from agent → org structure)
 const ORG_NAME_MAP = [
-  { from: 'forge-org',    to: 'alice-org'  },
-  { from: 'compass-org',  to: 'bob-org'    },
-  { from: 'sentinel-org', to: 'dave-org'   },
-  { from: 'anvil-org',    to: 'carol-org'  },
-  { from: 'vanguard-org', to: 'oscar-org'  },
+  { from: 'agent1-org',    to: 'alice-org'  },
+  { from: 'agent2-org',  to: 'bob-org'    },
+  { from: 'agent3-org', to: 'dave-org'   },
+  { from: 'agent6-org',    to: 'carol-org'  },
+  { from: 'agent5-org', to: 'oscar-org'  },
 ];
 
 // Council lead references (councilLead field values)
 // Applied as string replacements in quoted contexts
 const COUNCIL_LEAD_MAP = [
-  { from: "'forge'",    to: "'alice'"   },
-  { from: "'compass'",  to: "'bob'"     },
-  { from: "'sentinel'", to: "'dave'"    },
-  { from: "'anvil'",    to: "'carol'"   },
-  { from: "'vanguard'", to: "'oscar'"   },
+  { from: "'agent1'",    to: "'alice'"   },
+  { from: "'agent2'",  to: "'bob'"     },
+  { from: "'agent3'", to: "'dave'"    },
+  { from: "'agent6'",    to: "'carol'"   },
+  { from: "'agent5'", to: "'oscar'"   },
 ];
 
 // Path substitutions
@@ -137,7 +137,7 @@ const LEAK_TERMS = [
   'ClawDispatch',
   'workspace-council',
   // Agent names that should have been substituted (check Title case too)
-  // Note: 'clarity' is intentionally not here — it's a generic word
+  // Note: 'agent4' is intentionally not here — it's a generic word
 ];
 
 // ─── Files to exclude from public sync ──────────────────────────
@@ -181,7 +181,7 @@ function sanitize(content, filePath) {
 
   // 2. Agent names (word-boundary aware)
   for (const { from, to } of AGENT_NAME_MAP) {
-    // Match whole word, preserve case for Title-case occurrences (e.g. "Forge" → "Alice")
+    // Match whole word, preserve case for Title-case occurrences (e.g. "agent1" → "Alice")
     const re = new RegExp(`\\b${escapeRegex(from)}\\b`, 'gi');
     out = out.replace(re, (match) => {
       if (match[0] === match[0].toUpperCase()) {

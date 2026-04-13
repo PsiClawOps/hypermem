@@ -493,6 +493,8 @@ Full reference: **[docs/TUNING.md](./docs/TUNING.md)**
 
 ## API
 
+> **Note:** The examples below use placeholder agent names (`my-agent`, `agent1`, etc.). Replace these with your actual agent IDs from your OpenClaw config. Single-agent installs typically use `main`. Multi-agent fleets use whatever IDs you've configured. See [INSTALL.md § "Configure your fleet"](./INSTALL.md#step-5--configure-your-fleet-multi-agent-only) for details.
+
 ```typescript
 import { HyperMem } from '@psiclawops/hypermem';
 
@@ -506,18 +508,18 @@ const hm = await HyperMem.create({
 });
 
 // Record and compose
-await hm.recordUserMessage('forge', 'agent:forge:webchat:main', 'How does drift detection work?');
+await hm.recordUserMessage('my-agent', 'agent:my-agent:webchat:main', 'How does drift detection work?');
 
 const composed = await hm.compose({
-  agentId: 'forge',
-  sessionKey: 'agent:forge:webchat:main',
+  agentId: 'my-agent',
+  sessionKey: 'agent:my-agent:webchat:main',
   prompt: 'How does drift detection work?',
   tokenBudget: 4000,
   provider: 'anthropic',
 });
 
 // Refresh tool compression after each turn
-await hm.refreshCacheGradient('forge', 'agent:forge:webchat:main');
+await hm.refreshCacheGradient('my-agent', 'agent:my-agent:webchat:main');
 ```
 
 Spawning a subagent with parent context:
@@ -526,10 +528,10 @@ Spawning a subagent with parent context:
 import { buildSpawnContext, MessageStore, DocChunkStore } from '@psiclawops/hypermem';
 
 const spawn = await buildSpawnContext(
-  new MessageStore(hm.dbManager.getMessageDb('forge')),
+  new MessageStore(hm.dbManager.getMessageDb('my-agent')),
   new DocChunkStore(hm.dbManager.getLibraryDb()),
-  'forge',
-  { parentSessionKey: 'agent:forge:webchat:main', workingSnapshot: 12 }
+  'my-agent',
+  { parentSessionKey: 'agent:my-agent:webchat:main', workingSnapshot: 12 }
 );
 ```
 
@@ -541,7 +543,7 @@ const spawn = await buildSpawnContext(
 
 ```bash
 node bin/hypermem-status.mjs              # full dashboard
-node bin/hypermem-status.mjs --agent forge   # scoped to one agent
+node bin/hypermem-status.mjs --agent my-agent   # scoped to one agent
 node bin/hypermem-status.mjs --json          # machine-readable output
 node bin/hypermem-status.mjs --health        # health checks only (exit 1 on failure)
 ```
