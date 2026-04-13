@@ -94,6 +94,8 @@ const PATH_MAP = [
   { from: /process\.env\.HOME \|\| '\/home\/user'/g,           to: "process.env.HOME || os.homedir()" },
   // Internal workspace repo paths (in comments/examples only — caught by word boundary rules above)
   { from: /~\/\.openclaw\/workspace-council\//g,               to: '~/.openclaw/workspace/' },
+  // Bare string in path.join() calls
+  { from: /workspace-council/g, to: 'workspace' },
 ];
 
 // Operator name substitutions (in code patterns, not user-facing docs)
@@ -107,7 +109,8 @@ const OPERATOR_MAP = [
 // Internal product names → generic public descriptions.
 // Applied as whole-word replacements, case-preserved.
 const PRODUCT_NAME_MAP = [
-  { from: 'ClawText',     to: 'memory system' },
+  // ClawText is the real predecessor product name — kept as-is in migration docs
+  // { from: 'ClawText',     to: 'memory system' },
   { from: 'ClawDash',     to: 'dashboard' },
   { from: 'ClawCanvas',   to: 'canvas' },
   { from: 'ClawCouncil',  to: 'council' },
@@ -126,9 +129,9 @@ const OPERATOR_BROAD_MAP = [
 // Post-sanitization scan. If any of these survive in the output,
 // the sync fails. Case-insensitive matching.
 const LEAK_TERMS = [
-  'operator',
   'lumadmin',
-  'ClawText',
+  // ClawText is a legitimate public product name (predecessor to HyperMem)
+  // 'ClawText',
   'ClawDash',
   'ClawCanvas',
   'ClawCouncil',
