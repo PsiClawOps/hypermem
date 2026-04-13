@@ -77,7 +77,7 @@ export class TemporalStore {
     factId: number,
     agentId: string,
     createdAt: string,
-    opts?: { timeRef?: string; confidence?: number; occurredAt?: number }
+    opts?: { timeRef?: string; confidence?: number; occurredAt?: number; validFrom?: string }
   ): void {
     const ingestMs = new Date(createdAt).getTime();
     const occurredMs = opts?.occurredAt ?? ingestMs;

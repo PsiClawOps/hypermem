@@ -138,6 +138,8 @@ export interface Fact {
   expiresAt: string | null;
   supersededBy: number | null;
   decayScore: number;
+  validFrom: string | null;    // ISO-8601 timestamp: when this fact became true
+  invalidAt: string | null;    // ISO-8601 timestamp: when this fact stopped being true
 }
 
 // ─── Topic Types ─────────────────────────────────────────────────
@@ -625,6 +627,12 @@ export interface CompositorConfig {
   // This ensures the compositor always has access to the full recent window
   // and can make intelligent decisions about what to include.
 }
+
+// ─── Expertise Types ─────────────────────────────────────────────
+
+export type ExpertiseSourceType = 'conversation' | 'pipeline' | 'review' | 'manual';
+
+export type EvidenceRelationship = 'confirms' | 'contradicts';
 
 export interface IndexerConfig {
   enabled: boolean;

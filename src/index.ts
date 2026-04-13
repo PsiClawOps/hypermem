@@ -32,6 +32,8 @@ export { ensureContextSchema, getActiveContext, getOrCreateActiveContext, update
 export type { Context } from './context-store.js';
 export type { WorkItem, WorkEvent, WorkStatus } from './work-store.js';
 export { DesiredStateStore } from './desired-state-store.js';
+export { ExpertiseStore } from './expertise-store.js';
+export type { ExpertiseObservation, ExpertisePattern, ExpertiseEvidence } from './expertise-store.js';
 export { evictStaleContent, DEFAULT_EVICTION_CONFIG } from './image-eviction.js';
 export type { ImageEvictionConfig, EvictionStats, EvictionResult } from './image-eviction.js';
 export { KnowledgeGraph } from './knowledge-graph.js';
@@ -166,6 +168,8 @@ export type {
   AgentIdentity,
   SessionCursor,
   RecentTurn,
+  ExpertiseSourceType,
+  EvidenceRelationship,
 } from './types.js';
 
 export type { ProviderType } from './provider-translator.js';
