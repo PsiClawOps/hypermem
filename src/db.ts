@@ -16,6 +16,8 @@ import path from 'node:path';
 import { migrate } from './schema.js';
 import { migrateLibrary } from './library-schema.js';
 import { ENGINE_VERSION } from './version.js';
+import { ensureContextSchema } from './context-store.js';
+import { backfillContexts } from './context-backfill.js';
 
 // sqlite-vec extension loading — optional dependency
 import { createRequire } from 'node:module';
@@ -128,6 +130,13 @@ export class DatabaseManager {
     db = new DatabaseSync(dbPath);
     applyPragmas(db);
     migrate(db);
+    ensureContextSchema(db);
+
+    // Backfill contexts for existing conversations on first run after migration
+    const contextCount = db.prepare('SELECT COUNT(*) as cnt FROM contexts').get() as { cnt: number };
+    if (contextCount.cnt === 0) {
+      backfillContexts(db);
+    }
 
     this.messageDbs.set(agentId, db);
     return db;

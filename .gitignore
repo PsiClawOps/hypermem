@@ -18,3 +18,7 @@ secrets.json
 auth-profiles.json
 credentials.json
 oauth_creds.json
+
+# ClawMap (internal architecture analysis)
+clawmap.json
+clawmap.lock.json

@@ -28,6 +28,8 @@ export type { FleetAgent, FleetOrg, AgentCapability } from './fleet-store.js';
 export { SystemStore } from './system-store.js';
 export type { SystemState, SystemEvent } from './system-store.js';
 export { WorkStore } from './work-store.js';
+export { ensureContextSchema, getActiveContext, getOrCreateActiveContext, updateContextHead, archiveContext } from './context-store.js';
+export type { Context } from './context-store.js';
 export type { WorkItem, WorkEvent, WorkStatus } from './work-store.js';
 export { DesiredStateStore } from './desired-state-store.js';
 export { evictStaleContent, DEFAULT_EVICTION_CONFIG } from './image-eviction.js';
@@ -259,10 +261,11 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     maxMessagesPerTick: 500,
   },
   embedding: {
-    provider: 'gemini',
+    provider: 'openai',
     ollamaUrl: 'http://localhost:11434',
-    model: 'gemini-embedding-2-preview',
-    dimensions: 3072,
+    openaiBaseUrl: 'https://openrouter.ai/api/v1',
+    model: 'qwen/qwen3-embedding-8b',
+    dimensions: 4096,
     timeout: 15000,
     batchSize: 100,
   },
@@ -381,10 +384,18 @@ export class HyperMem {
       model: opts?.model,
     });
 
+    let contextId: number | undefined;
+    try {
+      const { getOrCreateActiveContext } = await import('./context-store.js');
+      const ctx = getOrCreateActiveContext(db, agentId, sessionKey, conversation.id);
+      contextId = ctx.id;
+    } catch (_) { /* context wiring is best-effort in Phase 1 */ }
+
     const neutral = userMessageToNeutral(stripMessageMetadata(content));
     const stored = store.recordMessage(conversation.id, agentId, neutral, {
       tokenCount: opts?.tokenCount,
       isHeartbeat: opts?.isHeartbeat,
+      contextId,
     });
 
     await this.cache.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
@@ -410,8 +421,16 @@ export class HyperMem {
       throw new Error(`No conversation found for session ${sessionKey}`);
     }
 
+    let contextId: number | undefined;
+    try {
+      const { getOrCreateActiveContext } = await import('./context-store.js');
+      const ctx = getOrCreateActiveContext(db, agentId, sessionKey, conversation.id);
+      contextId = ctx.id;
+    } catch (_) { /* context wiring is best-effort in Phase 1 */ }
+
     const stored = store.recordMessage(conversation.id, agentId, message, {
       tokenCount: opts?.tokenCount,
+      contextId,
     });
 
     await this.cache.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);

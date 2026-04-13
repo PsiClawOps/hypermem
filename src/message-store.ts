@@ -15,6 +15,7 @@ import type {
   ConversationStatus,
   RecentTurn,
 } from './types.js';
+import { getOrCreateActiveContext, updateContextHead } from './context-store.js';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -105,6 +106,9 @@ export class MessageStore {
 
     // node:sqlite returns { changes, lastInsertRowid }
     const id = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
+
+    // Ensure an active context exists for the new conversation (fire-and-forget side effect)
+    getOrCreateActiveContext(this.db, agentId, sessionKey, id);
 
     return {
       id,
@@ -216,6 +220,7 @@ export class MessageStore {
     opts?: {
       tokenCount?: number;
       isHeartbeat?: boolean;
+      contextId?: number;
     }
   ): StoredMessage {
     const now = nowIso();
@@ -228,8 +233,8 @@ export class MessageStore {
     const messageIndex = (lastRow?.max_idx ?? -1) + 1;
 
     const result = this.db.prepare(`
-      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, metadata, token_count, message_index, is_heartbeat, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, metadata, token_count, message_index, is_heartbeat, created_at, context_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       conversationId,
       agentId,
@@ -241,10 +246,16 @@ export class MessageStore {
       opts?.tokenCount || null,
       messageIndex,
       opts?.isHeartbeat ? 1 : 0,
-      now
+      now,
+      opts?.contextId ?? null
     );
 
     const id = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
+
+    // Update context head pointer if contextId was provided
+    if (opts?.contextId) {
+      updateContextHead(this.db, opts.contextId, Number(id));
+    }
 
     // Update conversation counters
     const tokenDelta = opts?.tokenCount || 0;
@@ -283,13 +294,16 @@ export class MessageStore {
   /**
    * Get recent messages for a conversation.
    */
-  getRecentMessages(conversationId: number, limit: number = 50): StoredMessage[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM messages
-      WHERE conversation_id = ?
-      ORDER BY message_index DESC
-      LIMIT ?
-    `).all(conversationId, limit) as Record<string, unknown>[];
+  getRecentMessages(conversationId: number, limit: number = 50, minMessageId?: number): StoredMessage[] {
+    const params: (string | number | null)[] = [conversationId];
+    let sql = 'SELECT * FROM messages WHERE conversation_id = ?';
+    if (minMessageId != null) {
+      sql += ' AND id >= ?';
+      params.push(minMessageId);
+    }
+    sql += ' ORDER BY message_index DESC LIMIT ?';
+    params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
 
     // Reverse to get chronological order
     return rows.reverse().map(parseMessageRow);
@@ -301,13 +315,16 @@ export class MessageStore {
    * (legacy messages created before topic tracking was introduced).
    * This is transition-safe: no legacy messages are silently dropped.
    */
-  getRecentMessagesByTopic(conversationId: number, topicId: string, limit: number = 50): StoredMessage[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM messages
-      WHERE conversation_id = ? AND (topic_id = ? OR topic_id IS NULL)
-      ORDER BY message_index DESC
-      LIMIT ?
-    `).all(conversationId, topicId, limit) as Record<string, unknown>[];
+  getRecentMessagesByTopic(conversationId: number, topicId: string, limit: number = 50, minMessageId?: number): StoredMessage[] {
+    const params: (string | number | null)[] = [conversationId, topicId];
+    let sql = 'SELECT * FROM messages WHERE conversation_id = ? AND (topic_id = ? OR topic_id IS NULL)';
+    if (minMessageId != null) {
+      sql += ' AND id >= ?';
+      params.push(minMessageId);
+    }
+    sql += ' ORDER BY message_index DESC LIMIT ?';
+    params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
 
     // Reverse to get chronological order
     return rows.reverse().map(parseMessageRow);

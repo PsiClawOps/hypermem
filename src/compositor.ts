@@ -41,7 +41,7 @@ import { toProviderFormat } from './provider-translator.js';
 import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
 import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
-import { ensureCompactionFenceSchema, updateCompactionFence } from './compaction-fence.js';
+import { ensureCompactionFenceSchema, updateCompactionFence, getCompactionFence } from './compaction-fence.js';
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
 import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
 import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderLightFOS, resolveOutputTier, buildActionVerificationSummary } from './fos-mod.js';
@@ -1046,6 +1046,21 @@ export class Compositor {
       computeDynamicReserve(sampleMessages, totalWindow, this.config);
     const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget, dynamicReserve, this.config.budgetFraction);
     let remaining = budget;
+
+    // Phase 0 fence enforcement: resolve the compaction fence for this conversation.
+    // All downstream message queries use this as a lower bound to exclude zombie
+    // messages below the fence that should have been compacted.
+    let fenceMessageId: number | undefined;
+    if (sampleConv) {
+      try {
+        ensureCompactionFenceSchema(db);
+        const fence = getCompactionFence(db, sampleConv.id);
+        if (fence) fenceMessageId = fence.fenceMessageId;
+      } catch {
+        // Fence lookup is best-effort — never fail composition
+      }
+    }
+
     const warnings: string[] = [];
     const slots: SlotTokenCounts = {
       system: 0,
@@ -1187,7 +1202,8 @@ export class Compositor {
         request.sessionKey,
         request.historyDepth || this.config.maxHistoryMessages,
         store,
-        activeTopicId
+        activeTopicId,
+        fenceMessageId
       );
 
       // Deduplicate history by StoredMessage.id (second line of defense after
@@ -1265,7 +1281,8 @@ export class Compositor {
           keystoneFraction,
           keystoneMaxMsgs,
           request.prompt,
-          libDb || undefined
+          libDb || undefined,
+          fenceMessageId
         );
         if (keystoneResult) {
           keystoneMessages = keystoneResult.keystoneMessages;
@@ -1292,7 +1309,8 @@ export class Compositor {
             activeTopic,
             includedHistory,
             db,
-            3
+            3,
+            fenceMessageId
           );
           if (rawCrossTopicKeystones.length > 0) {
             // Token budget: cap the full cross-topic block at 15% of remaining,
@@ -2245,6 +2263,16 @@ export class Compositor {
 
     if (!conversation) return;
 
+    // Phase 0 fence enforcement: resolve compaction fence for warm bootstrap.
+    let warmFenceMessageId: number | undefined;
+    try {
+      ensureCompactionFenceSchema(db);
+      const fence = getCompactionFence(db, conversation.id);
+      if (fence) warmFenceMessageId = fence.fenceMessageId;
+    } catch {
+      // Fence lookup is best-effort
+    }
+
     // Fetch a generous pool from SQLite, apply gradient transform, then
     // token-budget-cap the warm set. This replaces the old WARM_BOOTSTRAP_CAP
     // message-count constant which was a blunt instrument — 100 messages of
@@ -2256,7 +2284,7 @@ export class Compositor {
     const warmBudget = Math.floor(
       effectiveBudget * (this.config.warmHistoryBudgetFraction ?? 0.4)
     );
-    const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
+    const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages, warmFenceMessageId);
     const transformedForWarm = applyToolGradient(rawHistory, {
       totalWindowTokens: resolveModelWindow(opts?.model, this.config.defaultTokenBudget),
     });
@@ -2316,7 +2344,17 @@ export class Compositor {
     const conversation = store.getConversation(sessionKey);
     if (!conversation) return;
 
-    const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages);
+    // Phase 0 fence enforcement for gradient refresh
+    let gradientFenceMessageId: number | undefined;
+    try {
+      ensureCompactionFenceSchema(db);
+      const fence = getCompactionFence(db, conversation.id);
+      if (fence) gradientFenceMessageId = fence.fenceMessageId;
+    } catch {
+      // Fence lookup is best-effort
+    }
+
+    const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages, gradientFenceMessageId);
     const transformedHistory = applyToolGradient(rawHistory, {
       totalWindowTokens: tokenBudget && tokenBudget > 0
         ? Math.max(tokenBudget, Math.floor(tokenBudget / 0.80))
@@ -2393,7 +2431,8 @@ export class Compositor {
     sessionKey: string,
     limit: number,
     store: MessageStore,
-    topicId?: string
+    topicId?: string,
+    fenceMessageId?: number
   ): Promise<NeutralMessage[]> {
     // Pass limit through to Redis — this is the correct enforcement point.
     // Previously getHistory() ignored the limit on the Redis path (LRANGE 0 -1),
@@ -2406,9 +2445,9 @@ export class Compositor {
 
     if (topicId) {
       // P3.4: Option B — active topic messages + legacy NULL messages
-      return store.getRecentMessagesByTopic(conversation.id, topicId, limit);
+      return store.getRecentMessagesByTopic(conversation.id, topicId, limit, fenceMessageId);
     }
-    return store.getRecentMessages(conversation.id, limit);
+    return store.getRecentMessages(conversation.id, limit, fenceMessageId);
   }
 
   // ─── L4 Library Builders ─────────────────────────────────────
@@ -2756,6 +2795,9 @@ export class Compositor {
    * Build cross-session context by finding recent activity
    * in other sessions for this agent.
    */
+  // TODO Phase 1: buildCrossSessionContext queries OTHER conversations. Each has its
+  // own compaction fence. Per-conversation fence filtering should be added here so
+  // zombie messages from other sessions don't leak into cross-session context.
   private buildCrossSessionContext(
     agentId: string,
     currentSessionKey: string,
@@ -2861,7 +2903,8 @@ export class Compositor {
     keystoneFraction: number,
     keystoneMaxMsgs: number,
     prompt?: string,
-    libraryDb?: DatabaseSync
+    libraryDb?: DatabaseSync,
+    fenceMessageId?: number
   ): Promise<{
     keystoneMessages: NeutralMessage[];
     keystoneTokens: number;
@@ -2937,6 +2980,10 @@ export class Compositor {
         created_at: string;
       };
 
+      const fenceClause = fenceMessageId != null ? 'AND m.id >= ?' : '';
+      const baseParams: (string | number | null)[] = [conversationId, cutoffId];
+      if (fenceMessageId != null) baseParams.push(fenceMessageId);
+
       const baseQuery = `
         SELECT
           m.id,
@@ -2947,6 +2994,7 @@ export class Compositor {
         FROM messages m
         WHERE m.conversation_id = ?
           AND m.id < ?
+          ${fenceClause}
           AND m.text_content IS NOT NULL
           AND m.is_heartbeat = 0
           AND m.text_content != ''
@@ -2964,6 +3012,9 @@ export class Compositor {
 
         if (ftsTerms) {
           try {
+            const ftsParams: (string | number | null)[] = [conversationId, cutoffId];
+            if (fenceMessageId != null) ftsParams.push(fenceMessageId);
+            ftsParams.push(ftsTerms);
             candidateRows = db.prepare(`
               SELECT
                 m.id,
@@ -2974,6 +3025,7 @@ export class Compositor {
               FROM messages m
               WHERE m.conversation_id = ?
                 AND m.id < ?
+                ${fenceClause}
                 AND m.text_content IS NOT NULL
                 AND m.is_heartbeat = 0
                 AND m.text_content != ''
@@ -2983,16 +3035,16 @@ export class Compositor {
                   LIMIT 100
                 )
               LIMIT 200
-            `).all(conversationId, cutoffId, ftsTerms) as CandidateRow[];
+            `).all(...ftsParams) as CandidateRow[];
           } catch {
             // FTS query may fail on special characters — fall back to base query
-            candidateRows = db.prepare(baseQuery).all(conversationId, cutoffId) as CandidateRow[];
+            candidateRows = db.prepare(baseQuery).all(...baseParams) as CandidateRow[];
           }
         } else {
-          candidateRows = db.prepare(baseQuery).all(conversationId, cutoffId) as CandidateRow[];
+          candidateRows = db.prepare(baseQuery).all(...baseParams) as CandidateRow[];
         }
       } else {
-        candidateRows = db.prepare(baseQuery).all(conversationId, cutoffId) as CandidateRow[];
+        candidateRows = db.prepare(baseQuery).all(...baseParams) as CandidateRow[];
       }
 
       if (candidateRows.length === 0) return null;
@@ -3087,7 +3139,8 @@ export class Compositor {
     activeTopic: { id: string; name: string },
     currentMessages: NeutralMessage[],
     db: DatabaseSync,
-    maxKeystones: number = 3
+    maxKeystones: number = 3,
+    fenceMessageId?: number
   ): Promise<ScoredKeystone[]> {
     // Fetch all topics for this session except the active one (max 5, most recent first)
     type TopicRow = { id: string; name: string };
@@ -3123,6 +3176,9 @@ export class Compositor {
 
       let topicMessages: MsgRow[];
       try {
+        const topicFenceClause = fenceMessageId != null ? 'AND m.id >= ?' : '';
+        const topicParams: (string | number | null)[] = [sessionKey, agentId, topic.id];
+        if (fenceMessageId != null) topicParams.push(fenceMessageId);
         topicMessages = db.prepare(`
           SELECT m.id, m.message_index, m.role, m.text_content, m.created_at
           FROM messages m
@@ -3130,12 +3186,13 @@ export class Compositor {
           WHERE c.session_key = ?
             AND c.agent_id = ?
             AND m.topic_id = ?
+            ${topicFenceClause}
             AND m.text_content IS NOT NULL
             AND m.text_content != ''
             AND m.is_heartbeat = 0
           ORDER BY m.message_index DESC
           LIMIT 50
-        `).all(sessionKey, agentId, topic.id) as MsgRow[];
+        `).all(...topicParams) as MsgRow[];
       } catch {
         // Corrupt topic data — skip this topic, never throw
         continue;
