@@ -26,6 +26,8 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const REPO_ROOT = join(__dirname, '..');
+const PUBLIC_REMOTE_URL = 'github-psiclawops:PsiClawOps/hypermem.git';
+const PUBLIC_REMOTE = 'public';
 
 // ─── CLI ─────────────────────────────────────────────────────────
 
@@ -312,10 +314,17 @@ async function main() {
   const internalHead = gitOut('rev-parse --short HEAD');
   console.log(`Internal main HEAD: ${internalHead}`);
 
-  // 2. Switch to public branch
-  console.log('\n[1/6] Switching to public branch...');
+  // 2. Add ephemeral public remote
+  console.log('\n[1/6] Adding public remote (ephemeral)...');
+  try { git(`remote remove ${PUBLIC_REMOTE}`, { silent: true }); } catch { /* didn't exist */ }
+  git(`remote add ${PUBLIC_REMOTE} ${PUBLIC_REMOTE_URL}`);
+  git(`fetch ${PUBLIC_REMOTE}`);
+  console.log(`  Added ${PUBLIC_REMOTE} → ${PUBLIC_REMOTE_URL}`);
+
+  // 3. Switch to public branch
+  console.log('\n[2/6] Switching to public branch...');
   if (!DRY_RUN) {
-    git('checkout -B public-sync public/main');
+    git(`checkout -B public-sync ${PUBLIC_REMOTE}/main`);
   } else {
     console.log('  DRY RUN: would checkout public-sync from public/main');
   }
@@ -466,23 +475,27 @@ async function main() {
   // 8. Push
   if (!NO_PUSH) {
     console.log('\n[7/7] Pushing to public remote...');
-    git('push public HEAD:main');
+    git(`push ${PUBLIC_REMOTE} HEAD:main`);
     console.log('  ✅ Pushed to public/main');
   } else {
     console.log('\n[7/7] Skipped push (--no-push)');
-    console.log('  To push manually: git push public HEAD:main');
+    console.log('  To push manually: re-run without --no-push');
   }
 
-  // 8. Return to main
+  // 9. Return to main, remove ephemeral remote
+  const publicCommit = NO_PUSH ? '(not pushed)' : gitOut(`rev-parse --short ${PUBLIC_REMOTE}/main`);
   git('checkout main');
+  try { git(`remote remove ${PUBLIC_REMOTE}`); } catch { /* best effort */ }
   console.log('\n✅ Sync complete.');
   console.log(`   Internal: ${internalHead}`);
-  console.log(`   Public commit: ${gitOut('rev-parse --short public/main')}`);
+  console.log(`   Public commit: ${publicCommit}`);
+  console.log(`   Public remote removed (ephemeral).`);
 }
 
 main().catch(err => {
   console.error('\n❌ Sync failed:', err.message);
-  // Try to return to main on failure
+  // Try to return to main and clean up ephemeral remote on failure
   try { execSync(`git -C "${REPO_ROOT}" checkout main`, { stdio: 'pipe' }); } catch {}
+  try { execSync(`git -C "${REPO_ROOT}" remote remove ${PUBLIC_REMOTE}`, { stdio: 'pipe' }); } catch {}
   process.exit(1);
 });
