@@ -99,8 +99,8 @@ async function run() {
   assert(agent1.tier === 'council', `Tier: ${agent1.tier}`);
   assert(agent1.domains.includes('infrastructure'), 'Domains set');
 
-  hm.upsertFleetAgent('pylon', {
-    displayName: 'Pylon',
+  hm.upsertFleetAgent('director1', {
+    displayName: 'Director1',
     tier: 'director',
     orgId: 'agent1-org',
     reportsTo: 'agent1',
@@ -160,7 +160,7 @@ async function run() {
   hm.setSystemState('flag', 'reboot_needed', {
     value: false,
     reason: null,
-  }, { updatedBy: 'vigil' });
+  }, { updatedBy: 'director2' });
 
   const services = hm.getSystemCategory('service');
   assert(services.length === 2, `Services: ${services.length}`);
@@ -173,7 +173,7 @@ async function run() {
     status: 'running',
     port: 6379,
     version: '7.2.0',
-  }, { updatedBy: 'pylon' });
+  }, { updatedBy: 'director1' });
 
   const updatedRedis = hm.getSystemState('service', 'redis');
   assert(updatedRedis.value.version === '7.2.0', 'State updated');

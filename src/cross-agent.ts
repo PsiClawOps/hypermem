@@ -44,22 +44,22 @@ export function defaultOrgRegistry(): OrgRegistry {
     agent3: { agentId: 'agent3', tier: 'council' },
     agent6:    { agentId: 'agent6',    tier: 'council' },
     agent5: { agentId: 'agent5', tier: 'council' },
-    pylon:    { agentId: 'pylon',  tier: 'director', org: 'agent1-org', councilLead: 'agent1' },
-    vigil:    { agentId: 'vigil',  tier: 'director', org: 'agent1-org', councilLead: 'agent1' },
-    plane:    { agentId: 'plane',  tier: 'director', org: 'agent1-org', councilLead: 'agent1' },
-    helm:     { agentId: 'helm',   tier: 'director', org: 'agent2-org', councilLead: 'agent2' },
-    chisel:   { agentId: 'chisel', tier: 'director', org: 'agent2-org', councilLead: 'agent2' },
-    facet:    { agentId: 'facet',  tier: 'director', org: 'agent2-org', councilLead: 'agent2' },
-    bastion:  { agentId: 'bastion', tier: 'director', org: 'agent3-org', councilLead: 'agent3' },
-    gauge:    { agentId: 'gauge',   tier: 'director', org: 'agent3-org', councilLead: 'agent3' },
-    crucible: { agentId: 'crucible', tier: 'specialist' },
-    relay:    { agentId: 'relay', tier: 'specialist' },
+    director1:    { agentId: 'director1',  tier: 'director', org: 'agent1-org', councilLead: 'agent1' },
+    director2:    { agentId: 'director2',  tier: 'director', org: 'agent1-org', councilLead: 'agent1' },
+    director3:    { agentId: 'director3',  tier: 'director', org: 'agent1-org', councilLead: 'agent1' },
+    director4:     { agentId: 'director4',   tier: 'director', org: 'agent2-org', councilLead: 'agent2' },
+    director5:   { agentId: 'director5', tier: 'director', org: 'agent2-org', councilLead: 'agent2' },
+    director6:    { agentId: 'director6',  tier: 'director', org: 'agent2-org', councilLead: 'agent2' },
+    director7:  { agentId: 'director7', tier: 'director', org: 'agent3-org', councilLead: 'agent3' },
+    director8:    { agentId: 'director8',   tier: 'director', org: 'agent3-org', councilLead: 'agent3' },
+    specialist1: { agentId: 'specialist1', tier: 'specialist' },
+    specialist2:    { agentId: 'specialist2', tier: 'specialist' },
   };
 
   const orgs: Record<string, string[]> = {
-    'agent1-org':    ['agent1', 'pylon', 'vigil', 'plane'],
-    'agent2-org':  ['agent2', 'helm', 'chisel', 'facet'],
-    'agent3-org': ['agent3', 'bastion', 'gauge'],
+    'agent1-org':    ['agent1', 'director1', 'director2', 'director3'],
+    'agent2-org':  ['agent2', 'director4', 'director5', 'director6'],
+    'agent3-org': ['agent3', 'director7', 'director8'],
   };
 
   return { orgs, agents };

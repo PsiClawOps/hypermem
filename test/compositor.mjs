@@ -444,7 +444,7 @@ Every council response includes:
   });
   const directorChunks = chunkMarkdown('# Charter\n\n## Director Structure\n\nThis section is for directors only - their specific delegation and reporting lines.\n', {
     collection: 'governance/charter',
-    sourcePath: '/workspace/pylon/CHARTER.md',
+    sourcePath: '/workspace/director1/CHARTER.md',
     scope: 'per-tier',
     tier: 'director',
   });

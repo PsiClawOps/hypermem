@@ -49,7 +49,7 @@ async function run() {
       `empty fleet returns hardcoded registry (${Object.keys(fallbackReg.agents).length} agents)`
     );
     assert('agent1' in fallbackReg.agents, 'agent1 present in fallback');
-    assert('pylon' in fallbackReg.agents, 'pylon present in fallback');
+    assert('director1' in fallbackReg.agents, 'director1 present in fallback');
 
     // ── With DB agents ────────────────────────────────────────
     console.log('\n  With seeded fleet:');
@@ -59,12 +59,12 @@ async function run() {
     const fleetStore = new FleetStore(libDb);
 
     hm.dbManager.ensureAgent('agent1', { displayName: 'agent1', tier: 'council' });
-    hm.dbManager.ensureAgent('pylon', { displayName: 'Pylon', tier: 'director', org: 'agent1-org' });
+    hm.dbManager.ensureAgent('director1', { displayName: 'Director1', tier: 'director', org: 'agent1-org' });
     hm.dbManager.ensureAgent('newagent', { displayName: 'NewAgent', tier: 'specialist' });
 
     // Set reportsTo via FleetStore upsert (ensureAgent doesn't support it directly)
-    fleetStore.upsertAgent('pylon', {
-      displayName: 'Pylon',
+    fleetStore.upsertAgent('director1', {
+      displayName: 'Director1',
       tier: 'director',
       orgId: 'agent1-org',
       reportsTo: 'agent1',
@@ -75,9 +75,9 @@ async function run() {
     assert('agent1' in liveReg.agents, 'agent1 loaded from DB');
     assert(liveReg.agents['agent1'].tier === 'council', 'agent1 tier is council');
 
-    assert('pylon' in liveReg.agents, 'pylon loaded from DB');
-    assert(liveReg.agents['pylon'].councilLead === 'agent1', 'pylon reports to agent1');
-    assert(liveReg.agents['pylon'].org === 'agent1-org', 'pylon in agent1-org');
+    assert('director1' in liveReg.agents, 'director1 loaded from DB');
+    assert(liveReg.agents['director1'].councilLead === 'agent1', 'director1 reports to agent1');
+    assert(liveReg.agents['director1'].org === 'agent1-org', 'director1 in agent1-org');
 
     assert('newagent' in liveReg.agents, 'newagent loaded from DB (not in hardcoded)');
     assert(liveReg.agents['newagent'].tier === 'specialist', 'newagent tier is specialist');
@@ -85,10 +85,10 @@ async function run() {
     // Agents not seeded to DB but in hardcoded registry should still be present (merge)
     assert('agent2' in liveReg.agents, 'agent2 preserved from hardcoded fallback (not in DB)');
 
-    // Org membership: pylon should be in agent1-org
+    // Org membership: director1 should be in agent1-org
     assert(
-      liveReg.orgs['agent1-org']?.includes('pylon'),
-      'pylon is in agent1-org in live registry'
+      liveReg.orgs['agent1-org']?.includes('director1'),
+      'director1 is in agent1-org in live registry'
     );
 
     // ── Access control using live registry ────────────────────
@@ -96,21 +96,21 @@ async function run() {
     const { visibilityFilter } = await import('../dist/cross-agent.js');
 
     const forgeIdentity = liveReg.agents['agent1'];
-    const pylonIdentity = liveReg.agents['pylon'];
+    const director1Identity = liveReg.agents['director1'];
 
-    // agent1 (council) can read pylon's org-visible content
-    const forgeFilterForPylon = visibilityFilter(forgeIdentity, 'pylon', liveReg);
-    assert(forgeFilterForPylon.canReadOrg, 'agent1 can read pylon org-visible (same org)');
+    // agent1 (council) can read director1's org-visible content
+    const forgeFilterForDirector1 = visibilityFilter(forgeIdentity, 'director1', liveReg);
+    assert(forgeFilterForDirector1.canReadOrg, 'agent1 can read director1 org-visible (same org)');
 
-    // Pylon can read agent1's org-visible content (council lead)
-    const pylonFilterForForge = visibilityFilter(pylonIdentity, 'agent1', liveReg);
-    assert(pylonFilterForForge.canReadCouncil, 'pylon can read agent1 council-visible (reports to agent1)');
+    // Director1 can read agent1's org-visible content (council lead)
+    const director1FilterForForge = visibilityFilter(director1Identity, 'agent1', liveReg);
+    assert(director1FilterForForge.canReadCouncil, 'director1 can read agent1 council-visible (reports to agent1)');
 
-    // NewAgent (specialist, no org) should only see fleet-visible from pylon
+    // NewAgent (specialist, no org) should only see fleet-visible from director1
     const newAgentIdentity = liveReg.agents['newagent'];
-    const newAgentFilterForPylon = visibilityFilter(newAgentIdentity, 'pylon', liveReg);
-    assert(!newAgentFilterForPylon.canReadOrg, 'newagent cannot read pylon org-visible (different org)');
-    assert(!newAgentFilterForPylon.canReadCouncil, 'newagent cannot read pylon council-visible');
+    const newAgentFilterForDirector1 = visibilityFilter(newAgentIdentity, 'director1', liveReg);
+    assert(!newAgentFilterForDirector1.canReadOrg, 'newagent cannot read director1 org-visible (different org)');
+    assert(!newAgentFilterForDirector1.canReadCouncil, 'newagent cannot read director1 council-visible');
 
     // ── Compositor wiring: orgRegistry cached at init ──────────────────────
     console.log('\n  Compositor.orgRegistry (cached on init):');
