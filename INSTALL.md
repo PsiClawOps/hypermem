@@ -236,18 +236,38 @@ openclaw config get plugins.slots.memory           # should be: hypermem
 openclaw status                                     # look for hypermem in plugins
 ```
 
-### Step 5 — Configure your fleet (multi-agent only)
+### Step 5 — Configure your fleet
 
-> **Single-agent installs can skip this step entirely.** hypermem resolves your agent ID from your OpenClaw config at runtime. The placeholder names in source code are never used unless you run a multi-agent fleet with explicit org structures.
-
-hypermem ships with generic placeholder agent names (`agent1`, `agent2`, `director1`, etc.) in two files that define fleet topology:
+hypermem works out of the box for both single-agent and multi-agent installs. The source ships with generic placeholder agent names (`agent1`, `agent2`, `director1`, etc.) in two files that define fleet topology:
 
 | File | What it defines |
 |---|---|
 | `src/cross-agent.ts` | Org membership, agent tiers, visibility scoping |
 | `src/background-indexer.ts` | Agent-to-domain mapping for fact classification |
 
-To configure for your fleet:
+#### Single-agent installs
+
+No code changes needed. hypermem resolves your agent ID from your OpenClaw config at runtime. The placeholder names are never used.
+
+Verify it's working after Step 4:
+
+```bash
+openclaw logs --limit 20 | grep hypermem
+```
+
+You should see your agent ID (not a placeholder) in the compose logs:
+
+```
+[hypermem:compose] agent=my-agent triggers=0 fallback=true facts=3 semantic=2 ...
+```
+
+Facts, episodes, and topics are all scoped to your agent ID automatically. Cross-agent features (org visibility, shared facts) are dormant with a single agent and activate only when additional agents are configured.
+
+#### Multi-agent installs
+
+hypermem ships with generic placeholder agent names (`agent1`, `agent2`, `director1`, etc.) in the two fleet topology files listed above.
+
+Replace the placeholder names with your fleet:
 
 **1. Edit `src/cross-agent.ts`** — replace the `agents` map and `orgs` map in `defaultOrgRegistry()` with your fleet:
 
