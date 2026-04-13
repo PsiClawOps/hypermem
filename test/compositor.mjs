@@ -46,8 +46,8 @@ async function run() {
     process.exit(1);
   }
 
-  const agentId = 'agent1';
-  const sessionKey = 'agent:agent1:webchat:main';
+  const agentId = 'alice';
+  const sessionKey = 'agent:alice:webchat:main';
   const msgDb = hm.dbManager.getMessageDb(agentId);
   const libDb = hm.dbManager.getLibraryDb();
 
@@ -192,8 +192,8 @@ async function run() {
 
   // Warm the session
   await compositor.warmSession(agentId, sessionKey, msgDb, {
-    systemPrompt: 'You are agent1, the infrastructure seat.',
-    identity: 'agent1 - Infrastructure Council Seat',
+    systemPrompt: 'You are alice, the infrastructure seat.',
+    identity: 'alice - Infrastructure Council Seat',
     libraryDb: libDb,
   });
 
@@ -214,7 +214,7 @@ async function run() {
     return '';
   }).join(' ');
 
-  assert(warmedContent.includes('agent1'), 'System prompt from Redis');
+  assert(warmedContent.includes('alice'), 'System prompt from Redis');
 
   // ── Test 4b: Gate 1 - historyDepth constrains hot Redis sessions ──
   console.log('\n── Gate 1: historyDepth limits hot Redis sessions ──');
@@ -375,19 +375,19 @@ Every council response includes:
     collection: 'identity/job',
     sourcePath: '/workspace/JOB.md',
     scope: 'per-agent',
-    agentId: 'agent1',
+    agentId: 'alice',
   });
   hm.indexDocChunks(jobChunks);
 
   // The seeded policy doc contains unique text that can ONLY appear via chunk injection,
   // not from echoing the user message. We assert on that unique text.
-  // Unique agent3 in policyContent: "mandatory human review requirements"
-  // Unique agent3 in jobContent: "operationally fit, conditionally fit, or not fit"
+  // Unique dave in policyContent: "mandatory human review requirements"
+  // Unique dave in jobContent: "operationally fit, conditionally fit, or not fit"
   //
   // This ensures the test fails if FTS retrieval doesn't actually find the right chunks
-  // (Pylon's repro: user message contained "escalation" but no chunk was injected).
+  // (Hank's repro: user message contained "escalation" but no chunk was injected).
 
-  const chunkSessionKey = 'agent:agent1:webchat:chunk-test';
+  const chunkSessionKey = 'agent:alice:webchat:chunk-test';
   await hm.recordUserMessage(agentId, chunkSessionKey, 'What are the escalation triggers I should follow?');
 
   const escalationResult = await hm.compose({
@@ -403,7 +403,7 @@ Every council response includes:
   ).join('\n');
 
   // Assert on chunk-unique content - text that can only appear via chunk injection, not from the user message.
-  // The seeded policy chunk contains "No autonomous resolution allowed" - unique agent3 text
+  // The seeded policy chunk contains "No autonomous resolution allowed" - unique dave text
   // that does not appear in the user question "What are the escalation triggers I should follow?"
   assert(escalationText.includes('No autonomous resolution') || escalationText.includes('autonomous resolution'),
     'Chunk-unique policy text injected (not just user message echo)');
@@ -411,7 +411,7 @@ Every council response includes:
     'Library slot consumed (confirms chunk was actually injected, not just present in history)');
 
   // Seed a deliberation-related message to trigger identity/job chunks
-  const deliberationSessionKey = 'agent:agent1:webchat:deliberation-test';
+  const deliberationSessionKey = 'agent:alice:webchat:deliberation-test';
   await hm.recordUserMessage(agentId, deliberationSessionKey, 'We need a council round vote on this proposal and response contract.');
 
   const deliberationResult = await hm.compose({
@@ -438,7 +438,7 @@ Every council response includes:
   // Tier filter: council-scoped chunks should not appear for director queries
   const councilChunks = chunkMarkdown('# Charter\n\n## Council Structure\n\nThis section is for council seats only - their specific roles and responsibilities.\n', {
     collection: 'governance/charter',
-    sourcePath: '/workspace/agent1/CHARTER.md',
+    sourcePath: '/workspace/alice/CHARTER.md',
     scope: 'per-tier',
     tier: 'council',
   });
@@ -463,7 +463,7 @@ Every council response includes:
   hm.upsertKnowledge(agentId, 'deployments', 'k8s-staging',
     'K8S_STAGING_SENTINEL Kubernetes staging deployment requires readiness gates, rollout checks, and rollback verification.');
 
-  const promptRecallSessionKey = 'agent:agent1:webchat:prompt-recall-test';
+  const promptRecallSessionKey = 'agent:alice:webchat:prompt-recall-test';
   await hm.recordUserMessage(agentId, promptRecallSessionKey, 'Can you review our incident process?');
   await hm.recordAssistantMessage(agentId, promptRecallSessionKey, {
     role: 'assistant',
@@ -508,7 +508,7 @@ Every council response includes:
   // 'P0.1: prompt drives retrieval before message is in history'
   console.log('\n── P0.1: prompt drives retrieval before message is in history ──');
 
-  const freshPromptSessionKey = 'agent:agent1:webchat:fresh-prompt-test';
+  const freshPromptSessionKey = 'agent:alice:webchat:fresh-prompt-test';
   const freshPromptResult = await hm.compose({
     agentId,
     sessionKey: freshPromptSessionKey,
@@ -635,12 +635,12 @@ Every council response includes:
   console.log('\n── Cursor Dual-Write (P1.3) ──');
   // After compose(), the cursor should be written to both Redis AND SQLite.
   // Compose has already been called above - check the conversations table for cursor columns.
-  const cursorDb = hm.dbManager.getMessageDb('agent1');
+  const cursorDb = hm.dbManager.getMessageDb('alice');
   const cursorRow = cursorDb.prepare(`
     SELECT cursor_last_sent_id, cursor_last_sent_index, cursor_last_sent_at,
            cursor_window_size, cursor_token_count
     FROM conversations
-    WHERE session_key = 'agent:agent1:webchat:main'
+    WHERE session_key = 'agent:alice:webchat:main'
   `).get();
   assert(cursorRow !== undefined, 'Cursor row exists in conversations table');
   assert(cursorRow.cursor_last_sent_id !== null, `SQLite cursor_last_sent_id: ${cursorRow?.cursor_last_sent_id}`);
@@ -649,12 +649,12 @@ Every council response includes:
   assert(cursorRow.cursor_token_count > 0, `SQLite cursor_token_count: ${cursorRow?.cursor_token_count}`);
 
   // Verify cache has the same cursor
-  const cacheCursor = await hm.cache.getCursor('agent1', 'agent:agent1:webchat:main');
+  const cacheCursor = await hm.cache.getCursor('alice', 'agent:alice:webchat:main');
   assert(cacheCursor !== null, 'Cache cursor exists');
   assert(cacheCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Cache/SQLite cursor_last_sent_id match');
 
   // Verify facade returns cursor from cache
-  const facadeCursor = await hm.getSessionCursor('agent1', 'agent:agent1:webchat:main');
+  const facadeCursor = await hm.getSessionCursor('alice', 'agent:alice:webchat:main');
   assert(facadeCursor !== null, 'Facade cursor exists');
   assert(facadeCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Facade cursor data matches SQLite');
 

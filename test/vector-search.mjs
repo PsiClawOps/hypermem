@@ -86,10 +86,10 @@ async function run() {
 
   // ── Setup: populate agent data ──
   console.log('\n── Populating Test Data ──');
-  hm.dbManager.ensureAgent('agent1', { displayName: 'agent1', tier: 'council' });
+  hm.dbManager.ensureAgent('alice', { displayName: 'alice', tier: 'council' });
 
   // Check sqlite-vec via getVectorDb (extension loads there, not in message DB)
-  const vecDb = hm.dbManager.getVectorDb('agent1');
+  const vecDb = hm.dbManager.getVectorDb('alice');
   assert(hm.dbManager.vecAvailable, 'sqlite-vec loaded successfully');
   assert(vecDb !== null, 'Vector DB created');
   const vecVersion = vecDb.prepare('SELECT vec_version() as v').get();
@@ -110,39 +110,39 @@ async function run() {
   for (const content of factContents) {
     libDb.prepare(`INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility, source_type, created_at, updated_at, decay_score)
       VALUES (?, ?, ?, ?, ?, ?, 'conversation', datetime('now'), datetime('now'), 0.0)`)
-      .run('agent1', 'agent', 'infrastructure', content, 1.0, 'fleet');
+      .run('alice', 'agent', 'infrastructure', content, 1.0, 'fleet');
   }
 
   // Insert knowledge
   libDb.prepare(`INSERT INTO knowledge (agent_id, domain, key, content, confidence, visibility, source_type, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
-    .run('agent1', 'operations', 'deploy-process', 'Run preflight checks, push containers, run health check, shift traffic', 0.9, 'fleet', 'conversation');
+    .run('alice', 'operations', 'deploy-process', 'Run preflight checks, push containers, run health check, shift traffic', 0.9, 'fleet', 'conversation');
 
   libDb.prepare(`INSERT INTO knowledge (agent_id, domain, key, content, confidence, visibility, source_type, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
-    .run('agent1', 'architecture', 'memory-design', 'Three-layer architecture: hot Redis compositor, warm SQLite per-agent, cold library', 0.95, 'fleet', 'conversation');
+    .run('alice', 'architecture', 'memory-design', 'Three-layer architecture: hot Redis compositor, warm SQLite per-agent, cold library', 0.95, 'fleet', 'conversation');
 
   // Insert episodes
   libDb.prepare(`INSERT INTO episodes (agent_id, event_type, summary, significance, visibility, participants, created_at, decay_score)
     VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 0.0)`)
-    .run('agent1', 'deployment', 'Deployed HyperMem Phase 1 with 52 passing tests', 8, 'fleet', JSON.stringify(['agent1', 'operator']));
+    .run('alice', 'deployment', 'Deployed HyperMem Phase 1 with 52 passing tests', 8, 'fleet', JSON.stringify(['alice', 'operator']));
 
   assert(true, `Populated ${factContents.length} facts, 2 knowledge, 1 episode`);
 
   // ── Test: Index all content ──
   console.log('\n── Vector Indexing ──');
-  const indexResult = await hm.indexAgent('agent1');
+  const indexResult = await hm.indexAgent('alice');
   assert(indexResult.indexed === 8, `Indexed ${indexResult.indexed} items (expected 8)`);
   assert(indexResult.skipped === 0, `Skipped ${indexResult.skipped} items (expected 0)`);
 
   // Second indexing should skip all (content unchanged)
-  const reindexResult = await hm.indexAgent('agent1');
+  const reindexResult = await hm.indexAgent('alice');
   assert(reindexResult.indexed === 0, `Re-index: ${reindexResult.indexed} indexed (expected 0 — all cached)`);
   assert(reindexResult.skipped === 8, `Re-index: ${reindexResult.skipped} skipped (expected 8)`);
 
   // ── Test: Vector stats ──
   console.log('\n── Vector Stats ──');
-  const stats = hm.getVectorStats('agent1');
+  const stats = hm.getVectorStats('alice');
   assert(stats !== null, 'Stats returned');
   assert(stats.totalVectors === 8, `Total vectors: ${stats.totalVectors}`);
   assert(stats.tableBreakdown.facts === 5, `Facts vectors: ${stats.tableBreakdown.facts}`);
@@ -153,18 +153,18 @@ async function run() {
   console.log('\n── Semantic Search ──');
 
   // Search for Redis-related content
-  const redisResults = await hm.semanticSearch('agent1', 'Redis server configuration');
+  const redisResults = await hm.semanticSearch('alice', 'Redis server configuration');
   assert(redisResults.length > 0, `Redis query returned ${redisResults.length} results`);
   // Redis should appear in top 3 (semantic similarity isn't always keyword-exact)
   const topRedis = redisResults.slice(0, 3).some(r => r.content.toLowerCase().includes('redis'));
   assert(topRedis, `Redis mentioned in top 3 results (distances: ${redisResults.slice(0, 3).map(r => r.distance.toFixed(2)).join(', ')})`);
 
   // Search for deployment process
-  const deployResults = await hm.semanticSearch('agent1', 'How to deploy to production');
+  const deployResults = await hm.semanticSearch('alice', 'How to deploy to production');
   assert(deployResults.length > 0, `Deploy query returned ${deployResults.length} results`);
 
   // Search with table filter
-  const factOnlyResults = await hm.semanticSearch('agent1', 'memory architecture', {
+  const factOnlyResults = await hm.semanticSearch('alice', 'memory architecture', {
     tables: ['facts'],
     limit: 3,
   });
@@ -174,10 +174,10 @@ async function run() {
   );
 
   // Search with distance threshold
-  const strictResults = await hm.semanticSearch('agent1', 'Redis', {
+  const strictResults = await hm.semanticSearch('alice', 'Redis', {
     maxDistance: 0.5,
   });
-  const looseResults = await hm.semanticSearch('agent1', 'Redis', {
+  const looseResults = await hm.semanticSearch('alice', 'Redis', {
     maxDistance: 5.0,
   });
   assert(
@@ -190,23 +190,23 @@ async function run() {
   // Delete a fact from library and verify pruning works
   const factToDelete = libDb.prepare('SELECT id FROM facts LIMIT 1').get();
   libDb.prepare('DELETE FROM facts WHERE id = ?').run(factToDelete.id);
-  const pruned = hm.pruneVectorOrphans('agent1');
+  const pruned = hm.pruneVectorOrphans('alice');
   assert(pruned === 1, `Pruned ${pruned} orphan(s) (expected 1)`);
 
-  const statsAfterPrune = hm.getVectorStats('agent1');
+  const statsAfterPrune = hm.getVectorStats('alice');
   assert(statsAfterPrune.totalVectors === 7, `Vectors after prune: ${statsAfterPrune.totalVectors} (expected 7)`);
 
   // ── Test: Supersedes Tombstoning ──
   console.log('\n── Supersedes Tombstoning ──');
   // Add two facts, index them (one will be newly indexed), then mark one superseded.
   // tombstoneSuperseded() should remove the superseded fact's vec_index_map entry.
-  const statsBeforeTombstone = hm.getVectorStats('agent1');
+  const statsBeforeTombstone = hm.getVectorStats('alice');
 
   // Insert a fact that's already indexed (simulate: manually insert into vec_index_map)
   const supersededFact = libDb.prepare(`
     INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility,
       source_type, created_at, updated_at, decay_score)
-    VALUES ('agent1', 'agent', null, 'HyperMem uses Redis for hot cache (SUPERSEDED)', 1.0, 'private',
+    VALUES ('alice', 'agent', null, 'HyperMem uses Redis for hot cache (SUPERSEDED)', 1.0, 'private',
       'test', datetime('now'), datetime('now'), 0.0)
   `).run();
   const supersededId = Number(supersededFact.lastInsertRowid);
@@ -214,18 +214,18 @@ async function run() {
   const newFact = libDb.prepare(`
     INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility,
       source_type, created_at, updated_at, decay_score)
-    VALUES ('agent1', 'agent', null, 'HyperMem uses Redis for hot cache (NEW)', 1.0, 'private',
+    VALUES ('alice', 'agent', null, 'HyperMem uses Redis for hot cache (NEW)', 1.0, 'private',
       'test', datetime('now'), datetime('now'), 0.0)
   `).run();
   const newFactId = Number(newFact.lastInsertRowid);
 
   // Manually insert a vec_index_map entry for the superseded fact
-  const tombstoneVecDb = hm.dbManager.getVectorDb('agent1');
+  const tombstoneVecDb = hm.dbManager.getVectorDb('alice');
   tombstoneVecDb.prepare(`
     INSERT OR IGNORE INTO vec_index_map (source_table, source_id, vec_table, content_hash, indexed_at)
     VALUES ('facts', ?, 'vec_facts', 'fakehash_superseded', datetime('now'))
   `).run(supersededId);
-  const statsWithSuperseded = hm.getVectorStats('agent1');
+  const statsWithSuperseded = hm.getVectorStats('alice');
   assert(
     statsWithSuperseded.totalVectors === statsBeforeTombstone.totalVectors + 1,
     `Vec count increased by 1 after inserting superseded entry: ${statsWithSuperseded.totalVectors}`
@@ -235,10 +235,10 @@ async function run() {
   libDb.prepare('UPDATE facts SET superseded_by = ? WHERE id = ?').run(newFactId, supersededId);
 
   // indexAgent triggers tombstoneSuperseded()
-  const tombstoneIndexResult = await hm.indexAgent('agent1');
+  const tombstoneIndexResult = await hm.indexAgent('alice');
   assert(tombstoneIndexResult.tombstoned >= 1, `Tombstoned ${tombstoneIndexResult.tombstoned} superseded entry (expected >= 1)`);
 
-  const statsAfterTombstone = hm.getVectorStats('agent1');
+  const statsAfterTombstone = hm.getVectorStats('alice');
   // Net: +1 for newFact indexed - 1 tombstoned = same as before we inserted supersededFact
   // i.e. statsBeforeTombstone (which already had superseded in index) or slightly higher
   assert(
@@ -248,32 +248,32 @@ async function run() {
 
   // Cleanup tombstone test facts
   libDb.prepare('DELETE FROM facts WHERE id IN (?, ?)').run(supersededId, newFactId);
-  hm.pruneVectorOrphans('agent1');
+  hm.pruneVectorOrphans('alice');
 
   // ── Test: Session Registry ──
   console.log('\n── Session Registry ──');
 
-  hm.registerSession('agent:agent1:webchat:main', 'agent1', {
-    channel: '#agent1-main',
+  hm.registerSession('agent:alice:webchat:main', 'alice', {
+    channel: '#alice-main',
     channelType: 'webchat',
   });
   assert(true, 'Session registered');
 
-  hm.recordSessionEvent('agent:agent1:webchat:main', 'decision', { description: 'Chose sqlite-vec over vectorlite' });
-  hm.recordSessionEvent('agent:agent1:webchat:main', 'fact_extracted', { fact: 'nomic-embed-text produces 768d vectors' });
+  hm.recordSessionEvent('agent:alice:webchat:main', 'decision', { description: 'Chose sqlite-vec over vectorlite' });
+  hm.recordSessionEvent('agent:alice:webchat:main', 'fact_extracted', { fact: 'nomic-embed-text produces 768d vectors' });
   assert(true, 'Session events recorded');
 
-  const sessions = hm.querySessions({ agentId: 'agent1', status: 'active' });
-  assert(sessions.length === 1, `Active sessions for agent1: ${sessions.length}`);
+  const sessions = hm.querySessions({ agentId: 'alice', status: 'active' });
+  assert(sessions.length === 1, `Active sessions for alice: ${sessions.length}`);
   assert(sessions[0].decisions_made === 1, `Decisions tracked: ${sessions[0].decisions_made}`);
   assert(sessions[0].facts_extracted === 1, `Facts tracked: ${sessions[0].facts_extracted}`);
 
-  hm.closeSession('agent:agent1:webchat:main', 'Built vector search layer with sqlite-vec');
-  const closedSessions = hm.querySessions({ agentId: 'agent1', status: 'completed' });
+  hm.closeSession('agent:alice:webchat:main', 'Built vector search layer with sqlite-vec');
+  const closedSessions = hm.querySessions({ agentId: 'alice', status: 'completed' });
   assert(closedSessions.length === 1, `Completed sessions: ${closedSessions.length}`);
   assert(closedSessions[0].summary !== null, 'Session has summary');
 
-  const events = hm.getSessionEvents('agent:agent1:webchat:main');
+  const events = hm.getSessionEvents('agent:alice:webchat:main');
   assert(events.length === 4, `Session events: ${events.length} (start + decision + fact + completion)`);
 
   // ── Cleanup ──

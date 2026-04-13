@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LIBRARY_SCHEMA_VERSION = 13;
+export const LIBRARY_SCHEMA_VERSION = 15;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -167,12 +167,15 @@ function applyV3Collections(db: DatabaseSync): void {
       updated_at TEXT NOT NULL,
       expires_at TEXT,
       superseded_by INTEGER,
-      decay_score REAL DEFAULT 0.0
+      decay_score REAL DEFAULT 0.0,
+      valid_from TEXT,
+      invalid_at TEXT
     )
   `);
   db.exec('CREATE INDEX IF NOT EXISTS idx_facts_agent ON facts(agent_id, scope, domain)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_facts_visibility ON facts(visibility, agent_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(agent_id, superseded_by, decay_score, confidence DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_facts_temporal_validity ON facts(agent_id, valid_from, invalid_at)');
 
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
@@ -1106,6 +1109,69 @@ export function migrateLibrary(db: DatabaseSync, engineVersion?: string): void {
 
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(13, nowIso());
+  }
+
+  // ── V14: Temporal validity columns on facts ──────────────────────────
+  // valid_from / invalid_at enable "what was true on date X?" queries.
+  if (currentVersion < 14) {
+    try { db.exec('ALTER TABLE facts ADD COLUMN valid_from TEXT'); } catch { /* already exists */ }
+    try { db.exec('ALTER TABLE facts ADD COLUMN invalid_at TEXT'); } catch { /* already exists */ }
+    try { db.exec('CREATE INDEX IF NOT EXISTS idx_facts_temporal_validity ON facts(agent_id, valid_from, invalid_at)'); } catch { /* already exists */ }
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(14, nowIso());
+  }
+
+  // ── V15: Expertise tables (domain expertise patterns) ──────────────
+  // expertise_observations: raw learnings from conversations, pipelines, reviews
+  // expertise_patterns: graduated observations with confirming evidence
+  // expertise_evidence: links observations to patterns (confirms/contradicts)
+  if (currentVersion < 15) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS expertise_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        context TEXT,
+        observation_text TEXT NOT NULL,
+        source_type TEXT NOT NULL DEFAULT 'conversation',
+        source_ref TEXT,
+        created_at TEXT NOT NULL
+      )
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_expertise_obs_agent ON expertise_observations(agent_id, domain)');
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS expertise_patterns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        pattern_text TEXT NOT NULL,
+        confidence REAL DEFAULT 0.7,
+        frequency INTEGER DEFAULT 1,
+        first_seen TEXT NOT NULL,
+        last_confirmed TEXT NOT NULL,
+        invalidated_at TEXT,
+        invalidation_reason TEXT,
+        decay_score REAL DEFAULT 0.0,
+        updated_at TEXT
+      )
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_expertise_patterns_agent ON expertise_patterns(agent_id, domain, invalidated_at)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_expertise_patterns_active ON expertise_patterns(agent_id, invalidated_at, confidence DESC)');
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS expertise_evidence (
+        observation_id INTEGER NOT NULL,
+        pattern_id INTEGER NOT NULL,
+        relationship TEXT NOT NULL CHECK(relationship IN ('confirms', 'contradicts')),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (observation_id, pattern_id)
+      )
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_expertise_evidence_pattern ON expertise_evidence(pattern_id, relationship)');
+
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(15, nowIso());
   }
 
   // Always ensure meta exists before stamping the running engine version.

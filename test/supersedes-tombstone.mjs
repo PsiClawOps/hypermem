@@ -105,8 +105,8 @@ async function run() {
     const libDb = makeLibraryDb();
     const store = new FactStore(libDb);
 
-    const oldFact = store.addFact('agent1', 'decided to use Redis for hot cache because latency is critical in production');
-    const newFact = store.addFact('agent1', 'decided to use Redis for hot cache with agent3 HA mode in production env');
+    const oldFact = store.addFact('alice', 'decided to use Redis for hot cache because latency is critical in production');
+    const newFact = store.addFact('alice', 'decided to use Redis for hot cache with dave HA mode in production env');
 
     assert(oldFact.supersededBy === null, 'Old fact starts with supersededBy=null');
     assert(newFact.supersededBy === null, 'New fact starts with supersededBy=null');
@@ -119,12 +119,12 @@ async function run() {
     assert(didMarkAgain === false, 'markSuperseded returns false on already-superseded fact');
 
     // getActiveFacts must exclude superseded
-    const active = store.getActiveFacts('agent1');
+    const active = store.getActiveFacts('alice');
     assertEquals(active.length, 1, 'getActiveFacts returns 1 active fact');
     assertEquals(active[0].id, newFact.id, 'Active fact is the new one');
 
     // searchFacts (FTS) must also exclude superseded
-    const searchResults = store.searchFacts('Redis hot cache', { agentId: 'agent1' });
+    const searchResults = store.searchFacts('Redis hot cache', { agentId: 'alice' });
     const allActive = searchResults.every(r => r.supersededBy === null);
     assert(allActive, 'searchFacts excludes superseded facts');
   }
@@ -138,26 +138,26 @@ async function run() {
     // The prefix must be >= 60 chars and shared between base and updated content.
     // Both start with the same 60+ chars, then diverge.
     const sharedPrefix = 'decided to use Redis for the primary cache layer in all envs'; // 61 chars
-    const base = store.addFact('agent1', sharedPrefix + ' — original version with default TTL settings configured');
+    const base = store.addFact('alice', sharedPrefix + ' — original version with default TTL settings configured');
     const updated = sharedPrefix + ' — updated version with explicit TTL of 300s configured properly';
 
-    const found = store.findSupersedableByContent('agent1', updated);
+    const found = store.findSupersedableByContent('alice', updated);
     assertEquals(found, base.id, `findSupersedableByContent found base fact id=${base.id}`);
 
     // After marking superseded, should not find it again
     store.markSuperseded(base.id, base.id + 999);
-    const foundAfter = store.findSupersedableByContent('agent1', updated);
+    const foundAfter = store.findSupersedableByContent('alice', updated);
     assert(foundAfter === null, 'findSupersedableByContent returns null for already-superseded fact');
 
     // No match if content prefix is different
     const noMatch = store.findSupersedableByContent(
-      'agent1',
+      'alice',
       'completely different subject matter that will not match any existing facts stored here'
     );
     assert(noMatch === null, 'findSupersedableByContent returns null when no prefix match');
 
     // Exact duplicate should not match itself (content != ? guard)
-    const exactSelf = store.findSupersedableByContent('agent1', updated);
+    const exactSelf = store.findSupersedableByContent('alice', updated);
     assert(exactSelf === null, 'findSupersedableByContent does not match exact duplicate of input content');
   }
 
@@ -170,7 +170,7 @@ async function run() {
     const { vecDb, vs } = makeVectorStore(libDb);
     const factStore = new FactStore(libDb);
 
-    const fact = factStore.addFact('agent1', 'decided to use SQLite for local storage because of zero-server simplicity in dev');
+    const fact = factStore.addFact('alice', 'decided to use SQLite for local storage because of zero-server simplicity in dev');
 
     // Simulate the fact having been indexed via fake map entry
     insertFakeMapEntry(vecDb, 'facts', fact.id);
@@ -199,9 +199,9 @@ async function run() {
     const { vecDb, vs } = makeVectorStore(libDb);
     const factStore = new FactStore(libDb);
 
-    const activeFact = factStore.addFact('agent1', 'decided to deploy containers via Kubernetes for production workloads always');
-    const oldFact   = factStore.addFact('agent1', 'decided to deploy containers via Docker Compose for production workloads only');
-    const newFact   = factStore.addFact('agent1', 'decided to deploy containers via Kubernetes with Helm for production workloads');
+    const activeFact = factStore.addFact('alice', 'decided to deploy containers via Kubernetes for production workloads always');
+    const oldFact   = factStore.addFact('alice', 'decided to deploy containers via Docker Compose for production workloads only');
+    const newFact   = factStore.addFact('alice', 'decided to deploy containers via Kubernetes with Eve for production workloads');
     factStore.markSuperseded(oldFact.id, newFact.id);
 
     // Simulate all three having been indexed
@@ -229,8 +229,8 @@ async function run() {
     const { vecDb, vs } = makeVectorStore(libDb);
     const factStore = new FactStore(libDb);
 
-    const supersededFact = factStore.addFact('agent1', 'decided to use PostgreSQL for primary database storage in production systems');
-    const newFact        = factStore.addFact('agent1', 'decided to use SQLite for primary database storage in production systems v2');
+    const supersededFact = factStore.addFact('alice', 'decided to use PostgreSQL for primary database storage in production systems');
+    const newFact        = factStore.addFact('alice', 'decided to use SQLite for primary database storage in production systems v2');
     factStore.markSuperseded(supersededFact.id, newFact.id);
 
     // Fake index entry for the superseded fact
@@ -248,15 +248,15 @@ async function run() {
     const libDb = makeLibraryDb();
     const factStore = new FactStore(libDb);
 
-    factStore.addFact('agent1', 'decided to use PostgreSQL for the primary analytics database cluster in production');
-    const old   = factStore.addFact('agent1', 'decided to use MySQL for the primary analytics database cluster in production env');
-    const newer = factStore.addFact('agent1', 'decided to use PostgreSQL for the primary analytics database cluster v2 production');
+    factStore.addFact('alice', 'decided to use PostgreSQL for the primary analytics database cluster in production');
+    const old   = factStore.addFact('alice', 'decided to use MySQL for the primary analytics database cluster in production env');
+    const newer = factStore.addFact('alice', 'decided to use PostgreSQL for the primary analytics database cluster v2 production');
     factStore.markSuperseded(old.id, newer.id);
 
     // FTS hybrid search — superseded MySQL fact must not appear
     const results = await hybridSearch(libDb, null, 'analytics database MySQL primary cluster', {
       tables: ['facts'],
-      agentId: 'agent1',
+      agentId: 'alice',
       limit: 20,
     });
 
@@ -300,8 +300,8 @@ async function run() {
 
     // Insert a fact and mark it superseded, with a stale vec entry
     const factStore = new FactStore(libDb);
-    const old   = factStore.addFact('agent2', 'decided to use Nginx for the reverse proxy and load balancing layer in production');
-    const newer = factStore.addFact('agent2', 'decided to use Caddy for the reverse proxy and load balancing layer in production');
+    const old   = factStore.addFact('bob', 'decided to use Nginx for the reverse proxy and load balancing layer in production');
+    const newer = factStore.addFact('bob', 'decided to use Caddy for the reverse proxy and load balancing layer in production');
     factStore.markSuperseded(old.id, newer.id);
     insertFakeMapEntry(vecDb, 'facts', old.id);
 
@@ -312,7 +312,7 @@ async function run() {
       { enabled: false },
       (_agentId) => msgDb,
       () => libDb,
-      () => ['agent2'],
+      () => ['bob'],
     );
     indexer.setVectorStore(vs);
 
@@ -321,8 +321,8 @@ async function run() {
 
     assert(results.length >= 1, `tick() produced ${results.length} stats entry(ies)`);
 
-    const agentStats = results.find(r => r.agentId === 'agent2');
-    assert(agentStats !== undefined, 'Stats contain entry for agent2');
+    const agentStats = results.find(r => r.agentId === 'bob');
+    assert(agentStats !== undefined, 'Stats contain entry for bob');
     assert('tombstoned' in agentStats, 'Stats entry has tombstoned field');
     assert(agentStats.tombstoned >= 1, `tombstoned >= 1 in stats (got ${agentStats?.tombstoned})`);
 
@@ -331,7 +331,7 @@ async function run() {
 
     // Second tick: tombstoned should be 0 (idempotent)
     const results2 = await indexer.tick();
-    const agentStats2 = results2.find(r => r.agentId === 'agent2');
+    const agentStats2 = results2.find(r => r.agentId === 'bob');
     // May be undefined if tombstoned=0 causes it to be filtered out — check accordingly
     const tombstoned2 = agentStats2?.tombstoned ?? 0;
     assertEquals(tombstoned2, 0, 'Second tick tombstoned=0 (idempotent)');

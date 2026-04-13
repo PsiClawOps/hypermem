@@ -100,7 +100,7 @@ function run() {
   // Test 2: No fence = no compaction
   {
     const db = createTestDb();
-    const convId = seedConversation(db, 'agent1', 'agent:agent1:webchat:main', 20);
+    const convId = seedConversation(db, 'alice', 'agent:alice:webchat:main', 20);
     const fence = getCompactionFence(db, convId);
     assert(fence === null, 'No fence exists by default');
 
@@ -112,7 +112,7 @@ function run() {
   // Test 3: Set fence, check eligibility
   {
     const db = createTestDb();
-    const convId = seedConversation(db, 'agent1', 'agent:agent1:webchat:main', 20);
+    const convId = seedConversation(db, 'alice', 'agent:alice:webchat:main', 20);
 
     // Get message IDs
     const msgs = db.prepare('SELECT id FROM messages WHERE conversation_id = ? ORDER BY message_index ASC').all(convId);
@@ -133,7 +133,7 @@ function run() {
   // Test 4: Monotone progress — fence never moves backward
   {
     const db = createTestDb();
-    const convId = seedConversation(db, 'agent1', 'agent:agent1:webchat:main', 20);
+    const convId = seedConversation(db, 'alice', 'agent:alice:webchat:main', 20);
     const msgs = db.prepare('SELECT id FROM messages WHERE conversation_id = ? ORDER BY message_index ASC').all(convId);
 
     // Set fence at message 15
@@ -158,7 +158,7 @@ function run() {
   // Test 5: Compactable messages excludes already-summarized
   {
     const db = createTestDb();
-    const convId = seedConversation(db, 'agent1', 'agent:agent1:webchat:main', 20);
+    const convId = seedConversation(db, 'alice', 'agent:alice:webchat:main', 20);
     const msgs = db.prepare('SELECT id FROM messages WHERE conversation_id = ? ORDER BY message_index ASC').all(convId);
 
     // Set fence at message 11
@@ -168,7 +168,7 @@ function run() {
     const now = new Date().toISOString();
     db.prepare(`
       INSERT INTO summaries (conversation_id, agent_id, depth, content, created_at, updated_at)
-      VALUES (?, 'agent1', 0, 'Summary of messages 1-5', ?, ?)
+      VALUES (?, 'alice', 0, 'Summary of messages 1-5', ?, ?)
     `).run(convId, now, now);
 
     const summaryRow = db.prepare('SELECT id FROM summaries WHERE conversation_id = ?').get(convId);
@@ -191,7 +191,7 @@ function run() {
   // Test 6: No fence = empty compactable set
   {
     const db = createTestDb();
-    const convId = seedConversation(db, 'agent1', 'agent:agent1:webchat:main', 20);
+    const convId = seedConversation(db, 'alice', 'agent:alice:webchat:main', 20);
     const compactable = getCompactableMessages(db, convId);
     assert(compactable.length === 0, 'No fence = empty compactable set');
   }

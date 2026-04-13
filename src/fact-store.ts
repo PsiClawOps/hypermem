@@ -31,6 +31,8 @@ function parseFactRow(row: Record<string, unknown>): Fact {
     expiresAt: (row.expires_at as string) || null,
     supersededBy: (row.superseded_by as number) || null,
     decayScore: row.decay_score as number,
+    validFrom: (row.valid_from as string) || null,
+    invalidAt: (row.invalid_at as string) || null,
   };
 }
 
@@ -91,8 +93,8 @@ export class FactStore {
     const result = this.db.prepare(`
       INSERT INTO facts (agent_id, scope, domain, content, confidence,
         visibility, source_type, source_session_key, source_ref,
-        created_at, updated_at, expires_at, decay_score)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0)
+        created_at, updated_at, expires_at, decay_score, valid_from)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?)
     `).run(
       agentId,
       scope,
@@ -105,7 +107,8 @@ export class FactStore {
       opts?.sourceRef || null,
       now,
       now,
-      opts?.expiresAt || null
+      opts?.expiresAt || null,
+      now
     );
 
     const id = Number((result as unknown as { lastInsertRowid: bigint }).lastInsertRowid);
@@ -126,6 +129,8 @@ export class FactStore {
       expiresAt: opts?.expiresAt || null,
       supersededBy: null,
       decayScore: 0,
+      validFrom: now,
+      invalidAt: null,
     };
   }
 
@@ -230,10 +235,10 @@ export class FactStore {
     const result = this.db
       .prepare(`
         UPDATE facts
-        SET superseded_by = ?, updated_at = ?
+        SET superseded_by = ?, invalid_at = ?, updated_at = ?
         WHERE id = ? AND superseded_by IS NULL
       `)
-      .run(newFactId, now, oldFactId);
+      .run(newFactId, now, now, oldFactId);
     return (result as unknown as { changes: number }).changes > 0;
   }
 
@@ -311,5 +316,61 @@ export class FactStore {
       'SELECT COUNT(*) AS count FROM facts WHERE agent_id = ?'
     ).get(agentId) as { count: number };
     return row.count;
+  }
+
+  /**
+   * Get facts that were valid at a specific point in time.
+   * Returns facts where valid_from <= dateMs AND (invalid_at IS NULL OR invalid_at > dateMs).
+   * This enables "what was true on date X?" queries (Zep-competitive).
+   */
+  getFactsValidAt(
+    agentId: string,
+    dateMs: number,
+    opts?: {
+      domain?: string;
+      limit?: number;
+    }
+  ): Fact[] {
+    const dateIso = new Date(dateMs).toISOString();
+    let sql = `
+      SELECT * FROM facts
+      WHERE agent_id = ?
+      AND (valid_from IS NULL OR valid_from <= ?)
+      AND (invalid_at IS NULL OR invalid_at > ?)
+      AND superseded_by IS NULL
+      AND decay_score < 0.8
+    `;
+    const params: (string | number)[] = [agentId, dateIso, dateIso];
+
+    if (opts?.domain) {
+      sql += ' AND domain = ?';
+      params.push(opts.domain);
+    }
+
+    sql += ' ORDER BY confidence DESC, decay_score ASC';
+
+    if (opts?.limit) {
+      sql += ' LIMIT ?';
+      params.push(opts.limit);
+    }
+
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    return rows.map(parseFactRow);
+  }
+
+  /**
+   * Mark a fact as invalid at a specific time (or now).
+   * Unlike supersede, this doesn't require a replacement fact.
+   * Used by contradiction detection to mark stale facts.
+   */
+  invalidateFact(factId: number, atDate?: string): boolean {
+    const invalidAt = atDate || new Date().toISOString();
+    const result = this.db
+      .prepare(`
+        UPDATE facts SET invalid_at = ?, updated_at = ?
+        WHERE id = ? AND invalid_at IS NULL
+      `)
+      .run(invalidAt, invalidAt, factId);
+    return (result as unknown as { changes: number }).changes > 0;
   }
 }

@@ -6,7 +6,7 @@
  *
  * Usage:
  *   const ctx = await buildSpawnContext(messageStore, docChunkStore, agentId, {
- *     parentSessionKey: 'agent:agent1:webchat:main',
+ *     parentSessionKey: 'agent:alice:webchat:main',
  *     workingSnapshot: 10,
  *     documents: ['/path/to/spec.md'],
  *   });

@@ -48,15 +48,15 @@ async function run() {
   }
 
   // ── Seed some facts and knowledge for linking ──
-  const fact1 = hm.addFact('agent1', 'Redis 7.0.15 runs on localhost:6379', { domain: 'infra' });
-  const fact2 = hm.addFact('agent1', 'SQLite uses WAL mode for concurrent reads', { domain: 'infra' });
-  const fact3 = hm.addFact('agent1', 'HyperMem replaced ClawText JSONL', { domain: 'architecture' });
-  const fact4 = hm.addFact('agent2', 'Product launches Q2 2026', { domain: 'strategy' });
-  const fact5 = hm.addFact('agent3', 'All fleet DBs use encrypted-at-rest', { domain: 'security' });
+  const fact1 = hm.addFact('alice', 'Redis 7.0.15 runs on localhost:6379', { domain: 'infra' });
+  const fact2 = hm.addFact('alice', 'SQLite uses WAL mode for concurrent reads', { domain: 'infra' });
+  const fact3 = hm.addFact('alice', 'HyperMem replaced ClawText JSONL', { domain: 'architecture' });
+  const fact4 = hm.addFact('bob', 'Product launches Q2 2026', { domain: 'strategy' });
+  const fact5 = hm.addFact('dave', 'All fleet DBs use encrypted-at-rest', { domain: 'security' });
 
-  const k1 = hm.upsertKnowledge('agent1', 'architecture', 'memory-layers',
+  const k1 = hm.upsertKnowledge('alice', 'architecture', 'memory-layers',
     'L1 Redis, L2 Messages, L3 Vectors, L4 Library');
-  const k2 = hm.upsertKnowledge('agent1', 'architecture', 'db-split',
+  const k2 = hm.upsertKnowledge('alice', 'architecture', 'db-split',
     'Three files per agent: messages.db, vectors.db, library.db');
 
   // ── Test 1: Link creation ──
@@ -128,7 +128,7 @@ async function run() {
   assert(pathResult[pathResult.length - 1].type === 'knowledge', 'Path ends at knowledge');
 
   // No path to disconnected entity
-  const isolatedFact = hm.addFact('agent1', 'Isolated fact', { domain: 'test' });
+  const isolatedFact = hm.addFact('alice', 'Isolated fact', { domain: 'test' });
   const noPath = hm.findGraphPath('fact', fact1.id, 'fact', isolatedFact.id);
   assert(noPath === null, 'No path to disconnected node');
 

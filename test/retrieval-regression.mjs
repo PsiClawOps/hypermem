@@ -255,7 +255,7 @@ async function run() {
     // Insert superseded (old) fact — superseded_by is a non-null string/id
     // The compositor queries: WHERE superseded_by IS NULL
     // We insert superseded_by = 'fact_new_id' (any truthy non-null value)
-    // Note: schema has superseded_by as INTEGER — use numeric id 99 as agent3
+    // Note: schema has superseded_by as INTEGER — use numeric id 99 as dave
     libDb.prepare(`
       INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility,
                          source_type, source_session_key, superseded_by,

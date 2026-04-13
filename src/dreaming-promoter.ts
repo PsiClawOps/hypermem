@@ -92,12 +92,12 @@ export interface DreamerResult {
 
 /**
  * Resolve the workspace directory for an agent.
- * Council agents live at ~/.openclaw/workspace-council/{agentId}/
+ * Council agents live at ~/.openclaw/workspace/{agentId}/
  * Other agents at ~/.openclaw/workspace/{agentId}/
  */
 export async function resolveAgentWorkspacePath(agentId: string): Promise<string | null> {
   const home = os.homedir();
-  const councilPath = path.join(home, '.openclaw', 'workspace-council', agentId);
+  const councilPath = path.join(home, '.openclaw', 'workspace', agentId);
   const workspacePath = path.join(home, '.openclaw', 'workspace', agentId);
 
   try {

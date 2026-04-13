@@ -23,7 +23,14 @@
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
 import { buildPluginConfigSchema } from 'openclaw/plugin-sdk/core';
 import { z } from 'zod';
-import type { ContextEngine, ContextEngineInfo } from 'openclaw/plugin-sdk';
+import type {
+  ContextEngine,
+  ContextEngineInfo,
+  ContextEngineMaintenanceResult,
+  IngestBatchResult,
+  SubagentSpawnPreparation,
+  SubagentEndReason,
+} from 'openclaw/plugin-sdk';
 import type {
   NeutralMessage,
   NeutralToolCall,
@@ -919,7 +926,7 @@ function createHyperMemEngine(): ContextEngine {
     info: {
       id: 'hypermem',
       name: 'hypermem context engine',
-      version: '0.5.4',
+      version: '0.6.3',
       // We own compaction — assemble() trims to budget via the compositor safety
       // valve, so runtime compaction is never needed. compact() handles any
       // explicit calls by trimming the Redis history window directly.
@@ -945,35 +952,8 @@ function createHyperMemEngine(): ContextEngine {
         const sk = resolveSessionKey(sessionId, sessionKey);
         const agentId = extractAgentId(sk);
 
-        // EC1 pre-flight: proactively truncate the JSONL on disk if it is over
-        // the safe replay threshold. Fires BEFORE warm() so the next restart
-        // (not this one) loads a clean file. Combined with the preflight script
-        // run before each gateway restart, this closes the EC1 loop entirely.
-        //
-        // Why this doesn't help the CURRENT session:
-        //   OpenClaw has already replayed the JSONL into memory by the time
-        //   bootstrap() is called. Disk truncation here is forward-looking only.
-        //
-        // Why it still matters:
-        //   Without this, a session that saturates in operation (no preflight ran)
-        //   would restart saturated on the next boot. This ensures at least one
-        //   restart cycle later the session comes up clean.
-        try {
-          const sessionDir = path.join(os.homedir(), '.openclaw', 'agents', agentId, 'sessions');
-          const jsonlPath = path.join(sessionDir, `${sessionId}.jsonl`);
-          // EC1 threshold: 60 conversation messages (token-capped at 40% of 128k)
-          const EC1_MAX_MESSAGES = 60;
-          const EC1_TOKEN_BUDGET = Math.floor(128_000 * 0.40);
-          const truncated = await truncateJsonlIfNeeded(jsonlPath, EC1_MAX_MESSAGES, false, EC1_TOKEN_BUDGET);
-          if (truncated) {
-            console.log(
-              `[hypermem-plugin] bootstrap: proactive JSONL trim for ${agentId} ` +
-              `(EC1 guard — next restart will load clean)`
-            );
-          }
-        } catch {
-          // Non-fatal — JSONL truncation is best-effort
-        }
+        // EC1 JSONL truncation moved to maintain() — bootstrap stays fast.
+
         // Fast path: if session already has history in Redis, skip warm entirely.
         // sessionExists() is a single EXISTS call — sub-millisecond cost.
         const alreadyWarm = await hm.cache.sessionExists(agentId, sk);
@@ -1099,6 +1079,73 @@ function createHyperMemEngine(): ContextEngine {
     },
 
     /**
+     * Transcript maintenance — runs after bootstrap, successful turns, or compaction.
+     *
+     * Moved from bootstrap: proactive JSONL truncation is forward-looking (helps
+     * next restart, not current session), so it belongs in maintenance, not init.
+     * Also runs tool pair repair on Redis history to fix orphaned pairs from
+     * trim/compaction passes.
+     */
+    async maintain({ sessionId, sessionKey, sessionFile }): Promise<ContextEngineMaintenanceResult> {
+      let changed = false;
+      let bytesFreed = 0;
+      let rewrittenEntries = 0;
+
+      try {
+        const hm = await getHyperMem();
+        const sk = resolveSessionKey(sessionId, sessionKey);
+        const agentId = extractAgentId(sk);
+
+        // 1. Proactive JSONL truncation (EC1 guard — next restart loads clean)
+        try {
+          const EC1_MAX_MESSAGES = 60;
+          const EC1_TOKEN_BUDGET = Math.floor(128_000 * 0.40);
+          const truncated = await truncateJsonlIfNeeded(sessionFile, EC1_MAX_MESSAGES, false, EC1_TOKEN_BUDGET);
+          if (truncated) {
+            console.log(
+              `[hypermem-plugin] maintain: proactive JSONL trim for ${agentId} ` +
+              `(EC1 guard — next restart will load clean)`
+            );
+            changed = true;
+          }
+        } catch {
+          // Non-fatal — JSONL truncation is best-effort
+        }
+
+        // 2. Redis history tool pair repair
+        // Compaction and trim passes can orphan tool_call/tool_result pairs.
+        // Anthropic and Gemini reject orphaned pairs with 400 errors.
+        try {
+          const history = await hm.cache.getHistory(agentId, sk);
+          if (history && history.length > 0) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const repairedHistory = repairToolPairs(history as any[]) as unknown as typeof history;
+            const removedCount = history.length - repairedHistory.length;
+            if (removedCount > 0) {
+              await hm.cache.replaceHistory(agentId, sk, repairedHistory);
+              await hm.cache.invalidateWindow(agentId, sk);
+              console.log(
+                `[hypermem-plugin] maintain: repaired tool pairs in Redis history ` +
+                `for ${agentId} (removed ${removedCount} orphaned messages)`
+              );
+              changed = true;
+              rewrittenEntries += removedCount;
+              // Rough estimate: ~500 bytes per removed message
+              bytesFreed += removedCount * 500;
+            }
+          }
+        } catch {
+          // Non-fatal
+        }
+
+        return { changed, bytesFreed, rewrittenEntries };
+      } catch (err) {
+        console.warn('[hypermem-plugin] maintain failed:', (err as Error).message);
+        return { changed, bytesFreed, rewrittenEntries, reason: (err as Error).message };
+      }
+    },
+
+    /**
      * Ingest a single message into hypermem's message store.
      * Skip heartbeats — they're noise in the memory store.
      */
@@ -1189,6 +1236,43 @@ function createHyperMemEngine(): ContextEngine {
         console.warn('[hypermem-plugin] ingest failed:', (err as Error).message);
         return { ingested: false };
       }
+    },
+
+    /**
+     * Batch ingest: process multiple messages in a single call.
+     *
+     * Note: when afterTurn() is defined (which it is), the runtime calls
+     * afterTurn instead of ingest/ingestBatch. This is here for interface
+     * completeness and forward compatibility.
+     */
+    async ingestBatch({ sessionId, sessionKey, messages, isHeartbeat }): Promise<IngestBatchResult> {
+      if (isHeartbeat) {
+        return { ingestedCount: 0 };
+      }
+
+      let ingestedCount = 0;
+      try {
+        const hm = await getHyperMem();
+        const sk = resolveSessionKey(sessionId, sessionKey);
+        const agentId = extractAgentId(sk);
+
+        for (const message of messages) {
+          const msg = message as unknown as InboundMessage;
+          if (msg.role === 'system') continue;
+
+          const neutral = toNeutralMessage(msg);
+          if (neutral.role === 'user' && !neutral.toolResults?.length) {
+            await hm.recordUserMessage(agentId, sk, stripMessageMetadata(neutral.textContent ?? ''));
+          } else {
+            await hm.recordAssistantMessage(agentId, sk, neutral);
+          }
+          ingestedCount++;
+        }
+      } catch (err) {
+        console.warn('[hypermem-plugin] ingestBatch failed:', (err as Error).message);
+      }
+
+      return { ingestedCount };
     },
 
     /**
@@ -2208,6 +2292,97 @@ function createHyperMemEngine(): ContextEngine {
       } catch (err) {
         // afterTurn is never fatal
         console.warn('[hypermem-plugin] afterTurn failed:', (err as Error).message);
+      }
+    },
+
+    /**
+     * Prepare context for a subagent session before it starts.
+     *
+     * Seeds the child session's Redis with parent context based on the
+     * subagentWarming config ('full' | 'light' | 'off').
+     * Returns a rollback handle to clean up if spawn fails.
+     */
+    async prepareSubagentSpawn({ parentSessionKey, childSessionKey }): Promise<SubagentSpawnPreparation | undefined> {
+      if (_subagentWarming === 'off') {
+        return undefined;
+      }
+
+      try {
+        const hm = await getHyperMem();
+        const parentAgentId = extractAgentId(parentSessionKey);
+        const childAgentId = extractAgentId(childSessionKey);
+
+        // Seed child with parent's active facts
+        const facts = hm.getActiveFacts(parentAgentId, { limit: 50 });
+        if (facts && (facts as unknown[]).length > 0) {
+          const factBlock = (facts as Array<{ content: string }>)
+            .map(f => f.content)
+            .join('\n');
+          await hm.cache.setSlot(childAgentId, childSessionKey, 'parentFacts', factBlock);
+        }
+
+        // For 'full' warming, also seed recent history context
+        if (_subagentWarming === 'full') {
+          const history = await hm.cache.getHistory(parentAgentId, parentSessionKey);
+          if (history && history.length > 0) {
+            const recentHistory = history.slice(-10);
+            await hm.cache.setSlot(
+              childAgentId,
+              childSessionKey,
+              'parentHistory',
+              JSON.stringify(recentHistory)
+            );
+          }
+        }
+
+        console.log(
+          `[hypermem-plugin] prepareSubagentSpawn: seeded ${childSessionKey} ` +
+          `from ${parentSessionKey} (warming=${_subagentWarming})`
+        );
+
+        return {
+          async rollback() {
+            try {
+              const hm = await getHyperMem();
+              await hm.cache.setSlot(childAgentId, childSessionKey, 'parentFacts', '');
+              await hm.cache.setSlot(childAgentId, childSessionKey, 'parentHistory', '');
+            } catch {
+              // Rollback is best-effort
+            }
+          },
+        };
+      } catch (err) {
+        console.warn('[hypermem-plugin] prepareSubagentSpawn failed (non-fatal):', (err as Error).message);
+        return undefined;
+      }
+    },
+
+    /**
+     * Clean up after a subagent session ends.
+     *
+     * Removes Redis slots and invalidates caches for the dead session
+     * to prevent stale data accumulation.
+     */
+    async onSubagentEnded({ childSessionKey, reason }: { childSessionKey: string; reason: SubagentEndReason }): Promise<void> {
+      try {
+        const hm = await getHyperMem();
+        const childAgentId = extractAgentId(childSessionKey);
+
+        await Promise.all([
+          hm.cache.setSlot(childAgentId, childSessionKey, 'parentFacts', ''),
+          hm.cache.setSlot(childAgentId, childSessionKey, 'parentHistory', ''),
+          hm.cache.setSlot(childAgentId, childSessionKey, 'assemblyContextBlock', ''),
+          hm.cache.setSlot(childAgentId, childSessionKey, 'assemblyContextAt', '0'),
+          hm.cache.invalidateWindow(childAgentId, childSessionKey).catch(() => {}),
+        ]);
+
+        _overheadCache.delete(childSessionKey);
+
+        console.log(
+          `[hypermem-plugin] onSubagentEnded: cleaned up ${childSessionKey} (reason=${reason})`
+        );
+      } catch (err) {
+        console.warn('[hypermem-plugin] onSubagentEnded failed (non-fatal):', (err as Error).message);
       }
     },
 

@@ -275,7 +275,7 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 | `rate-limiter.ts` | ~230 | L3 | Token-bucket for embedding API |
 | `schema.ts` | ~200 | L2 | Messages schema + migrations |
 | `episode-store.ts` | ~180 | L4 | Significant event tracking |
-| `preference-store.ts` | ~170 | L4 | Operator behavioral patterns |
+| `preference-store.ts` | ~170 | L4 | operator behavioral patterns |
 | `topic-store.ts` | ~160 | L4 | Cross-session thread tracking |
 | `plugin/src/index.ts` | ~590 | - | `hypercompositor` context engine plugin + window invalidation |
 | `memory-plugin/src/index.ts` | ~290 | - | `hypermem` memory slot plugin (memory_search via hybrid retrieval) |

@@ -332,7 +332,7 @@ FTS5 queries use compound indexes on `agentId + sort key` and prefix optimizatio
 | Knowledge | Domain/key/value structured data with full-text search |
 | Episodes | Significant events with impact scores and participant tracking |
 | Topics | Cross-session thread tracking and synthesized wiki pages |
-| Preferences | Operator behavioral patterns |
+| Preferences | operator behavioral patterns |
 | Fleet Registry | Agent registry with tier, org, and capability metadata |
 | System Registry | Service state and lifecycle |
 | Work Items | Work queue with status transitions and FTS5 |
@@ -493,7 +493,7 @@ Full reference: **[docs/TUNING.md](./docs/TUNING.md)**
 
 ## API
 
-> **Note:** The examples below use placeholder agent names (`my-agent`, `agent1`, etc.). Replace these with your actual agent IDs from your OpenClaw config. Single-agent installs typically use `main`. Multi-agent fleets use whatever IDs you've configured. See [INSTALL.md § "Configure your fleet"](./INSTALL.md#step-5--configure-your-fleet-multi-agent-only) for details.
+> **Note:** The examples below use placeholder agent names (`my-agent`, `alice`, etc.). Replace these with your actual agent IDs from your OpenClaw config. Single-agent installs typically use `main`. Multi-agent fleets use whatever IDs you've configured. See [INSTALL.md § "Configure your fleet"](./INSTALL.md#step-5--configure-your-fleet-multi-agent-only) for details.
 
 ```typescript
 import { HyperMem } from '@psiclawops/hypermem';
@@ -572,7 +572,7 @@ The migration guide includes worked examples showing how to bring data from Open
 
 All examples default to dry-run. Nothing is written until you add `--apply`.
 
-Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
+operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 
 
 ---

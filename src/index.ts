@@ -32,6 +32,8 @@ export { ensureContextSchema, getActiveContext, getOrCreateActiveContext, update
 export type { Context } from './context-store.js';
 export type { WorkItem, WorkEvent, WorkStatus } from './work-store.js';
 export { DesiredStateStore } from './desired-state-store.js';
+export { ExpertiseStore } from './expertise-store.js';
+export type { ExpertiseObservation, ExpertisePattern, ExpertiseEvidence } from './expertise-store.js';
 export { evictStaleContent, DEFAULT_EVICTION_CONFIG } from './image-eviction.js';
 export type { ImageEvictionConfig, EvictionStats, EvictionResult } from './image-eviction.js';
 export { KnowledgeGraph } from './knowledge-graph.js';
@@ -88,6 +90,9 @@ export { VectorStore, generateEmbeddings } from './vector-store.js';
 export type { EmbeddingConfig, VectorSearchResult, VectorIndexStats } from './vector-store.js';
 export { hybridSearch, buildFtsQuery } from './hybrid-retrieval.js';
 export type { HybridSearchResult, HybridSearchOptions } from './hybrid-retrieval.js';
+
+export { ContradictionDetector } from './contradiction-detector.js';
+export type { ContradictionCandidate, ContradictionResult, ContradictionDetectorConfig } from './contradiction-detector.js';
 
 export { DocChunkStore } from './doc-chunk-store.js';
 export type { DocChunkRow, ChunkQuery, IndexResult as DocIndexResult } from './doc-chunk-store.js';
@@ -166,6 +171,8 @@ export type {
   AgentIdentity,
   SessionCursor,
   RecentTurn,
+  ExpertiseSourceType,
+  EvidenceRelationship,
 } from './types.js';
 
 export type { ProviderType } from './provider-translator.js';
@@ -233,7 +240,7 @@ const DEFAULT_CONFIG: HyperMemConfig = {
   cache: {
     keyPrefix: 'hm:',
     sessionTTL: 14400,      // 4 hours — system/identity/meta slots
-    historyTTL: 604800,     // 7 days — extended for ClawCanvas display
+    historyTTL: 604800,     // 7 days — extended for canvas display
   },
   compositor: {
     // TUNE-010 (2026-04-02): Raised from 65000 → 90000.
@@ -276,8 +283,8 @@ const DEFAULT_CONFIG: HyperMemConfig = {
  *
  * Usage:
  *   const hm = await hypermem.create({ dataDir: '~/.openclaw/hypermem' });
- *   await hm.record('agent1', 'agent:agent1:webchat:main', userMsg);
- *   const result = await hm.compose({ agentId: 'agent1', sessionKey: '...', ... });
+ *   await hm.record('alice', 'agent:alice:webchat:main', userMsg);
+ *   const result = await hm.compose({ agentId: 'alice', sessionKey: '...', ... });
  */
 export class HyperMem {
   readonly dbManager: DatabaseManager;

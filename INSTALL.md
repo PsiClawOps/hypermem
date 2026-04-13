@@ -238,7 +238,7 @@ openclaw status                                     # look for hypermem in plugi
 
 ### Step 5 — Configure your fleet
 
-hypermem works out of the box for both single-agent and multi-agent installs. The source ships with generic placeholder agent names (`agent1`, `agent2`, `director1`, etc.) in two files that define fleet topology:
+hypermem works out of the box for both single-agent and multi-agent installs. The source ships with generic placeholder agent names (`alice`, `bob`, `director1`, etc.) in two files that define fleet topology:
 
 | File | What it defines |
 |---|---|
@@ -265,7 +265,7 @@ Facts, episodes, and topics are all scoped to your agent ID automatically. Cross
 
 #### Multi-agent installs
 
-hypermem ships with generic placeholder agent names (`agent1`, `agent2`, `director1`, etc.) in the two fleet topology files listed above.
+hypermem ships with generic placeholder agent names (`alice`, `bob`, `director1`, etc.) in the two fleet topology files listed above.
 
 Replace the placeholder names with your fleet:
 
@@ -273,7 +273,7 @@ Replace the placeholder names with your fleet:
 
 ```typescript
 // Before (placeholder):
-agent1: { agentId: 'agent1', tier: 'council' },
+alice: { agentId: 'alice', tier: 'council' },
 
 // After (your fleet):
 architect: { agentId: 'architect', tier: 'council' },
@@ -283,7 +283,7 @@ architect: { agentId: 'architect', tier: 'council' },
 
 ```typescript
 // Before (placeholder):
-agent1: 'infrastructure',
+alice: 'infrastructure',
 
 // After (your fleet):
 architect: 'infrastructure',

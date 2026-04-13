@@ -2,7 +2,7 @@
 
 Start here.
 
-- **Operator guide:** [`MIGRATION_GUIDE.md`](./MIGRATION_GUIDE.md)
+- **operator guide:** [`MIGRATION_GUIDE.md`](./MIGRATION_GUIDE.md)
 - **Agent reference:** [`AGENT_MIGRATION.md`](./AGENT_MIGRATION.md)
 - **Unified migration entrypoint:** `node scripts/migrate-legacy-sessions.mjs --source <type> [options]`
 

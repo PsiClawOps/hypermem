@@ -37,7 +37,7 @@ export interface OrgRegistry {
  * Default fleet org structure.
  *
  * ── EXAMPLE DATA ──────────────────────────────────────────────────────────
- * The agent names below (agent1, agent2, director1, etc.) are PLACEHOLDERS.
+ * The agent names below (alice, bob, director1, etc.) are PLACEHOLDERS.
  * Replace them with your own agent IDs to match your fleet configuration.
  *
  * Single-agent installs: you don't need to edit this. Your agent ID is
@@ -50,28 +50,28 @@ export interface OrgRegistry {
  */
 export function defaultOrgRegistry(): OrgRegistry {
   const agents: Record<string, AgentIdentity> = {
-    agent1:    { agentId: 'agent1',    tier: 'council' },
-    agent2:  { agentId: 'agent2',  tier: 'council' },
+    alice:    { agentId: 'alice',    tier: 'council' },
+    bob:  { agentId: 'bob',  tier: 'council' },
     agent4:  { agentId: 'agent4',  tier: 'council' },
-    agent3: { agentId: 'agent3', tier: 'council' },
-    agent6:    { agentId: 'agent6',    tier: 'council' },
-    agent5: { agentId: 'agent5', tier: 'council' },
-    director1:    { agentId: 'director1',  tier: 'director', org: 'agent1-org', councilLead: 'agent1' },
-    director2:    { agentId: 'director2',  tier: 'director', org: 'agent1-org', councilLead: 'agent1' },
-    director3:    { agentId: 'director3',  tier: 'director', org: 'agent1-org', councilLead: 'agent1' },
-    director4:     { agentId: 'director4',   tier: 'director', org: 'agent2-org', councilLead: 'agent2' },
-    director5:   { agentId: 'director5', tier: 'director', org: 'agent2-org', councilLead: 'agent2' },
-    director6:    { agentId: 'director6',  tier: 'director', org: 'agent2-org', councilLead: 'agent2' },
-    director7:  { agentId: 'director7', tier: 'director', org: 'agent3-org', councilLead: 'agent3' },
-    director8:    { agentId: 'director8',   tier: 'director', org: 'agent3-org', councilLead: 'agent3' },
+    dave: { agentId: 'dave', tier: 'council' },
+    carol:    { agentId: 'carol',    tier: 'council' },
+    oscar: { agentId: 'oscar', tier: 'council' },
+    director1:    { agentId: 'director1',  tier: 'director', org: 'alice-org', councilLead: 'alice' },
+    director2:    { agentId: 'director2',  tier: 'director', org: 'alice-org', councilLead: 'alice' },
+    director3:    { agentId: 'director3',  tier: 'director', org: 'alice-org', councilLead: 'alice' },
+    director4:     { agentId: 'director4',   tier: 'director', org: 'bob-org', councilLead: 'bob' },
+    director5:   { agentId: 'director5', tier: 'director', org: 'bob-org', councilLead: 'bob' },
+    director6:    { agentId: 'director6',  tier: 'director', org: 'bob-org', councilLead: 'bob' },
+    director7:  { agentId: 'director7', tier: 'director', org: 'dave-org', councilLead: 'dave' },
+    director8:    { agentId: 'director8',   tier: 'director', org: 'dave-org', councilLead: 'dave' },
     specialist1: { agentId: 'specialist1', tier: 'specialist' },
     specialist2:    { agentId: 'specialist2', tier: 'specialist' },
   };
 
   const orgs: Record<string, string[]> = {
-    'agent1-org':    ['agent1', 'director1', 'director2', 'director3'],
-    'agent2-org':  ['agent2', 'director4', 'director5', 'director6'],
-    'agent3-org': ['agent3', 'director7', 'director8'],
+    'alice-org':    ['alice', 'director1', 'director2', 'director3'],
+    'bob-org':  ['bob', 'director4', 'director5', 'director6'],
+    'dave-org': ['dave', 'director7', 'director8'],
   };
 
   return { orgs, agents };

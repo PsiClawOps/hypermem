@@ -42,7 +42,7 @@ async function createHarness(label = 'default') {
     dataDir: tmpDir,
   });
 
-  const agentId = 'agent1';
+  const agentId = 'alice';
   const sessionKey = `agent:${agentId}:webchat:${label}`;
   const msgDb = hm.dbManager.getMessageDb(agentId);
   const libDb = hm.dbManager.getLibraryDb();
@@ -199,13 +199,13 @@ async function testContentExtraction() {
 
   seedTopicMessages(h, topicId, [
     {
-      agentId: 'agent1',
+      agentId: 'alice',
       text: 'We decided to keep topic synthesis heuristic-only and write compiled markdown into knowledge.',
       toolCalls: JSON.stringify([{ name: 'write', arguments: { path: '/home/user/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts' } }]),
     },
     {
-      agentId: 'agent1',
-      text: 'This message cites /home/user/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md and mentions agent1 and agent2 for scoring.',
+      agentId: 'alice',
+      text: 'This message cites /home/user/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md and mentions alice and bob for scoring.',
     },
     {
       agentId: 'agent4',
@@ -213,15 +213,15 @@ async function testContentExtraction() {
       toolCalls: JSON.stringify([{ input: { filePath: '/home/user/.openclaw/workspace/repo/hypermem/specs/TOPIC_SYNTHESIS.md' } }]),
     },
     {
-      agentId: 'agent1',
+      agentId: 'alice',
       text: longText,
     },
     {
-      agentId: 'agent2',
+      agentId: 'bob',
       text: 'Another long reference-rich message with `code refs`, /home/user/project/file.ts, and enough body to force summary truncation once combined with the others.'.repeat(8),
     },
     {
-      agentId: 'agent2',
+      agentId: 'bob',
       text: 'What should happen with open questions that never got an explicit decision follow-up?',
     },
   ]);
@@ -236,8 +236,8 @@ async function testContentExtraction() {
   assert(row.content.includes('/home/user/.openclaw/workspace/repo/hypermem/src/topic-synthesizer.ts'), 'synthesis content includes artifact paths from tool calls');
   assert(
     row.content.includes('**Participants:**') &&
-    row.content.includes('agent1') &&
-    row.content.includes('agent2') &&
+    row.content.includes('alice') &&
+    row.content.includes('bob') &&
     row.content.includes('agent4'),
     'synthesis content includes participant list'
   );
