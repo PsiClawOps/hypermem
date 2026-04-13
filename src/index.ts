@@ -91,6 +91,9 @@ export type { EmbeddingConfig, VectorSearchResult, VectorIndexStats } from './ve
 export { hybridSearch, buildFtsQuery } from './hybrid-retrieval.js';
 export type { HybridSearchResult, HybridSearchOptions } from './hybrid-retrieval.js';
 
+export { ContradictionDetector } from './contradiction-detector.js';
+export type { ContradictionCandidate, ContradictionResult, ContradictionDetectorConfig } from './contradiction-detector.js';
+
 export { DocChunkStore } from './doc-chunk-store.js';
 export type { DocChunkRow, ChunkQuery, IndexResult as DocIndexResult } from './doc-chunk-store.js';
 
