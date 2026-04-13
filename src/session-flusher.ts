@@ -37,8 +37,8 @@ export interface FlushSessionResult {
  * from those stores naturally.
  *
  * @param cache   Connected CacheLayer instance
- * @param agentId Agent identifier (e.g. "forge")
- * @param sessionKey  Full session key (e.g. "agent:forge:webchat:scratchpad")
+ * @param agentId Agent identifier (e.g. "agent1")
+ * @param sessionKey  Full session key (e.g. "agent:agent1:webchat:scratchpad")
  * @param opts    Optional flags
  */
 export async function flushSession(
