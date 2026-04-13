@@ -1,0 +1,8 @@
+# Repo Identity
+
+**GitHub:** `PsiClawOps/hypermem-internal` (private)
+**Local path:** `/home/lumadmin/.openclaw/workspace/repo/hypermem`
+**Relationship:** This is the development repo. The public-facing repo is `PsiClawOps/hypermem`, cloned locally at `/repo/hypermem-public`.
+
+> ⚠️ Local directory name (`hypermem`) does not match GitHub repo name (`hypermem-internal`).
+> Rename is backlogged. See Forge WORKQUEUE.md for tracking.

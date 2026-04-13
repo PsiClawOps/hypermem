@@ -418,13 +418,21 @@ export interface EmbeddingProviderConfig {
    * - 'ollama': local Ollama (nomic-embed-text or any pulled model)
    * - 'openai': OpenAI Embeddings API (text-embedding-3-small / 3-large)
    */
-  provider?: 'ollama' | 'openai';
+  provider?: 'ollama' | 'openai' | 'gemini';
   /** Ollama base URL. Default: http://localhost:11434 */
   ollamaUrl: string;
   /** OpenAI API key. Required when provider is 'openai'. */
   openaiApiKey?: string;
   /** OpenAI base URL. Default: https://api.openai.com/v1 */
   openaiBaseUrl?: string;
+  /** Gemini API key. Alternative to OAuth — passed as ?key= query param. */
+  geminiApiKey?: string;
+  /** Gemini API base URL. Default: https://generativelanguage.googleapis.com */
+  geminiBaseUrl?: string;
+  /** Gemini task type for indexing. Default: RETRIEVAL_DOCUMENT */
+  geminiIndexTaskType?: string;
+  /** Gemini task type for queries. Default: RETRIEVAL_QUERY */
+  geminiQueryTaskType?: string;
   /**
    * Embedding model name.
    * - ollama default: nomic-embed-text (768d)

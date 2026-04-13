@@ -41,6 +41,7 @@ import os from 'os';
 import path from 'path';
 import fs from 'fs/promises';
 import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
 
 // Re-export core types for consumers (eliminates local shim drift)
 export type { NeutralMessage, NeutralToolCall, NeutralToolResult, ComposeRequest, ComposeResult };
@@ -68,10 +69,13 @@ let _indexer: BackgroundIndexer | null = null;
 let _fleetStore: FleetStore | null = null;
 let _generateEmbeddings: ((texts: string[]) => Promise<Float32Array[]>) | null = null;
 let _embeddingConfig: {
-  provider: 'ollama' | 'openai';
+  provider: 'ollama' | 'openai' | 'gemini';
   ollamaUrl: string;
   openaiBaseUrl: string;
   openaiApiKey?: string;
+  geminiBaseUrl?: string;
+  geminiIndexTaskType?: string;
+  geminiQueryTaskType?: string;
   model: string;
   dimensions: number;
   timeout: number;
@@ -198,14 +202,20 @@ async function loadUserConfig(): Promise<{
    * Example (OpenAI):
    *   { "provider": "openai", "openaiApiKey": "sk-...", "model": "text-embedding-3-small", "dimensions": 1536, "batchSize": 128 }
    *
+   * Example (Gemini):
+   *   { "provider": "gemini", "model": "gemini-embedding-001", "dimensions": 3072, "batchSize": 100 }
+   *
    * WARNING: switching providers requires a full re-index. Existing vectors use
    * different dimensions and are incompatible with the new provider's output.
    */
   embedding?: {
-    provider?: 'ollama' | 'openai';
+    provider?: 'ollama' | 'openai' | 'gemini';
     ollamaUrl?: string;
     openaiApiKey?: string;
     openaiBaseUrl?: string;
+    geminiBaseUrl?: string;
+    geminiIndexTaskType?: string;
+    geminiQueryTaskType?: string;
     model?: string;
     dimensions?: number;
     timeout?: number;
@@ -293,16 +303,26 @@ async function getHyperMem(): Promise<HyperMemInstance> {
     // (VectorStore init) and the _generateEmbeddings closure above.
     if (userConfig.embedding) {
       const ue = userConfig.embedding;
+
+      // Provider-specific model/dimension/batch defaults
+      const providerDefaults = ue.provider === 'gemini'
+        ? { model: 'gemini-embedding-001', dimensions: 3072, batchSize: 100, timeout: 15000 }
+        : ue.provider === 'openai'
+          ? { model: 'text-embedding-3-small', dimensions: 1536, batchSize: 128, timeout: 10000 }
+          : { model: 'nomic-embed-text', dimensions: 768, batchSize: 32, timeout: 10000 };
+
       _embeddingConfig = {
         provider: ue.provider ?? 'ollama',
         ollamaUrl: ue.ollamaUrl ?? 'http://localhost:11434',
         openaiBaseUrl: ue.openaiBaseUrl ?? 'https://api.openai.com/v1',
         openaiApiKey: ue.openaiApiKey,
-        // Apply provider-specific model + dimension defaults when not explicitly set
-        model: ue.model ?? (ue.provider === 'openai' ? 'text-embedding-3-small' : 'nomic-embed-text'),
-        dimensions: ue.dimensions ?? (ue.provider === 'openai' ? 1536 : 768),
-        timeout: ue.timeout ?? 10000,
-        batchSize: ue.batchSize ?? (ue.provider === 'openai' ? 128 : 32),
+        geminiBaseUrl: ue.geminiBaseUrl,
+        geminiIndexTaskType: ue.geminiIndexTaskType,
+        geminiQueryTaskType: ue.geminiQueryTaskType,
+        model: ue.model ?? providerDefaults.model,
+        dimensions: ue.dimensions ?? providerDefaults.dimensions,
+        timeout: ue.timeout ?? providerDefaults.timeout,
+        batchSize: ue.batchSize ?? providerDefaults.batchSize,
       };
       console.log(
         `[hypermem-plugin] Embedding provider: ${_embeddingConfig.provider} ` +
@@ -1121,17 +1141,24 @@ function createHyperMemEngine(): ContextEngine {
           const effectiveBudget = computeEffectiveBudget(undefined);
           const redisPressure = redisTokens / effectiveBudget;
 
+          // Error tool results are always preserved intact — they're small and
+          // the model needs the error signal to understand what went wrong.
+          const hasErrorResult = neutral.toolResults!.some(tr => tr.isError);
+
           if (redisPressure > 0.85) {
             // FIX (Bug 4): Never skip a tool result entirely — that leaves an orphaned
             // tool_call in Redis history (the assistant message was already recorded).
             // Anthropic rejects assistant messages with tool_calls that have no matching result.
             // Instead, record a compact stub that preserves pair integrity in history.
-            const stubbedResults = neutral.toolResults!.map(tr => ({
-              ...tr,
-              content: `[tool result omitted by wave-guard at ${(redisPressure * 100).toFixed(0)}% Redis pressure]`,
-            }));
+            const stubbedResults = neutral.toolResults!.map(tr => {
+              if (tr.isError) return tr; // preserve error results intact
+              return {
+                ...tr,
+                content: `[tool result omitted by wave-guard at ${(redisPressure * 100).toFixed(0)}% Redis pressure]`,
+              };
+            });
             const stubNeutral = { ...neutral, toolResults: stubbedResults };
-            console.log(`[hypermem] ingest wave-guard: stubbing toolResult (Redis pressure ${(redisPressure * 100).toFixed(0)}% > 85%) — preserving pair integrity`);
+            console.log(`[hypermem] ingest wave-guard: stubbing toolResult (Redis pressure ${(redisPressure * 100).toFixed(0)}% > 85%)${hasErrorResult ? ' — error results preserved' : ''} — preserving pair integrity`);
             await hm.recordAssistantMessage(agentId, sk, stubNeutral);
             return { ingested: true };
           } else if (redisPressure > 0.70) {
@@ -1140,6 +1167,7 @@ function createHyperMemEngine(): ContextEngine {
             neutral = {
               ...neutral,
               toolResults: neutral.toolResults.map(tr => {
+                if (tr.isError) return tr; // preserve error results intact
                 const content = typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content);
                 if (content.length <= MAX_TOOL_RESULT_CHARS) return tr;
                 return {
@@ -1149,7 +1177,7 @@ function createHyperMemEngine(): ContextEngine {
               }),
             };
             console.log(
-              `[hypermem] ingest wave-guard: truncated toolResult (Redis pressure ${(redisPressure * 100).toFixed(0)}% > 70%)`
+              `[hypermem] ingest wave-guard: truncated toolResult (Redis pressure ${(redisPressure * 100).toFixed(0)}% > 70%)${hasErrorResult ? ' — error results preserved' : ''}`
             );
           }
         }
@@ -2358,10 +2386,13 @@ const hypercompositorConfigSchema = z.object({
   }).optional(),
   /** Embedding provider config */
   embedding: z.object({
-    provider: z.enum(['ollama', 'openai']).optional(),
+    provider: z.enum(['ollama', 'openai', 'gemini']).optional(),
     ollamaUrl: z.string().optional(),
     openaiApiKey: z.string().optional(),
     openaiBaseUrl: z.string().optional(),
+    geminiBaseUrl: z.string().optional(),
+    geminiIndexTaskType: z.string().optional(),
+    geminiQueryTaskType: z.string().optional(),
     model: z.string().optional(),
     dimensions: z.number().int().positive().optional(),
     timeout: z.number().int().positive().optional(),
@@ -2395,8 +2426,9 @@ export default definePluginEntry({
         HYPERMEM_PATH = require.resolve('@psiclawops/hypermem');
         console.log(`[hypermem-plugin] Resolved @psiclawops/hypermem from node_modules: ${HYPERMEM_PATH}`);
       } catch {
-        // Dev fallback: repo clone in the standard location
-        HYPERMEM_PATH = path.join(os.homedir(), '.openclaw/workspace/repo/hypermem/dist/index.js');
+        // Dev fallback: resolve relative to plugin directory
+        const __pluginDir = path.dirname(fileURLToPath(import.meta.url));
+        HYPERMEM_PATH = path.resolve(__pluginDir, '../../dist/index.js');
         console.log(`[hypermem-plugin] Falling back to dev path: ${HYPERMEM_PATH}`);
       }
     }

@@ -259,11 +259,12 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     maxMessagesPerTick: 500,
   },
   embedding: {
+    provider: 'gemini',
     ollamaUrl: 'http://localhost:11434',
-    model: 'nomic-embed-text',
-    dimensions: 768,
-    timeout: 10000,
-    batchSize: 32,
+    model: 'gemini-embedding-2-preview',
+    dimensions: 3072,
+    timeout: 15000,
+    batchSize: 100,
   },
 };
 

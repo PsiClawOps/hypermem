@@ -8,3 +8,13 @@ dist/
 .npmrc
 tmp/
 bench/results/
+
+# Secrets / credentials
+.env
+.env.*
+*.key
+*.pem
+secrets.json
+auth-profiles.json
+credentials.json
+oauth_creds.json

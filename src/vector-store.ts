@@ -16,20 +16,31 @@
 
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync, existsSync, readdirSync, realpathSync } from 'node:fs';
+import { join, dirname, delimiter } from 'node:path';
 
 export interface EmbeddingConfig {
   /**
    * Embedding provider. Default: 'ollama'.
    * - 'ollama': local Ollama instance (nomic-embed-text or any pull'd model)
    * - 'openai': OpenAI Embeddings API (text-embedding-3-small / 3-large)
+   * - 'gemini': Google Gemini Embedding API (gemini-embedding-2-preview)
    */
-  provider?: 'ollama' | 'openai';
+  provider?: 'ollama' | 'openai' | 'gemini';
   /** Ollama base URL. Default: http://localhost:11434 */
   ollamaUrl: string;
   /** OpenAI API key. Required when provider is 'openai'. */
   openaiApiKey?: string;
   /** OpenAI base URL. Default: https://api.openai.com/v1 */
   openaiBaseUrl?: string;
+  /** Gemini API key. Alternative to OAuth — passed as ?key= query param. */
+  geminiApiKey?: string;
+  /** Gemini API base URL. Default: https://generativelanguage.googleapis.com */
+  geminiBaseUrl?: string;
+  /** Gemini task type for indexing. Default: RETRIEVAL_DOCUMENT */
+  geminiIndexTaskType?: string;
+  /** Gemini task type for queries. Default: RETRIEVAL_QUERY */
+  geminiQueryTaskType?: string;
   /** Embedding model name. Default: nomic-embed-text (ollama) or text-embedding-3-small (openai) */
   model: string;
   /** Embedding dimensions. Default: 768 (ollama/nomic) or 1536 (openai/3-small) */
@@ -75,6 +86,14 @@ const OPENAI_DEFAULTS = {
   model: 'text-embedding-3-small',
   dimensions: 1536,
   batchSize: 128,
+} as const;
+
+/** Provider-specific defaults applied when provider is 'gemini' and fields are not set. */
+const GEMINI_DEFAULTS = {
+  model: 'gemini-embedding-2-preview',
+  dimensions: 3072,
+  batchSize: 100,   // Gemini batch limit
+  timeout: 15000,
 } as const;
 
 // ─── LRU Embedding Cache ─────────────────────────────────────────
@@ -186,6 +205,381 @@ async function generateOpenAIEmbeddings(
   return results;
 }
 
+// ─── Gemini OAuth Token Resolver ──────────────────────────────────
+// Resolves an OAuth access token for the Gemini API from OpenClaw's
+// secrets store. Supports automatic refresh via the Gemini CLI's
+// client credentials. Cached in-memory to avoid disk reads per batch.
+
+interface GeminiTokenCache {
+  accessToken: string;
+  expiresAt: number; // epoch ms
+}
+
+let _geminiTokenCache: GeminiTokenCache | null = null;
+
+/**
+ * Extract Gemini CLI OAuth client credentials.
+ *
+ * Strategy:
+ *   1. Check env vars GEMINI_CLI_OAUTH_CLIENT_ID / GEMINI_CLI_OAUTH_CLIENT_SECRET
+ *   2. Find the `gemini` binary in PATH, resolve to real path, navigate to oauth2.js,
+ *      regex out client_id and client_secret.
+ */
+function resolveGeminiCliCredentials(): { clientId: string; clientSecret: string } | null {
+  const envId = process.env.GEMINI_CLI_OAUTH_CLIENT_ID;
+  const envSecret = process.env.GEMINI_CLI_OAUTH_CLIENT_SECRET;
+  if (envId && envSecret) {
+    return { clientId: envId, clientSecret: envSecret };
+  }
+
+  // Find gemini binary in PATH
+  const pathDirs = (process.env.PATH ?? '').split(delimiter);
+  let geminiBinPath: string | null = null;
+  for (const dir of pathDirs) {
+    const candidate = join(dir, 'gemini');
+    if (existsSync(candidate)) {
+      geminiBinPath = candidate;
+      break;
+    }
+  }
+  if (!geminiBinPath) {
+    console.log('[hypermem-vector] Gemini CLI binary not found in PATH; cannot extract OAuth credentials');
+    return null;
+  }
+
+  try {
+    // Resolve symlinks to get actual install location
+    const realBin = realpathSync(geminiBinPath);
+    // Navigate from bin to the oauth2.js module
+    // Typical layout: .../node_modules/.bin/gemini -> ../gemini-cli/bin/gemini.js
+    // oauth2.js is at: .../node_modules/gemini-cli/src/oauth2.js or similar
+    const binDir = dirname(realBin);
+    const packageDir = dirname(binDir); // go up from bin/
+    // Search for oauth2.js in common locations
+    const candidates = [
+      join(packageDir, 'src', 'oauth2.js'),
+      join(packageDir, 'dist', 'oauth2.js'),
+      join(packageDir, 'lib', 'oauth2.js'),
+      join(packageDir, 'oauth2.js'),
+    ];
+    let oauthContent: string | null = null;
+    for (const c of candidates) {
+      if (existsSync(c)) {
+        oauthContent = readFileSync(c, 'utf-8');
+        break;
+      }
+    }
+    // Also try searching recursively in the package dir for any file containing 'client_id'
+    if (!oauthContent) {
+      // Try common JS bundle locations — first oauth-named files, then all .js
+      const searchDirs = [packageDir];
+      for (const searchDir of searchDirs) {
+        if (!existsSync(searchDir)) continue;
+        const entries = readdirSync(searchDir, { recursive: true }) as string[];
+        for (const entry of entries) {
+          const fullPath = join(searchDir, entry);
+          if (typeof entry === 'string' && (entry.endsWith('.js') || entry.endsWith('.mjs')) && entry.includes('oauth')) {
+            try {
+              oauthContent = readFileSync(fullPath, 'utf-8');
+              break;
+            } catch { /* skip unreadable */ }
+          }
+        }
+        if (oauthContent) break;
+      }
+    }
+
+    if (!oauthContent) {
+      console.log('[hypermem-vector] Could not find oauth2.js in Gemini CLI package');
+    }
+
+    // Regex out client_id and client_secret from oauth file
+    if (oauthContent) {
+      const idMatch = oauthContent.match(/client_id["'\s:=]+["']([^"']+)["']/i);
+      const secretMatch = oauthContent.match(/client_secret["'\s:=]+["']([^"']+)["']/i);
+      if (idMatch?.[1] && secretMatch?.[1]) {
+        return { clientId: idMatch[1], clientSecret: secretMatch[1] };
+      }
+    }
+
+    // Fallback: scan all bundle JS files for Google OAuth client_id pattern
+    // Bundled CLIs (e.g. @google/gemini-cli) split credentials across chunks
+    const bundleDir = join(packageDir, 'bundle');
+    if (existsSync(bundleDir)) {
+      const googleIdRe = /["']([\d]+-[a-z0-9]+\.apps\.googleusercontent\.com)["']/;
+      const clientSecretRe = /client_secret["'\s:=]+["']([^"']+)["']/i;
+      // Also match bundled patterns: secret alongside or near client_id
+      const inlineSecretRe = /["'](GOCSPX-[^"']+)["']/;
+      let foundId: string | null = null;
+      let foundSecret: string | null = null;
+
+      const bundleFiles = readdirSync(bundleDir)
+        .filter(f => f.endsWith('.js') || f.endsWith('.mjs'))
+        .sort();
+
+      for (const file of bundleFiles) {
+        try {
+          const content = readFileSync(join(bundleDir, file), 'utf-8');
+          if (!foundId) {
+            const m = content.match(googleIdRe);
+            if (m) foundId = m[1];
+          }
+          if (!foundSecret) {
+            const m = content.match(clientSecretRe) || content.match(inlineSecretRe);
+            if (m) foundSecret = m[1];
+          }
+          if (foundId && foundSecret) break;
+        } catch { /* skip */ }
+      }
+
+      if (foundId && foundSecret) {
+        return { clientId: foundId, clientSecret: foundSecret };
+      }
+    }
+
+    console.log('[hypermem-vector] Could not extract client_id/client_secret from Gemini CLI');
+    return null;
+  } catch (err) {
+    console.log('[hypermem-vector] Error extracting Gemini CLI credentials:', err);
+    return null;
+  }
+}
+
+/**
+ * Resolve a Gemini OAuth access token from OpenClaw's secrets store.
+ *
+ * Reads ~/.openclaw/secrets/secrets.json, finds the google-gemini-cli credential,
+ * refreshes if expired, and caches in memory.
+ */
+async function resolveGeminiOAuthToken(): Promise<string | null> {
+  // Return cached token if still valid (with 60s buffer)
+  if (_geminiTokenCache && Date.now() < _geminiTokenCache.expiresAt - 60_000) {
+    return _geminiTokenCache.accessToken;
+  }
+
+  const secretsPath = join(process.env.HOME ?? '/root', '.openclaw', 'secrets', 'secrets.json');
+  if (!existsSync(secretsPath)) {
+    console.log('[hypermem-vector] Secrets file not found:', secretsPath);
+    return null;
+  }
+
+  let secrets: Record<string, any>;
+  try {
+    secrets = JSON.parse(readFileSync(secretsPath, 'utf-8'));
+  } catch (err) {
+    console.log('[hypermem-vector] Failed to parse secrets.json:', err);
+    return null;
+  }
+
+  // Search for google-gemini-cli credential across all agents
+  let credential: { access: string; refresh: string; expires: number; email: string; projectId?: string } | null = null;
+  let credentialPath: string[] = []; // path segments for writing back
+
+  const agents = secrets.agents;
+  if (agents && typeof agents === 'object') {
+    for (const agentId of Object.keys(agents)) {
+      const profiles = agents[agentId]?.['auth-profiles']?.profiles;
+      if (!profiles || typeof profiles !== 'object') continue;
+      for (const profileKey of Object.keys(profiles)) {
+        if (profileKey.startsWith('google-gemini-cli:')) {
+          credential = profiles[profileKey];
+          credentialPath = ['agents', agentId, 'auth-profiles', 'profiles', profileKey];
+          break;
+        }
+      }
+      if (credential) break;
+    }
+  }
+
+  if (!credential) {
+    console.log('[hypermem-vector] No google-gemini-cli credential found in secrets.json');
+    return null;
+  }
+
+  // Check if token is still valid (with 60s buffer)
+  if (Date.now() < credential.expires - 60_000) {
+    _geminiTokenCache = { accessToken: credential.access, expiresAt: credential.expires };
+    return credential.access;
+  }
+
+  // Token expired, refresh it
+  console.log('[hypermem-vector] Gemini OAuth token expired, refreshing...');
+  const cliCreds = resolveGeminiCliCredentials();
+  if (!cliCreds) {
+    console.log('[hypermem-vector] Cannot refresh: no CLI credentials available. Set GEMINI_CLI_OAUTH_CLIENT_ID and GEMINI_CLI_OAUTH_CLIENT_SECRET env vars.');
+    return null;
+  }
+
+  try {
+    const refreshResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: cliCreds.clientId,
+        client_secret: cliCreds.clientSecret,
+        refresh_token: credential.refresh,
+        grant_type: 'refresh_token',
+      }),
+    });
+
+    if (!refreshResponse.ok) {
+      const body = await refreshResponse.text().catch(() => '');
+      console.log(`[hypermem-vector] OAuth refresh failed: ${refreshResponse.status} ${refreshResponse.statusText} — ${body}`);
+      return null;
+    }
+
+    const tokenData = await refreshResponse.json() as {
+      access_token: string;
+      expires_in: number;
+      token_type: string;
+    };
+
+    const newExpires = Date.now() + tokenData.expires_in * 1000;
+
+    // Write updated token back to secrets.json
+    try {
+      // Re-read to avoid clobbering concurrent changes
+      const freshSecrets = JSON.parse(readFileSync(secretsPath, 'utf-8'));
+      let target: Record<string, any> = freshSecrets;
+      for (let i = 0; i < credentialPath.length - 1; i++) {
+        target = target[credentialPath[i]];
+      }
+      const lastKey = credentialPath[credentialPath.length - 1];
+      if (target[lastKey]) {
+        target[lastKey].access = tokenData.access_token;
+        target[lastKey].expires = newExpires;
+      }
+      writeFileSync(secretsPath, JSON.stringify(freshSecrets, null, 2), 'utf-8');
+    } catch (writeErr) {
+      console.log('[hypermem-vector] Warning: refreshed token but failed to write back to secrets.json:', writeErr);
+    }
+
+    _geminiTokenCache = { accessToken: tokenData.access_token, expiresAt: newExpires };
+    return tokenData.access_token;
+  } catch (err) {
+    console.log('[hypermem-vector] OAuth token refresh error:', err);
+    return null;
+  }
+}
+
+/**
+ * L2-normalize a vector in place.
+ * Gemini pre-normalizes at native dimensions but lower outputDimensionality may not be unit-length.
+ */
+function l2Normalize(vec: Float32Array): Float32Array {
+  let sumSq = 0;
+  for (let i = 0; i < vec.length; i++) sumSq += vec[i] * vec[i];
+  if (sumSq === 0) return vec;
+  const norm = Math.sqrt(sumSq);
+  if (Math.abs(norm - 1.0) < 1e-6) return vec; // already unit-length
+  for (let i = 0; i < vec.length; i++) vec[i] /= norm;
+  return vec;
+}
+
+/**
+ * Generate embeddings via Google Gemini Embedding API.
+ * Uses batchEmbedContents endpoint, respects config.batchSize (max 100).
+ * Auth: OAuth token from secrets store, or API key via config/env.
+ */
+async function generateGeminiEmbeddings(
+  texts: string[],
+  config: EmbeddingConfig,
+  taskType?: string
+): Promise<Float32Array[]> {
+  const baseUrl = config.geminiBaseUrl ?? 'https://generativelanguage.googleapis.com';
+  const model = config.model;
+  const effectiveTaskType = taskType ?? config.geminiIndexTaskType ?? 'RETRIEVAL_DOCUMENT';
+  const results: Float32Array[] = [];
+
+  // Resolve auth: API key takes precedence (simpler), then OAuth
+  const apiKey = config.geminiApiKey ?? process.env.GEMINI_EMBEDDING_API_KEY ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? null;
+  let oauthToken: string | null = null;
+  if (!apiKey) {
+    oauthToken = await resolveGeminiOAuthToken();
+    if (!oauthToken) {
+      throw new Error(
+        '[hypermem] Gemini embedding provider requires authentication. ' +
+        'Set geminiApiKey in config, GEMINI_EMBEDDING_API_KEY env var, or configure a google-gemini-cli OAuth credential in OpenClaw secrets.'
+      );
+    }
+  }
+
+  const effectiveBatchSize = Math.min(config.batchSize, 100); // Gemini hard limit
+
+  for (let i = 0; i < texts.length; i += effectiveBatchSize) {
+    const batch = texts.slice(i, i + effectiveBatchSize);
+
+    const requests = batch.map(text => ({
+      model: `models/${model}`,
+      content: { parts: [{ text }] },
+      taskType: effectiveTaskType,
+      outputDimensionality: config.dimensions,
+    }));
+
+    let url: string;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (apiKey) {
+      url = `${baseUrl}/v1beta/models/${model}:batchEmbedContents?key=${apiKey}`;
+    } else {
+      url = `${baseUrl}/v1beta/models/${model}:batchEmbedContents`;
+      headers['Authorization'] = `Bearer ${oauthToken}`;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.timeout);
+
+    let retried = false;
+    const doRequest = async (): Promise<void> => {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ requests }),
+        signal: controller.signal,
+      });
+
+      if (response.status === 401 && !retried && !apiKey) {
+        // OAuth token may have been refreshed by another process; re-resolve once
+        retried = true;
+        _geminiTokenCache = null; // force re-read
+        const freshToken = await resolveGeminiOAuthToken();
+        if (freshToken) {
+          oauthToken = freshToken;
+          headers['Authorization'] = `Bearer ${oauthToken}`;
+          return doRequest();
+        }
+      }
+
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        throw new Error(`Gemini embedding failed: ${response.status} ${response.statusText} — ${body}`);
+      }
+
+      const data = await response.json() as { embeddings: Array<{ values: number[] }> };
+
+      for (const item of data.embeddings) {
+        if (item.values.length !== config.dimensions) {
+          throw new Error(
+            `Gemini embedding dimension mismatch: expected ${config.dimensions}, got ${item.values.length}. ` +
+            'If you changed models or dimensions, re-index via hypermem reindex.'
+          );
+        }
+        const vec = new Float32Array(item.values);
+        // L2 normalize as safety net for reduced dimensions
+        l2Normalize(vec);
+        results.push(vec);
+      }
+    };
+
+    try {
+      await doRequest();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  return results;
+}
+
 /**
  * Generate embeddings via Ollama API.
  * Supports single and batch embedding.
@@ -208,6 +602,18 @@ export async function generateEmbeddings(
     // OpenAI path — no LRU cache (responses are billed; caching at this layer
     // adds complexity without proportional benefit given async background use).
     return generateOpenAIEmbeddings(texts, config);
+  }
+  if (config.provider === 'gemini') {
+    config = {
+      ...DEFAULT_EMBEDDING_CONFIG,
+      ...config,
+      model: config.model !== DEFAULT_EMBEDDING_CONFIG.model ? config.model : GEMINI_DEFAULTS.model,
+      dimensions: config.dimensions !== DEFAULT_EMBEDDING_CONFIG.dimensions ? config.dimensions : GEMINI_DEFAULTS.dimensions,
+      batchSize: config.batchSize !== DEFAULT_EMBEDDING_CONFIG.batchSize ? config.batchSize : GEMINI_DEFAULTS.batchSize,
+    };
+    // Gemini path — no LRU cache (same rationale as OpenAI: billed API calls,
+    // background indexing context, minimal benefit from this-layer caching).
+    return generateGeminiEmbeddings(texts, config);
   }
   if (texts.length === 0) return [];
 

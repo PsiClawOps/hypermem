@@ -102,12 +102,51 @@ const OPERATOR_MAP = [
   { from: /\/\(\?:ragesaq\|operator\)/g, to: '/(?:operator)' },
 ];
 
+// ─── Product name substitutions ─────────────────────────────────
+//
+// Internal product names → generic public descriptions.
+// Applied as whole-word replacements, case-preserved.
+const PRODUCT_NAME_MAP = [
+  { from: 'ClawText',     to: 'memory system' },
+  { from: 'ClawDash',     to: 'dashboard' },
+  { from: 'ClawCanvas',   to: 'canvas' },
+  { from: 'ClawCouncil',  to: 'council' },
+  { from: 'ClawTomation', to: 'automation' },
+  { from: 'ClawMap',      to: 'dependency analyzer' },
+  { from: 'ClawDispatch', to: 'dispatch' },
+];
+
+// Broad operator name substitution (in all text contexts)
+const OPERATOR_BROAD_MAP = [
+  { from: 'ragesaq', to: 'operator' },
+];
+
+// ─── Leak detection terms ───────────────────────────────────────
+//
+// Post-sanitization scan. If any of these survive in the output,
+// the sync fails. Case-insensitive matching.
+const LEAK_TERMS = [
+  'ragesaq',
+  'lumadmin',
+  'ClawText',
+  'ClawDash',
+  'ClawCanvas',
+  'ClawCouncil',
+  'ClawTomation',
+  'ClawMap',
+  'ClawDispatch',
+  'workspace-council',
+  // Agent names that should have been substituted (check Title case too)
+  // Note: 'clarity' is intentionally not here — it's a generic word
+];
+
 // ─── Files to exclude from public sync ──────────────────────────
 //
 // These files exist in internal only and must not appear in public.
 const EXCLUDE_FILES = [
-  'scripts/flush-agent-session.sh',   // Internal fleet ops only
-  // Add more as needed
+  'scripts/flush-agent-session.sh',     // Internal fleet ops only
+  'scripts/migrate-clawtext.mjs',       // Internal migration tool, ClawText refs
+  'scripts/sync-public.mjs',            // The sync script itself
 ];
 
 // ─── Text file extensions to sanitize ───────────────────────────
@@ -118,7 +157,12 @@ const SANITIZE_EXTENSIONS = new Set([
 
 // ─── Directories to sync ─────────────────────────────────────────
 const SYNC_DIRS = ['src', 'test', 'scripts', 'docs'];
-const SYNC_ROOT_FILES = ['package.json', 'tsconfig.json', 'README.md', 'CHANGELOG.md', '.npmignore'];
+const SYNC_ROOT_FILES = [
+  'package.json', 'tsconfig.json',
+  'README.md', 'CHANGELOG.md', 'INSTALL.md',
+  'ARCHITECTURE.md', 'MIGRATION_GUIDE.md',
+  'LICENSE', '.npmignore',
+];
 
 // ─── Sanitization Engine ─────────────────────────────────────────
 
@@ -152,14 +196,26 @@ function sanitize(content, filePath) {
     out = out.split(from).join(to);
   }
 
-  // 4. Path substitutions
+  // 4. Product names (word-boundary aware, case-preserved)
+  for (const { from, to } of PRODUCT_NAME_MAP) {
+    const re = new RegExp(`\\b${escapeRegex(from)}\\b`, 'g');
+    out = out.replace(re, to);
+  }
+
+  // 5. Path substitutions
   for (const { from, to } of PATH_MAP) {
     out = out.replace(from, to);
   }
 
-  // 5. Operator name patterns
+  // 6. Operator name patterns (specific regex patterns)
   for (const { from, to } of OPERATOR_MAP) {
     out = out.replace(from, to);
+  }
+
+  // 7. Broad operator name substitution (word-boundary)
+  for (const { from, to } of OPERATOR_BROAD_MAP) {
+    const re = new RegExp(`\\b${escapeRegex(from)}\\b`, 'gi');
+    out = out.replace(re, to);
   }
 
   return out;
@@ -318,21 +374,82 @@ async function main() {
 
   console.log(`  ${synced} files synced, ${sanitized} sanitized, ${skipped} excluded`);
 
+  // Post-sanitization leak scan
+  console.log('\n[2.5/6] Running identity leak scan...');
+  const leaks = [];
+  for (const relPath of internalFiles) {
+    const shouldSync = SYNC_DIRS.some(d => relPath.startsWith(d + '/')) ||
+                       SYNC_ROOT_FILES.includes(relPath);
+    if (!shouldSync || shouldExclude(relPath)) continue;
+
+    const ext = extname(relPath);
+    if (!SANITIZE_EXTENSIONS.has(ext)) continue;
+
+    const destPath = join(REPO_ROOT, relPath);
+    let content;
+    try {
+      content = DRY_RUN
+        ? sanitize(execSync(`git -C "${REPO_ROOT}" show ${internalHead}:${relPath}`, { encoding: 'utf8' }), relPath)
+        : readFileSync(destPath, 'utf8');
+    } catch { continue; }
+
+    for (const term of LEAK_TERMS) {
+      const re = new RegExp(term, 'gi');
+      const matches = content.match(re);
+      if (matches) {
+        // Find line numbers
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (new RegExp(term, 'gi').test(lines[i])) {
+            leaks.push({ file: relPath, line: i + 1, term, snippet: lines[i].trim().slice(0, 100) });
+          }
+        }
+      }
+    }
+  }
+
+  if (leaks.length > 0) {
+    console.error(`\n\u274C Identity leak scan found ${leaks.length} leaked term(s):`);
+    for (const l of leaks) {
+      console.error(`  ${l.file}:${l.line} — "${l.term}" — ${l.snippet}`);
+    }
+    if (!DRY_RUN) {
+      console.error('\nSync aborted. Fix the substitution map or add exclusions, then re-run.');
+      git('checkout main');
+      process.exit(1);
+    } else {
+      console.warn('\n\u26A0\uFE0F  DRY RUN: leaks would block the real sync. Fix before running without --dry-run.');
+    }
+  } else {
+    console.log('  \u2705 No leaked identity terms found.');
+  }
+
   if (DRY_RUN) {
     console.log('\nDRY RUN complete. No changes written.');
     return;
   }
 
-  // 4. Build
-  console.log('\n[3/6] Building...');
+  // 4. Docs accuracy gate (structural — blocks sync if docs contradict code)
+  console.log('\n[3/7] Validating docs accuracy...');
+  try {
+    execSync('node scripts/validate-docs.mjs', { cwd: REPO_ROOT, stdio: 'inherit' });
+  } catch {
+    console.error('\n\u274C Docs validation failed. Fix the docs before releasing.');
+    console.error('Run: node scripts/validate-docs.mjs');
+    git('checkout main');
+    process.exit(1);
+  }
+
+  // 5. Build
+  console.log('\n[4/7] Building...');
   execSync('npm run build', { cwd: REPO_ROOT, stdio: 'inherit' });
 
-  // 5. Test
-  console.log('\n[4/6] Running test suite...');
+  // 6. Test
+  console.log('\n[5/7] Running test suite...');
   execSync('npm test', { cwd: REPO_ROOT, stdio: 'inherit' });
 
-  // 6. Commit
-  console.log('\n[5/6] Committing...');
+  // 7. Commit
+  console.log('\n[6/7] Committing...');
   git('add -A');
   const diffStat = gitOut('diff --cached --stat');
   if (!diffStat) {
@@ -343,13 +460,13 @@ async function main() {
   console.log(diffStat);
   git(`commit -m "${commitMsg.replace(/"/g, '\\"')}"`);
 
-  // 7. Push
+  // 8. Push
   if (!NO_PUSH) {
-    console.log('\n[6/6] Pushing to public remote...');
+    console.log('\n[7/7] Pushing to public remote...');
     git('push public HEAD:main');
     console.log('  ✅ Pushed to public/main');
   } else {
-    console.log('\n[6/6] Skipped push (--no-push)');
+    console.log('\n[7/7] Skipped push (--no-push)');
     console.log('  To push manually: git push public HEAD:main');
   }
 

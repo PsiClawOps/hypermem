@@ -144,9 +144,80 @@ export function repairToolPairs(messages: AnyMessage[]): AnyMessage[] {
     result.push(msg);
   }
 
+  // ── Pass 4: Intra-message content block integrity ─────────────────────────
+  // Anthropic requires that every tool_result content block in a user message
+  // references a tool_use_id that exists in the IMMEDIATELY PRECEDING assistant
+  // message's content blocks. Pass 3 only checks global existence. This pass
+  // enforces adjacency.
+  let intraBlockDropped = 0;
+  for (let i = 0; i < result.length; i++) {
+    const msg = result[i];
+    if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
+
+    const content = msg.content as AnyMessage[];
+    const hasToolResultBlocks = content.some(b => b.type === 'tool_result');
+    if (!hasToolResultBlocks) continue;
+
+    // Find the immediately preceding assistant message
+    let precedingAssistant: AnyMessage | null = null;
+    for (let j = i - 1; j >= 0; j--) {
+      if (result[j].role === 'assistant') {
+        precedingAssistant = result[j];
+        break;
+      }
+    }
+
+    // Collect tool_use IDs from the preceding assistant message only
+    const adjacentCallIds = new Set<string>();
+    if (precedingAssistant) {
+      // Content array format
+      if (Array.isArray(precedingAssistant.content)) {
+        for (const block of precedingAssistant.content as AnyMessage[]) {
+          if (
+            (block.type === 'toolCall' || block.type === 'tool_use') &&
+            typeof block.id === 'string' && block.id
+          ) {
+            adjacentCallIds.add(block.id);
+          }
+        }
+      }
+      // NeutralMessage format
+      if (Array.isArray(precedingAssistant.toolCalls)) {
+        for (const tc of precedingAssistant.toolCalls as AnyMessage[]) {
+          if (typeof tc.id === 'string' && tc.id) adjacentCallIds.add(tc.id);
+        }
+      }
+    }
+
+    // Also check pi-agent ToolResultMessages that reference the preceding assistant
+    // (these are message-level, not content-block level — skip for adjacency check)
+
+    // Filter: keep tool_result blocks only if their tool_use_id is in the
+    // immediately preceding assistant message
+    const filteredContent = content.filter(block => {
+      if (block.type !== 'tool_result') return true;
+      const toolUseId = typeof block.tool_use_id === 'string' ? block.tool_use_id : '';
+      if (!toolUseId) return false; // malformed, drop
+      if (adjacentCallIds.has(toolUseId)) return true;
+      intraBlockDropped++;
+      return false;
+    });
+
+    if (filteredContent.length === 0) {
+      // All content blocks were orphaned — remove the message entirely
+      result.splice(i, 1);
+      i--; // re-check this index
+    } else if (filteredContent.length !== content.length) {
+      result[i] = { ...msg, content: filteredContent };
+    }
+  }
+
   const dropped = messages.length - result.length;
-  if (dropped > 0) {
-    console.log(`[hypermem] repairToolPairs: dropped ${dropped} orphaned message(s) (${messages.length} → ${result.length})`);
+  if (dropped > 0 || intraBlockDropped > 0) {
+    const parts: string[] = [];
+    if (dropped > 0) parts.push(`${dropped} orphaned message(s)`);
+    if (intraBlockDropped > 0) parts.push(`${intraBlockDropped} intra-message orphaned content block(s)`);
+    console.log(`[hypermem] repairToolPairs: dropped ${parts.join(' + ')} (${messages.length} → ${result.length})`);
   }
 
   return result;

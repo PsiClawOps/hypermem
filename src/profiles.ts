@@ -30,6 +30,15 @@ const BASE_EMBEDDING: EmbeddingProviderConfig = {
   batchSize: 32,
 };
 
+/** Gemini embedding preset — use with mergeProfile() when switching fleet to Gemini. */
+export const GEMINI_EMBEDDING: Partial<EmbeddingProviderConfig> = {
+  provider: 'gemini',
+  model: 'gemini-embedding-2-preview',
+  dimensions: 3072,
+  timeout: 15000,
+  batchSize: 100,
+};
+
 // ---------------------------------------------------------------------------
 // light — 64k context window, single agent, constrained resources
 //
