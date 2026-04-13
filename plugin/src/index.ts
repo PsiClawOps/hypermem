@@ -919,7 +919,7 @@ function createHyperMemEngine(): ContextEngine {
     info: {
       id: 'hypermem',
       name: 'hypermem context engine',
-      version: '0.5.4',
+      version: '0.6.3',
       // We own compaction — assemble() trims to budget via the compositor safety
       // valve, so runtime compaction is never needed. compact() handles any
       // explicit calls by trimming the Redis history window directly.
