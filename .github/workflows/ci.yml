@@ -30,7 +30,7 @@ jobs:
         run: npm run typecheck
 
       - name: Install plugin deps
-        run: npm ci --prefix plugin
+        run: npm install --prefix plugin
 
       - name: Plugin typecheck
         run: npm --prefix plugin run typecheck
@@ -39,7 +39,7 @@ jobs:
         run: npm --prefix plugin run build
 
       - name: Install memory-plugin deps
-        run: npm ci --prefix memory-plugin
+        run: npm install --prefix memory-plugin
 
       - name: Memory-plugin typecheck
         run: npm --prefix memory-plugin run typecheck
