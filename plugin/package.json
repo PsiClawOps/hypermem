@@ -1,14 +1,14 @@
 {
-  "name": "@psiclawops/hypermem-context-engine",
-  "version": "0.1.0",
-  "description": "HyperMem context engine plugin for OpenClaw",
+  "name": "@psiclawops/hypercompositor",
+  "version": "0.6.2",
+  "description": "HyperCompositor — context engine plugin for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
   "license": "Apache-2.0",
   "author": "PsiClawOps",
   "repository": {
     "type": "git",
-    "url": "https://github.com/PsiClawOps/hypermem.git",
+    "url": "https://github.com/PsiClawOps/hypermem-internal.git",
     "directory": "plugin"
   },
   "publishConfig": {
@@ -17,20 +17,30 @@
   },
   "openclaw": {
     "plugin": {
-      "id": "hypermem",
-      "name": "HyperMem Context Engine",
+      "id": "hypercompositor",
+      "name": "HyperCompositor — Context Engine",
       "kind": "context-engine"
     },
     "extensions": [
       "./dist/index.js"
-    ]
+    ],
+    "compat": {
+      "pluginApi": ">=2026.4.5",
+      "minGatewayVersion": "2026.4.5"
+    },
+    "build": {
+      "openclawVersion": "2026.4.9",
+      "pluginSdkVersion": "2026.4.5"
+    }
   },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@psiclawops/hypermem": "^0.5.2"
+  },
   "devDependencies": {
-    "@psiclawops/hypermem": "file:..",
     "openclaw": "*",
     "typescript": "^5.4.0"
   },
@@ -42,5 +52,13 @@
     "openclaw-plugin",
     "context-engine",
     "hypermem"
+  ],
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
   ]
 }

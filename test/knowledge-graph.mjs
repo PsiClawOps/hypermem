@@ -41,24 +41,22 @@ async function run() {
   try {
     hm = await HyperMem.create({
       dataDir: tmpDir,
-      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm-graph:', sessionTTL: 60 },
     });
-    await hm.redis.flushPrefix();
   } catch (err) {
     console.log(`  ❌ Failed to create HyperMem: ${err.message}`);
     process.exit(1);
   }
 
   // ── Seed some facts and knowledge for linking ──
-  const fact1 = hm.addFact('agent-alpha', 'Redis 7.0.15 runs on localhost:6379', { domain: 'infra' });
-  const fact2 = hm.addFact('agent-alpha', 'SQLite uses WAL mode for concurrent reads', { domain: 'infra' });
-  const fact3 = hm.addFact('agent-alpha', 'HyperMem replaced ClawText JSONL', { domain: 'architecture' });
-  const fact4 = hm.addFact('agent-beta', 'Product launches Q2 2026', { domain: 'strategy' });
-  const fact5 = hm.addFact('agent-delta', 'All fleet DBs use encrypted-at-rest', { domain: 'security' });
+  const fact1 = hm.addFact('agent1', 'Redis 7.0.15 runs on localhost:6379', { domain: 'infra' });
+  const fact2 = hm.addFact('agent1', 'SQLite uses WAL mode for concurrent reads', { domain: 'infra' });
+  const fact3 = hm.addFact('agent1', 'HyperMem replaced ClawText JSONL', { domain: 'architecture' });
+  const fact4 = hm.addFact('agent2', 'Product launches Q2 2026', { domain: 'strategy' });
+  const fact5 = hm.addFact('agent3', 'All fleet DBs use encrypted-at-rest', { domain: 'security' });
 
-  const k1 = hm.upsertKnowledge('agent-alpha', 'architecture', 'memory-layers',
+  const k1 = hm.upsertKnowledge('agent1', 'architecture', 'memory-layers',
     'L1 Redis, L2 Messages, L3 Vectors, L4 Library');
-  const k2 = hm.upsertKnowledge('agent-alpha', 'architecture', 'db-split',
+  const k2 = hm.upsertKnowledge('agent1', 'architecture', 'db-split',
     'Three files per agent: messages.db, vectors.db, library.db');
 
   // ── Test 1: Link creation ──
@@ -130,7 +128,7 @@ async function run() {
   assert(pathResult[pathResult.length - 1].type === 'knowledge', 'Path ends at knowledge');
 
   // No path to disconnected entity
-  const isolatedFact = hm.addFact('agent-alpha', 'Isolated fact', { domain: 'test' });
+  const isolatedFact = hm.addFact('agent1', 'Isolated fact', { domain: 'test' });
   const noPath = hm.findGraphPath('fact', fact1.id, 'fact', isolatedFact.id);
   assert(noPath === null, 'No path to disconnected node');
 
@@ -196,7 +194,6 @@ async function run() {
 
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
-  await hm.redis.flushPrefix();
   await hm.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
   assert(true, 'Cleaned up');

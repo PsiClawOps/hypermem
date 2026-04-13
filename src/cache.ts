@@ -294,16 +294,23 @@ export class CacheLayer {
         }
       });
 
-    const clusters: Array<{ startSeq: number; endSeq: number; tokenCost: number }> = [];
+    // Helper: check if a message contains any error tool results
+    const hasErrorToolResult = (msg: StoredMessage): boolean => {
+      if (!msg.toolResults) return false;
+      return msg.toolResults.some((tr: any) => tr.isError === true);
+    };
+
+    const clusters: Array<{ startSeq: number; endSeq: number; tokenCost: number; hasError: boolean }> = [];
     for (let i = 0; i < chronological.length; i++) {
       const current = chronological[i];
       if (current.fallback || !current.msg) {
-        clusters.push({ startSeq: current.seq, endSeq: current.seq, tokenCost: 500 });
+        clusters.push({ startSeq: current.seq, endSeq: current.seq, tokenCost: 500, hasError: false });
         continue;
       }
 
       let endSeq = current.seq;
       let tokenCost = estimateMessageTokens(current.msg);
+      let clusterHasError = hasErrorToolResult(current.msg);
 
       if (current.msg.toolCalls && current.msg.toolCalls.length > 0) {
         const callIds = new Set(current.msg.toolCalls.map(tc => tc.id).filter(Boolean));
@@ -314,6 +321,7 @@ export class CacheLayer {
           const resultIds = candidate.msg.toolResults.map(tr => tr.callId).filter(Boolean);
           if (callIds.size > 0 && resultIds.length > 0 && !resultIds.some(id => callIds.has(id))) break;
           tokenCost += estimateMessageTokens(candidate.msg);
+          if (hasErrorToolResult(candidate.msg)) clusterHasError = true;
           endSeq = candidate.seq;
           j++;
         }
@@ -324,13 +332,17 @@ export class CacheLayer {
           const candidate = chronological[j];
           if (candidate.fallback || !candidate.msg || !candidate.msg.toolResults || candidate.msg.toolResults.length === 0 || (candidate.msg.toolCalls && candidate.msg.toolCalls.length > 0)) break;
           tokenCost += estimateMessageTokens(candidate.msg);
+          if (hasErrorToolResult(candidate.msg)) clusterHasError = true;
           endSeq = candidate.seq;
           j++;
         }
         i = j - 1;
       }
 
-      clusters.push({ startSeq: current.seq, endSeq, tokenCost });
+      // Error clusters get a 90% cost discount so they survive trimming longer.
+      // Failed tool calls are high-signal context the model needs to avoid repeating mistakes.
+      const effectiveCost = clusterHasError ? Math.max(50, Math.ceil(tokenCost * 0.1)) : tokenCost;
+      clusters.push({ startSeq: current.seq, endSeq, tokenCost: effectiveCost, hasError: clusterHasError });
     }
 
     let tokenSum = 0;

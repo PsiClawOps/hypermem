@@ -32,8 +32,8 @@ function assert(condition, msg) {
 console.log('\n── Registry Shape ──');
 
 assert(
-  Array.isArray(TRIGGER_REGISTRY) && TRIGGER_REGISTRY.length === 7,
-  `TRIGGER_REGISTRY has 7 entries (got ${TRIGGER_REGISTRY.length})`
+  Array.isArray(TRIGGER_REGISTRY) && TRIGGER_REGISTRY.length >= 9,
+  `TRIGGER_REGISTRY has at least 9 entries (got ${TRIGGER_REGISTRY.length})`
 );
 
 assert(
@@ -104,6 +104,18 @@ const emptyMatches = matchTriggers('', TRIGGER_REGISTRY);
 assert(
   emptyMatches.length === 0,
   `matchTriggers('', registry) returns 0 results (got ${emptyMatches.length})`
+);
+
+const identityMatches = matchTriggers('what is your role and your soul', TRIGGER_REGISTRY);
+assert(
+  identityMatches.some(m => m.collection === 'identity/soul'),
+  `matchTriggers('what is your role and your soul', registry) hits identity/soul`
+);
+
+const toolsMatches = matchTriggers('which openclaw command should I use to restart the gateway', TRIGGER_REGISTRY);
+assert(
+  toolsMatches.some(m => m.collection === 'operations/tools'),
+  `matchTriggers('which openclaw command should I use to restart the gateway', registry) hits operations/tools`
 );
 
 // ─── Backward-compat alias ────────────────────────────────────

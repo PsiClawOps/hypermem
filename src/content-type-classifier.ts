@@ -8,7 +8,7 @@
  *   - Compaction for retention decisions
  *
  * Ported from ClawText content-type-classifier.ts — adapted for
- * HyperMem's NeutralMessage interface.
+ * hypermem's NeutralMessage interface.
  *
  * No LLM dependency. Pure pattern matching + heuristics.
  */

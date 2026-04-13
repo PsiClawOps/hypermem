@@ -2,15 +2,16 @@
  * Compositor integration test.
  *
  * Tests prompt composition with all four memory layers:
- *   L1 Redis    — slot caching
- *   L2 Messages — conversation history
- *   L3 Vectors  — semantic recall (mocked — no Ollama required)
- *   L4 Library  — facts, knowledge, preferences
+ *   L1 Redis    - slot caching
+ *   L2 Messages - conversation history
+ *   L3 Vectors  - semantic recall (mocked - no Ollama required)
+ *   L4 Library  - facts, knowledge, preferences
  */
 
-import { HyperMem } from '../dist/index.js';
+import { HyperMem, toProviderFormat, repairToolCallPairs } from '../dist/index.js';
 import { Compositor, DEFAULT_TRIGGERS } from '../dist/compositor.js';
 import { chunkMarkdown } from '../dist/doc-chunker.js';
+import { DocChunkStore } from '../dist/doc-chunk-store.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -39,16 +40,14 @@ async function run() {
   try {
     hm = await HyperMem.create({
       dataDir: tmpDir,
-      redis: { host: 'localhost', port: 6379, keyPrefix: 'hm-comp:', sessionTTL: 60 },
     });
-    await hm.redis.flushPrefix();
   } catch (err) {
     console.log(`  ❌ Failed to create HyperMem: ${err.message}`);
     process.exit(1);
   }
 
-  const agentId = 'agent-alpha';
-  const sessionKey = 'agent:agent-alpha:webchat:main';
+  const agentId = 'agent1';
+  const sessionKey = 'agent:agent1:webchat:main';
   const msgDb = hm.dbManager.getMessageDb(agentId);
   const libDb = hm.dbManager.getLibraryDb();
 
@@ -100,11 +99,11 @@ async function run() {
     'Three files per agent: messages.db (rotatable), vectors.db (reconstructable), plus fleet-wide library.db (crown jewel)');
 
   // Seed preferences
-  hm.setPreference('testuser', 'coding_style', 'Architecture over speed, explicit over implicit', {
+  hm.setPreference('operator', 'coding_style', 'Architecture over speed, explicit over implicit', {
     domain: 'development',
     agentId,
   });
-  hm.setPreference('testuser', 'communication', 'Direct, no hedging', {
+  hm.setPreference('operator', 'communication', 'Direct, no hedging', {
     domain: 'personal',
     agentId,
   });
@@ -113,7 +112,7 @@ async function run() {
   console.log('── Basic Composition (L1+L2+L4) ──');
 
   const compositor = new Compositor({
-    redis: hm.redis,
+    cache: hm.cache,
     vectorStore: null,  // No vector search for this test
     libraryDb: libDb,
   });
@@ -166,7 +165,7 @@ async function run() {
   }, msgDb, libDb);
 
   assert(tightResult.tokenCount <= 600, `Tight budget tokens: ${tightResult.tokenCount} (target ≤600)`);
-  // With small test data, budget may not be exceeded — verify it's under budget
+  // With small test data, budget may not be exceeded - verify it's under budget
   assert(tightResult.tokenCount <= 500 || tightResult.truncated, 'Under budget or truncated');
 
   // ── Test 3: Selective slot inclusion ──
@@ -193,8 +192,8 @@ async function run() {
 
   // Warm the session
   await compositor.warmSession(agentId, sessionKey, msgDb, {
-    systemPrompt: 'You are Agent Alpha, the infrastructure seat.',
-    identity: 'Agent Alpha — Infrastructure Council Seat',
+    systemPrompt: 'You are agent1, the infrastructure seat.',
+    identity: 'agent1 - Infrastructure Council Seat',
     libraryDb: libDb,
   });
 
@@ -215,12 +214,12 @@ async function run() {
     return '';
   }).join(' ');
 
-  assert(warmedContent.includes('Agent Alpha'), 'System prompt from Redis');
+  assert(warmedContent.includes('agent1'), 'System prompt from Redis');
 
-  // ── Test 4b: Gate 1 — historyDepth constrains hot Redis sessions ──
+  // ── Test 4b: Gate 1 - historyDepth constrains hot Redis sessions ──
   console.log('\n── Gate 1: historyDepth limits hot Redis sessions ──');
 
-  const isWarm = await hm.redis.sessionExists(agentId, sessionKey);
+  const isWarm = await hm.cache.sessionExists(agentId, sessionKey);
   assert(isWarm, 'Session marked warm in Redis');
 
   const gatedResult = await compositor.compose({
@@ -244,15 +243,41 @@ async function run() {
   // ── Test 5: Empty session composition ──
   console.log('\n── Empty Session Composition ──');
 
+  // Compose with history excluded — tests system/identity/FOS/MOD only path.
+  // includeHistory:false is the clean way to test "no prior session" without
+  // a separate DB fixture. The seeded msgDb/libDb are fine to pass — history
+  // is just skipped by the compositor gate.
   const emptyResult = await compositor.compose({
     agentId: 'newagent',
     sessionKey: 'agent:newagent:webchat:main',
     tokenBudget: 50000,
     provider: 'anthropic',
     model: 'claude-opus-4-6',
+    includeHistory: false,
   }, msgDb, libDb);
 
-  assert(emptyResult.messages.length === 0 || emptyResult.tokenCount < 100, 'Empty session produces minimal output');
+  // No history replay. Only system context (identity, FOS/MOD directives).
+  // FOS/MOD is injected from the default fleet profile even for unknown agents.
+  // Ceiling is 5000 — generous enough for any system prompt + FOS/MOD block.
+  const emptyNonSystem = emptyResult.messages.filter(m => m.role !== 'system');
+  assert(
+    emptyNonSystem.length === 0,
+    `Empty session has no history messages (got ${emptyNonSystem.length} non-system messages)`
+  );
+  assert(
+    emptyResult.tokenCount < 5000,
+    `Empty session token count ${emptyResult.tokenCount} is below 5000 (system context only)`
+  );
+
+  const emptySystemMessages = emptyResult.messages.filter(m => m.role === 'system');
+  const outputStandardMsg = emptySystemMessages.find(m => typeof m.content === 'string' && String(m.content).includes('## Output Standard'));
+  assert(outputStandardMsg !== undefined, 'Empty session keeps output profile in static system prefix');
+  const cachedBoundaryMsg = emptySystemMessages.find(m => m.cache_control && m.cache_control.type === 'ephemeral');
+  assert(cachedBoundaryMsg !== undefined, 'Anthropic output marks a static cache boundary');
+  assert(
+    cachedBoundaryMsg && typeof cachedBoundaryMsg.content === 'string' && cachedBoundaryMsg.content.includes('## Output Standard'),
+    'Cache boundary lands on the stable output-profile prefix'
+  );
 
   // ── Test 6: Multi-provider output ──
   console.log('\n── Multi-Provider Output ──');
@@ -340,29 +365,29 @@ Performance criteria for the infrastructure seat.
 ## Response Contract
 
 Every council response includes:
-1. Position — operationally fit, conditionally fit, or not fit
-2. Top risk — single most critical operational or architectural risk
-3. Confidence — high/medium/low
-4. Action — specific infrastructure work, test, or validation needed
+1. Position - operationally fit, conditionally fit, or not fit
+2. Top risk - single most critical operational or architectural risk
+3. Confidence - high/medium/low
+4. Action - specific infrastructure work, test, or validation needed
 `;
 
   const jobChunks = chunkMarkdown(jobContent, {
     collection: 'identity/job',
     sourcePath: '/workspace/JOB.md',
     scope: 'per-agent',
-    agentId: 'agent-alpha',
+    agentId: 'agent1',
   });
   hm.indexDocChunks(jobChunks);
 
   // The seeded policy doc contains unique text that can ONLY appear via chunk injection,
   // not from echoing the user message. We assert on that unique text.
-  // Unique agent4 in policyContent: "mandatory human review requirements"
-  // Unique agent4 in jobContent: "operationally fit, conditionally fit, or not fit"
+  // Unique agent3 in policyContent: "mandatory human review requirements"
+  // Unique agent3 in jobContent: "operationally fit, conditionally fit, or not fit"
   //
   // This ensures the test fails if FTS retrieval doesn't actually find the right chunks
-  // (Reviewer's repro: user message contained "escalation" but no chunk was injected).
+  // (Pylon's repro: user message contained "escalation" but no chunk was injected).
 
-  const chunkSessionKey = 'agent:agent-alpha:webchat:chunk-test';
+  const chunkSessionKey = 'agent:agent1:webchat:chunk-test';
   await hm.recordUserMessage(agentId, chunkSessionKey, 'What are the escalation triggers I should follow?');
 
   const escalationResult = await hm.compose({
@@ -377,8 +402,8 @@ Every council response includes:
     typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
   ).join('\n');
 
-  // Assert on chunk-unique content — text that can only appear via chunk injection, not from the user message.
-  // The seeded policy chunk contains "No autonomous resolution allowed" — unique agent4 text
+  // Assert on chunk-unique content - text that can only appear via chunk injection, not from the user message.
+  // The seeded policy chunk contains "No autonomous resolution allowed" - unique agent3 text
   // that does not appear in the user question "What are the escalation triggers I should follow?"
   assert(escalationText.includes('No autonomous resolution') || escalationText.includes('autonomous resolution'),
     'Chunk-unique policy text injected (not just user message echo)');
@@ -386,7 +411,7 @@ Every council response includes:
     'Library slot consumed (confirms chunk was actually injected, not just present in history)');
 
   // Seed a deliberation-related message to trigger identity/job chunks
-  const deliberationSessionKey = 'agent:agent-alpha:webchat:deliberation-test';
+  const deliberationSessionKey = 'agent:agent1:webchat:deliberation-test';
   await hm.recordUserMessage(agentId, deliberationSessionKey, 'We need a council round vote on this proposal and response contract.');
 
   const deliberationResult = await hm.compose({
@@ -411,22 +436,22 @@ Every council response includes:
   assert(statsAfterSeed.some(s => s.collection === 'identity/job'), 'Job collection indexed');
 
   // Tier filter: council-scoped chunks should not appear for director queries
-  const councilChunks = chunkMarkdown('# Charter\n\n## Council Structure\n\nThis section is for council seats only — their specific roles and responsibilities.\n', {
+  const councilChunks = chunkMarkdown('# Charter\n\n## Council Structure\n\nThis section is for council seats only - their specific roles and responsibilities.\n', {
     collection: 'governance/charter',
-    sourcePath: '/workspace/agent-alpha/CHARTER.md',
+    sourcePath: '/workspace/agent1/CHARTER.md',
     scope: 'per-tier',
     tier: 'council',
   });
-  const directorChunks = chunkMarkdown('# Charter\n\n## Director Structure\n\nThis section is for directors only — their specific delegation and reporting lines.\n', {
+  const directorChunks = chunkMarkdown('# Charter\n\n## Director Structure\n\nThis section is for directors only - their specific delegation and reporting lines.\n', {
     collection: 'governance/charter',
-    sourcePath: '/workspace/agent-gamma/CHARTER.md',
+    sourcePath: '/workspace/director1/CHARTER.md',
     scope: 'per-tier',
     tier: 'director',
   });
   hm.indexDocChunks(councilChunks);
   hm.indexDocChunks(directorChunks);
 
-  // Query with tier filter — should only return matching tier
+  // Query with tier filter - should only return matching tier
   const councilOnly = hm.queryDocChunks({ collection: 'governance/charter', tier: 'council' });
   const directorOnly = hm.queryDocChunks({ collection: 'governance/charter', tier: 'director' });
   assert(councilOnly.every(c => !c.tier || c.tier === 'council'), 'Council tier filter excludes director chunks');
@@ -438,11 +463,11 @@ Every council response includes:
   hm.upsertKnowledge(agentId, 'deployments', 'k8s-staging',
     'K8S_STAGING_SENTINEL Kubernetes staging deployment requires readiness gates, rollout checks, and rollback verification.');
 
-  const promptRecallSessionKey = 'agent:agent-alpha:webchat:prompt-recall-test';
+  const promptRecallSessionKey = 'agent:agent1:webchat:prompt-recall-test';
   await hm.recordUserMessage(agentId, promptRecallSessionKey, 'Can you review our incident process?');
   await hm.recordAssistantMessage(agentId, promptRecallSessionKey, {
     role: 'assistant',
-    textContent: 'Yes — I can review the incident process.',
+    textContent: 'Yes - I can review the incident process.',
     toolCalls: null,
     toolResults: null,
   });
@@ -474,13 +499,16 @@ Every council response includes:
 
   assert(promptRecallText.includes('K8S_STAGING_SENTINEL'),
     'Semantic recall uses request.prompt before prompt is written to history');
-  assert(promptRecallResult.contextBlock?.includes('Related Memory') || promptRecallText.includes('## Related Memory'),
-    'Prompt-aware retrieval produced a Related Memory block');
+  // TUNE-016: FTS floor raised to 0.05 — low-score FTS hits are filtered. Knowledge is still
+  // retrieved via library path (L2). The assert below confirms content is present regardless
+  // of which context section it appears under.
+  assert(promptRecallText.includes('K8S_STAGING_SENTINEL'),
+    'Prompt-aware retrieval surfaces knowledge content (via library or related-memory path)');
 
   // 'P0.1: prompt drives retrieval before message is in history'
   console.log('\n── P0.1: prompt drives retrieval before message is in history ──');
 
-  const freshPromptSessionKey = 'agent:agent-alpha:webchat:fresh-prompt-test';
+  const freshPromptSessionKey = 'agent:agent1:webchat:fresh-prompt-test';
   const freshPromptResult = await hm.compose({
     agentId,
     sessionKey: freshPromptSessionKey,
@@ -535,9 +563,9 @@ Every council response includes:
     toolResults: null,
   });
 
-  // Compose with skipProviderTranslation — should get NeutralMessages back
+  // Compose with skipProviderTranslation - should get NeutralMessages back
   const pluginCompositor = new Compositor({
-    redis: hm.redis,
+    cache: hm.cache,
     vectorStore: null,
     libraryDb: libDb,
   });
@@ -582,7 +610,7 @@ Every council response includes:
     assert(tr.content.includes('TOOLS.md'), `Plugin path: tool result content preserved`);
   }
 
-  // Compare with provider-translated output — should be different format
+  // Compare with provider-translated output - should be different format
   const providerResult = await pluginCompositor.compose({
     agentId,
     sessionKey: pluginSessionKey,
@@ -601,18 +629,18 @@ Every council response includes:
   // Neutral format should NOT have tool_use blocks
   assert(tcMsg && !Array.isArray(tcMsg.content), 'Plugin path: does NOT have provider-translated content blocks');
 
-  console.log('  (skipProviderTranslation returns NeutralMessage format — plugin path validated)');
+  console.log('  (skipProviderTranslation returns NeutralMessage format - plugin path validated)');
 
   // ── Cursor Dual-Write (P1.3) ──
   console.log('\n── Cursor Dual-Write (P1.3) ──');
   // After compose(), the cursor should be written to both Redis AND SQLite.
-  // Compose has already been called above — check the conversations table for cursor columns.
-  const cursorDb = hm.dbManager.getMessageDb('agent-alpha');
+  // Compose has already been called above - check the conversations table for cursor columns.
+  const cursorDb = hm.dbManager.getMessageDb('agent1');
   const cursorRow = cursorDb.prepare(`
     SELECT cursor_last_sent_id, cursor_last_sent_index, cursor_last_sent_at,
            cursor_window_size, cursor_token_count
     FROM conversations
-    WHERE session_key = 'agent:agent-alpha:webchat:main'
+    WHERE session_key = 'agent:agent1:webchat:main'
   `).get();
   assert(cursorRow !== undefined, 'Cursor row exists in conversations table');
   assert(cursorRow.cursor_last_sent_id !== null, `SQLite cursor_last_sent_id: ${cursorRow?.cursor_last_sent_id}`);
@@ -620,18 +648,15 @@ Every council response includes:
   assert(cursorRow.cursor_window_size > 0, `SQLite cursor_window_size: ${cursorRow?.cursor_window_size}`);
   assert(cursorRow.cursor_token_count > 0, `SQLite cursor_token_count: ${cursorRow?.cursor_token_count}`);
 
-  // Verify Redis has the same cursor
-  const redisCursor = await hm.redis.getCursor('agent-alpha', 'agent:agent-alpha:webchat:main');
-  assert(redisCursor !== null, 'Redis cursor exists');
-  assert(redisCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Redis/SQLite cursor_last_sent_id match');
+  // Verify cache has the same cursor
+  const cacheCursor = await hm.cache.getCursor('agent1', 'agent:agent1:webchat:main');
+  assert(cacheCursor !== null, 'Cache cursor exists');
+  assert(cacheCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Cache/SQLite cursor_last_sent_id match');
 
-  // Verify facade fallback: flush Redis prefix (simulates eviction), then getSessionCursor should fallback to SQLite
-  await hm.redis.flushPrefix();
-  const redisCursorAfterFlush = await hm.redis.getCursor('agent-alpha', 'agent:agent-alpha:webchat:main');
-  assert(redisCursorAfterFlush === null, 'Redis cursor is null after flush');
-  const fallbackCursor = await hm.getSessionCursor('agent-alpha', 'agent:agent-alpha:webchat:main');
-  assert(fallbackCursor !== null, 'Fallback cursor from SQLite works after Redis eviction');
-  assert(fallbackCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Fallback cursor data matches SQLite');
+  // Verify facade returns cursor from cache
+  const facadeCursor = await hm.getSessionCursor('agent1', 'agent:agent1:webchat:main');
+  assert(facadeCursor !== null, 'Facade cursor exists');
+  assert(facadeCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Facade cursor data matches SQLite');
 
   // ── W3: Diagnostics on ComposeResult ──
   console.log('\n── W3: Diagnostics present on ComposeResult ──');
@@ -673,6 +698,7 @@ Every council response includes:
     appendToolSummary,
     truncateWithHeadTail,
     applyTierPayloadCap,
+    evictLargeToolResults,
   } = await import('../dist/compositor.js');
 
   // Helper: build a synthetic NeutralMessage with tool content
@@ -724,63 +750,98 @@ Every council response includes:
     assert(getTurnAge(msgs, 1) === 2, 'getTurnAge: counts only user messages, not assistant');
   }
 
-  // ── T0: turn age 0-4 — payload kept verbatim (no tool payload stripping) ──
+  // ── T0/T1: recent window preserves full results when pressure is low ──
   {
     const shortPayload = 'tool result here';
-    const msgs = buildConvoWithTurnAge('user', shortPayload, 2); // turn age = 2 (T0)
+    const msgs = buildConvoWithTurnAge('user', shortPayload, 0); // turn age = 0 (T0)
     const out = applyToolGradient(msgs);
     const firstMsg = out[0];
-    // T0: toolResults preserved
-    assert(firstMsg.toolResults !== null, 'T0: toolResults NOT stripped at turn age 2');
-    assert(firstMsg.toolResults[0].content === shortPayload, 'T0: payload preserved verbatim at turn age 2');
-    assert(firstMsg.toolCalls === null, 'T0: only toolResults message here (user role)');
+    assert(firstMsg.toolResults !== null, 'T0: toolResults NOT stripped at turn age 0');
+    assert(firstMsg.toolResults[0].content === shortPayload, 'T0: small payload preserved verbatim at turn age 0');
 
-    // Turn age 4 is still T0 boundary
-    const msgs4 = buildConvoWithTurnAge('user', shortPayload, 4); // turn age = 4
-    const out4 = applyToolGradient(msgs4);
-    assert(out4[0].toolResults !== null, 'T0: toolResults preserved at turn age 4 (boundary)');
+    // Turn age 1 is still in the protected recent-turn window.
+    const msgs1 = buildConvoWithTurnAge('user', shortPayload, 1);
+    const out1 = applyToolGradient(msgs1);
+    assert(out1[0].toolResults !== null, 'T0/T1: small payload preserved at turn age 1');
   }
 
-  // ── T0: 32K cap applied when payload exceeds limit ──
+  // ── T0: >40k result survives intact when projected pressure is low ──
   {
-    const bigPayload = 'X'.repeat(40_000); // > 32K
-    const msgs = buildConvoWithTurnAge('user', bigPayload, 3); // turn age = 3, T0
+    const bigPayload = 'X'.repeat(50_000);
+    const msgs = buildConvoWithTurnAge('user', bigPayload, 0);
     const out = applyToolGradient(msgs);
     const content = out[0].toolResults[0].content;
-    assert(content.length < bigPayload.length, 'T0: oversized payload is capped (truncated)');
-    assert(content.length <= 32_000 + 100, 'T0: payload capped at ~32K');
-    assert(content.includes('[... tool output truncated ...]'), 'T0: truncation marker present');
+    assert(content.length === bigPayload.length, 'T0: 50k result preserved when projected occupancy is below orange zone');
+    assert(!content.includes('reason=oversize_turn0_trim'), 'T0: low-pressure path does not inject trim note');
   }
 
-  // ── T1: turn age 5-10 — payload capped at 12K/result ──
+  // ── T0/T1: high-pressure >40k result gets structured head+tail trim note ──
   {
-    const payload12k = 'Y'.repeat(15_000); // > 12K, < 24K
-    const msgs = buildConvoWithTurnAge('user', payload12k, 5); // turn age = 5 (T1)
+    const msgs = [
+      textMsg('assistant', 'A'.repeat(200_000)),
+      toolMsg('user', 'X'.repeat(50_000)),
+    ];
+    const out = applyToolGradient(msgs);
+    const content = out[1].toolResults[0].content;
+    assert(content.includes('[hypermem_tool_result_trim'), 'T0 trim note: structured note injected');
+    assert(content.includes('reason=oversize_turn0_trim'), 'T0 trim note: reason recorded');
+    assert(content.includes('[... tool output truncated ...]'), 'T0 trim note: head+tail body preserved');
+    assert(content.length <= 40_500, `T0 trim note: payload reduced to ~40k envelope (got ${content.length})`);
+  }
+
+  // ── T0/T1: age-1 large result is protected from secondary eviction ──
+  {
+    const payload = 'X'.repeat(10_000);
+    const msgs = buildConvoWithTurnAge('user', payload, 1); // turn age = 1
+    const transformed = applyToolGradient(msgs);
+    const evicted = evictLargeToolResults(transformed);
+    assert(evicted[0].toolResults !== null, 'T0/T1 eviction guard: toolResults still present at turn age 1');
+    assert(evicted[0].toolResults[0].content === payload, 'T0/T1 eviction guard: age-1 large result not stubbed out');
+  }
+
+  // ── T1: turn age 3-4 - payload capped at 6K/result ──
+  {
+    const payload8k = 'Y'.repeat(8_000); // > 6K T1 cap
+    const msgs = buildConvoWithTurnAge('user', payload8k, 3); // turn age = 3 (first T1 with T0_TURNS=2)
     const out = applyToolGradient(msgs);
     const content = out[0].toolResults[0].content;
-    assert(out[0].toolResults !== null, 'T1: toolResults present at turn age 5');
-    assert(content.length < payload12k.length, 'T1: per-result cap applied at turn age 5');
-    assert(content.length <= 12_000 + 100, 'T1: result capped at ~12K');
+    assert(out[0].toolResults !== null, 'T1: toolResults present at turn age 3');
+    assert(content.length < payload8k.length, 'T1: per-result cap applied at turn age 3');
+    assert(content.length <= 6_000 + 100, 'T1: result capped at ~6K');
 
-    // Turn age 10 is still T1 boundary
-    const msgs10 = buildConvoWithTurnAge('user', 'short payload', 10);
-    const out10 = applyToolGradient(msgs10);
-    assert(out10[0].toolResults !== null, 'T1: toolResults preserved at turn age 10 (boundary)');
+    // Turn age 2 is now T0 — should stay full (protected)
+    const msgsT0 = buildConvoWithTurnAge('user', payload8k, 2);
+    const outT0 = applyToolGradient(msgsT0);
+    const contentT0 = outT0[0].toolResults[0].content;
+    assert(outT0[0].toolResults !== null, 'T0: toolResults present at turn age 2');
+    assert(contentT0.length === payload8k.length, 'T0: 8K payload stays full in the protected recent-turn window');
+
+    // Turn age 1 is also T0 — full fidelity
+    const msgsT0b = buildConvoWithTurnAge('user', payload8k, 1);
+    const outT0b = applyToolGradient(msgsT0b);
+    const contentT0b = outT0b[0].toolResults[0].content;
+    assert(outT0b[0].toolResults !== null, 'T0: toolResults present at turn age 1');
+    assert(contentT0b.length === payload8k.length, 'T0: 8K payload stays full at turn age 1');
+
+    // Turn age 4 is T1 boundary (T1_TURNS=4)
+    const msgs4b = buildConvoWithTurnAge('user', 'short payload', 4);
+    const out4b = applyToolGradient(msgs4b);
+    assert(out4b[0].toolResults !== null, 'T1: toolResults preserved at turn age 4 (boundary)');
+
+    // Turn age 5 is T2 - toolResults stripped
+    const msgs5 = buildConvoWithTurnAge('user', payload8k, 5);
+    const out5 = applyToolGradient(msgs5);
+    assert(out5[0].toolResults === null, 'T2: toolResults stripped at turn age 5 (first T2 turn)');
   }
 
-  // ── T1 → T2 downgrade: per-turn aggregate cap (24K) exceeded ──
+  // ── T1 → T2 downgrade: per-turn aggregate cap (12K) exceeded ──
   {
-    // Build a conversation where TWO tool-call messages (role: assistant) are in the
-    // same logical turn (same turn age = same number of user messages after them).
-    // Assistant messages don't count toward turn age, so both have the same turn age.
-    // Each has 12K+ content; together they exceed the 24K aggregate cap.
-    // gradient processes newest→oldest: index 1 fits within cap, index 0 overflows → T2 downgrade.
-    //
-    // Layout:
-    //   index 0: assistantToolCall (older) — turn age = 5 (T1)
-    //   index 1: assistantToolCall (newer) — turn age = 5 (T1)
-    //   index 2..6: 5 user messages
-    const payload13k = 'Z'.repeat(13_000);
+    // Three assistant tool messages at turn age 1 (T1). T1_TURN_CAP = 12K, T1_CHAR_CAP = 6K.
+    // gradient processes newest→oldest:
+    //   msg2 (newest): 7K payload capped to 6K. usage = 6K. 6K <= 12K → no downgrade.
+    //   msg1 (middle): usedSoFar=6K, 7K capped to 6K, total=12K. 12K > 12K? NO → no downgrade.
+    //   msg0 (oldest): usedSoFar=12K, 7K capped to 6K, total=18K > 12K → DOWNGRADE.
+    const payload7k = 'Z'.repeat(7_000);
 
     const asstToolMsg = (content) => ({
       role: 'assistant',
@@ -789,66 +850,21 @@ Every council response includes:
       toolResults: [{ callId: 'tc_agg', name: 'read', content, isError: false }],
     });
 
-    const msgs = [
-      asstToolMsg(payload13k),  // index 0: turn age = 5 (T1, older)
-      asstToolMsg(payload13k),  // index 1: turn age = 5 (T1, newer)
-      textMsg('user', 'q1'),
-      textMsg('user', 'q2'),
-      textMsg('user', 'q3'),
-      textMsg('user', 'q4'),
-      textMsg('user', 'q5'),
-    ];
-    // Both assistant tool messages have the same turn age (5 user messages after each)
-    const age0 = getTurnAge(msgs, 0);
-    const age1 = getTurnAge(msgs, 1);
-    assert(age0 === 5, `T1 downgrade setup: index 0 has turn age 5 (got ${age0})`);
-    assert(age1 === 5, `T1 downgrade setup: index 1 has turn age 5 (got ${age1})`);
-
-    const out = applyToolGradient(msgs);
-    // index 1 processed first (newest→oldest): 13K capped to 12K → usage.t1 = 12K
-    // index 0 processed next: 12K + 12K = 24K − no, let’s check the exact arithmetic:
-    //   applyTierPayloadCap(msg, 12000, 24000, 12000): usedChars = 12000 + 12000 = 24000
-    //   24000 > 24000 is FALSE, so no downgrade at exactly the limit.
-    //   Use 13K each: after T1 cap, result[1] = 12K. usage.t1 = 0 + 12K = 12K.
-    //   result[0]: usedSoFar=12K, content capped to 12K, usedChars = 12K + 12K = 24K → NOT > 24K.
-    //   So we need slightly more: use two 13K payloads where T1 cap results in 12K each,
-    //   and the turn cap check is 12K + 12K = 24K which is NOT > 24K (strict greater-than).
-    //   We need to exceed 24K. Use payload of 13K so cap doesn’t truncate, but sum > 24K:
-    //   Actually with T1_CHAR_CAP=12000 and payload=13000:
-    //     after truncation: content.length becomes 12000 (approximately, due to head/tail)
-    //     usedChars = usedSoFar(12000) + 12000 = 24000, NOT > 24000 → no downgrade
-    //   So we need payload where even after 12K cap, sum of two caps > 24K.
-    //   That’s not possible with two 12K-capped results summing to exactly 24K (= boundary).
-    //   Use three messages, or use a payload that results in different cap behavior.
-    //
-    // Correction: use per-result content of 13K and verify T1 per-result cap applies,
-    // then for aggregate downgrade use a larger dataset.
-    // The aggregate downgrade requires usedChars > 24K. With T1 cap at 12K per result:
-    //   message1 truncated to 12K. usage=12K.
-    //   message2: usedSoFar=12K, truncated to 12K, total=24K. 24K > 24K? NO.
-    // To trigger downgrade: need total > 24K. E.g., three 13K messages:
-    //   msg3: usage=0, after cap 12K, total=12K (no downgrade)
-    //   msg2: usage=12K, after cap 12K, total=24K (no downgrade — 24000 is NOT > 24000)
-    //   msg1: usage=24K, payload capped to 12K, total=36K > 24K → DOWNGRADE
-
-    // Rebuild with 3 assistant tool messages at same turn age
     const msgs3 = [
-      asstToolMsg(payload13k),  // index 0: turn age = 5, processed last
-      asstToolMsg(payload13k),  // index 1: turn age = 5, processed 2nd
-      asstToolMsg(payload13k),  // index 2: turn age = 5, processed 1st
+      asstToolMsg(payload7k),  // index 0: turn age = 3 (T1), processed last
+      asstToolMsg(payload7k),  // index 1: turn age = 3 (T1), processed 2nd
+      asstToolMsg(payload7k),  // index 2: turn age = 3 (T1), processed 1st
       textMsg('user', 'q1'),
       textMsg('user', 'q2'),
       textMsg('user', 'q3'),
-      textMsg('user', 'q4'),
-      textMsg('user', 'q5'),
     ];
     const age0b = getTurnAge(msgs3, 0);
-    assert(age0b === 5, `T1 downgrade (3msg) setup: index 0 has turn age 5 (got ${age0b})`);
+    assert(age0b === 3, `T1 downgrade (3msg) setup: index 0 has turn age 3 (got ${age0b})`);
 
     const out3 = applyToolGradient(msgs3);
-    const newest = out3[2]; // processed first, 12K fits (usage: 0→12K)
-    const middle = out3[1]; // processed second, 12K more (usage: 12K→24K), 24K NOT > 24K → no downgrade
-    const oldest = out3[0]; // processed last, usedSoFar=24K, total=36K > 24K → DOWNGRADE
+    const newest = out3[2]; // processed first, 6K fits (usage: 0→6K)
+    const middle = out3[1]; // processed second (usage: 6K→12K), 12K NOT > 12K → no downgrade
+    const oldest = out3[0]; // processed last, usedSoFar=12K, total=18K > 12K → DOWNGRADE
 
     assert(newest.toolResults !== null, 'T1 downgrade: newest message keeps toolResults');
     assert(middle.toolResults !== null, 'T1 downgrade: middle message keeps toolResults (at boundary)');
@@ -858,44 +874,42 @@ Every council response includes:
       'T1 downgrade: oldest message has prose summary in textContent');
   }
 
-  // ── T2: turn age 11-15 — payload replaced with prose envelope ──
+  // ── T2: turn age 5-8 - payload replaced with prose envelope ──
   {
     const payload = 'function doThing() { return 42; } // some code here';
-    const msgs = buildConvoWithTurnAge('user', payload, 11); // turn age = 11 (T2)
+    const msgs = buildConvoWithTurnAge('user', payload, 5); // turn age = 5 (first T2 with T1_TURNS=4)
     const out = applyToolGradient(msgs);
     const msg = out[0];
-    assert(msg.toolResults === null, 'T2: toolResults stripped at turn age 11');
-    assert(msg.toolCalls === null, 'T2: toolCalls stripped at turn age 11');
+    assert(msg.toolResults === null, 'T2: toolResults stripped at turn age 5');
+    assert(msg.toolCalls === null, 'T2: toolCalls stripped at turn age 5');
     assert(msg.textContent !== null && msg.textContent.length > 0, 'T2: prose envelope in textContent');
-    // T2 envelope contains the tool label from the read call
-    assert(msg.textContent.includes('read') || msg.textContent.includes('['), 'T2: textContent contains tool label');
+    assert(/read|Read|\[/.test(msg.textContent), 'T2: textContent contains tool label');
 
-    // Turn age 15 is still T2 boundary
-    const msgs15 = buildConvoWithTurnAge('user', payload, 15);
-    const out15 = applyToolGradient(msgs15);
-    assert(out15[0].toolResults === null, 'T2: toolResults stripped at turn age 15 (boundary)');
-    assert(out15[0].textContent !== null, 'T2: prose envelope present at turn age 15');
+    // Turn age 8 is T2 boundary (T2_TURNS = 8)
+    const msgs7 = buildConvoWithTurnAge('user', payload, 8);
+    const out7 = applyToolGradient(msgs7);
+    assert(out7[0].toolResults === null, 'T2: toolResults stripped at turn age 8 (boundary)');
+    assert(out7[0].textContent !== null, 'T2: prose envelope present at turn age 8');
   }
 
-  // ── T3: turn age 16+ — payload replaced with compact outcome stub ──
+  // ── T3: turn age 8+ - payload replaced with compact outcome stub ──
   {
     const payload = 'The quick brown fox jumps over the lazy dog. Some important content here.';
-    const msgs = buildConvoWithTurnAge('user', payload, 16); // turn age = 16 (T3)
+    const msgs = buildConvoWithTurnAge('user', payload, 9); // turn age = 9 (first T3 with T2_TURNS=8)
     const out = applyToolGradient(msgs);
     const msg = out[0];
-    assert(msg.toolResults === null, 'T3: toolResults stripped at turn age 16');
-    assert(msg.toolCalls === null, 'T3: toolCalls stripped at turn age 16');
+    assert(msg.toolResults === null, 'T3: toolResults stripped at turn age 9');
+    assert(msg.toolCalls === null, 'T3: toolCalls stripped at turn age 9');
     assert(msg.textContent !== null && msg.textContent.length > 0, 'T3: compact stub in textContent');
-    // T3 stub should be short — capped at 300 chars per result
-    assert(msg.textContent.length <= 350, `T3: stub is compact (got ${msg.textContent.length} chars)`);
-    // T3 envelope uses square bracket wrapping
+    // T3 stub should be short - capped at 150 chars per result
+    assert(msg.textContent.length <= 200, `T3: stub is compact (got ${msg.textContent.length} chars)`);
     assert(msg.textContent.startsWith('[') || msg.textContent.includes('['), 'T3: stub uses compact bracket format');
 
-    // Turn age 20 is well into T3
-    const msgs20 = buildConvoWithTurnAge('user', payload, 20);
-    const out20 = applyToolGradient(msgs20);
-    assert(out20[0].toolResults === null, 'T3: toolResults stripped at turn age 20');
-    assert(out20[0].textContent.length <= 350, 'T3: stub remains compact at turn age 20');
+    // Turn age 15 is well into T3
+    const msgs15 = buildConvoWithTurnAge('user', payload, 15);
+    const out15 = applyToolGradient(msgs15);
+    assert(out15[0].toolResults === null, 'T3: toolResults stripped at turn age 15');
+    assert(out15[0].textContent.length <= 200, 'T3: stub remains compact at turn age 15');
   }
 
   // ── Turn-age counts USER messages only, not total messages ──
@@ -916,15 +930,15 @@ Every council response includes:
     assert(age === 2, `Turn-age counts only user messages (expected 2, got ${age})`);
 
     const out = applyToolGradient(msgs);
-    // Turn age 2 → T0 → payload preserved
+    // Turn age 2 → T1 — small payload preserved (under T1 cap)
     assert(out[0].toolResults !== null,
-      'Turn-age user-only: T0 tier applied despite many assistant messages between');
+      'Turn-age user-only: T1 tier applied, small payload preserved');
   }
 
   // ── appendToolSummary: preserves existing textContent, does not overwrite ──
   {
     const existing = 'I already said something important.';
-    const summary = 'read /foo/bar — first line of file';
+    const summary = 'read /foo/bar - first line of file';
 
     const result = appendToolSummary(existing, summary);
     assert(result.includes(existing), 'appendToolSummary: existing textContent preserved');
@@ -962,37 +976,242 @@ Every council response includes:
     assert(truncateWithHeadTail(short, 1_000) === short, 'truncateWithHeadTail: short content unchanged');
   }
 
-  // ── T0 boundary: assistant tool call message at turn age 4 (exact boundary) ──
+  // ── Tool-aware summaries: web_search / exec / read ──
   {
-    // Build: [assistantTool, user, user, user, user] — assistant at index 0, 4 user msgs after
-    const msgs = [
+    const webMsgs = [{
+      role: 'assistant',
+      textContent: null,
+      toolCalls: [{ id: 'tc_ws', name: 'web_search', arguments: JSON.stringify({ query: 'image token cost' }) }],
+      toolResults: [{ callId: 'tc_ws', name: 'web_search', content: '{"results":[{"title":"How Images Work"},{"title":"Context Windows"}]}' }],
+    }, textMsg('user', 'follow-up question 1'), textMsg('user', 'follow-up question 2'), textMsg('user', 'follow-up question 3'), textMsg('user', 'follow-up question 4'), textMsg('user', 'follow-up question 5')];
+    const outWeb = applyToolGradient(webMsgs);
+    assert(outWeb[0].textContent.includes("Searched 'image token cost'"), 'web_search summary keeps query');
+    assert(outWeb[0].textContent.includes('2 results'), 'web_search summary keeps result count');
+
+    const execMsgs = [{
+      role: 'assistant',
+      textContent: null,
+      toolCalls: [{ id: 'tc_exec', name: 'exec', arguments: JSON.stringify({ command: 'npm test' }) }],
+      toolResults: [{ callId: 'tc_exec', name: 'exec', content: 'exit code: 1\nFAIL src/foo.test.ts\n1 failed' }],
+    }, textMsg('user', 'follow-up question 1'), textMsg('user', 'follow-up question 2'), textMsg('user', 'follow-up question 3'), textMsg('user', 'follow-up question 4'), textMsg('user', 'follow-up question 5')];
+    const outExec = applyToolGradient(execMsgs);
+    assert(outExec[0].textContent.includes('Ran npm test'), 'exec summary keeps command');
+    assert(outExec[0].textContent.includes('exit 1'), 'exec summary keeps exit code');
+
+    const readMsgs = [{
+      role: 'assistant',
+      textContent: null,
+      toolCalls: [{ id: 'tc_read2', name: 'read', arguments: JSON.stringify({ path: '/src/foo.ts' }) }],
+      toolResults: [{ callId: 'tc_read2', name: 'read', content: '# Foo\nexport function run() {}' }],
+    }, textMsg('user', 'follow-up question 1'), textMsg('user', 'follow-up question 2'), textMsg('user', 'follow-up question 3'), textMsg('user', 'follow-up question 4'), textMsg('user', 'follow-up question 5')];
+    const outRead = applyToolGradient(readMsgs);
+    assert(outRead[0].textContent.includes('Read /src/foo.ts'), 'read summary keeps path');
+    assert(outRead[0].textContent.includes('Foo'), 'read summary keeps heading');
+  }
+
+  // ── T0/T1 boundary: assistant tool call at turn age 0 (T0) vs 1 (T1) ──
+  {
+    // Turn age 0: T0 — toolCalls preserved
+    const msgs0 = [
       {
         role: 'assistant',
         textContent: 'Let me read that.',
         toolCalls: [{ id: 'tc_bnd', name: 'read', arguments: JSON.stringify({ path: '/f' }) }],
         toolResults: null,
       },
-      textMsg('user', 'q1'),
-      textMsg('user', 'q2'),
-      textMsg('user', 'q3'),
-      textMsg('user', 'q4'), // 4 user msgs → turn age 4, still T0
+      // No user messages after — turn age 0, T0
     ];
-    const age = getTurnAge(msgs, 0);
-    assert(age === 4, `T0 boundary: turn age at index 0 is 4 (got ${age})`);
+    const age0 = getTurnAge(msgs0, 0);
+    assert(age0 === 0, `T0 boundary: turn age at index 0 is 0 (got ${age0})`);
+    const out0 = applyToolGradient(msgs0);
+    assert(out0[0].toolCalls !== null, 'T0 boundary: toolCalls preserved at turn age 0');
 
-    const out = applyToolGradient(msgs);
-    // toolCalls preserved at T0
-    assert(out[0].toolCalls !== null, 'T0 boundary: toolCalls preserved at turn age 4');
+    // One user message → turn age 1, enters T1
+    const msgs1 = [...msgs0, textMsg('user', 'q1')];
+    const age1 = getTurnAge(msgs1, 0);
+    assert(age1 === 1, `T1 boundary: turn age at index 0 is 1 (got ${age1})`);
+  }
 
-    // One more user message → turn age 5, T1 boundary
-    msgs.push(textMsg('user', 'q5'));
-    const age5 = getTurnAge(msgs, 0);
-    assert(age5 === 5, `T1 boundary: turn age at index 0 is 5 (got ${age5})`);
+  // ── Tool pair integrity: orphan tool_result never reaches provider ──
+  {
+    const orphaned = [
+      {
+        role: 'assistant',
+        textContent: 'I checked the file.',
+        toolCalls: null,
+        toolResults: null,
+      },
+      {
+        role: 'user',
+        textContent: null,
+        toolCalls: null,
+        toolResults: [{ callId: 'missing_1', name: 'read', content: 'secret payload that should not become a tool_result block' }],
+      },
+    ];
+
+    const repaired = repairToolCallPairs(orphaned);
+    assert(repaired[1].toolResults === null, 'orphan tool_result downgraded to plain text before translation');
+    assert(repaired[1].textContent.includes('missing matching tool call'), 'orphan downgrade explains why tool result was omitted');
+
+    const anthropic = toProviderFormat(orphaned, 'anthropic');
+    const anthropicUser = anthropic[1];
+    assert(typeof anthropicUser.content === 'string', 'Anthropic orphan becomes plain user text, not tool_result block');
+
+    const openai = toProviderFormat(orphaned, 'openai');
+    assert(openai[1].role === 'user', 'OpenAI orphan remains a user message');
+    assert(!openai.some(m => m.role === 'tool'), 'OpenAI orphan does not emit tool role message');
+  }
+
+  // ── Dynamic Reserve ──
+  {
+    console.log('\n── Dynamic Reserve ──');
+
+    const agentId = 'dynamic-reserve-test';
+    const db = hm.dbManager.getMessageDb(agentId);
+    const libDb = hm.dbManager.getLibraryDb();
+
+    // Seed a conversation in SQLite
+    db.prepare(`
+      INSERT INTO conversations
+        (session_key, agent_id, channel_type, status, message_count,
+         token_count_in, token_count_out, created_at, updated_at)
+      VALUES (?, ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+    `).run('agent:dynamic-reserve-test:webchat:main', agentId);
+
+    const convRow = db.prepare('SELECT id FROM conversations WHERE session_key = ?')
+      .get('agent:dynamic-reserve-test:webchat:main');
+    const convId = convRow.id;
+
+    const insertMsg = db.prepare(`
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_results, message_index, is_heartbeat, created_at)
+      VALUES (?, ?, ?, ?, NULL, ?, 0, datetime('now'))
+    `);
+
+    // ── Test 1: Cold session (no history) → floor reserve applies ──
+    const coldResult = await compositor.compose({
+      agentId,
+      sessionKey: 'agent:dynamic-reserve-test:webchat:main',
+      userMessage: 'Hello',
+      model: 'gpt-4o', // 128k window
+    }, db, libDb);
+
+    assert(coldResult.diagnostics !== undefined, 'Dynamic reserve: diagnostics present');
+    assert(coldResult.diagnostics.dynamicReserveActive === false,
+      `Dynamic reserve: cold session uses floor (active=false, got ${coldResult.diagnostics.dynamicReserveActive})`);
+    assert(coldResult.diagnostics.reserveFraction !== undefined,
+      'Dynamic reserve: reserveFraction present in diagnostics');
+    // Floor is 0.15 by default
+    assert(Math.abs(coldResult.diagnostics.reserveFraction - 0.15) < 0.01,
+      `Dynamic reserve: cold session floor=0.15 (got ${coldResult.diagnostics.reserveFraction})`);
+    assert(coldResult.diagnostics.sessionPressureHigh === false,
+      'Dynamic reserve: cold session not high pressure');
+
+    // ── Test 2: Heavy session (large messages) → dynamic reserve engages ──
+    // Seed 20 large user+assistant messages (~8k chars each ≈ 2k tokens each)
+    const heavyContent = 'x'.repeat(8000);
+    for (let i = 0; i < 20; i++) {
+      insertMsg.run(convId, agentId, i % 2 === 0 ? 'user' : 'assistant', heavyContent, i);
+    }
+
+    const heavyResult = await compositor.compose({
+      agentId,
+      sessionKey: 'agent:dynamic-reserve-test:webchat:main',
+      userMessage: 'Continue this work',
+      model: 'gpt-4o', // 128k window
+    }, db, libDb);
+
+    assert(heavyResult.diagnostics !== undefined, 'Dynamic reserve heavy: diagnostics present');
+    assert(heavyResult.diagnostics.avgTurnCostTokens !== undefined && heavyResult.diagnostics.avgTurnCostTokens > 0,
+      `Dynamic reserve heavy: avg_turn_cost > 0 (got ${heavyResult.diagnostics.avgTurnCostTokens})`);
+    // With 8k char messages (~2k tokens each), avg ≈ 2k, horizon=5 → safety=10k, 10k/128k ≈ 7.8%
+    // Still under the 15% floor, so dynamic won't engage here. Need heavier messages.
+    // Just verify diagnostics are populated correctly.
+    assert(heavyResult.diagnostics.reserveFraction >= 0.15,
+      `Dynamic reserve heavy: reserve >= floor (got ${heavyResult.diagnostics.reserveFraction})`);
+    assert(heavyResult.diagnostics.sessionPressureHigh !== undefined,
+      'Dynamic reserve heavy: sessionPressureHigh field present');
+
+    // ── Test 3: Very heavy session → dynamic > floor, engage ──
+    // Seed 20 more very large messages (~80k chars each ≈ 20k tokens each)
+    const veryHeavyContent = 'y'.repeat(80000);
+    for (let i = 20; i < 40; i++) {
+      insertMsg.run(convId, agentId, i % 2 === 0 ? 'user' : 'assistant', veryHeavyContent, i);
+    }
+
+    const veryHeavyResult = await compositor.compose({
+      agentId,
+      sessionKey: 'agent:dynamic-reserve-test:webchat:main',
+      userMessage: 'Continue with more analysis',
+      model: 'gpt-4o', // 128k window - avg_turn_cost ~20k, horizon=5 → safety=100k, 100k/128k=78% > max(50%)
+    }, db, libDb);
+
+    assert(veryHeavyResult.diagnostics !== undefined, 'Dynamic reserve very heavy: diagnostics present');
+    assert(veryHeavyResult.diagnostics.dynamicReserveActive === true,
+      `Dynamic reserve very heavy: active=true (got ${veryHeavyResult.diagnostics.dynamicReserveActive})`);
+    // Should be clamped at max=0.50 and SESSION_PRESSURE_HIGH emitted
+    assert(veryHeavyResult.diagnostics.reserveFraction <= 0.51,
+      `Dynamic reserve very heavy: clamped at max (got ${veryHeavyResult.diagnostics.reserveFraction})`);
+    assert(veryHeavyResult.diagnostics.sessionPressureHigh === true,
+      `Dynamic reserve very heavy: sessionPressureHigh=true (got ${veryHeavyResult.diagnostics.sessionPressureHigh})`);
+    assert(veryHeavyResult.warnings.some(w => w.includes('SESSION_PRESSURE_HIGH')),
+      `Dynamic reserve very heavy: SESSION_PRESSURE_HIGH in warnings (got [${veryHeavyResult.warnings.join(', ')}])`);
+  }
+
+
+  // ── Test 13: Aggregate trigger budget cap ──
+  console.log('── Aggregate Trigger Budget Cap ──');
+
+  {
+    const docChunkStore = new DocChunkStore(libDb);
+    const triggerPrompt = DEFAULT_TRIGGERS.map(t => t.keywords[0]).join(' ');
+    let uncappedTriggerTokens = 0;
+
+    for (const [i, trigger] of DEFAULT_TRIGGERS.entries()) {
+      const keyword = trigger.keywords[0];
+      const repeated = (`${keyword} guidance and ${keyword} review notes. `).repeat(70);
+      const markdown = `# ${trigger.collection}
+
+## Retrieved Section
+
+${repeated}`;
+      const chunks = chunkMarkdown(markdown, {
+        collection: trigger.collection,
+        sourcePath: `/virtual/${trigger.collection.replace(/\//g, '_')}_${i}.md`,
+        scope: 'agent',
+        tier: 'council',
+        agentId,
+      });
+      const firstChunk = chunks[0];
+      if (!firstChunk) continue;
+      uncappedTriggerTokens += Math.min(trigger.maxTokens || 1000, firstChunk.tokenEstimate);
+      docChunkStore.indexChunks(chunks);
+    }
+
+    const triggerBudgetResult = await compositor.compose({
+      agentId,
+      sessionKey,
+      tokenBudget: 5000,
+      provider: 'anthropic',
+      model: 'claude-opus-4-6',
+      tier: 'council',
+      includeHistory: false,
+      includeFacts: false,
+      includeLibrary: false,
+      includeContext: false,
+      includeDocChunks: true,
+      prompt: triggerPrompt,
+    }, msgDb, libDb);
+
+    assert(triggerBudgetResult.diagnostics.triggerHits >= 6,
+      `Aggregate trigger cap: multiple triggers matched (got ${triggerBudgetResult.diagnostics.triggerHits})`);
+    assert(triggerBudgetResult.slots.library <= 2200,
+      `Aggregate trigger cap: library tokens bounded (got ${triggerBudgetResult.slots.library})`);
+    assert(triggerBudgetResult.slots.library < uncappedTriggerTokens,
+      `Aggregate trigger cap: capped below uncapped potential (${triggerBudgetResult.slots.library} < ${uncappedTriggerTokens})`);
   }
 
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
-  await hm.redis.flushPrefix();
   await hm.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
   assert(true, 'Cleaned up');

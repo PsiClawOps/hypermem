@@ -1,5 +1,5 @@
 /**
- * HyperMem Library Schema — Fleet-Wide Structured Knowledge
+ * hypermem Library Schema — Fleet-Wide Structured Knowledge
  *
  * Single database: ~/.openclaw/hypermem/library.db
  * The "crown jewel" — durable, backed up, low-write-frequency.
@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LIBRARY_SCHEMA_VERSION = 9;
+export const LIBRARY_SCHEMA_VERSION = 13;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -742,9 +742,202 @@ function applyV8EpisodeSourceMessageId(db: DatabaseSync): void {
   db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_source_msg ON episodes(agent_id, source_message_id)');
 }
 
+// ── V12: FOS / MOD tables + builtin seed data ──────────────
+
+function applyV12FosMod(db: DatabaseSync): void {
+  // fleet_output_standard: fleet-wide output formatting standards
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fleet_output_standard (
+      id                TEXT PRIMARY KEY,
+      name              TEXT NOT NULL,
+      directives        TEXT NOT NULL,
+      task_variants     TEXT DEFAULT '{}',
+      token_budget      INTEGER DEFAULT 250,
+      active            INTEGER DEFAULT 0,
+      source            TEXT DEFAULT 'builtin',
+      version           INTEGER DEFAULT 1,
+      last_validated_at TEXT,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL
+    )
+  `);
+
+  // model_output_directives: per-model corrections and calibration
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS model_output_directives (
+      id                TEXT PRIMARY KEY,
+      match_pattern     TEXT NOT NULL,
+      priority          INTEGER DEFAULT 0,
+      corrections       TEXT NOT NULL,
+      calibration       TEXT NOT NULL,
+      task_overrides    TEXT DEFAULT '{}',
+      token_budget      INTEGER DEFAULT 150,
+      version           INTEGER DEFAULT 1,
+      source            TEXT DEFAULT 'builtin',
+      enabled           INTEGER DEFAULT 1,
+      last_validated_at TEXT,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL
+    )
+  `);
+
+  // output_metrics: per-request telemetry for drift analytics
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS output_metrics (
+      id                TEXT PRIMARY KEY,
+      timestamp         TEXT NOT NULL,
+      agent_id          TEXT NOT NULL,
+      session_key       TEXT NOT NULL,
+      model_id          TEXT NOT NULL,
+      provider          TEXT NOT NULL,
+      fos_version       INTEGER,
+      mod_version       INTEGER,
+      mod_id            TEXT,
+      task_type         TEXT,
+      output_tokens     INTEGER NOT NULL,
+      input_tokens      INTEGER,
+      cache_read_tokens INTEGER,
+      corrections_fired TEXT DEFAULT '[]',
+      latency_ms        INTEGER,
+      created_at        TEXT NOT NULL
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_output_metrics_model ON output_metrics(model_id, timestamp)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_output_metrics_agent ON output_metrics(agent_id, timestamp)');
+
+  // ── Seed builtin FOS profile ──
+  const now = nowIso();
+
+  const fosDirectives = JSON.stringify({
+    structural: [
+      'Lead with the answer. Conclusion first, reasoning after.',
+      'Headers earn their place. Under 200 words: no headers.',
+      'Lists cap at 7 items. Technical enumerations exempt.',
+      'One metaphor lands. Two is the limit.',
+    ],
+    anti_patterns: [
+      'No sycophantic openings: Great question, Certainly, Absolutely, Of course',
+      'No em dashes',
+      'No preamble restating the question',
+      'No: Let me know if you need anything else',
+      'No AI vocabulary: delve, tapestry, pivotal, fostering, garner, underscore, vibrant, leverage, noteworthy, realm',
+      'No unverifiable references — don\'t cite "you mentioned earlier" or "as discussed" without a direct quote',
+      'No claiming actions completed without tool results to back them up',
+      'No attributing statements to people without quoting the actual message',
+    ],
+    density_targets: {
+      simple: '1-3 sentences',
+      analysis: '200-500 words',
+      code: 'code first, explain only non-obvious parts',
+    },
+    voice: [
+      'Every sentence states a fact, makes a decision, or advances an argument',
+      'Numbers over adjectives',
+      'Vary sentence length deliberately',
+      'Match confidence to evidence: facts zero hedges, inference one hedge max',
+    ],
+  });
+
+  const fosVariants = JSON.stringify({
+    'council-deliberation': {
+      density_target: '400-800 words. Depth over brevity.',
+      structure: 'Headers required. Position statement, risk assessment, confidence, action.',
+    },
+    'code-generation': {
+      density_target: 'Minimize prose. Code is the deliverable.',
+      list_cap: 'DISABLED',
+    },
+    'quick-answer': {
+      density_target: '1-3 sentences.',
+      structure: 'No headers. No lists unless the answer is genuinely a list.',
+    },
+  });
+
+  const existingFos = db.prepare("SELECT id FROM fleet_output_standard WHERE id = 'psiclawops-default'").get();
+  if (!existingFos) {
+    db.prepare(`
+      INSERT INTO fleet_output_standard (id, name, directives, task_variants, token_budget, active, source, version, created_at, updated_at)
+      VALUES ('psiclawops-default', 'PsiClawOps Default', ?, ?, 250, 1, 'builtin', 1, ?, ?)
+    `).run(fosDirectives, fosVariants, now, now);
+  }
+
+  // ── Seed builtin MOD profiles ──
+
+  const mods = [
+    {
+      id: 'gpt-5.4',
+      match_pattern: 'gpt-5.4*',
+      priority: 10,
+      corrections: JSON.stringify([
+        { id: 'plan-loop', rule: 'If 2+ responses without concrete output, execute immediately. Ship partial.', severity: 'hard' },
+        { id: 'first-person-opening', rule: 'Do not open with I.', severity: 'medium' },
+        { id: 'throat-clearing', rule: 'No preamble before the answer.', severity: 'medium' },
+        { id: 'conditional-hedging', rule: 'Decision questions: answer + 1-2 reasons. No if-X-then-Y branching.', severity: 'medium' },
+      ]),
+      calibration: JSON.stringify([
+        { id: 'verbosity-offset', fos_target: 'analysis: 200-500 words', model_tendency: '~600 words vs Opus baseline', adjustment: 'Actively compress. Your natural output is ~2x the target. Cut first drafts in half.' },
+        { id: 'list-length-offset', fos_target: '7 items max', model_tendency: 'defaults to 12-15 items', adjustment: 'After drafting a list, cut the bottom half.' },
+      ]),
+    },
+    {
+      id: 'claude-opus-4.6',
+      match_pattern: 'claude-opus-4*',
+      priority: 10,
+      corrections: JSON.stringify([
+        { id: 'over-structuring', rule: 'Resist adding headers and sections to short answers.', severity: 'medium' },
+        { id: 'premature-enumeration', rule: "Don't list when prose works. Lists require 3+ genuinely distinct items.", severity: 'medium' },
+      ]),
+      calibration: JSON.stringify([
+        { id: 'verbosity-offset', fos_target: 'analysis: 200-500 words', model_tendency: '1.1x target', adjustment: 'Near target. Minor compression on detailed analysis.' },
+      ]),
+    },
+    {
+      id: 'claude-sonnet-4.6',
+      match_pattern: 'claude-sonnet-4*',
+      priority: 10,
+      corrections: JSON.stringify([
+        { id: 'caveat-frontloading', rule: "Don't open with caveats. State the answer, then caveats if needed.", severity: 'medium' },
+        { id: 'safety-hedging', rule: 'Minimize safety qualifiers on unambiguous requests.', severity: 'medium' },
+      ]),
+      calibration: JSON.stringify([
+        { id: 'verbosity-offset', fos_target: 'analysis: 200-500 words', model_tendency: '1.3x target', adjustment: 'Compress by ~25%. Cut qualifications and restatements.' },
+      ]),
+    },
+    {
+      id: 'gemini-3.1',
+      match_pattern: 'gemini-3.1*',
+      priority: 10,
+      corrections: JSON.stringify([
+        { id: 'numbered-list-default', rule: "Don't default to numbered lists. Use prose unless order matters.", severity: 'hard' },
+        { id: 'source-attribution-noise', rule: 'Skip attribution boilerplate unless sourcing is specifically requested.', severity: 'medium' },
+      ]),
+      calibration: JSON.stringify([
+        { id: 'list-length-offset', fos_target: '7 items max', model_tendency: '1.5x target', adjustment: 'Cut lists to 7 items. Merge or drop the rest.' },
+      ]),
+    },
+    {
+      id: 'default',
+      match_pattern: '*',
+      priority: 0,
+      corrections: JSON.stringify([]),
+      calibration: JSON.stringify([]),
+    },
+  ];
+
+  for (const mod of mods) {
+    const existing = db.prepare('SELECT id FROM model_output_directives WHERE id = ?').get(mod.id);
+    if (!existing) {
+      db.prepare(`
+        INSERT INTO model_output_directives (id, match_pattern, priority, corrections, calibration, task_overrides, token_budget, version, source, enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, '{}', 150, 1, 'builtin', 1, ?, ?)
+      `).run(mod.id, mod.match_pattern, mod.priority, mod.corrections, mod.calibration, now, now);
+    }
+  }
+}
+
 // ── Migration runner ──────────────────────────────────────────
 
-export function migrateLibrary(db: DatabaseSync): void {
+export function migrateLibrary(db: DatabaseSync, engineVersion?: string): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
       version INTEGER PRIMARY KEY,
@@ -817,5 +1010,121 @@ export function migrateLibrary(db: DatabaseSync): void {
     applyV9DocChunkSessionKey(db);
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(9, nowIso());
+  }
+
+  if (currentVersion < 10) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS meta (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(10, nowIso());
+  }
+
+  // ── V11: Topics FTS + indexer watermarks ──────────────────
+  // topics_fts was missing from V3 (topics table was created without FTS).
+  // indexer_watermarks tracks per-agent indexer progress for resumable indexing.
+  if (currentVersion < 11) {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS topics_fts USING fts5(
+        name,
+        description,
+        content='topics',
+        content_rowid='id'
+      )
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS topics_fts_ai AFTER INSERT ON topics BEGIN
+        INSERT INTO topics_fts(rowid, name, description) VALUES (new.id, new.name, new.description);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS topics_fts_ad AFTER DELETE ON topics BEGIN
+        INSERT INTO topics_fts(topics_fts, rowid, name, description) VALUES('delete', old.id, old.name, old.description);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS topics_fts_au AFTER UPDATE ON topics BEGIN
+        INSERT INTO topics_fts(topics_fts, rowid, name, description) VALUES('delete', old.id, old.name, old.description);
+        INSERT INTO topics_fts(rowid, name, description) VALUES (new.id, new.name, new.description);
+      END
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS indexer_watermarks (
+        agent_id TEXT PRIMARY KEY,
+        last_message_id INTEGER NOT NULL DEFAULT 0,
+        last_run_at TEXT NOT NULL
+      )
+    `);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(11, nowIso());
+  }
+
+  // ── V12: FOS/MOD tables + builtin seed data ──────────────
+  // fleet_output_standard: fleet-wide output standards
+  // model_output_directives: per-model correction & calibration profiles
+  // output_metrics: per-request telemetry for drift analytics
+  if (currentVersion < 12) {
+    applyV12FosMod(db);
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(12, nowIso());
+  }
+
+  // ── V13: Temporal index ──────────────────────────────────────────────────
+  // Maps fact_id → occurred_at (unix ms). Initially backfilled from created_at
+  // (ingest time as proxy). Enables time-range retrieval for LoCoMo temporal
+  // questions without vector similarity.
+  if (currentVersion < 13) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS temporal_index (
+        fact_id     INTEGER PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE,
+        agent_id    TEXT NOT NULL,
+        occurred_at INTEGER NOT NULL,
+        ingest_at   INTEGER NOT NULL,
+        time_ref    TEXT,
+        confidence  REAL NOT NULL DEFAULT 0.5
+      )
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_temporal_agent_time ON temporal_index(agent_id, occurred_at DESC)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_temporal_occurred ON temporal_index(occurred_at DESC)');
+
+    // Backfill existing facts using created_at as occurred_at proxy
+    db.exec(`
+      INSERT OR IGNORE INTO temporal_index (fact_id, agent_id, occurred_at, ingest_at, confidence)
+      SELECT
+        id,
+        agent_id,
+        CAST((julianday(created_at) - 2440587.5) * 86400000 AS INTEGER),
+        CAST((julianday(created_at) - 2440587.5) * 86400000 AS INTEGER),
+        0.5
+      FROM facts
+      WHERE superseded_by IS NULL
+    `);
+
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(13, nowIso());
+  }
+
+  // Always ensure meta exists before stamping the running engine version.
+  // Some legacy/stale DBs reached schema >=10 without the V10 migration having
+  // actually created the table, which would make startup fail with
+  // "no such table: meta" during an otherwise unrelated init path.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meta (
+      key        TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+  // Always stamp the running engine version so any query can surface it.
+  if (engineVersion) {
+    db.prepare(`
+      INSERT INTO meta (key, value, updated_at) VALUES ('engine_version', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(engineVersion, nowIso());
   }
 }

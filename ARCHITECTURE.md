@@ -1,4 +1,4 @@
-# HyperMem Architecture
+# hypermem Architecture
 
 _Agent-centric memory that outlives sessions._
 
@@ -7,11 +7,10 @@ _Agent-centric memory that outlives sessions._
 ## Memory Layers
 
 ```
-L1  SQLite Cache (Hot)           Active session working memory
-     │                           Slots: system, identity, messages, facts, context
-     │                           Sub-millisecond reads, evicts on session end
-     │                           Fleet cache: agent profiles, fleet summary
-     │                           In-memory SQLite via ATTACH ':memory:'
+L1  Redis (Hot)              Active session working memory
+     │                       Slots: system, identity, messages, facts, context
+     │                       Sub-millisecond reads, evicts on session end
+     │                       Fleet cache: agent profiles, fleet summary
      │
 L2  Agent Messages DB        Raw conversation history (per agent)
      │  messages.db           Write-heavy, rotatable (100MB / 90 days)
@@ -71,7 +70,7 @@ Assembles LLM prompts from all four layers with token budgeting:
 ```
 User message arrives
   │
-  ├── L1 Cache: system prompt, identity, cached slots
+  ├── L1 Redis: system prompt, identity, cached slots
   ├── L2 Messages: recent conversation history (budget-truncated)
   ├── L3 Vectors: KNN semantic recall on user's latest message
   │     └── Related facts/knowledge/episodes with relevance scores
@@ -105,14 +104,14 @@ Compositor behavior is tuned via parameters tracked in `tune/TUNING_REGISTRY.md`
 - **Compaction fence:** Per-conversation boundary protecting the LLM's recent tail from compaction. Only moves forward (monotone progress). No fence = no compaction (explicit opt-in).
 - **Preservation gate:** Nomic-space geometric verification that summaries stay faithful to source content. Centroid alignment + source coverage → combined score (threshold: 0.65).
 
-## Fleet Cache (Hot Cache Layer)
+## Fleet Cache (Redis Hot Layer)
 
 ```
 fleet:agent:{id}   — Composite profile: registry + capabilities + desired state
 fleet:summary      — Fleet-wide stats: agent count, drift count, tier breakdown
 ```
 
-- **Cache-aside** on reads: hot cache first, SQLite fallback, warm on miss
+- **Cache-aside** on reads: Redis first, SQLite fallback, warm on miss
 - **Write-through invalidation** on fleet mutations
 - **Hydration** on gateway startup: bulk-populate from library.db
 - TTL: agent profiles 10min, summary 2min
@@ -162,23 +161,31 @@ This means:
 
 ## Context Engine Plugin
 
-`plugin/src/index.ts` — OpenClaw context engine plugin (replaces basic hook integration):
+`plugin/src/index.ts` — OpenClaw context engine plugin (`hypercompositor`, fills `contextEngine` slot):
 
 ```
-gateway:startup     → Init HyperMem, auto-rotate DBs, hydrate fleet cache
-agent:bootstrap     → Warm session (history, facts, profile → hot cache)
+gateway:startup     → Init hypermem, auto-rotate DBs, hydrate fleet cache
+agent:bootstrap     → Warm session (history, facts, profile → Redis)
 context:assemble    → Full four-layer prompt assembly within token budget
-agent:afterTurn     → Ingest new messages to SQLite + cache, trigger background indexer
+agent:afterTurn     → Ingest new messages to SQLite + Redis, trigger background indexer
 ```
 
 Registers with `ownsCompaction: true` — runtime skips legacy compaction entirely.
-Deployed as managed hook at `~/.openclaw/hooks/hypermem-core/handler.js`.
+
+## Memory Plugin
+
+`memory-plugin/src/index.ts` — Lightweight memory provider (`hypermem`, fills `memory` slot):
+
+- Registers `MemoryPluginCapability` with a `MemorySearchManager` backed by HyperMem's hybrid FTS5 + KNN retrieval
+- Provides the `memory_search` tool through the official memory slot interface
+- Public artifacts provider lists `MEMORY.md` and `memory/*.md` for all configured agents
+- Stateless wrapper: lifecycle is owned by the context engine plugin
 
 ### Plugin Data Flow
 
 ```
                     ┌──────────────────────────────────────────────────┐
-                    │          CACHE (L1 Hot Layer, :memory:)           │
+                    │             REDIS (L1 Hot Layer)                  │
                     │                                                  │
                     │  hm:{a}:{s}:history  ── Session archive (250 cap │
                     │    (append-only)        at bootstrap, 1000 soft  │
@@ -203,20 +210,20 @@ Data Flow (current — P0 stabilized, window/cursor active):
   ▸ sessionExists() → skip if hot  compose()                    slice(prePromptCount)
   ▸ SQLite ─→ warmSession()        ─→ getHistory(limit) ✅      ─→ record*Message()
            ─→ pushHistory(250)     ─→ dedup by id               ─→ pushHistory(1, dedup)
-           ─→ cache :history       ─→ budget assembly            ─→ cache :history
+           ─→ Redis :history       ─→ budget assembly            ─→ Redis :history
                                    ─→ write :window (120s)      ─→ invalidateWindow()
                                    ─→ write :cursor (24h)       ─→ background indexer
                                    ─→ → runtime → provider
 
 ### Key Invariants
 
-1. Cache `history` is the warm archive. Append-only. Nothing reads it for direct submission.
-2. Cache `window` is the compositor's output cache. Written ONLY by `compose()`. Read ONLY by `assemble()`. Invalidated by `afterTurn`.
-3. Cache `cursor` tracks the newest message in the last window. Used by background indexer for high-signal mining.
+1. Redis `history` is the warm archive. Append-only. Nothing reads it for direct submission.
+2. Redis `window` is the compositor's output cache. Written ONLY by `compose()`. Read ONLY by `assemble()`. Invalidated by `afterTurn`.
+3. Redis `cursor` tracks the newest message in the last window. Used by background indexer for high-signal mining.
 4. `warmSession()` seeds `history` only (capped at 250). Never writes `window`.
-5. `pushHistory()` tail-checks before append (no duplicate IDs in cache).
+5. `pushHistory()` tail-checks before append (no duplicate IDs in Redis list).
 6. `compose()` deduplicates history by `id` before budget assembly.
-7. `getHistory()` honors its `limit` parameter on BOTH cache and SQLite paths.
+7. `getHistory()` honors its `limit` parameter on BOTH Redis and SQLite paths.
 
 Design spec: `specs/HYPERMEM_QUEUE_SPLIT.md`
 Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
@@ -234,7 +241,7 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 
 ### Runtime Contract
 
-**Exclusive dispatch:** The OpenClaw runtime calls either `afterTurn()` OR `ingest()`/`ingestBatch()`, never both. Since HyperMem implements `afterTurn`, it must handle message ingestion there. `ingest()` exists for API compatibility but is never called by the runtime in practice.
+**Exclusive dispatch:** The OpenClaw runtime calls either `afterTurn()` OR `ingest()`/`ingestBatch()`, never both. Since hypermem implements `afterTurn`, it must handle message ingestion there. `ingest()` exists for API compatibility but is never called by the runtime in practice.
 
 **Provider translation:** The plugin sets `skipProviderTranslation: true` on compose requests. The compositor returns NeutralMessages; the plugin converts to AgentMessages. The runtime handles provider-specific translation. Two-stage translation (compositor → provider format → plugin → agent format) was the root cause of Incident 1 (silent tool call drops).
 
@@ -251,7 +258,7 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 | `fleet-store.ts` | ~440 | L4 | Fleet registry + capabilities |
 | `db.ts` | ~440 | - | Database manager + rotation |
 | `knowledge-graph.ts` | ~420 | L4 | DAG traversal + shortest path |
-| `cache.ts` | ~530 | L1 | Cache operations, window cache, cursor, fleet cache |
+| `redis.ts` | ~530 | L1 | Redis operations, window cache, cursor, fleet cache |
 | `doc-chunker.ts` | ~400 | - | Section-aware markdown/file parser |
 | `work-store.ts` | ~400 | L4 | Work queue + FTS5 |
 | `provider-translator.ts` | ~390 | - | Neutral ↔ provider format conversion |
@@ -270,7 +277,8 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 | `episode-store.ts` | ~180 | L4 | Significant event tracking |
 | `preference-store.ts` | ~170 | L4 | Operator behavioral patterns |
 | `topic-store.ts` | ~160 | L4 | Cross-session thread tracking |
-| `plugin/src/index.ts` | ~590 | - | OpenClaw context engine plugin + window invalidation |
+| `plugin/src/index.ts` | ~590 | - | `hypercompositor` context engine plugin + window invalidation |
+| `memory-plugin/src/index.ts` | ~290 | - | `hypermem` memory slot plugin (memory_search via hybrid retrieval) |
 
 ## Test Coverage (105 assertions, 11 suites)
 
@@ -279,12 +287,12 @@ _Test count reflects assertions, not individual test blocks. Suites contain inli
 | Suite | Key coverage |
 |---|---|
 | smoke | End-to-end create/write/read/close, provider translation |
-| cache-integration | Cache ops, slots, history limits, window cache, cursor, warming, dedup |
+| redis-integration | Redis ops, slots, history limits, window cache, cursor, warming, dedup |
 | cross-agent | Cross-agent queries, fleet search, visibility tiers |
 | vector-search | Embedding, KNN, batch indexing |
 | library | All L4 collections (facts → desired state) |
 | compositor | Four-layer composition, budgets, providers, safety valve, Gate 1 |
-| fleet-cache | Hot cache fleet cache, hydration, cache-aside |
+| fleet-cache | Redis fleet cache, hydration, cache-aside |
 | rotation | DB rotation, auto-rotate, collision handling |
 | knowledge-graph | DAG traversal, shortest path, analytics |
 | rate-limiter | Token bucket, priority, timeout, embedder |
@@ -292,6 +300,7 @@ _Test count reflects assertions, not individual test blocks. Suites contain inli
 
 ## Dependencies
 
-- `node:sqlite` (Node 22+ built-in) — zero-dependency SQLite (L1 cache + L2/L4 storage)
+- `node:sqlite` (Node 22+ built-in) — zero-dependency SQLite
+- `ioredis` — Redis client
 - `sqlite-vec` — optional, vector search extension
 - Ollama (localhost:11434) — optional, embedding generation

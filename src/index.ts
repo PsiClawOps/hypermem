@@ -1,14 +1,16 @@
 /**
- * HyperMem — Agent-Centric Memory & Context Composition Engine
+ * hypermem — Agent-Centric Memory & Context Composition Engine
  *
  * @module @psiclawops/hypermem
  *
  * Architecture:
- *   L1: Cache      — hot session working memory (SQLite :memory:)
+ *   L1: Redis       — hot session working memory
  *   L2: messages.db — per-agent conversation log (rotatable)
  *   L3: vectors.db  — per-agent semantic search index (reconstructable)
- *   L4: library.db  — structured knowledge store (crown jewel)
+ *   L4: library.db  — fleet-wide structured knowledge (crown jewel)
  */
+
+export { ENGINE_VERSION, MIN_NODE_VERSION, MIN_REDIS_VERSION, SQLITE_VEC_VERSION, MAIN_SCHEMA_VERSION, LIBRARY_SCHEMA_VERSION_EXPORT, HYPERMEM_COMPAT_VERSION, SCHEMA_COMPAT } from './version.js';
 
 export { DatabaseManager } from './db.js';
 export type { DatabaseManagerConfig } from './db.js';
@@ -21,22 +23,35 @@ export { TopicStore } from './topic-store.js';
 export { EpisodeStore } from './episode-store.js';
 export { PreferenceStore } from './preference-store.js';
 export type { Preference } from './preference-store.js';
+export { FleetStore } from './fleet-store.js';
+export type { FleetAgent, FleetOrg, AgentCapability } from './fleet-store.js';
+export { SystemStore } from './system-store.js';
+export type { SystemState, SystemEvent } from './system-store.js';
+export { WorkStore } from './work-store.js';
+export { ensureContextSchema, getActiveContext, getOrCreateActiveContext, updateContextHead, archiveContext, rotateSessionContext } from './context-store.js';
+export type { Context } from './context-store.js';
+export type { WorkItem, WorkEvent, WorkStatus } from './work-store.js';
+export { DesiredStateStore } from './desired-state-store.js';
+export { evictStaleContent, DEFAULT_EVICTION_CONFIG } from './image-eviction.js';
+export type { ImageEvictionConfig, EvictionStats, EvictionResult } from './image-eviction.js';
 export { KnowledgeGraph } from './knowledge-graph.js';
 export type { EntityType, KnowledgeLink, GraphNode, TraversalResult } from './knowledge-graph.js';
 
 export { RateLimiter, createRateLimitedEmbedder } from './rate-limiter.js';
 export type { RateLimiterConfig, Priority } from './rate-limiter.js';
+export type { DesiredStateEntry, ConfigEvent, DriftStatus } from './desired-state-store.js';
 
-export { CacheLayer } from './cache.js';
 export type { ModelState } from './cache.js';
+export { CacheLayer } from './cache.js';
 
-export { Compositor, type CompositorDeps, applyToolGradientToWindow } from './compositor.js';
+export { Compositor, type CompositorDeps, applyToolGradientToWindow, canPersistReshapedHistory, OPENCLAW_BOOTSTRAP_FILES } from './compositor.js';
 
 export {
   type CollectionTrigger,
   TRIGGER_REGISTRY,
   TRIGGER_REGISTRY_VERSION,
   TRIGGER_REGISTRY_HASH,
+  DEFAULT_TRIGGERS,
   matchTriggers,
 } from './trigger-registry.js';
 
@@ -63,6 +78,7 @@ export {
   normalizeToolCallId,
   generateToolCallId,
   detectProvider,
+  repairToolCallPairs,
 } from './provider-translator.js';
 
 export { migrate, SCHEMA_VERSION } from './schema.js';
@@ -76,17 +92,45 @@ export type { HybridSearchResult, HybridSearchOptions } from './hybrid-retrieval
 export { DocChunkStore } from './doc-chunk-store.js';
 export type { DocChunkRow, ChunkQuery, IndexResult as DocIndexResult } from './doc-chunk-store.js';
 
+export { WorkspaceSeeder, seedWorkspace } from './seed.js';
+export type { SeedOptions, SeedResult } from './seed.js';
+
 export { chunkMarkdown, chunkFile, inferCollection, hashContent, ACA_COLLECTIONS } from './doc-chunker.js';
 export type { DocChunk, ChunkOptions, CollectionDef } from './doc-chunker.js';
 
+export {
+  crossAgentQuery,
+  canAccess,
+  visibilityFilter,
+  defaultOrgRegistry,
+  buildOrgRegistryFromDb,
+  loadOrgRegistryFromDb,
+} from './cross-agent.js';
+export type { OrgRegistry } from './cross-agent.js';
+
 export { BackgroundIndexer, createIndexer, type CursorFetcher } from './background-indexer.js';
+export {
+  runDreamingPromoter,
+  runDreamingPassForFleet,
+  resolveAgentWorkspacePath,
+  type DreamerConfig,
+  type DreamerResult,
+  type PromotionEntry,
+  DEFAULT_DREAMER_CONFIG,
+} from './dreaming-promoter.js';
 export type { IndexerStats, WatermarkState } from './background-indexer.js';
 
 export { TopicSynthesizer } from './topic-synthesizer.js';
 export type { SynthesisResult, SynthesisConfig } from './topic-synthesizer.js';
 
+export { WikiPageEmitter } from './wiki-page-emitter.js';
+export type { WikiPage, WikiLink, WikiPageSummary } from './wiki-page-emitter.js';
+
 export { lintKnowledge } from './knowledge-lint.js';
 export type { LintResult } from './knowledge-lint.js';
+
+export { buildSpawnContext } from './spawn-context.js';
+export type { SpawnContextOptions, SpawnContext } from './spawn-context.js';
 
 export { runNoiseSweep, runToolDecay, type NoiseSweepResult, type ToolDecayResult } from './proactive-pass.js';
 
@@ -109,7 +153,6 @@ export type {
   SessionSlots,
   SessionMeta,
   HyperMemConfig,
-  CacheConfig,
   RedisConfig,
   CompositorConfig,
   IndexerConfig,
@@ -134,6 +177,23 @@ export type { TopicSignal } from './topic-detector.js';
 
 export { SessionTopicMap } from './session-topic-map.js';
 
+export {
+  getActiveFOS,
+  matchMOD,
+  renderFOS,
+  renderMOD,
+  recordOutputMetrics,
+} from './fos-mod.js';
+export type {
+  FOSRecord,
+  MODRecord,
+  FOSDirectives,
+  FOSTaskVariant,
+  MODCorrection,
+  MODCalibration,
+  OutputMetricsRow,
+} from './fos-mod.js';
+
 import { DatabaseManager } from './db.js';
 import { MessageStore } from './message-store.js';
 import { FactStore } from './fact-store.js';
@@ -141,12 +201,18 @@ import { KnowledgeStore } from './knowledge-store.js';
 import { TopicStore } from './topic-store.js';
 import { EpisodeStore } from './episode-store.js';
 import { PreferenceStore, type Preference } from './preference-store.js';
+import { FleetStore, type FleetAgent, type FleetOrg, type AgentCapability } from './fleet-store.js';
+import { SystemStore, type SystemState, type SystemEvent } from './system-store.js';
+import { WorkStore, type WorkItem, type WorkStatus } from './work-store.js';
 import { KnowledgeGraph, type EntityType, type KnowledgeLink, type GraphNode, type TraversalResult } from './knowledge-graph.js';
+import { DesiredStateStore, type DesiredStateEntry, type DriftStatus } from './desired-state-store.js';
 import { CacheLayer } from './cache.js';
 import { Compositor } from './compositor.js';
 import { VectorStore, type VectorSearchResult, type VectorIndexStats } from './vector-store.js';
 import { userMessageToNeutral, fromProviderFormat } from './provider-translator.js';
+import { stripMessageMetadata } from './topic-detector.js';
 import { DocChunkStore, type DocChunkRow, type ChunkQuery, type IndexResult } from './doc-chunk-store.js';
+import { WorkspaceSeeder, type SeedOptions, type SeedResult } from './seed.js';
 import { chunkMarkdown, chunkFile, inferCollection, type DocChunk, type ChunkOptions } from './doc-chunker.js';
 import type {
   HyperMemConfig,
@@ -157,6 +223,7 @@ import type {
   Conversation,
   ChannelType,
 } from './types.js';
+import { crossAgentQuery, defaultOrgRegistry, buildOrgRegistryFromDb, loadOrgRegistryFromDb, type OrgRegistry } from './cross-agent.js';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -166,9 +233,14 @@ const DEFAULT_CONFIG: HyperMemConfig = {
   cache: {
     keyPrefix: 'hm:',
     sessionTTL: 14400,      // 4 hours — system/identity/meta slots
-    historyTTL: 604800,     // 7 days
+    historyTTL: 604800,     // 7 days — extended for ClawCanvas display
   },
   compositor: {
+    // TUNE-010 (2026-04-02): Raised from 65000 → 90000.
+    // TUNE-008 dropped to 65k as a tool-loop overflow band-aid. The real fix
+    // (tool-loop pass-through guard in assemble()) means tool turns don't
+    // re-run composition, so 90k is safe — leaves ~30k headroom for in-flight
+    // tool results on a 120k window. Budget is better spent on context quality.
     defaultTokenBudget: 90000,
     maxHistoryMessages: 1000,
     maxFacts: 28,
@@ -185,23 +257,27 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     factDecayRate: 0.01,
     episodeSignificanceThreshold: 0.5,
     periodicInterval: 300000,
+    batchSize: 128,
+    maxMessagesPerTick: 500,
   },
   embedding: {
+    provider: 'openai',
     ollamaUrl: 'http://localhost:11434',
-    model: 'nomic-embed-text',
-    dimensions: 768,
-    timeout: 10000,
-    batchSize: 32,
+    openaiBaseUrl: 'https://openrouter.ai/api/v1',
+    model: 'qwen/qwen3-embedding-8b',
+    dimensions: 4096,
+    timeout: 15000,
+    batchSize: 100,
   },
 };
 
 /**
- * HyperMem — the main API facade.
+ * hypermem — the main API facade.
  *
  * Usage:
- *   const hm = await HyperMem.create({ dataDir: '~/.openclaw/hypermem' });
- *   await hm.record('my-agent', 'agent:my-agent:webchat:main', userMsg);
- *   const result = await hm.compose({ agentId: 'my-agent', sessionKey: '...', ... });
+ *   const hm = await hypermem.create({ dataDir: '~/.openclaw/hypermem' });
+ *   await hm.record('agent1', 'agent:agent1:webchat:main', userMsg);
+ *   const result = await hm.compose({ agentId: 'agent1', sessionKey: '...', ... });
  */
 export class HyperMem {
   readonly dbManager: DatabaseManager;
@@ -229,7 +305,7 @@ export class HyperMem {
   }
 
   /**
-   * Create and initialize a HyperMem instance.
+   * Create and initialize a hypermem instance.
    */
   static async create(config?: Partial<HyperMemConfig>): Promise<HyperMem> {
     const merged: HyperMemConfig = {
@@ -248,9 +324,9 @@ export class HyperMem {
 
     const cacheOk = await hm.cache.connect();
     if (cacheOk) {
-      console.log('[hypermem] Cache layer connected');
+      console.log('[hypermem] Cache connected');
     } else {
-      console.warn('[hypermem] Cache layer unavailable — running in SQLite-only mode');
+      console.warn('[hypermem] Cache unavailable — running in SQLite-only mode');
     }
 
     // ── Vector store init ─────────────────────────────────────
@@ -265,7 +341,10 @@ export class HyperMem {
         const vs = new VectorStore(vectorDb, merged.embedding, hm.dbManager.getLibraryDb());
         vs.ensureTables();
         hm.compositor.setVectorStore(vs);
-        console.log('[hypermem] Vector store initialized (sqlite-vec + nomic-embed-text)');
+        const embeddingDesc = merged.embedding.provider === 'openai'
+          ? `${merged.embedding.openaiBaseUrl?.includes('openrouter') ? 'openrouter' : 'openai'}/${merged.embedding.model ?? 'text-embedding-3-small'}`
+          : `ollama/${merged.embedding.model ?? 'nomic-embed-text'}`;
+        console.log(`[hypermem] Vector store initialized (sqlite-vec + ${embeddingDesc})`);
       } else {
         console.warn('[hypermem] sqlite-vec unavailable — semantic recall in FTS5-only mode');
       }
@@ -305,10 +384,18 @@ export class HyperMem {
       model: opts?.model,
     });
 
-    const neutral = userMessageToNeutral(content);
+    let contextId: number | undefined;
+    try {
+      const { getOrCreateActiveContext } = await import('./context-store.js');
+      const ctx = getOrCreateActiveContext(db, agentId, sessionKey, conversation.id);
+      contextId = ctx.id;
+    } catch (_) { /* context wiring is best-effort in Phase 1 */ }
+
+    const neutral = userMessageToNeutral(stripMessageMetadata(content));
     const stored = store.recordMessage(conversation.id, agentId, neutral, {
       tokenCount: opts?.tokenCount,
       isHeartbeat: opts?.isHeartbeat,
+      contextId,
     });
 
     await this.cache.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
@@ -334,8 +421,16 @@ export class HyperMem {
       throw new Error(`No conversation found for session ${sessionKey}`);
     }
 
+    let contextId: number | undefined;
+    try {
+      const { getOrCreateActiveContext } = await import('./context-store.js');
+      const ctx = getOrCreateActiveContext(db, agentId, sessionKey, conversation.id);
+      contextId = ctx.id;
+    } catch (_) { /* context wiring is best-effort in Phase 1 */ }
+
     const stored = store.recordMessage(conversation.id, agentId, message, {
       tokenCount: opts?.tokenCount,
+      contextId,
     });
 
     await this.cache.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
@@ -368,7 +463,7 @@ export class HyperMem {
   }
 
   /**
-   * Warm a session from SQLite into the hot cache.
+   * Warm a session from SQLite into Redis.
    */
   async warm(
     agentId: string,
@@ -381,11 +476,11 @@ export class HyperMem {
   }
 
   /**
-   * Recompute the hot cache history view from SQLite and re-apply tool gradient.
+   * Recompute the Redis hot history view from SQLite and re-apply tool gradient.
    */
-  async refreshCacheGradient(agentId: string, sessionKey: string, tokenBudget?: number): Promise<void> {
+  async refreshRedisGradient(agentId: string, sessionKey: string, tokenBudget?: number): Promise<void> {
     const db = this.dbManager.getMessageDb(agentId);
-    await this.compositor.refreshCacheGradient(agentId, sessionKey, db, tokenBudget);
+    await this.compositor.refreshRedisGradient(agentId, sessionKey, db, tokenBudget);
   }
 
   /**
@@ -565,6 +660,325 @@ export class HyperMem {
     return store.getForSubject(subject, domain);
   }
 
+  // ─── Fleet Registry (L4: Library) ───────────────────────────
+
+  /**
+   * Register or update a fleet agent. Invalidates cache.
+   */
+  upsertFleetAgent(id: string, data: {
+    displayName?: string;
+    tier?: string;
+    orgId?: string;
+    reportsTo?: string;
+    domains?: string[];
+    sessionKeys?: string[];
+    status?: string;
+    metadata?: Record<string, unknown>;
+  }): FleetAgent {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    const result = store.upsertAgent(id, data);
+    // Invalidate cache — fire and forget
+    this.cache.invalidateFleetAgent(id).catch(() => {});
+    return result;
+  }
+
+  /**
+   * Get a fleet agent. Cache-aside: check Redis first, fall back to SQLite.
+   */
+  async getFleetAgentCached(id: string): Promise<FleetAgent | null> {
+    // Try cache first
+    const cached = await this.cache.getCachedFleetAgent(id);
+    if (cached) return cached as unknown as FleetAgent;
+
+    // Fall back to SQLite
+    const agent = this.getFleetAgent(id);
+    if (agent) {
+      // Warm cache — fire and forget
+      this.cache.cacheFleetAgent(id, agent as unknown as Record<string, unknown>).catch(() => {});
+    }
+    return agent;
+  }
+
+  /**
+   * Get a fleet agent (synchronous, SQLite only).
+   */
+  getFleetAgent(id: string): FleetAgent | null {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.getAgent(id);
+  }
+
+  /**
+   * List fleet agents.
+   */
+  listFleetAgents(opts?: { tier?: string; orgId?: string; status?: string }): FleetAgent[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.listAgents(opts);
+  }
+
+  /**
+   * Register or update a fleet org.
+   */
+  upsertFleetOrg(id: string, data: { name: string; leadAgentId?: string; mission?: string }): FleetOrg {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.upsertOrg(id, data);
+  }
+
+  /**
+   * List fleet orgs.
+   */
+  listFleetOrgs(): FleetOrg[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.listOrgs();
+  }
+
+  // ─── Agent Capabilities (L4: Library) ────────────────────────
+
+  /**
+   * Register or update a capability for an agent.
+   */
+  upsertCapability(agentId: string, cap: {
+    capType: 'skill' | 'tool' | 'mcp_server';
+    name: string;
+    version?: string;
+    source?: string;
+    config?: Record<string, unknown>;
+    status?: string;
+  }): import('./fleet-store.js').AgentCapability {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.upsertCapability(agentId, cap);
+  }
+
+  /**
+   * Bulk-sync capabilities of a given type for an agent.
+   * Marks capabilities not in the list as 'removed'.
+   */
+  syncCapabilities(agentId: string, capType: 'skill' | 'tool' | 'mcp_server', caps: Array<{
+    name: string;
+    version?: string;
+    source?: string;
+    config?: Record<string, unknown>;
+  }>): void {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    store.syncCapabilities(agentId, capType, caps);
+  }
+
+  /**
+   * Get capabilities for an agent, optionally filtered by type.
+   */
+  getAgentCapabilities(agentId: string, capType?: string): import('./fleet-store.js').AgentCapability[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.getAgentCapabilities(agentId, capType);
+  }
+
+  /**
+   * Find agents that have a specific capability.
+   */
+  findAgentsByCapability(capType: string, name: string): FleetAgent[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    return store.findByCapability(capType, name);
+  }
+
+  // ─── System Registry (L4: Library) ──────────────────────────
+
+  /**
+   * Set a system state value.
+   */
+  setSystemState(category: string, key: string, value: unknown, opts?: {
+    updatedBy?: string;
+    ttl?: string;
+  }): SystemState {
+    const db = this.dbManager.getLibraryDb();
+    const store = new SystemStore(db);
+    return store.set(category, key, value, opts);
+  }
+
+  /**
+   * Get a system state value.
+   */
+  getSystemState(category: string, key: string): SystemState | null {
+    const db = this.dbManager.getLibraryDb();
+    const store = new SystemStore(db);
+    return store.get(category, key);
+  }
+
+  /**
+   * Get all state in a category.
+   */
+  getSystemCategory(category: string): SystemState[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new SystemStore(db);
+    return store.getCategory(category);
+  }
+
+  // ─── Work Items (L4: Library) ───────────────────────────────
+
+  /**
+   * Create a work item.
+   */
+  createWorkItem(data: {
+    title: string;
+    description?: string;
+    priority?: number;
+    agentId?: string;
+    createdBy: string;
+    domain?: string;
+    parentId?: string;
+    dueAt?: string;
+    metadata?: Record<string, unknown>;
+  }): WorkItem {
+    const db = this.dbManager.getLibraryDb();
+    const store = new WorkStore(db);
+    return store.create(data);
+  }
+
+  /**
+   * Update work item status.
+   */
+  updateWorkStatus(id: string, status: WorkStatus, agentId?: string, comment?: string): WorkItem | null {
+    const db = this.dbManager.getLibraryDb();
+    const store = new WorkStore(db);
+    return store.updateStatus(id, status, agentId, comment);
+  }
+
+  /**
+   * Get active work for an agent.
+   */
+  getAgentWork(agentId: string, status?: WorkStatus): WorkItem[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new WorkStore(db);
+    return store.getAgentWork(agentId, status);
+  }
+
+  /**
+   * Get the fleet kanban board.
+   */
+  getFleetKanban(opts?: { domain?: string; agentId?: string }): WorkItem[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new WorkStore(db);
+    return store.getKanban(opts);
+  }
+
+  /**
+   * Get work item stats.
+   */
+  getWorkStats(opts?: { agentId?: string; since?: string }): unknown {
+    const db = this.dbManager.getLibraryDb();
+    const store = new WorkStore(db);
+    return store.getStats(opts);
+  }
+
+  /**
+   * Get blocked work items.
+   */
+  getBlockedWork(): WorkItem[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new WorkStore(db);
+    return store.getBlocked();
+  }
+
+  // ─── Agent Desired State (L4: Library) ──────────────────────
+
+  /**
+   * Set desired configuration for an agent.
+   */
+  setDesiredState(agentId: string, configKey: string, desiredValue: unknown, opts?: {
+    source?: string;
+    setBy?: string;
+    notes?: string;
+  }): DesiredStateEntry {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    const result = store.setDesired(agentId, configKey, desiredValue, opts);
+    // Invalidate cache — desired state change affects fleet view
+    this.cache.invalidateFleetAgent(agentId).catch(() => {});
+    return result;
+  }
+
+  /**
+   * Report actual runtime value for drift detection. Invalidates cache.
+   */
+  reportActualState(agentId: string, configKey: string, actualValue: unknown): DriftStatus {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    const result = store.reportActual(agentId, configKey, actualValue);
+    this.cache.invalidateFleetAgent(agentId).catch(() => {});
+    return result;
+  }
+
+  /**
+   * Bulk report actual state (e.g., on session startup / heartbeat). Invalidates cache.
+   */
+  reportActualStateBulk(agentId: string, actuals: Record<string, unknown>): Record<string, DriftStatus> {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    const result = store.reportActualBulk(agentId, actuals);
+    this.cache.invalidateFleetAgent(agentId).catch(() => {});
+    return result;
+  }
+
+  /**
+   * Get all desired state for an agent.
+   */
+  getDesiredState(agentId: string): DesiredStateEntry[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.getAgentState(agentId);
+  }
+
+  /**
+   * Get desired state as a flat config map.
+   */
+  getDesiredConfig(agentId: string): Record<string, unknown> {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.getAgentConfig(agentId);
+  }
+
+  /**
+   * Get all drifted entries across the fleet.
+   */
+  getDriftedState(): DesiredStateEntry[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.getDrifted();
+  }
+
+  /**
+   * Get fleet-wide view of a specific config key.
+   */
+  getFleetConfigKey(configKey: string): DesiredStateEntry[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.getFleetConfig(configKey);
+  }
+
+  /**
+   * Get config change history.
+   */
+  getConfigHistory(agentId: string, configKey?: string, limit?: number): import('./desired-state-store.js').ConfigEvent[] {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.getHistory(agentId, configKey, limit);
+  }
+
+  /**
+   * Get fleet drift summary.
+   */
+  getDriftSummary(): { total: number; ok: number; drifted: number; unknown: number; error: number } {
+    const db = this.dbManager.getLibraryDb();
+    const store = new DesiredStateStore(db);
+    return store.getDriftSummary();
+  }
+
   // ─── Knowledge Graph (L4: Library) ──────────────────────────
 
   /**
@@ -718,17 +1132,17 @@ export class HyperMem {
     return vs.pruneOrphans();
   }
 
-  // ─── Session Cursor (dual-read: cache → SQLite fallback) ──────
+  // ─── Session Cursor (dual-read: Redis → SQLite fallback) ──────
 
   /**
    * Get the session cursor for an agent+session.
-   * Reads from cache first; falls back to SQLite if cache returns null
+   * Reads from Redis first; falls back to SQLite if Redis returns null
    * (e.g. after eviction or restart). This is the P1.3 durability guarantee.
    */
   async getSessionCursor(agentId: string, sessionKey: string): Promise<import('./types.js').SessionCursor | null> {
-    // Try cache first (hot path)
-    const cachedCursor = await this.cache.getCursor(agentId, sessionKey);
-    if (cachedCursor) return cachedCursor;
+    // Try Redis first (hot path)
+    const redisCursor = await this.cache.getCursor(agentId, sessionKey);
+    if (redisCursor) return redisCursor;
 
     // Fallback to SQLite
     const db = this.dbManager.getMessageDb(agentId);
@@ -750,7 +1164,7 @@ export class HyperMem {
       tokenCount: row.cursor_token_count as number,
     };
 
-    // Re-warm cache so subsequent reads are fast
+    // Re-warm Redis so subsequent reads are fast
     try {
       await this.cache.setCursor(agentId, sessionKey, cursor);
     } catch {
@@ -919,6 +1333,64 @@ export class HyperMem {
       .all(sessionKey, limit);
   }
 
+  // ─── Cross-Agent Queries ─────────────────────────────────────
+
+  /**
+   * Query another agent's memory with visibility-scoped access.
+   */
+  queryAgent(
+    requesterId: string,
+    targetAgentId: string,
+    opts?: {
+      memoryType?: 'facts' | 'knowledge' | 'topics' | 'episodes' | 'messages';
+      domain?: string;
+      limit?: number;
+    },
+    registry?: OrgRegistry
+  ): unknown[] {
+    return crossAgentQuery(this.dbManager, {
+      requesterId,
+      targetAgentId,
+      memoryType: opts?.memoryType || 'facts',
+      domain: opts?.domain,
+      limit: opts?.limit,
+    }, registry || buildOrgRegistryFromDb(this.dbManager.getLibraryDb()));
+  }
+
+  /**
+   * Query fleet-wide visible memory.
+   */
+  queryFleet(
+    requesterId: string,
+    opts?: {
+      memoryType?: 'facts' | 'knowledge' | 'topics' | 'episodes';
+      domain?: string;
+      limit?: number;
+    },
+    registry?: OrgRegistry
+  ): unknown[] {
+    const reg = registry || buildOrgRegistryFromDb(this.dbManager.getLibraryDb());
+    const results: unknown[] = [];
+
+    // Query all agents from the fleet registry
+    const libraryDb = this.dbManager.getLibraryDb();
+    const agents = libraryDb
+      .prepare("SELECT id FROM fleet_agents WHERE status = 'active'")
+      .all() as Array<{ id: string }>;
+
+    for (const agent of agents) {
+      if (agent.id === requesterId) continue;
+      try {
+        const agentResults = this.queryAgent(requesterId, agent.id, opts, reg);
+        results.push(...agentResults);
+      } catch {
+        // Skip agents we can't query (not in registry)
+      }
+    }
+
+    return results;
+  }
+
   // ─── Document Chunks (L4: Library) ──────────────────────────
 
   /**
@@ -940,6 +1412,25 @@ export class HyperMem {
     return store.queryChunks(query);
   }
 
+  /**
+   * Seed all ACA files from a workspace directory into the doc chunk index.
+   * Idempotent: skips files whose source hash hasn't changed.
+   * Force re-index with opts.force = true.
+   */
+  async seedWorkspace(workspaceDir: string, opts: SeedOptions = {}): Promise<SeedResult> {
+    const db = this.dbManager.getLibraryDb();
+    const seeder = new WorkspaceSeeder(db);
+    return seeder.seedWorkspace(workspaceDir, opts);
+  }
+
+  /**
+   * Seed a single file into the doc chunk index.
+   */
+  seedFile(filePath: string, collection: string, opts: SeedOptions = {}) {
+    const db = this.dbManager.getLibraryDb();
+    const seeder = new WorkspaceSeeder(db);
+    return seeder.seedFile(filePath, collection, opts);
+  }
 
   /**
    * Get stats about the current doc chunk index.
@@ -959,6 +1450,75 @@ export class HyperMem {
     return store.listSources(opts);
   }
 
+  // ─── Fleet Cache Hydration ──────────────────────────────────
+
+  /**
+   * Hydrate the Redis fleet cache from library.db.
+   * Call on gateway startup to warm the cache for dashboard queries.
+   * 
+   * Populates:
+   *  - Per-agent profiles (fleet registry + capabilities + desired state)
+   *  - Fleet summary (counts, drift status)
+   */
+  async hydrateFleetCache(): Promise<{ agents: number; summary: boolean }> {
+    if (!this.cache.isConnected) return { agents: 0, summary: false };
+
+    const db = this.dbManager.getLibraryDb();
+    const fleetStore = new FleetStore(db);
+    const desiredStore = new DesiredStateStore(db);
+
+    const agents = fleetStore.listAgents();
+    let hydrated = 0;
+
+    for (const agent of agents) {
+      try {
+        // Build a composite profile for each agent
+        const capabilities = fleetStore.getAgentCapabilities(agent.id);
+        const desiredState = desiredStore.getAgentState(agent.id);
+        const desiredConfig = desiredStore.getAgentConfig(agent.id);
+
+        const composite = {
+          ...agent,
+          capabilities: capabilities.map(c => ({ capType: c.capType, name: c.name, version: c.version })),
+          desiredState: desiredState.map(d => ({
+            configKey: d.configKey,
+            desiredValue: d.desiredValue,
+            actualValue: d.actualValue,
+            driftStatus: d.driftStatus,
+          })),
+          desiredConfig,
+        };
+
+        await this.cache.cacheFleetAgent(agent.id, composite as unknown as Record<string, unknown>);
+        hydrated++;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`[hypermem] Failed to cache agent ${agent.id}: ${message}`);
+      }
+    }
+
+    // Cache fleet summary
+    try {
+      const driftSummary = desiredStore.getDriftSummary();
+      const summary = {
+        totalAgents: agents.length,
+        activeAgents: agents.filter(a => a.status === 'active').length,
+        tiers: {
+          council: agents.filter(a => a.tier === 'council').length,
+          director: agents.filter(a => a.tier === 'director').length,
+          specialist: agents.filter(a => a.tier === 'specialist').length,
+        },
+        drift: driftSummary,
+        hydratedAt: new Date().toISOString(),
+      };
+      await this.cache.cacheFleetSummary(summary);
+    } catch {
+      return { agents: hydrated, summary: false };
+    }
+
+    return { agents: hydrated, summary: true };
+  }
+
   // ─── Lifecycle ───────────────────────────────────────────────
 
   /**
@@ -971,3 +1531,17 @@ export class HyperMem {
 }
 
 export default HyperMem;
+
+export { SessionFlusher, flushSession } from './session-flusher.js';
+export type { FlushSessionOptions, FlushSessionResult } from './session-flusher.js';
+export { importVault, watchVault, parseObsidianNote, parseFrontmatter, extractWikilinks, extractTags, cleanObsidianMarkdown } from './obsidian-watcher.js';
+export type { ObsidianConfig, ObsidianNote, ObsidianImportResult, ObsidianWikiLink, VaultChangeCallback } from './obsidian-watcher.js';
+export { exportToVault } from './obsidian-exporter.js';
+export type { ObsidianExportConfig, ObsidianExportResult } from './obsidian-exporter.js';
+export { collectMetrics, formatMetricsSummary } from './metrics-dashboard.js';
+export type { HyperMemMetrics, FactMetrics, WikiMetrics, EpisodeMetrics, VectorMetrics, CompositionMetrics, IngestionMetrics, SystemHealth, MetricsDashboardOptions } from './metrics-dashboard.js';
+export { getProfile, mergeProfile, PROFILES, lightProfile, standardProfile, fullProfile, extendedProfile, minimalProfile, richProfile } from './profiles.js';
+export type { ProfileName } from './profiles.js';
+export { renderStarterFOS, resolveOutputTier } from './fos-mod.js';
+export type { OutputStandardTier } from './fos-mod.js';
+export { repairToolPairs } from './repair-tool-pairs.js';

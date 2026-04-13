@@ -1,143 +1,334 @@
-# hyper**mem**
+<p align="center">
+  <img src="assets/logo.png" alt="hypermem" width="283" />
+</p>
 
-*beyond memory, beyond speed*
+<p align="center"><em>Coherent agents. Every session.</em></p>
 
 ---
 
-Your agent forgets. Not because the model is broken — because nothing in the default stack was built to prevent it.
+hypermem is a runtime context engine for OpenClaw agents.
 
-**Output normalization: 40 tokens.** Starter FOS costs less than a single sentence. Starter is ~40 tokens, Standard ~250, Fleet ~400 — negligible overhead for measurable output improvement across every model, every turn.
-
-Context accumulates, gets summarized, loses specifics. Sessions end and the agent wakes up empty. Tool output crowds out reasoning. The wrong history is in the window at the wrong time. These are not edge cases. They are the natural failure modes of treating memory as an afterthought.
-
-OpenClaw already gives agents a solid baseline: workspace memory files, hybrid file search, and compaction safeguards. HyperMem goes deeper. It replaces transcript accumulation with a context engine that assembles prompts fresh from storage on every turn — purpose-built to eliminate each failure mode at the source.
-
-```text
-L1  SQLite Cache   Hot session cache (in-memory), identity, compressed recent history
-L2  Messages DB    Per-agent conversation history in SQLite
-L3  Vectors DB     Per-agent semantic search with sqlite-vec embeddings
-L4  Library DB     Fleet-wide structured knowledge, facts, episodes, registry
+```bash
+curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
+
+
+---
+
+## The problem
+
+Every LLM conversation is composed at runtime. The model sees only what's in the prompt. It has no memory of prior sessions, no access to decisions made last week, no awareness of work that happened before this context window opened.
+
+Two questions make this concrete:
+
+| Question | What the LLM has | What happens |
+|---|---|---|
+| *"What was Caesar's greatest military victory?"* | Training data | ✅ Answered correctly, no session context needed |
+| *"What did we decide about the retry logic last week?"* | Nothing (prior session is gone) | ❌ The decision existed only in that session |
+
+The difference isn't intelligence. It's what was in the prompt. Two failure modes follow:
+
+**New-session amnesia.** The agent restarts and everything is gone. Decisions, preferences, work in progress: erased at the session boundary. Operators re-explain context. Agents re-ask questions already answered.
+
+**Compaction crunch.** Long sessions fill the context window. The runtime summarizes to make room. Specifics (tool output, exact decisions, file paths) are lost in the summary. The agent keeps running, but degraded.
+
+---
+
+## What OpenClaw provides today
+
+OpenClaw addresses both failure modes with structured guidance files injected into every session:
+
+| File | What it contributes | Survives session restart? |
+|---|---|---|
+| `SOUL.md` | Agent identity, voice, principles | ✅ always injected |
+| `USER.md` | User preferences, working style | ✅ always injected |
+| Task and workspace instruction files (for example AGENTS.md, job files, and related guidance) | ✅ always injected |
+| `MEMORY.md` | Hand-curated decisions, facts, patterns | ✅ if manually maintained |
+
+These are powerful for identity and preferences. But the retry logic decision from last week? If nobody manually captured it into `MEMORY.md`, that session boundary erased it. The system is only as strong as its last manual update.
+
+OpenClaw also ships compaction safeguards and hybrid file search. That's a solid baseline. It has limits. hypermem closes both gaps.
+
+---
+
+## hypermem
+
+Four storage layers, sub-millisecond retrieval, no external database services required. Runs in-process with local SQLite storage and local Nomic embeddings by default, with optional hosted embeddings for L3.
+
+| Layer | What it holds | Speed |
+|---|---|---|
+| **L1 In-memory** | What the agent needs right now. Identity, recent history, active state. | 0.08ms |
+| **L2 History** | Every conversation, queryable and concurrent-safe. Per-agent. | 0.13ms |
+| **L3 Semantic** | Finds related content even when the words don't match. | 0.29ms |
+| **L4 Knowledge** | Facts, wiki pages, episodes, preferences. Shared across agents. | 0.09ms |
+
+Everything is retained. Storage survives session boundaries. The retry logic decision from last week, the deployment preferences from last month, the architecture choices from day one: all queryable, all available for composition.
+
+**Session warming.** Before the first turn fires, hypermem pre-loads the agent's full working state from the in-memory SQLite cache: recent history, facts ranked by confidence and recency, active topic context, cached embeddings for fast semantic recall. The agent's first reply draws from everything that was in scope at the end of the last session. The agent picks up where it left off.
+
+---
+
+## hypercompositor
+
+Every memory system stores. Almost none compose.
+
+Your agent has four layers of stored context, but what shows up in the prompt? How much of the token budget goes to stale content? Who decides what's relevant to this specific turn?
+
+The hypercompositor queries all four layers in parallel on every turn and composes context within a fixed token budget. No transcript accumulates. No lossy transcript summarization. Amnesia isn't a storage problem; the memories exist, but nobody composed them into a coherent prompt. Compaction isn't inevitable; content that doesn't fit this turn stays in storage instead of being destroyed.
+
+**Bigger context windows don't help if you fill them with stale history.**
+128k tokens of stale history and irrelevant memory is worse than 32k of precisely selected content. 10 budget categories, priority-ordered, greedy-fill. Every token in the prompt earned its spot.
+
+### What the model actually sees
+
+Token budget allocation from a mature session (847 turns deep, 128k budget):
+
+```
+What the model sees (92k of 128k tokens, 72% utilization):
+
+  ┌────────────────┬──────────────────────────┬──────────────┬───────────┬────────────┬────────────┬──────────────┬──────────┐
+  │ id/sys/user    │ history                  │ recent tools │ keystones │ wiki/know. │ facts      │ recall/sem.  │ reserve  │
+  │ tools 14,000   │ 46,000                   │ 10,000       │ 3,600     │ 2,600      │ 2,200      │ 1,600        │ 12,000   │
+  │                │ 65-90 tool or 120-160    │              │           │            │ top ~28    │              │          │
+  └────────────────┴──────────────────────────┴──────────────┴───────────┴────────────┴────────────┴──────────────┴──────────┘
+   ◄────────────────────────────────────────────── 72% composed ──────────────────────────────────────────────►
+
+What's in storage, not in this prompt:
+
+  L2  847 turns stored          top 70-120 shown depending on turn density
+  L3  28,441 indexed episodes   available via semantic search
+  L4  5,104 facts               ranked by confidence × decay, top ~28 selected
+  L4  847 knowledge entries     active-topic subset shown, rest on standby
+
+  Everything stays in storage. The compositor picks what's relevant right now.
+  Change the topic, and the next turn pulls different content from the same storage.
+```
+
+### Standard context engine vs. hypercompositor
+
+```
+Standard                                hypercompositor
+────────────────────────────────        ────────────────────────────────
+message → append to transcript          message → detect active topic
+transcript full → trim oldest           query 4 storage layers in parallel
+trimmed content → summarize (lossy)     budget allocator: 10 slots, fixed cap
+send transcript to model                tool compression by turn age
+model responds → append again           keystone guard + hyperform profile
+                                        composed prompt → model
+     ┌──────────────────┐               model responds → afterTurn ingest
+     │ loop until full  │               → write back to all 4 layers
+     └──────────────────┘
+
+When it fills:                          When budget is exceeded:
+  content is lost permanently             content stays in storage
+  summaries are lossy                     not selected for this turn
+  no recovery path                        change topic back → retrieved again
+```
+
+| | Standard | hypercompositor |
+|---|---|---|
+| Context source | Growing transcript only | Transcript + 3 additional storage layers |
+| When context fills | Trim + summarize (lossy) | Budget allocation (lossless storage) |
+| Old decisions | Lost after compaction | Retrievable via keystones + semantic recall |
+| Topic changes | All history competes equally | Scoped retrieval by active topic |
+| Tool output | Stays until trimmed | Cluster-compressed by age |
+| Model swap mid-session | Re-count, hope it fits | Budget recomputed from new window size next turn |
+
+High-signal turns are marked as keystones and survive pressure trimming ahead of ordinary history.
+
+The compositor fills 9 slots in priority order (system prompt → identity → hyperform → history → facts → wiki → semantic recall → cross-session → action summary). Each slot consumes tokens from the remaining budget before the next slot runs. Slots that don't fit this turn stay in storage, not destroyed.
+
+For the full fill order, budget formula, and all configuration knobs, see **[Tuning](#tuning)** below and **[docs/TUNING.md](./docs/TUNING.md)**.
+
+---
+
+## hyperform
+
+Raw model output has two problems. It drifts from your standards (sycophancy, hedging, pagination, formatting) and it drifts from your facts (confabulation, contradiction, stale claims). hyperform handles both: normalization enforces consistency, confabulation resistance checks output against what's actually stored.
+
+Consistent output isn't just aesthetic. A model that paginates short answers, preambles with filler, or inflates lists uses more output tokens per turn. Over hundreds of turns, that compounds into real cost. hyperform directives compress output at the source: fewer tokens generated means lower API spend per session, and less context pressure for subsequent turns.
+
+### Behavior standards
+
+Behavior standards define how your agents write. Anti-sycophancy rules prevent filler openings. Density targets compress answers. Anti-pattern bans remove common AI markers (em dashes, AI vocabulary, inflated significance). These rules apply to all models equally.
+
+| Tier | Tokens | What it injects |
+|---|---|---|
+| `light` | ~100 | 9 standalone directives: lead with answer, no sycophancy, no em dashes, AI vocab ban, length targets (simple/analysis/code), filler ban, no pagination of short answers, evidence calibration, numbers over adjectives. No database required. |
+| `standard` | ~250 | Full directive set from the `fleet_output_standard` table: structural rules, density targets per task type, anti-patterns, format rules, compression ratios, voice directives, and task-context overrides. Falls back to `light` directives if no record exists. |
+| `full` | ~250 + adaptation | Same directives as `standard`, plus model adaptation (see below). |
+
+### Model adaptation
+
+Different models have different default behaviors. GPT-5.4 tends toward 2x verbosity and long lists. Claude Opus defaults to hedging and preambles. Gemini produces bulleted summaries where prose would be more direct. Model adaptation corrects for these tendencies per model.
+
+Adaptation entries are stored in the `model_output_directives` table and matched by model ID using exact match, then glob pattern (longest wins), then wildcard fallback. Each entry contains:
+
+- **Calibration** — known model tendencies and specific adjustments (e.g., "2x verbosity: cut first drafts in half")
+- **Corrections** — hard/medium/soft severity rules applied in order (e.g., "No preamble before the answer")
+- **Task overrides** — per-task-type adjustments
+
+Model adaptation is only active at the `full` tier. At `light` and `standard`, model-specific corrections are suppressed.
+
+The `model_output_directives` table starts empty. You populate it with corrections for the models you run. See [docs/TUNING.md](./docs/TUNING.md#creating-custom-entries) for the schema and SQL examples.
+
+### Before and after
+
+The same prompt, GPT-5.4, with and without `hyperformProfile: "light"`:
+
+```
+Prompt: "How should I size my context window budget for a long-running agent session?"
+
+WITHOUT normalization (GPT-5.4 default):
+Here are the key factors to consider when sizing your context window budget:
+
+**1. Session depth**
+Longer sessions accumulate more history...
+
+**2. Tool output volume**
+Agentic sessions generate significant tool output...
+
+**3. Fact corpus size**
+More stored facts means more retrieval candidates...
+
+Would you like me to go deeper on any of these?
+
+WITH outputProfile: "light":
+For a 128k window: reserve 14k for identity/system, target 46k for history, 10k for recent
+tool context, and leave ~30k as allocator reserve. hypermem handles slot competition
+automatically — set `reserveFraction` to your preferred floor and let the compositor fill.
+```
+
+**Confabulation resistance** checks output against stored facts before claims are recorded. No LLM call. Pattern matching against the fact corpus, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
+
+Set `compositor.hyperformProfile` to `light`, `standard`, or `full`. For tier selection guidance, configuration details, and custom entry creation, see **[Tuning](#tuning)** below and **[docs/TUNING.md](./docs/TUNING.md)**.
 
 ---
 
 ## What it solves
 
-### Agents that never forget
-
-When an agent restarts, it wakes up empty. Decisions made, preferences established, work in progress — gone. Operators re-explain context. Agents ask questions they have already asked. The work is real. The memory is not.
-
-HyperMem warms sessions from SQLite into the hot cache before the first turn. The agent picks up mid-conversation. Session continuity is no longer a function of uptime — it is a property of the architecture.
-
-### Context that never collapses
-
-Transcripts grow. Windows fill. Runtimes compact history into a summary — and specifics, tool detail, and work state get lost in the process. The agent keeps going, but degraded.
-
-HyperMem never reaches that cliff. It assembles context fresh on every turn inside a strict token budget. History, facts, recall, and library data compete for tokens intentionally. If the model window changes mid-session, the compositor adapts on the next turn. There is no accumulated transcript to compress.
-
-### Retrieval that actually finds things
-
-Storing everything is not the same as being able to find anything.
-
-FTS5 full-text search catches exact matches. KNN vector search catches semantic matches. Reciprocal Rank Fusion merges both into one ranked result. Trigger-based retrieval handles known patterns. When no trigger matches, bounded semantic fallback keeps the memory slot from coming back empty.
-
 ### Tool output that doesn't take over
 
-Long agentic sessions generate a lot of tool output. Left unmanaged, old results crowd out current reasoning.
-
-Tool Context Tuning compresses by turn age. T0 turns stay verbatim. T1 turns become short prose stubs: `Read /src/foo.ts (1.2KB)`, `Ran npm test — exit 0`. T2 and T3 turns drop payloads entirely, keeping message text. Large results keep the head and tail and cut the middle. For multi-agent fleets, compression is tier-aware: director and council agents preserve more context per pass, reflecting their coordination scope; specialists use a tighter cap to stay focused. The live hot cache is refreshed from SQLite after each turn so it never drifts from the source of truth.
-
-### Sessions that stay on topic
-
-Long sessions drift. An agent deep in a database migration does not need deployment context from two hours ago competing for tokens.
-
-HyperMem detects topic shifts with heuristics: explicit subject changes, long gaps, entity overlap between recent turns. When a shift is detected, history scopes to the active topic. Past context does not disappear — cross-topic keystone retrieval pulls high-signal moments back in when they are relevant.
+Agentic sessions generate massive tool output. Left unmanaged, old results crowd out current reasoning. hypermem compresses tool history by age: recent clusters stay full, older clusters are capped, and the oldest collapse to short stubs while preserving tool call/result integrity. The budget goes to current work, not last hour's npm test output.
 
 ### Knowledge that outlasts the conversation
 
-Most memory systems store what was said. HyperMem synthesizes what was learned.
+Most memory systems store what was said. hypermem synthesizes what was learned.
 
-When a topic goes quiet, HyperMem compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. No LLM call required — content classifiers do the extraction from stored messages. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay. The conversation is gone. The knowledge it produced is not.
+When a topic goes quiet, hypermem compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay.
 
-### Topics as first-class sessions
-
-When a new topic takes over, the agent doesn't just detect the shift — it switches. Topic-scoped cache warming loads only the relevant context for the active thread. Switching back restores that context cleanly. Natural language cues trigger transitions; ambiguous shifts get a soft confirmation before committing. Each topic is its own coherent working context, searchable across the fleet.
+OpenClaw 2026.4.7 ships memory wiki for structured storage. hypermem goes further: wiki pages are synthesized automatically and injected by the compositor within token budget.
 
 ### Subagents that hit the ground running
 
-Spawned subagents start cold. They don't know what the parent was doing, which files were in scope, or what decisions preceded the spawn.
+Spawned subagents inherit a bounded context block: recent parent turns, session-scoped documents, and relevant facts. Scope is isolated from the shared library. Documents are cleaned up on completion.
 
-`buildSpawnContext()` snapshots recent parent turns, indexes session-scoped documents, and gives the spawned agent a bounded context block at compose time. Useful context carries forward. Session documents stay isolated from the shared library and are cleaned up when the spawn completes.
+### Context that doesn't repeat itself
+
+Retrieval paths pull from four layers, trigger shortcuts, temporal indexes, open-domain FTS5, semantic recall, and cross-session summaries. Without dedup, the same fact surfaces through multiple paths and wastes budget on repetition.
+
+hypermem runs content fingerprint dedup across all compose-time retrieval. Every fact, temporal result, open-domain hit, and semantic recall entry is normalized and fingerprinted on a 120-char prefix. O(1) lookup in a shared set catches duplicates regardless of which retrieval path produced them, including rephrased near-duplicates that substring matching missed. Diagnostics track dedup counts and fingerprint collisions per compose call.
+
+Identity content (SOUL.md, USER.md, IDENTITY.md) and doc chunks already injected by OpenClaw's bootstrap are fingerprinted before retrieval runs, so the compositor never double-injects content the runtime already placed in the prompt.
+
+### Integrity under failure
+
+The background indexer runs a startup integrity check against `library.db` on every boot. If the schema is corrupt, tables are missing, or critical indexes are damaged, the indexer enters circuit-breaker mode: it logs the failure, skips indexing for the session, and avoids cascading writes into a broken database. The agent still runs with cached and in-memory data while the operator is notified.
+
+SQL queries that interpolate datetime values are fully parameterized. FTS5 trigger terms are quoted to prevent injection through crafted content. These aren't theoretical: agentic sessions ingest arbitrary user and tool output into the fact store, and unparameterized queries on that path were a real attack surface.
 
 ---
 
 ## Pressure management
 
-HyperMem assembles context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript and cache window. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
+hypermem composes context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
 
 | Path | Trigger | Action |
 |---|---|---|
-| **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures runtime pressure before results land. >85%: trims to 50% budget. >80%: 60%. >75%: 65%. Also trims the messages[] array returned to the runtime — this is what actually prevents stripping on the current turn, not just the next one |
+| **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures projected occupancy before results land; trims large results at 80%+ and truncates the messages[] array for the current turn |
 | **AfterTurn trim** | Every turn at >80% | Pre-emptive headroom cut after the assistant replies, before the next turn arrives |
-| **Nuclear compaction** | compact() at >85% | Cuts cache to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
-| **Density-aware JSONL truncation** | compact() | Counts tokens per message, not message count — catches large-message sessions that looked "fine" by count but were full by volume |
+| **Deep compaction** | compact() at >85% | Cuts in-memory cache to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
+| **Reshape guard** | Structured tool history on downshift | `canPersistReshapedHistory()` blocks a lower-context snapshot from overwriting the full JSONL history |
 
-**The one thing these paths cannot fix:** a session whose JSONL transcript on disk is already at 98% when the gateway restarts. The JSONL loads into runtime context before any compaction runs. If your pre-restart session was large, you start at whatever pressure that JSONL represents. Check `session_status` immediately on startup. If you're above 85%, start a fresh session — don't attempt tool work.
-
-**Pressure telemetry in logs:**
-```
-[hypermem-plugin] tool-loop trim: pressure=91.3% → target=50% (cache=43 msgs, messages=67 dropped)
-[hypermem-plugin] compact: NUCLEAR — session at 118400/128000 tokens (92% full), deep-trimmed...
-```
-
-If you see `tool-loop trim` lines, the machinery is running. If results are still stripped after that log line appears, the session was past the recovery threshold before the trim ran — start fresh.
+**The one thing these paths cannot fix:** a session whose JSONL transcript on disk is already at 98% when the gateway restarts. The JSONL loads into runtime context before any compaction runs. Check `session_status` on startup. If you're above 85%, start a fresh session.
 
 ---
 
 ## How it works
 
-1. **Record** each turn into SQLite and mirror hot session state into the cache.
+1. **Record** each turn into SQLite and mirror hot session state into the in-memory cache.
 2. **Index** conversations and workspace files for exact and semantic recall.
 3. **Assemble** a fresh prompt from history, facts, document chunks, and library data within a strict budget.
 4. **Tune** tool-heavy history by turn age so old payloads don't crowd out current work.
 5. **Compile** stale topics into structured wiki pages for future recall without raw history replay.
 6. **Carry forward** scoped context into subagents when a task needs a narrower working set.
 
+### What runs automatically
+
+No configuration required for any of these:
+
+- **Semantic indexer:** indexes each session's turns for recall after activity drops off. Embeddings are computed asynchronously after the assistant replies and cached for subsequent turns, so compose calls hit cache rather than computing on demand
+- **Topic synthesis:** compiles stale topics into structured wiki pages and promotes high-signal facts from the hot cache to pointer-format entries in MEMORY.md; both classifier-driven, no LLM call
+- **Noise sweep:** removes low-signal or expired facts on a rolling basis
+- **Tool decay:** compresses older tool history to free budget for current work
+- **Keystone scoring:** evaluates each recorded turn for historical significance; high-signal turns are marked for preservation ahead of ordinary history during pressure trimming
+
 ---
 
 ## Speed
 
-Benchmarked against a production database: 3,482 facts, 19,853 episodes.
+Benchmarked against a production database: 5,104 facts, 28,441 episodes, 847 knowledge entries, 42MB. 1,000 iterations, 50 warmup discarded, single-process isolation.
 
 | Operation | avg | p50 | p95 |
 |---|---|---|---|
-| Cache single slot GET | 0.03ms | 0.02ms | 0.05ms |
-| Cache history query (100 messages) | 0.05ms | 0.04ms | 0.08ms |
-| L4 facts query (top-28 by confidence×decay) | 0.29ms | 0.28ms | 0.31ms |
-| L4 FTS5 keyword search | 0.08ms | 0.076ms | 0.11ms |
-| Full 4-layer compose, warm session | 52ms | 52ms | 57ms |
-| Full 4-layer compose, cold session (first turn) | 249ms | 54ms | 1,592ms |
-| Async pre-embed (background, not user-facing) | 302ms | 146ms | 725ms |
+| L1 slot GET (SQLite in-memory) | 0.08ms | 0.07ms | 0.13ms |
+| L1 history window (100 messages) | 0.13ms | 0.11ms | 0.19ms |
+| L4 facts (top-28, confidence × decay) | 0.28ms | 0.26ms | 0.36ms |
+| L4 facts + agentId filter | 0.31ms | 0.29ms | 0.40ms |
+| L4 FTS5 keyword search | 0.06ms | 0.05ms | 0.08ms |
+| L4 FTS5 + agentId filter | 0.07ms | 0.06ms | 0.10ms |
+| L4 knowledge query | 0.09ms | 0.08ms | 0.14ms |
+| Recency decay scoring (28 rows, in JS) | 0.003ms | 0.002ms | 0.005ms |
+> Query planner uses compound indexes on agentId + sort key; FTS5 performance improved 25% from baseline after index additions despite a 47% increase in stored data.
 
-L1 and L4 structured retrieval are sub-millisecond. After the first turn, query embeddings are computed in the background and cached — warm compose averages 52ms with a p95 of 57ms. The cold p95 of 1,592ms happens exactly once per new session, then never again. The async embed cost is paid after the assistant replies; users never wait for it.
+L1 and L4 structured retrieval are sub-millisecond. Vector embeddings are computed asynchronously after the assistant replies and cached in the in-memory layer, not on the primary composition call path. Users never wait for an embedding computation.
 
 ---
 
 ## Architecture
 
-HyperMem plugs into OpenClaw as a context engine and owns the full prompt composition lifecycle.
+hypermem plugs into OpenClaw via two plugins that fill both composition slots:
 
-**L1: SQLite Cache** is the hot layer. An in-memory SQLite database attached via `ATTACH ':memory:'`. Identity, compressed session history, cached embeddings, topic-scoped context, and fleet registry data. The compositor goes here first on every turn. Zero external dependencies, zero TCP overhead.
+| Plugin | ID | Slot | What it does |
+|---|---|---|---|
+| `@psiclawops/hypercompositor` | `hypercompositor` | `contextEngine` | Owns session lifecycle, ingest, compose, afterTurn indexing, tool compression, hyperform |
+| `@psiclawops/hypermem-memory` | `hypermem` | `memory` | Provides `memory_search` tool backed by hybrid FTS5 + KNN retrieval against library.db |
 
-**L2: Messages DB** is the durable per-agent record. SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
+Both load from the same repo and share a single HyperMem core singleton. The context engine plugin (`hypercompositor`) is the heavy one: session warming, compositor, tool gradient, hyperform. The memory plugin (`hypermem`) is a thin wrapper that exposes HyperMem's hybrid retrieval as OpenClaw's standard `MemoryPluginCapability`, so `memory_search` routes through the official memory slot and shows correctly in `openclaw plugins list`.
 
-**L3: Vectors DB** is the semantic index. Per-agent sqlite-vec database with 768-dimensional embeddings from `nomic-embed-text`. KNN search over prior turns and indexed workspace documents. Reconstructable from L2 if lost.
+The Plugin column is the npm package name. The ID column is what goes in `plugins.allow` and `plugins.slots.*`. Don't put the package name in a slot config.
 
-**L4: Library DB** is the fleet-wide knowledge layer. One shared SQLite database:
+**L1: SQLite in-memory.** Sub-millisecond hot reads, no network dependency, no daemon, no retry logic. Identity, compressed session history, cached embeddings, topic-scoped session and recall state, and agent registry data. The compositor hits this first on every turn.
+
+**L2: Messages DB.** A single `MEMORY.md` file doesn't hold per-agent conversation history at scale. Thousands of turns across dozens of agents need queryable, concurrent-safe storage. Per-agent SQLite with WAL mode, auto-rotating at 100MB or 90 days. Full conversation history and session metadata. Rotated archives remain readable for recall.
+
+**L3: Vectors DB.** Keyword search alone misses semantically related content. A decision recorded as "we chose exponential backoff" won't match a search for "what was the retry strategy" without vector similarity. Per-agent sqlite-vec database with KNN search over prior turns and indexed workspace documents. Reconstructable from L2 if lost. Supports two embedding providers: Ollama (local, default `nomic-embed-text`) or hosted via OpenRouter (recommended: `qwen/qwen3-embedding-8b`, 4096d, top of MTEB retrieval leaderboard).
+
+Retrieval follows a fixed pipeline on every compose call:
+
+1. **Trigger registry** fires first. Nine pattern triggers check for exact-match shortcuts. If one hits, scoped FTS5 prefix queries (`word1* OR word2*`) run against L4 collections and return immediately.
+2. **Semantic fallback** fires when no trigger matches. Bounded hybrid retrieval runs FTS5 + KNN in parallel, then merges via Reciprocal Rank Fusion (RRF). BM25 ranks and KNN cosine distances combine into a single ordered result.
+3. **Noise floor** filters anything below RRF 0.008 before it reaches the compositor.
+
+FTS5 queries use compound indexes on `agentId + sort key` and prefix optimization (3+ chars, capped at 8 terms, OR queries). These indexes yielded a 25% read improvement over baseline despite a 47% increase in stored data.
+
+### Retrieval pipeline
+
+**L4: Library DB.** Per-agent storage can't hold shared knowledge. Facts established by one agent, wiki pages synthesized from cross-agent topics, shared registry state: these belong to the system, not one agent. One shared SQLite database:
 
 | Collection | What it holds |
 |---|---|
-| Facts | Verifiable claims with confidence, domain, expiry, supersedes chains |
+| Facts | Claims with confidence scoring, domain, expiry, supersedes chains |
 | Knowledge | Domain/key/value structured data with full-text search |
 | Episodes | Significant events with impact scores and participant tracking |
 | Topics | Cross-session thread tracking and synthesized wiki pages |
@@ -146,82 +337,174 @@ HyperMem plugs into OpenClaw as a context engine and owns the full prompt compos
 | System Registry | Service state and lifecycle |
 | Work Items | Work queue with status transitions and FTS5 |
 | Session Registry | Session lifecycle tracking |
-| Desired State | Per-agent config targets with automatic drift detection |
+| Desired State | Per-agent config targets; compares running config against desired at gateway startup and surfaces drift for operator review |
 
-**The compositor** queries all four layers in parallel on each turn and assembles ten injection categories, each with its own percentage-based budget cap:
+Facts are ranked by `confidence × recencyDecay`, where decay is exponential with a configurable half-life: recent, high-confidence facts float to the top while stale entries yield budget to newer knowledge.
 
-| Category | Budget cap |
-|---|---|
-| Wiki Page synthesis | 15% of remaining |
-| Active Facts | 25% of remaining |
-| Knowledge | 20% of remaining |
-| User Preferences | 10% of remaining |
-| Related Memory | 12% of remaining |
-| Doc Chunks (ACA) | 40% total, 12% per collection, 3 chunks max |
-| Spawn Context | 15% of remaining |
-| Other Active Sessions | 20% of remaining |
-| FOS/MOD | 40–400 tokens (Starter ~40, Standard ~250, Fleet ~400) |
-| Action Verification | Remainder — rolling tool-action buffer |
+**Secret scanner:** Before any fact, episode, or knowledge entry with `org`, `council`, or `fleet` visibility is written to L4, hypermem scans the content for credentials, API keys, tokens, and connection strings. Matches are downgraded to `private` scope rather than rejected; the write succeeds without the content reaching shared-visible storage.
 
-This is what makes it a compositor, not a retrieval wrapper. Static injection loads files. Budget-aware composition allocates ten competing categories within constraints — on every turn, under pressure. OpenClaw provides the base workspace text. hypermem provides retrieval, synthesis, and budgeted reinjection.
+**The compositor** queries all four layers in parallel on each turn, applies per-slot token caps, and composes a provider-format context block. A safety valve catches estimation drift and trims post-composition. Because the budget is computed from the model's actual context window at compose time (resolved from the model string when the runtime doesn't pass `tokenBudget` explicitly), a mid-session model swap triggers a budget recompute on the next turn. Structured tool history is guarded from destructive persistence during a budget downshift.
 
-The compositor also runs Tool Context Tuning on history, and assembles the final provider-format context block. A safety valve catches estimation drift and trims post-assembly. Because the budget is computed from the model's actual context window at compose time, a mid-session model swap is absorbed on the next turn with no manual intervention.
+**Tool compression** groups calls with results into atomic clusters via `clusterNeutralMessages()`. T0 preserves the current turn plus the two most recent completed turns at full fidelity, matching OpenClaw's native `keepLastAssistants: 3` baseline. Above 80% projected occupancy, large T0 results are head-and-tail trimmed with a structured trim note rather than dropped. Older clusters then enter the gradient: T1 caps at 6k per result, T2 at 800 chars, T3 at 150-char stubs. A pair-integrity guard ensures call-result clusters survive or drop together. `getTurnAge()` counts tool clusters correctly, and `toolPairMetrics` logs pair-integrity anomalies at the OpenClaw seam. When `deferToolPruning` is enabled and OpenClaw's native `contextPruning` is active, the native pruner handles tool result trimming instead.
+
+**canPersistReshapedHistory** guards the compositor from persisting structurally reshaped history back to the JSONL transcript. When structured tool history is present, budget downshifts are computed but not committed to storage, preventing a lower-context snapshot from overwriting the full history on disk.
+
+```
+  user message
+       │
+  topic detection ──► scope retrieval to active thread
+       │
+  ┌────┴───────────────────────────────────────────────┐
+  │              query 4 layers (parallel)             │
+  │                                                    │
+  │  L1 in-memory  L2 History   L3 Vectors  L4 Library │
+  │  hot state    durable       semantic    facts/wiki │
+  │  0.1ms        0.16ms        0.29ms      0.08ms     │
+  └────┬───────────────────────────────────────────────┘
+       │
+  budget allocator ──► 10 slots, fixed token cap
+       │
+  tool compression ──► clusterNeutralMessages() → T0 full → T1 6k → T2 800 → T3 150-char stub
+       │
+  keystone guard ──► high-signal turns survive pressure
+       │
+  hyperform ──► output normalization directives
+       │
+  composed prompt
+       │
+  model response
+       │
+  afterTurn ──► write back to all 4 layers (tool-result carrier messages persisted through recordAssistantMessage, not flattened into plain user text, so structured tool results remain recoverable in durable history)
+```
+
+Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the-model-actually-sees) above. The 72% composition figure is typical for a warm mature session. Multi-agent sessions with active registry and cross-session wiki may run slightly higher.
+
+---
+
+## Requirements
+
+**Current release: hypermem 0.5.6.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
+
+| Requirement | Version | Notes |
+|---|---|---|
+| **Node.js** | `>=22.0.0` | Required for native `node:sqlite` module |
+| **better-sqlite3** | `^11.x` | Installed automatically via npm; powers L1 in-memory and L4 library |
+| **sqlite-vec** | `0.1.9` | Bundled; no separate install needed |
+
+SQLite is a library, not a service. All four layers run in-process with no external daemons. The nomic embedder on Ollama is the heaviest component, and it is lighter than pgvector or any hosted vector database.
+
+**Runtime version constants** (importable from the package):
+```typescript
+import {
+  ENGINE_VERSION,        // '0.5.6'
+  MIN_NODE_VERSION,      // '22.0.0'
+  SQLITE_VEC_VERSION,    // '0.1.9'
+  MAIN_SCHEMA_VERSION,   // 6  (hypermem.db)
+  LIBRARY_SCHEMA_VERSION_EXPORT, // 12 (library.db)
+} from '@psiclawops/hypermem';
+```
+
+Schema versions are stamped into each database on startup and checked on open. A database created by an older engine version will be migrated forward automatically. A database created by a newer engine version will throw on open.
 
 ---
 
 ## Installation
-
-**Let your OpenClaw agent install this.** The configuration varies by deployment shape, and there are enough moving parts that manual setup is error-prone. Hand this to your agent:
-
-> "Install HyperMem following INSTALL.md. I'm running a [solo / multi-agent] setup."
-
-Full guide: **[INSTALL.md](./INSTALL.md)**
-
-### Manual quick path
 
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git ~/.openclaw/workspace/repo/hypermem
 cd ~/.openclaw/workspace/repo/hypermem
 npm install && npm run build
 npm --prefix plugin install && npm --prefix plugin run build
+npm --prefix memory-plugin install && npm --prefix memory-plugin run build
 
-openclaw config set plugins.slots.contextEngine hypermem
-openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin"]' --strict-json
+openclaw config set plugins.slots.contextEngine hypercompositor
+openclaw config set plugins.slots.memory hypermem
+openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin","~/.openclaw/workspace/repo/hypermem/memory-plugin"]' --strict-json
+openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
 openclaw gateway restart
 ```
 
-Verify: `openclaw logs --limit 50 | grep hypermem` — you should see `[hypermem:compose]` lines on each turn.
+Or use the one-line installer:
 
-**Requirements:** Node.js 22+, OpenClaw with context engine plugin support, Ollama with `nomic-embed-text`.
+```bash
+curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
+```
+
+**Requirements:** Node.js 22+, OpenClaw with context engine plugin support, and either Ollama (local) or an OpenRouter API key (hosted) for embeddings. No standalone SQLite install is required for the documented repo install: hypermem uses the SQLite bundled with Node 22 via `node:sqlite`, and `sqlite-vec` provides the platform-specific extension through npm dependencies.
+
+Full guide with deployment-specific options: **[INSTALL.md](./INSTALL.md)**
+
+### Agent-assisted install
+
+If you prefer, hand the install to your OpenClaw agent:
+
+> "Install hypermem following INSTALL.md. I'm running a [solo / multi-agent] setup."
 
 ### Tuning
 
-Drop a `~/.openclaw/hypermem/config.json` to override compositor defaults. Takes effect on gateway restart:
+Two independent surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model writes). Pick a profile first — most deployments adjust one or two settings on top.
+
+| Profile | Target window | Best for |
+|---|---|---|
+| `light` | 64k | Single agent, small models, constrained resources |
+| `standard` | 128k | Normal deployments, small fleets |
+| `full` | 200k+ | Multi-agent fleets, large-context models |
+
+Start with `light`. Use `mergeProfile()` to adjust individual settings:
+
+```typescript
+import { mergeProfile } from '@psiclawops/hypermem';
+const config = mergeProfile('standard', { compositor: { maxFacts: 40 } });
+```
+
+Drop a `~/.openclaw/hypermem/config.json` to override defaults (takes effect on gateway restart):
 
 ```json
 {
   "compositor": {
-    "defaultTokenBudget": 60000,
-    "maxFacts": 18,
-    "maxCrossSessionContext": 3000,
-    "maxRecentToolPairs": 2,
-    "maxProseToolPairs": 6
+    "budgetFraction": 0.70,
+    "hyperformProfile": "standard"
   }
 }
 ```
 
-This profile targets ~35-45% token reduction for smaller context windows. Full tuning notes are in INSTALL.md.
+Or configure through `openclaw.json` (preferred for managed deployments):
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "hypercompositor": {
+        "config": {
+          "compositor": { "budgetFraction": 0.70 },
+          "hyperformProfile": "standard"
+        }
+      }
+    }
+  }
+}
+```
+
+Plugin config in `openclaw.json` takes precedence over `config.json`. Both sources are merged, with plugin config winning on overlap. The config schema is validated on gateway start and visible via `openclaw config get plugins.entries.hypercompositor.config`.
+
+Full reference: **[docs/TUNING.md](./docs/TUNING.md)**
 
 ---
 
 ## API
 
+> **Note:** The examples below use placeholder agent names (`my-agent`, `agent1`, etc.). Replace these with your actual agent IDs from your OpenClaw config. Single-agent installs typically use `main`. Multi-agent fleets use whatever IDs you've configured. See [INSTALL.md § "Configure your fleet"](./INSTALL.md#step-5--configure-your-fleet-multi-agent-only) for details.
+
 ```typescript
-import { HyperMem, buildSpawnContext, DocChunkStore, MessageStore } from '@psiclawops/hypermem';
+import { HyperMem } from '@psiclawops/hypermem';
 
 const hm = await HyperMem.create({
   dataDir: '~/.openclaw/hypermem',
+  cache: { maxEntries: 10000 },
+  // Local (Ollama):
   embedding: { ollamaUrl: 'http://localhost:11434', model: 'nomic-embed-text' },
+  // Hosted (OpenRouter), recommended for installs without local GPU/CPU:
+  // embedding: { provider: 'openai', openaiApiKey: 'sk-or-...', openaiBaseUrl: 'https://openrouter.ai/api/v1', model: 'qwen/qwen3-embedding-8b', dimensions: 4096, batchSize: 128 },
 });
 
 // Record and compose
@@ -237,14 +520,32 @@ const composed = await hm.compose({
 
 // Refresh tool compression after each turn
 await hm.refreshCacheGradient('my-agent', 'agent:my-agent:webchat:main');
+```
 
-// Spawn a subagent with parent context
+Spawning a subagent with parent context:
+
+```typescript
+import { buildSpawnContext, MessageStore, DocChunkStore } from '@psiclawops/hypermem';
+
 const spawn = await buildSpawnContext(
   new MessageStore(hm.dbManager.getMessageDb('my-agent')),
   new DocChunkStore(hm.dbManager.getLibraryDb()),
   'my-agent',
   { parentSessionKey: 'agent:my-agent:webchat:main', workingSnapshot: 12 }
 );
+```
+
+---
+
+## CLI
+
+`bin/hypermem-status.mjs` provides health checks and metrics from the command line:
+
+```bash
+node bin/hypermem-status.mjs              # full dashboard
+node bin/hypermem-status.mjs --agent my-agent   # scoped to one agent
+node bin/hypermem-status.mjs --json          # machine-readable output
+node bin/hypermem-status.mjs --health        # health checks only (exit 1 on failure)
 ```
 
 ---
@@ -263,47 +564,33 @@ const spawn = await buildSpawnContext(
 
 ---
 
-## Known limits
-
-**Global-scope fact writes trust the caller.** Fine for single-operator alpha. Not safe for untrusted multi-tenant deployments. Write authorization is on the roadmap before any multi-tenant release.
-
-**Full per-turn fact extraction is a future step.** Proactive passes (noise sweep, tool decay) are production. Per-turn LLM-driven fact and episode extraction from live conversations is a follow-on.
-
-**Embedding model hot-swap is not yet implemented.** Current default is `nomic-embed-text`.
-
----
-
 ## Migration
 
-HyperMem doesn't touch your existing memory data. Install it, switch the context engine, and migrate historical data on your own timeline — before or after switching.
+hypermem doesn't touch your existing memory data. Install it, switch the context engine, and migrate historical data on your own timeline.
 
-Migrations are supported from any memory platform. Worked examples are included in the migration documentation for: **OpenClaw built-in memory, ClawText, Mem0, Honcho, QMD session exports, and Engram**.
+The migration guide includes worked examples showing how to bring data from OpenClaw built-in memory, Mem0, Honcho, QMD session exports, and Engram. Each example walks through the data model mapping, transformation steps, and validation. Adapt them to your setup.
 
-All migration scripts default to dry-run. Nothing is written until you add `--apply`.
+All examples default to dry-run. Nothing is written until you add `--apply`.
 
 Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 
-> **For agents:** See [docs/AGENT_MIGRATION.md](./docs/AGENT_MIGRATION.md) for HyperMem's data model, field-level semantics, and mapping examples for each platform. The scripts are helpers — the doc gives you enough to handle any format, including ones without a script.
 
 ---
 
-## Roadmap
+## Identity layer
 
-- [x] Compiled knowledge synthesis
-- [x] Virtual Sessions
-- [x] Live org registry
-- [x] Budget downshift reshape (adaptive budget allocation under context pressure)
-- [x] Migration guide and scripts for existing OpenClaw sessions
-- [x] Nuclear compaction path (saturated session recovery)
-- [x] Pressure-tiered tool-loop trim + messages[] trimming (ingestion wave prevention)
-- [x] Runtime-baseline pressure measurement (post-restart accuracy)
-- [ ] Versioned atomic re-indexing
-- [ ] `hypermem seed --workspace` CLI
-- [ ] Embedding model hot-swap
-- [ ] Full per-turn fact and episode extraction
+hypermem handles context and output normalization. The Agentic Cognitive Architecture handles identity: self-authored SOUL files, structured communication contracts, and identity persistence across sessions. Same team, complementary layers.
+
+Design guide: [PsiClawOps/AgenticCognitiveArchitecture](https://github.com/PsiClawOps/AgenticCognitiveArchitecture/)
+
+---
+
+## Acknowledgments
+
+The embedding-space fidelity threshold used in compaction validation was informed by the geometric preservation mathematics published by the [libravdb](https://github.com/xDarkicex/openclaw-memory-libravdb) project.
 
 ---
 
 ## License
 
-Apache-2.0 — [PsiClawOps](https://github.com/PsiClawOps)
+Apache-2.0, [PsiClawOps](https://github.com/PsiClawOps)

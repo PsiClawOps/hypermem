@@ -49,8 +49,8 @@ export function lintKnowledge(libraryDb: DatabaseSync): LintResult {
       FROM knowledge k
       WHERE k.domain = 'topic-synthesis'
         AND k.superseded_by IS NULL
-        AND k.updated_at < datetime('now', '-${LINT_STALE_DAYS} days')
-    `).all() as Array<{ id: number; source_ref: string | null; agent_id: string; key: string }>;
+        AND k.updated_at < datetime('now', '-' || ? || ' days')
+    `).all(Math.floor(LINT_STALE_DAYS)) as Array<{ id: number; source_ref: string | null; agent_id: string; key: string }>;
 
     for (const entry of staleSyntheses) {
       // Extract topic id from source_ref: "topic:<id>" or "topic:<id>:mc:<count>"
@@ -73,8 +73,8 @@ export function lintKnowledge(libraryDb: DatabaseSync): LintResult {
 
       // Check if topic is stale (updated_at older than LINT_STALE_DAYS)
       const topicAge = libraryDb.prepare(`
-        SELECT CASE WHEN datetime(?) < datetime('now', '-${LINT_STALE_DAYS} days') THEN 1 ELSE 0 END AS is_stale
-      `).get(topicRow.updated_at) as { is_stale: number };
+        SELECT CASE WHEN datetime(?) < datetime('now', '-' || ? || ' days') THEN 1 ELSE 0 END AS is_stale
+      `).get(topicRow.updated_at, Math.floor(LINT_STALE_DAYS)) as { is_stale: number };
 
       if (topicAge.is_stale) {
         // Decay confidence to 0.3

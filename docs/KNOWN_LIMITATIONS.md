@@ -1,4 +1,4 @@
-# Known Limitations — HyperMem 0.2.0
+# Known Limitations — HyperMem 0.5.x
 
 ## Global-scope fact write authorization
 

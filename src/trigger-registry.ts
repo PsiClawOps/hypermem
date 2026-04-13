@@ -1,5 +1,5 @@
 /**
- * HyperMem Trigger Registry (W5)
+ * hypermem Trigger Registry (W5)
  *
  * Centralizes ACA collection trigger definitions with owner/category metadata.
  * Extracted from compositor.ts for independent testability and auditability.
@@ -49,7 +49,7 @@ export const TRIGGER_REGISTRY_VERSION = '1.0.0';
 
 /**
  * Default trigger registry for standard ACA collections.
- * Covers the core ACA offload use case.
+ * Covers the core ACA offload use case from agent6's spec.
  */
 export const TRIGGER_REGISTRY: CollectionTrigger[] = [
   {
@@ -97,7 +97,7 @@ export const TRIGGER_REGISTRY: CollectionTrigger[] = [
     ],
     maxTokens: 800,
     maxChunks: 2,
-    owner: 'system',
+    owner: 'agent1',
     category: 'operations',
     description: 'Agent operational procedures: boot sequence, heartbeat, work queue, session startup',
   },
@@ -134,9 +134,35 @@ export const TRIGGER_REGISTRY: CollectionTrigger[] = [
     ],
     maxTokens: 1500,
     maxChunks: 4,
-    owner: 'system',
+    owner: 'agent1',
     category: 'memory',
     description: 'Decision history: past choices, previously agreed approaches, recalled context',
+  },
+  {
+    collection: 'identity/soul',
+    keywords: [
+      'who are you', 'your role', 'your purpose', 'your domain', 'your job',
+      'identity', 'soul', 'persona', 'what do you do', 'how do you work',
+      'your principles', 'your values', 'your seat',
+    ],
+    maxTokens: 1200,
+    maxChunks: 2,
+    owner: 'council',
+    category: 'identity',
+    description: 'Agent soul and persona: role definition, domain ownership, core principles',
+  },
+  {
+    collection: 'operations/tools',
+    keywords: [
+      'tool', 'config', 'command', 'cli', 'path', 'deploy', 'restart',
+      'openclaw', 'session_status', 'model', 'plugin', 'workspace path',
+      'how to', 'where is', 'which command', 'quick ref',
+    ],
+    maxTokens: 1200,
+    maxChunks: 3,
+    owner: 'agent1',
+    category: 'operations',
+    description: 'Agent tooling reference: CLI commands, config paths, deployment procedures, quick reference',
   },
 ];
 

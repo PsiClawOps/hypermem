@@ -3,5 +3,22 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+*.db.bak*
 .DS_Store
 .npmrc
+tmp/
+bench/results/
+
+# Secrets / credentials
+.env
+.env.*
+*.key
+*.pem
+secrets.json
+auth-profiles.json
+credentials.json
+oauth_creds.json
+
+# ClawMap (internal architecture analysis)
+clawmap.json
+clawmap.lock.json

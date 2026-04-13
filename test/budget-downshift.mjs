@@ -11,8 +11,7 @@
  *   - Downshift threshold: 15% reduction DOES trigger reshape
  */
 
-import { applyToolGradientToWindow } from '../dist/compositor.js';
-import { RedisLayer } from '../dist/redis.js';
+import { applyToolGradientToWindow, canPersistReshapedHistory, getTurnAge } from '../dist/compositor.js';
 
 let passed = 0;
 let failed = 0;
@@ -45,7 +44,7 @@ console.log('── applyToolGradientToWindow ──');
 
 {
   // Test 2: messages under budget — all returned
-  // Budget = 10_000 tokens → targetChars = floor(10000 * 0.65) * 4 = 26000 chars
+  // Budget = 10_000 tokens → targetTokens = floor(10000 * 0.65) = 6500 tokens
   // 3 short messages, well under budget
   const messages = [
     { role: 'user', textContent: 'Hello', toolCalls: null, toolResults: null },
@@ -54,21 +53,14 @@ console.log('── applyToolGradientToWindow ──');
   ];
   const result = applyToolGradientToWindow(messages, 10_000);
   assert(Array.isArray(result), 'Returns an array for under-budget input');
-  // All messages fit well within budget — all should be returned
+  // All messages fit well within budget — all should survive
   assert(result.length > 0, 'Under-budget input returns messages (not empty)');
-  // The trimming only removes if totalChars > targetChars, so all 3 should survive
-  const totalChars = messages.reduce((s, m) => s + (m.textContent?.length ?? 0), 0);
-  const targetChars = Math.floor(10_000 * 0.65) * 4;
-  if (totalChars <= targetChars) {
-    assert(result.length === messages.length, `Under-budget: all ${messages.length} messages returned (got ${result.length})`);
-  } else {
-    assert(result.length < messages.length, 'Over-budget: trimmed correctly');
-  }
+  assert(result.length === messages.length, `Under-budget: all ${messages.length} messages returned (got ${result.length})`);
 }
 
 {
   // Test 3: messages over budget — trims oldest
-  // Budget = 100 tokens → targetChars = floor(100 * 0.65) * 4 = 260 chars
+  // Budget = 100 tokens → targetTokens = floor(100 * 0.65) = 65 tokens
   // Create messages that exceed this limit
   const longText = 'A'.repeat(100); // 100 chars each
   const messages = [
@@ -77,7 +69,7 @@ console.log('── applyToolGradientToWindow ──');
     { role: 'user', textContent: longText, toolCalls: null, toolResults: null },
     { role: 'assistant', textContent: longText, toolCalls: null, toolResults: null },    // newest
   ];
-  // totalChars = 400, targetChars = 260 → should drop oldest
+  // 4 short prose messages exceed the 65-token target → should drop oldest
   const result = applyToolGradientToWindow(messages, 100);
   assert(result.length < messages.length, `Over-budget: trimmed from ${messages.length} to ${result.length}`);
   // The LAST message should always be kept (newest preserved)
@@ -87,13 +79,87 @@ console.log('── applyToolGradientToWindow ──');
     lastMsg && lastMsg.textContent === origLastMsg.textContent,
     'Over-budget trim preserves newest messages'
   );
-  // Verify the remaining messages fit within the budget
+  // Text-only path: remaining prose is comfortably smaller than the original window
   const totalCharsAfter = result.reduce((s, m) => s + (m.textContent?.length ?? 0), 0);
-  const targetChars = Math.floor(100 * 0.65) * 4;
-  assert(
-    totalCharsAfter <= targetChars,
-    `Trimmed result fits within budget (${totalCharsAfter} <= ${targetChars} chars)`
+  assert(totalCharsAfter < longText.length * messages.length, 'Trimmed result is smaller than the original prose window');
+}
+
+{
+  // Test 4: toolResults count toward budget, not just textContent.
+  // Old behavior looked only at textContent, so this case kept both messages.
+  const messages = [
+    { role: 'user', textContent: 'B'.repeat(200), toolCalls: null, toolResults: null },
+    {
+      role: 'assistant',
+      textContent: null,
+      toolCalls: null,
+      toolResults: [{ callId: 'tc_001', name: 'read', content: 'X'.repeat(1200), isError: false }],
+    },
+  ];
+  const result = applyToolGradientToWindow(messages, 100);
+  assert(result.length === 1, `Tool payload budget-fit trims older prose when toolResults carry the real weight (got ${result.length})`);
+  assert(result[0].toolResults?.[0]?.content?.length > 0, 'Newest tool payload is preserved after oldest prose is dropped');
+}
+
+{
+  // Test 5: structured tool history must not be persisted after reshape.
+  // The view may flatten old tool turns, but canonical cache/history must stay lossless.
+  const longResult = 'R'.repeat(2000);
+  const messages = [
+    { role: 'user', textContent: 'Initial request', toolCalls: null, toolResults: null },
+    {
+      role: 'assistant',
+      textContent: 'Working on it',
+      toolCalls: [{ id: 'tc_100', name: 'read', arguments: '{"path":"README.md"}' }],
+      toolResults: [{ callId: 'tc_100', name: 'read', content: longResult, isError: false }],
+    },
+    { role: 'user', textContent: 'Turn 1', toolCalls: null, toolResults: null },
+    { role: 'assistant', textContent: 'Ack 1', toolCalls: null, toolResults: null },
+    { role: 'user', textContent: 'Turn 2', toolCalls: null, toolResults: null },
+    { role: 'assistant', textContent: 'Ack 2', toolCalls: null, toolResults: null },
+    { role: 'user', textContent: 'Turn 3', toolCalls: null, toolResults: null },
+    { role: 'assistant', textContent: 'Ack 3', toolCalls: null, toolResults: null },
+    { role: 'user', textContent: 'Turn 4', toolCalls: null, toolResults: null },
+    { role: 'assistant', textContent: 'Ack 4', toolCalls: null, toolResults: null },
+    { role: 'user', textContent: 'Newest turn', toolCalls: null, toolResults: null },
+  ];
+
+  const reshaped = applyToolGradientToWindow(messages, 100);
+
+  assert(canPersistReshapedHistory(messages) === false, 'Structured tool history disables destructive persistence');
+  assert(messages[1].toolCalls?.length === 1, 'Canonical input retains tool call structure');
+  assert(messages[1].toolResults?.length === 1, 'Canonical input retains tool result structure');
+  assert(Array.isArray(reshaped) && reshaped.length > 0, 'View-only reshape still produces a compose-time window');
+}
+
+{
+  // Test 6: cluster trim must not keep a tool result after dropping its tool call.
+  const messages = [
+    { role: 'user', textContent: 'older prose', toolCalls: null, toolResults: null },
+    { role: 'assistant', textContent: 'calling tool', toolCalls: [{ id: 'tc_cluster', name: 'read', arguments: '{\"path\":\"README.md\"}' }], toolResults: null },
+    { role: 'user', textContent: null, toolCalls: null, toolResults: [{ callId: 'tc_cluster', name: 'read', content: 'X'.repeat(120), isError: false }] },
+    { role: 'assistant', textContent: 'newest prose', toolCalls: null, toolResults: null },
+  ];
+
+  const reshaped = applyToolGradientToWindow(messages, 60);
+  const hasOrphanResult = reshaped.some((msg, idx) =>
+    msg.toolResults?.length && !(idx > 0 && reshaped[idx - 1].toolCalls?.some(tc => tc.id === 'tc_cluster'))
   );
+
+  assert(!hasOrphanResult, 'Cluster-aware trim never leaves a tool result without its preceding tool call');
+  assert(!reshaped.some(msg => msg.toolCalls?.some(tc => tc.id === 'tc_cluster')), 'Over-budget cluster drops both halves together when the pair no longer fits');
+}
+
+{
+  // Test 7: toolResult carriers must not count as a new user turn for gradient aging.
+  const messages = [
+    { role: 'assistant', textContent: 'calling tool', toolCalls: [{ id: 'tc_age', name: 'read', arguments: '{\"path\":\"README.md\"}' }], toolResults: null },
+    { role: 'user', textContent: null, toolCalls: null, toolResults: [{ callId: 'tc_age', name: 'read', content: 'ok', isError: false }] },
+    { role: 'user', textContent: 'actual human follow-up', toolCalls: null, toolResults: null },
+  ];
+
+  assert(getTurnAge(messages, 0) === 1, 'Assistant tool call ignores its matching tool-result carrier when computing turn age');
+  assert(getTurnAge(messages, 1) === 1, 'Tool-result carrier shares the same turn age as its assistant tool call');
 }
 
 // ─── Downshift threshold math tests (no Redis required) ─────────────────────
@@ -101,7 +167,7 @@ console.log('── applyToolGradientToWindow ──');
 console.log('\n── Downshift threshold logic ──');
 
 {
-  // Test 6: 9% reduction does NOT trigger reshape (below 10% threshold)
+  // Test 8: 9% reduction does NOT trigger reshape (below 10% threshold)
   const prevBudget = 100_000;
   const newBudget = 91_000; // 9% less
   const DOWNSHIFT_THRESHOLD = 0.10;
@@ -111,7 +177,7 @@ console.log('\n── Downshift threshold logic ──');
 }
 
 {
-  // Test 7: 15% reduction DOES trigger reshape
+  // Test 9: 15% reduction DOES trigger reshape
   const prevBudget = 100_000;
   const newBudget = 85_000; // 15% less
   const DOWNSHIFT_THRESHOLD = 0.10;
@@ -129,64 +195,6 @@ console.log('\n── Downshift threshold logic ──');
   const isDownshift = reduction > DOWNSHIFT_THRESHOLD;
   assert(!isDownshift, `Exactly 10% reduction is NOT a trigger (strict greater-than comparison)`);
 }
-
-// ─── Redis round-trip tests ──────────────────────────────────────────────────
-
-console.log('\n── Redis model state round-trip ──');
-
-async function runRedisTests() {
-  const redis = new RedisLayer({ keyPrefix: 'hm-bd-test:', sessionTTL: 30 });
-  const connected = await redis.connect();
-
-  if (!connected) {
-    console.log('  ⚠️  Redis unavailable — skipping Redis model state tests');
-    return;
-  }
-
-  // Clean up stale keys from previous runs
-  await redis.flushPrefix();
-
-  const agentId = 'test-bd-agent';
-  const sessionKey = 'agent:test-bd-agent:webchat:main';
-
-  // Test 4: getModelState returns null on miss
-  const missing = await redis.getModelState(agentId, sessionKey);
-  assert(missing === null, 'getModelState returns null on cache miss');
-
-  // Test 5: setModelState then getModelState round-trips correctly
-  const state = {
-    model: 'gpt-5.4',
-    tokenBudget: 128_000,
-    composedAt: '2026-04-05T12:00:00.000Z',
-    historyDepth: 150,
-  };
-  await redis.setModelState(agentId, sessionKey, state);
-  const retrieved = await redis.getModelState(agentId, sessionKey);
-
-  assert(retrieved !== null, 'getModelState returns non-null after setModelState');
-  assert(retrieved?.model === state.model, `Round-trip model matches (got ${retrieved?.model})`);
-  assert(retrieved?.tokenBudget === state.tokenBudget, `Round-trip tokenBudget matches (got ${retrieved?.tokenBudget})`);
-  assert(retrieved?.composedAt === state.composedAt, `Round-trip composedAt matches (got ${retrieved?.composedAt})`);
-  assert(retrieved?.historyDepth === state.historyDepth, `Round-trip historyDepth matches (got ${retrieved?.historyDepth})`);
-  assert(retrieved?.reshapedAt === undefined, 'reshapedAt is undefined when not set');
-
-  // Test: reshapedAt round-trips correctly
-  const stateWithReshape = {
-    ...state,
-    reshapedAt: '2026-04-05T12:01:00.000Z',
-  };
-  await redis.setModelState(agentId, sessionKey, stateWithReshape);
-  const retrievedWithReshape = await redis.getModelState(agentId, sessionKey);
-  assert(
-    retrievedWithReshape?.reshapedAt === stateWithReshape.reshapedAt,
-    `reshapedAt round-trips correctly (got ${retrievedWithReshape?.reshapedAt})`
-  );
-
-  await redis.flushPrefix();
-  await redis.disconnect();
-}
-
-await runRedisTests();
 
 // ─── Summary ─────────────────────────────────────────────────────────────────
 

@@ -35,26 +35,29 @@ function makeDb() {
 }
 
 function makeCompositor() {
-  const fakeRedis = {
+  const fakeVectorStore = {
+    async search() { return []; },
+  };
+
+  const fakeCache = {
     async getSlot() { return null; },
     async getHistory() { return []; },
     async setWindow() {},
     async setCursor() {},
     async getQueryEmbedding() { return null; },
-  };
-
-  const fakeVectorStore = {
-    async search() { return []; },
+    async setTopicWindow() {},
+    async replaceHistory() {},
+    async warmSession() {},
   };
 
   return new Compositor({
-    redis: fakeRedis,
+    cache: fakeCache,
     vectorStore: fakeVectorStore,
     libraryDb: null,
   });
 }
 
-function seedConversation(db, sessionKey, agentId = 'agent-alpha') {
+function seedConversation(db, sessionKey, agentId = 'agent1') {
   db.prepare(`
     INSERT INTO conversations (
       session_key, session_id, agent_id, channel_type, status,
@@ -72,7 +75,7 @@ function seedTopic(db, sessionKey, id, name, lastActiveAt) {
   `).run(id, sessionKey, name, lastActiveAt - 1000, lastActiveAt);
 }
 
-function seedMessage(db, convId, { agentId = 'agent-alpha', role, text, idx, topicId, createdAt }) {
+function seedMessage(db, convId, { agentId = 'agent1', role, text, idx, topicId, createdAt }) {
   db.prepare(`
     INSERT INTO messages (
       conversation_id, agent_id, role, text_content,
@@ -115,8 +118,8 @@ async function run() {
   console.log('  HyperMem Cross-Topic Keystone Test (P3.5)');
   console.log('═══════════════════════════════════════════════════\n');
 
-  const sessionKey = 'agent:agent-alpha:webchat:main';
-  const agentId = 'agent-alpha';
+  const sessionKey = 'agent:agent1:webchat:main';
+  const agentId = 'agent1';
 
   // ── 1. No other topics -> empty + compose succeeds ─────────────
   console.log('── 1. No other topics ──\n');

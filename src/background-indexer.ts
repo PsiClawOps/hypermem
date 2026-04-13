@@ -1,5 +1,5 @@
 /**
- * HyperMem Background Indexer
+ * hypermem Background Indexer
  *
  * Processes message history to extract structured knowledge:
  *   - Facts: atomic pieces of learned information
@@ -19,18 +19,51 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { StoredMessage, IndexerConfig, EpisodeType, SessionCursor } from './types.js';
+import { lintKnowledge } from './knowledge-lint.js';
+import { MessageStore } from './message-store.js';
+import { runNoiseSweep, runToolDecay } from './proactive-pass.js';
+import { TopicSynthesizer } from './topic-synthesizer.js';
+import { runDreamingPassForFleet, type DreamerConfig } from './dreaming-promoter.js';
+import { FactStore } from './fact-store.js';
+import { EpisodeStore } from './episode-store.js';
+import { TopicStore } from './topic-store.js';
+import { KnowledgeStore } from './knowledge-store.js';
+import { TemporalStore } from './temporal-store.js';
+import { isSafeForSharedVisibility } from './secret-scanner.js';
+import type { VectorStore } from './vector-store.js';
 
 // ─── Agent-to-Domain Map ────────────────────────────────────────
-// Maps agent IDs to their primary domain.
+// Maps well-known agent IDs to their primary domain.
 // Used to populate the `domain` column on extracted facts so that
 // domain-scoped retrieval (e.g. getActiveFacts({ domain: 'infrastructure' }))
 // returns results. New agents default to 'general'.
-// Customize this map with your own agent IDs and domains.
+//
+// ── EXAMPLE DATA ──────────────────────────────────────────────────
+// The agent names below (agent1, director1, etc.) are PLACEHOLDERS.
+// Replace them with your own agent IDs and domain labels to match
+// your fleet. Single-agent installs don't need to edit this:
+// unknown agents fall through to 'general' automatically.
+// See INSTALL.md § "Configure your fleet" for details.
+// ─────────────────────────────────────────────────────────────────
 const AGENT_DOMAIN_MAP: Record<string, string> = {
-  // Example: 'my-infra-agent': 'infrastructure',
-  // Example: 'my-product-agent': 'product',
-  // Example: 'my-security-agent': 'security',
+  agent1:        'infrastructure',
+  director2:        'infrastructure',
+  director1:        'infrastructure',
+  director3:        'infrastructure',
+  agent2:      'product',
+  director4:         'product',
+  director5:       'product',
+  director6:        'product',
+  agent3:     'security',
+  director7:      'security',
+  director8:        'security',
+  agent4:      'ux',
+  agent6:        'governance',
+  agent5:     'strategy',
+  specialist1:     'development',
+  specialist2:        'communications',
   main:         'general',
+  'channel-mini': 'general',
 };
 
 /**
@@ -40,16 +73,7 @@ const AGENT_DOMAIN_MAP: Record<string, string> = {
 function domainForAgent(agentId: string): string {
   return AGENT_DOMAIN_MAP[agentId] ?? 'general';
 }
-import { MessageStore } from './message-store.js';
-import { runNoiseSweep, runToolDecay } from './proactive-pass.js';
-import { TopicSynthesizer } from './topic-synthesizer.js';
-import { lintKnowledge } from './knowledge-lint.js';
-import { FactStore } from './fact-store.js';
-import { EpisodeStore } from './episode-store.js';
-import { TopicStore } from './topic-store.js';
-import { KnowledgeStore } from './knowledge-store.js';
-import { isSafeForSharedVisibility } from './secret-scanner.js';
-import type { VectorStore } from './vector-store.js';
+
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -120,7 +144,7 @@ function extractFactCandidates(content: string): FactCandidate[] {
   // Preference patterns — medium confidence (0.60)
   const preferencePatterns = [
     /(?:prefer|always use|never use|don't use|avoid) (.{10,150})/gi,
-    /(?:operator|user) (?:wants|prefers|likes|hates|dislikes) (.{10,150})/gi,
+    /(?:operator|operator) (?:wants|prefers|likes|hates|dislikes) (.{10,150})/gi,
   ];
 
   // Operational patterns: deployments, incidents, fixes — high confidence (0.70)
@@ -160,6 +184,30 @@ function extractFactCandidates(content: string): FactCandidate[] {
  * Rejects pattern matches that are code, table fragments, questions,
  * or too short to be meaningful facts.
  */
+/**
+ * Operational boilerplate phrases that appear frequently across sessions
+ * but carry zero signal value. High knn similarity makes them *worse*
+ * retrieval candidates — they match everything and contaminate episodes.
+ */
+const OPERATIONAL_BOILERPLATE: RegExp[] = [
+  /timed?\s*out\s*waiting/i,
+  /message\s*was\s*delivered/i,
+  /no\s*reply\s*(back\s*)?yet/i,
+  /picked?\s*it\s*up\s*on\s*(next\s*)?heartbeat/i,
+  /session\s*not\s*found/i,
+  /\bretrying\b/i,
+  /tool\s*call\s*failed/i,
+  /exec\s*completed/i,
+  /no\s*reply\s*needed/i,
+  /still\s*waiting/i,
+  /will\s*pick\s*(it\s*)?up\s*(on\s*(next|the))?/i,
+  /message\s*is\s*in\s*(his|her|their|the)\s*queue/i,
+  /sent\s+to\s+(agent6|agent2|agent4|agent3|agent5|agent1)/i,
+  /dispatched\s+(it\s+)?to/i,
+  /timed\s*out\s*after/i,
+  /\bNO_REPLY\b/,
+];
+
 function isQualityFact(content: string): boolean {
   // Too short — sentence fragments
   if (content.length < 40) return false;
@@ -203,6 +251,29 @@ function isQualityFact(content: string): boolean {
   // High non-alpha ratio indicates code/data, not natural language
   const alphaChars = (content.match(/[a-zA-Z]/g) || []).length;
   if (alphaChars / content.length < 0.5) return false;
+
+  // TUNE-013: External/untrusted content markers — web search excerpts,
+  // external doc pulls, and injected context blocks should never become facts.
+  if (/<<<\s*(END_EXTERNAL|BEGIN_EXTERNAL|EXTERNAL_UNTRUSTED|UNTRUSTED_CONTENT)/i.test(content)) return false;
+  if (/EXTERNAL_UNTRUSTED_CONTENT\s+id=/.test(content)) return false;
+
+  // TUNE-013: Multi-paragraph content — real extracted facts are single sentences.
+  // More than 2 newlines means we captured a paragraph or structured block, not a fact.
+  const newlineCount = (content.match(/\n/g) || []).length;
+  if (newlineCount > 2) return false;
+
+  // TUNE-013: URL-heavy content — external source snippets, not actionable facts
+  const urlMatches = content.match(/https?:\/\/\S+/g) || [];
+  if (urlMatches.length >= 2) return false;  // one URL in a fact is ok; multiple = source snippet
+
+  // TUNE-013: Content starting with a markdown heading is section text, not a fact
+  if (/^#{1,4}\s/.test(content.trim())) return false;
+
+  // TUNE-014: Operational boilerplate — phrases common across sessions that produce
+  // high knn similarity scores but carry zero signal. They cross-contaminate episodes.
+  for (const pattern of OPERATIONAL_BOILERPLATE) {
+    if (pattern.test(content)) return false;
+  }
 
   return true;
 }
@@ -395,7 +466,7 @@ function detectTopic(content: string): string | null {
 
   // Product/project name detection
   const productMatch = content.match(
-    /\b(HyperMem|OpenClaw)\b/i
+    /\b(HyperMem|ClawText|ClawDash|ClawCanvas|ClawCouncil|ClawTomation|OpenClaw|ClawDispatch)\b/i
   );
   if (productMatch) return productMatch[1];
 
@@ -416,18 +487,24 @@ function detectTopic(content: string): string | null {
 
 export class BackgroundIndexer {
   private readonly config: IndexerConfig;
+  private readonly dreamerConfig: Partial<DreamerConfig>;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private vectorStore: VectorStore | null = null;
   private synthesizer: TopicSynthesizer | null = null;
   private tickCount: number = 0;
+  /** Circuit breaker: consecutive tick failure count. Resets on success. */
+  private consecutiveFailures: number = 0;
+  /** True when the indexer is running in backoff mode due to repeated failures. */
+  private inBackoff: boolean = false;
 
   constructor(
     config?: Partial<IndexerConfig>,
     private getMessageDb?: (agentId: string) => DatabaseSync,
     private getLibraryDb?: () => DatabaseSync,
     private listAgents?: () => string[],
-    private getCursor?: CursorFetcher
+    private getCursor?: CursorFetcher,
+    dreamerConfig?: Partial<DreamerConfig>
   ) {
     // Initialize synthesizer if libraryDb accessor is available
     if (getLibraryDb) {
@@ -450,8 +527,11 @@ export class BackgroundIndexer {
       topicClosedAfter: config?.topicClosedAfter ?? '7d',
       factDecayRate: config?.factDecayRate ?? 0.01,
       episodeSignificanceThreshold: config?.episodeSignificanceThreshold ?? 0.5,
-      periodicInterval: config?.periodicInterval ?? 300000, // 5 minutes
+      periodicInterval: config?.periodicInterval ?? 60000,  // 1 minute
+      batchSize: config?.batchSize ?? 128,
+      maxMessagesPerTick: config?.maxMessagesPerTick ?? 500,
     };
+    this.dreamerConfig = dreamerConfig ?? {};
   }
 
   /**
@@ -469,9 +549,33 @@ export class BackgroundIndexer {
     if (!this.config.enabled) return;
     if (this.intervalHandle) return;
 
+    // Startup integrity check — catch corruption before the first tick writes anything.
+    if (this.getLibraryDb) {
+      try {
+        const libDb = this.getLibraryDb();
+        if (libDb) {
+          const row = libDb.prepare('PRAGMA quick_check').get() as { integrity_check?: string } | undefined;
+          if (row?.integrity_check && row.integrity_check !== 'ok') {
+            console.error(
+              '[indexer] ⚠️  library.db integrity check failed: ' + row.integrity_check + '\n' +
+              '[indexer] Recovery: stop OpenClaw, run ' +
+              '`sqlite3 ~/.openclaw/hypermem/library.db ".recover" | sqlite3 ~/.openclaw/hypermem/library_recovered.db`' +
+              ', swap the files, and restart. If recovery fails, delete library.db — the indexer rebuilds from message history.'
+            );
+            // Don't start the interval — nothing will succeed with a corrupt DB.
+            return;
+          }
+        }
+      } catch (err) {
+        // If we can't even open the DB, log and bail — don't start the interval.
+        console.error('[indexer] Could not open library.db for integrity check:', (err as Error).message);
+        return;
+      }
+    }
+
     // Run once immediately
     this.tick().catch(err => {
-      console.error('[indexer] Initial tick failed:', err);
+      this._handleTickError(err, 'initial');
     });
 
     // Run episode vector backfill once at startup (no-op if already done)
@@ -484,11 +588,90 @@ export class BackgroundIndexer {
     // Then periodically
     this.intervalHandle = setInterval(() => {
       this.tick().catch(err => {
-        console.error('[indexer] Periodic tick failed:', err);
+        this._handleTickError(err, 'periodic');
       });
     }, this.config.periodicInterval);
 
-    console.log(`[indexer] Started with interval ${this.config.periodicInterval}ms`);
+    console.log(`[indexer] Started with interval ${this.config.periodicInterval}ms, batchSize ${this.config.batchSize}, maxPerTick ${this.config.maxMessagesPerTick}`);
+  }
+
+  /**
+   * Circuit breaker for tick failures.
+   *
+   * - Tracks consecutive failures.
+   * - After 3 failures, logs actionable recovery guidance once, then switches
+   *   the indexer to 10× backoff interval so it stops spamming the log.
+   * - On the next successful tick, resets state and restores normal interval.
+   */
+  private _handleTickError(err: unknown, phase: 'initial' | 'periodic'): void {
+    this.consecutiveFailures++;
+    const msg = err instanceof Error ? err.message : String(err);
+    const isSqliteCorrupt = msg.includes('database disk image is malformed') ||
+      msg.includes('SQLITE_CORRUPT') ||
+      (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ERR_SQLITE_ERROR');
+
+    if (this.consecutiveFailures < 3) {
+      // First 1–2 failures: log normally.
+      console.error(`[indexer] ${phase === 'initial' ? 'Initial' : 'Periodic'} tick failed (attempt ${this.consecutiveFailures}/3):`, err);
+      return;
+    }
+
+    if (this.consecutiveFailures === 3) {
+      // Third failure: log once with recovery instructions, then enter backoff.
+      if (isSqliteCorrupt) {
+        console.error(
+          `[indexer] ⛔ Tick failed 3 times consecutively — library.db appears corrupted. Entering backoff mode.\n` +
+          `[indexer] Recovery steps:\n` +
+          `[indexer]   1. Stop OpenClaw: openclaw gateway stop\n` +
+          `[indexer]   2. Check damage: sqlite3 ~/.openclaw/hypermem/library.db "PRAGMA integrity_check"\n` +
+          `[indexer]   3. Attempt recovery: sqlite3 ~/.openclaw/hypermem/library.db ".recover" | sqlite3 ~/.openclaw/hypermem/library_recovered.db\n` +
+          `[indexer]   4. Swap: mv library.db library_corrupt.bak && mv library_recovered.db library.db\n` +
+          `[indexer]   5. If recovery fails, delete library.db — the indexer rebuilds from message history on next start.\n` +
+          `[indexer]   6. Restart: openclaw gateway start\n` +
+          `[indexer] Indexer will retry every ${(this.config.periodicInterval * 10) / 60000} minutes until then.`
+        );
+      } else {
+        console.error(
+          `[indexer] ⛔ Tick failed 3 times consecutively (${msg}). Entering backoff mode. ` +
+          `Will retry every ${(this.config.periodicInterval * 10) / 60000} minutes.`
+        );
+      }
+
+      // Switch to backoff interval.
+      this.inBackoff = true;
+      if (this.intervalHandle) {
+        clearInterval(this.intervalHandle);
+      }
+      this.intervalHandle = setInterval(() => {
+        this.tick().catch(backoffErr => {
+          this._handleTickError(backoffErr, 'periodic');
+        });
+      }, this.config.periodicInterval * 10);
+      return;
+    }
+
+    // Beyond 3: silent (already logged, in backoff — don't spam).
+  }
+
+  /**
+   * Reset the circuit breaker and restore normal interval after a successful tick.
+   * Called at the end of a successful tick().
+   */
+  private _resetCircuitBreaker(): void {
+    if (this.consecutiveFailures === 0) return;
+    const wasInBackoff = this.inBackoff;
+    this.consecutiveFailures = 0;
+    this.inBackoff = false;
+    if (wasInBackoff) {
+      // Restore normal interval.
+      if (this.intervalHandle) clearInterval(this.intervalHandle);
+      this.intervalHandle = setInterval(() => {
+        this.tick().catch(err => {
+          this._handleTickError(err, 'periodic');
+        });
+      }, this.config.periodicInterval);
+      console.log('[indexer] Circuit breaker reset — tick succeeded, restored normal interval.');
+    }
   }
 
   /**
@@ -512,6 +695,7 @@ export class BackgroundIndexer {
 
     this.running = true;
     const results: IndexerStats[] = [];
+    let tickSucceeded = false;
 
     try {
       if (!this.listAgents || !this.getMessageDb || !this.getLibraryDb) {
@@ -521,10 +705,16 @@ export class BackgroundIndexer {
 
       const agents = this.listAgents();
       const libraryDb = this.getLibraryDb();
+      let tickTotal = 0;
 
       for (const agentId of agents) {
+        if (tickTotal >= this.config.maxMessagesPerTick) {
+          console.log(`[indexer] maxMessagesPerTick (${this.config.maxMessagesPerTick}) reached — deferring remaining agents`);
+          break;
+        }
         try {
           const stats = await this.processAgent(agentId, libraryDb);
+          tickTotal += stats.messagesProcessed;
           if (stats.messagesProcessed > 0 || stats.tombstoned > 0) {
             results.push(stats);
           }
@@ -578,6 +768,25 @@ export class BackgroundIndexer {
         }
       }
 
+      // Dreaming promotion pass — every tickInterval ticks (default 12 = ~1hr)
+      const dreamerEnabled = this.dreamerConfig.enabled ?? false;
+      const dreamerTickInterval = this.dreamerConfig.tickInterval ?? 12;
+      if (dreamerEnabled && this.tickCount % dreamerTickInterval === 0 && this.getLibraryDb) {
+        try {
+          const libDb = this.getLibraryDb();
+          if (libDb) {
+            const dreamResults = await runDreamingPassForFleet(agents, libDb, this.dreamerConfig);
+            const totalPromoted = dreamResults.reduce((s, r) => s + r.promoted, 0);
+            if (totalPromoted > 0) {
+              console.log(`[indexer] Dreaming: promoted ${totalPromoted} facts across ${dreamResults.length} agents`);
+            }
+          }
+        } catch (err) {
+          // Non-fatal — dreaming failures never block indexing
+          console.warn('[indexer] Dreaming pass failed (non-fatal):', (err as Error).message);
+        }
+      }
+
       // Run proactive passes on each agent's message DB
       for (const agentId of agents) {
         const messageDb = this.getMessageDb!(agentId);
@@ -606,7 +815,11 @@ export class BackgroundIndexer {
         }
       }
 
+      // If we reach here, the tick completed without throwing.
+      tickSucceeded = true;
+
     } finally {
+      if (tickSucceeded) this._resetCircuitBreaker();
       this.running = false;
     }
 
@@ -632,13 +845,14 @@ export class BackgroundIndexer {
     const episodeStore = new EpisodeStore(libraryDb);
     const topicStore = new TopicStore(libraryDb);
     const knowledgeStore = new KnowledgeStore(libraryDb);
+    const temporalStore = new TemporalStore(libraryDb);
 
     // Get watermark — last processed message ID for this agent
     const watermark = this.getWatermark(libraryDb, agentId);
     const lastProcessedId = watermark?.lastMessageId ?? 0;
 
-    // Fetch unindexed messages (batch size: 100)
-    const messages = this.getUnindexedMessages(messageDb, agentId, lastProcessedId, 100);
+    // Fetch unindexed messages (batch size from config)
+    const messages = this.getUnindexedMessages(messageDb, agentId, lastProcessedId, this.config.batchSize);
 
     if (messages.length === 0) {
       // Even with no new messages, run tombstone cleanup in case supersedes
@@ -719,6 +933,9 @@ export class BackgroundIndexer {
           // A supersede is detected when an existing active fact shares the
           // same 60-char prefix (same topic, different phrasing/update).
           if (fact.id) {
+            // Index into temporal store (ingest_at as proxy, confidence=0.5)
+            temporalStore.indexFact(fact.id, agentId, fact.createdAt);
+
             const oldFactId = factStore.findSupersedableByContent(agentId, factContent);
             if (oldFactId !== null && oldFactId !== fact.id) {
               const didSupersede = factStore.markSuperseded(oldFactId, fact.id);
@@ -931,23 +1148,26 @@ export class BackgroundIndexer {
     // Mark dormant topics
     const dormantThreshold = this.parseDuration(this.config.topicDormantAfter);
     if (dormantThreshold > 0) {
+      // Compute threshold timestamp in JS and pass as parameter — avoids SQL template interpolation.
+      const dormantBefore = new Date(Date.now() - dormantThreshold * 1000).toISOString();
       libraryDb.prepare(`
         UPDATE topics
         SET status = 'dormant'
         WHERE status = 'active'
-          AND updated_at < datetime('now', '-${dormantThreshold} seconds')
-      `).run();
+          AND updated_at < ?
+      `).run(dormantBefore);
     }
 
     // Close old dormant topics
     const closedThreshold = this.parseDuration(this.config.topicClosedAfter);
     if (closedThreshold > 0) {
+      const closedBefore = new Date(Date.now() - closedThreshold * 1000).toISOString();
       libraryDb.prepare(`
         UPDATE topics
         SET status = 'closed'
         WHERE status = 'dormant'
-          AND updated_at < datetime('now', '-${closedThreshold} seconds')
-      `).run();
+          AND updated_at < ?
+      `).run(closedBefore);
     }
   }
 
@@ -1078,7 +1298,7 @@ export class BackgroundIndexer {
 // ─── Standalone runner ──────────────────────────────────────────
 
 /**
- * Create and start a background indexer connected to HyperMem databases.
+ * Create and start a background indexer connected to hypermem databases.
  * Used by the hook or a standalone daemon.
  */
 export function createIndexer(
@@ -1087,9 +1307,10 @@ export function createIndexer(
   listAgents: () => string[],
   config?: Partial<IndexerConfig>,
   getCursor?: CursorFetcher,
-  vectorStore?: VectorStore
+  vectorStore?: VectorStore,
+  dreamerConfig?: Partial<DreamerConfig>
 ): BackgroundIndexer {
-  const indexer = new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor);
+  const indexer = new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor, dreamerConfig);
   if (vectorStore) indexer.setVectorStore(vectorStore);
   return indexer;
 }

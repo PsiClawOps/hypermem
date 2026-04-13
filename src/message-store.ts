@@ -1,9 +1,9 @@
 /**
- * HyperMem Message Store
+ * hypermem Message Store
  *
  * CRUD operations for conversations and messages in SQLite.
  * All messages are stored in provider-neutral format.
- * This is the write-through layer: hot cache → here.
+ * This is the write-through layer: Redis → here.
  */
 
 import type { DatabaseSync } from 'node:sqlite';
@@ -15,6 +15,7 @@ import type {
   ConversationStatus,
   RecentTurn,
 } from './types.js';
+import { getOrCreateActiveContext, updateContextHead } from './context-store.js';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -105,6 +106,9 @@ export class MessageStore {
 
     // node:sqlite returns { changes, lastInsertRowid }
     const id = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
+
+    // Ensure an active context exists for the new conversation (fire-and-forget side effect)
+    getOrCreateActiveContext(this.db, agentId, sessionKey, id);
 
     return {
       id,
@@ -208,6 +212,10 @@ export class MessageStore {
   /**
    * Record a message to the database.
    * Returns the stored message with its assigned ID.
+   *
+   * Phase 2 (Turn DAG): automatically sets parent_id and depth.
+   *   - parent_id = context.head_message_id (the previous message on this branch)
+   *   - depth = parent.depth + 1 (or 0 if first message)
    */
   recordMessage(
     conversationId: number,
@@ -216,6 +224,7 @@ export class MessageStore {
     opts?: {
       tokenCount?: number;
       isHeartbeat?: boolean;
+      contextId?: number;
     }
   ): StoredMessage {
     const now = nowIso();
@@ -227,9 +236,26 @@ export class MessageStore {
 
     const messageIndex = (lastRow?.max_idx ?? -1) + 1;
 
+    // Phase 2 (Turn DAG): resolve parent_id and depth from context head
+    let parentId: number | null = null;
+    let depth = 0;
+    if (opts?.contextId) {
+      const headRow = this.db
+        .prepare('SELECT head_message_id FROM contexts WHERE id = ?')
+        .get(opts.contextId) as { head_message_id: number | null } | undefined;
+
+      if (headRow?.head_message_id != null) {
+        parentId = headRow.head_message_id;
+        const parentDepthRow = this.db
+          .prepare('SELECT depth FROM messages WHERE id = ?')
+          .get(parentId) as { depth: number } | undefined;
+        depth = (parentDepthRow?.depth ?? -1) + 1;
+      }
+    }
+
     const result = this.db.prepare(`
-      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, metadata, token_count, message_index, is_heartbeat, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, metadata, token_count, message_index, is_heartbeat, created_at, context_id, parent_id, depth)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       conversationId,
       agentId,
@@ -241,10 +267,18 @@ export class MessageStore {
       opts?.tokenCount || null,
       messageIndex,
       opts?.isHeartbeat ? 1 : 0,
-      now
+      now,
+      opts?.contextId ?? null,
+      parentId,
+      depth
     );
 
     const id = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
+
+    // Update context head pointer if contextId was provided
+    if (opts?.contextId) {
+      updateContextHead(this.db, opts.contextId, Number(id));
+    }
 
     // Update conversation counters
     const tokenDelta = opts?.tokenCount || 0;
@@ -283,13 +317,16 @@ export class MessageStore {
   /**
    * Get recent messages for a conversation.
    */
-  getRecentMessages(conversationId: number, limit: number = 50): StoredMessage[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM messages
-      WHERE conversation_id = ?
-      ORDER BY message_index DESC
-      LIMIT ?
-    `).all(conversationId, limit) as Record<string, unknown>[];
+  getRecentMessages(conversationId: number, limit: number = 50, minMessageId?: number): StoredMessage[] {
+    const params: (string | number | null)[] = [conversationId];
+    let sql = 'SELECT * FROM messages WHERE conversation_id = ?';
+    if (minMessageId != null) {
+      sql += ' AND id >= ?';
+      params.push(minMessageId);
+    }
+    sql += ' ORDER BY message_index DESC LIMIT ?';
+    params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
 
     // Reverse to get chronological order
     return rows.reverse().map(parseMessageRow);
@@ -301,13 +338,16 @@ export class MessageStore {
    * (legacy messages created before topic tracking was introduced).
    * This is transition-safe: no legacy messages are silently dropped.
    */
-  getRecentMessagesByTopic(conversationId: number, topicId: string, limit: number = 50): StoredMessage[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM messages
-      WHERE conversation_id = ? AND (topic_id = ? OR topic_id IS NULL)
-      ORDER BY message_index DESC
-      LIMIT ?
-    `).all(conversationId, topicId, limit) as Record<string, unknown>[];
+  getRecentMessagesByTopic(conversationId: number, topicId: string, limit: number = 50, minMessageId?: number): StoredMessage[] {
+    const params: (string | number | null)[] = [conversationId, topicId];
+    let sql = 'SELECT * FROM messages WHERE conversation_id = ? AND (topic_id = ? OR topic_id IS NULL)';
+    if (minMessageId != null) {
+      sql += ' AND id >= ?';
+      params.push(minMessageId);
+    }
+    sql += ' ORDER BY message_index DESC LIMIT ?';
+    params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
 
     // Reverse to get chronological order
     return rows.reverse().map(parseMessageRow);
@@ -400,6 +440,101 @@ export class MessageStore {
       }));
     } catch (err) {
       console.warn('[hypermem:message-store] getRecentTurns failed:', (err as Error).message);
+      return [];
+    }
+  }
+
+  /**
+   * Get messages by walking the parent_id chain from a head message backward.
+   * This is the DAG-native read path introduced in Phase 3.
+   *
+   * Walks from headMessageId backward through parent_id links, collecting
+   * up to `limit` messages in chronological order.
+   *
+   * Falls back to getRecentMessages if the head message has no parent chain
+   * (e.g., legacy data before backfill).
+   */
+  getHistoryByDAGWalk(headMessageId: number, limit: number = 50): StoredMessage[] {
+    try {
+      // Use recursive CTE to walk backward from head
+      const rows = this.db.prepare(`
+        WITH RECURSIVE chain AS (
+          SELECT id, parent_id, depth, conversation_id, agent_id, role,
+                 text_content, tool_calls, tool_results, metadata,
+                 message_index, token_count, is_heartbeat, created_at,
+                 1 AS chain_pos
+          FROM messages
+          WHERE id = ?
+
+          UNION ALL
+
+          SELECT m.id, m.parent_id, m.depth, m.conversation_id, m.agent_id, m.role,
+                 m.text_content, m.tool_calls, m.tool_results, m.metadata,
+                 m.message_index, m.token_count, m.is_heartbeat, m.created_at,
+                 c.chain_pos + 1
+          FROM messages m
+          JOIN chain c ON m.id = c.parent_id
+          WHERE c.chain_pos < ?
+        )
+        SELECT * FROM chain ORDER BY depth ASC, message_index ASC
+      `).all(headMessageId, limit) as Record<string, unknown>[];
+
+      if (rows.length === 0) return [];
+      return rows.map(parseMessageRow);
+    } catch {
+      // DAG walk failed (e.g., no parent chain) — return empty, caller should fall back
+      return [];
+    }
+  }
+
+  /**
+   * Get messages scoped to a specific context_id.
+   * Used by keystone/FTS/topic recall to constrain results to the active branch.
+   */
+  getMessagesByContextId(
+    contextId: number,
+    limit: number = 200,
+    opts?: { excludeHeartbeats?: boolean; requireText?: boolean }
+  ): StoredMessage[] {
+    let sql = 'SELECT * FROM messages WHERE context_id = ?';
+    const params: (string | number | null)[] = [contextId];
+
+    if (opts?.excludeHeartbeats) {
+      sql += ' AND is_heartbeat = 0';
+    }
+    if (opts?.requireText) {
+      sql += " AND text_content IS NOT NULL AND text_content != ''";
+    }
+
+    sql += ' ORDER BY message_index DESC LIMIT ?';
+    params.push(limit);
+
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    return rows.reverse().map(parseMessageRow);
+  }
+
+  /**
+   * Full-text search constrained to a specific context_id.
+   * Phase 3: replaces unscoped searchMessages for composition paths.
+   */
+  searchMessagesByContextId(
+    contextId: number,
+    query: string,
+    limit: number = 20
+  ): StoredMessage[] {
+    try {
+      const rows = this.db.prepare(`
+        WITH fts_matches AS (
+          SELECT rowid, rank FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?
+        )
+        SELECT m.* FROM messages m
+        JOIN fts_matches ON m.id = fts_matches.rowid
+        WHERE m.context_id = ?
+        ORDER BY fts_matches.rank
+      `).all(query, limit * 3, contextId) as Record<string, unknown>[];
+
+      return rows.slice(0, limit).map(parseMessageRow);
+    } catch {
       return [];
     }
   }

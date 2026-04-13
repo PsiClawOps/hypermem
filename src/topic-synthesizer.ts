@@ -4,7 +4,7 @@
  * Synthesizes compiled knowledge pages (wiki-style) from stale topics.
  * Heuristic-only: no LLM calls. Uses content-type classifier + keystone scoring.
  *
- * Architecture: Karpathy LLM Wiki Pattern adapted for HyperMem.
+ * Architecture: Karpathy LLM Wiki Pattern adapted for hypermem.
  * Raw sources (messages.db) → Wiki (knowledge table) → Compositor (compose-time)
  */
 
@@ -101,9 +101,9 @@ function keystoneScore(msg: MessageRow): number {
   const backtickMatches = text.match(/`[^`]+`/g) || [];
   score += backtickMatches.length * 0.2;
 
-  // Agent mentions — add your agent IDs here for better topic scoring
-  // const agentMentions = text.match(/\b(agent-one|agent-two)\b/gi) || [];
-  // score += agentMentions.length * 0.25;
+  // Agent mentions (known patterns)
+  const agentMentions = text.match(/\b(agent1|agent2|agent4|agent3|agent5|agent6|director1|director2|director7|specialist2|specialist1)\b/gi) || [];
+  score += agentMentions.length * 0.25;
 
   // Quoted content
   const quotedMatches = text.match(/"[^"]{10,}"/g) || [];
@@ -219,9 +219,10 @@ export class TopicSynthesizer {
         SELECT * FROM topics
         WHERE agent_id = ?
           AND message_count >= ?
-          AND updated_at < datetime('now', '-${staleThresholdMinutes} minutes')
+          AND updated_at < datetime('now', '-' || ? || ' minutes')
+          -- safe: staleThresholdMinutes is a validated integer
         ORDER BY updated_at ASC
-      `).all(agentId, cfg.SYNTHESIS_MIN_MESSAGES) as unknown as TopicRow[];
+      `).all(agentId, cfg.SYNTHESIS_MIN_MESSAGES, Math.floor(staleThresholdMinutes)) as unknown as TopicRow[];
     } catch {
       return result;
     }

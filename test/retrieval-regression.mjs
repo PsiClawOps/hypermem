@@ -136,21 +136,18 @@ async function run() {
     insertFact(libDb, { agentId, scope: 'agent', content: 'nomic embedding model selected after benchmarking on domain data', domain: 'embeddings' });
 
     // Build a compositor with no vector store (FTS-only path)
-    // Use a mock Redis that never returns cached data
+    // Direct compositor test (no caching layer)
     let hm;
     try {
       hm = await HyperMem.create({
         dataDir: path.join(tmpDir, 's1'),
-        redis: { host: 'localhost', port: 6379, keyPrefix: 'hm-reg-s1:', sessionTTL: 60 },
       });
-      await hm.redis.flushPrefix();
     } catch {
-      // Redis unavailable — skip HyperMem.create, use Compositor directly
+      // Skip HyperMem.create, use Compositor directly
     }
 
-    // Build a compositor directly (no Redis dependency)
+    // Build a compositor directly
     const compositor = new Compositor({
-      redis: hm?.redis || makeMockRedis(),
       vectorStore: null,   // no Ollama
       libraryDb: libDb,
     });
@@ -213,7 +210,6 @@ async function run() {
     insertFact(libDb, { agentId: agentA, scope: 'agent', content: 'AGENT_A_FACT', domain: 'public' });
 
     const compositor = new Compositor({
-      redis: makeMockRedis(),
       vectorStore: null,
       libraryDb: libDb,
     });
@@ -259,7 +255,7 @@ async function run() {
     // Insert superseded (old) fact — superseded_by is a non-null string/id
     // The compositor queries: WHERE superseded_by IS NULL
     // We insert superseded_by = 'fact_new_id' (any truthy non-null value)
-    // Note: schema has superseded_by as INTEGER — use numeric id 99 as agent4
+    // Note: schema has superseded_by as INTEGER — use numeric id 99 as agent3
     libDb.prepare(`
       INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility,
                          source_type, source_session_key, superseded_by,
@@ -272,7 +268,6 @@ async function run() {
     insertFact(libDb, { agentId, scope: 'agent', content: 'NEW_APPROACH_VALUE', domain: 'approach' });
 
     const compositor = new Compositor({
-      redis: makeMockRedis(),
       vectorStore: null,
       libraryDb: libDb,
     });
@@ -340,7 +335,6 @@ async function run() {
       });
 
       const compositor = new Compositor({
-        redis: makeMockRedis(),
         vectorStore: null,
         libraryDb: libDb,
       });
@@ -401,7 +395,6 @@ async function run() {
     }
 
     const compositor = new Compositor({
-      redis: makeMockRedis(),
       vectorStore: null,
       libraryDb: libDb,
     });
@@ -447,22 +440,6 @@ async function run() {
 }
 
 /**
- * Minimal mock Redis that never returns cached data.
- * Satisfies the Compositor constructor without requiring a live Redis instance.
- */
-function makeMockRedis() {
-  return {
-    getSlot: async () => null,
-    getHistory: async () => [],
-    sessionExists: async () => false,
-    setWindow: async () => {},
-    setCursor: async () => {},
-    getCursor: async () => null,
-    getQueryEmbedding: async () => null,
-    warmSession: async () => {},
-    flushPrefix: async () => {},
-  };
-}
 
 run().catch(err => {
   console.error('Fatal:', err);
