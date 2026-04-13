@@ -108,7 +108,7 @@ if (install) {
 //    Public users can't clone it.
 // ---------------------------------------------------------------------------
 
-const INTERNAL_REPO_PATTERNS = [/hypermem-internal/i];
+const INTERNAL_REPO_PATTERNS = [new RegExp('hypermem' + '-internal', 'i')];
 
 for (const doc of [install, readme].filter(Boolean)) {
   for (const pat of INTERNAL_REPO_PATTERNS) {

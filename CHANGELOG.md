@@ -2,6 +2,25 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.7.0 — Temporal validity, expertise storage, contradiction detection
+
+- **Temporal validity engine:** facts expire, get superseded, and decay over time. Stale knowledge auto-deprioritized in retrieval.
+- **Expertise store:** per-agent skill/domain tracking. Agents accumulate domain proficiency through indexed interactions.
+- **Contradiction detector:** flags conflicting facts at ingest time. Newer evidence supersedes older, with audit trail.
+- **Maintenance APIs:** programmatic access to compaction stats, index health, and storage diagnostics.
+- **CI pipeline:** Redis removed, memory-plugin build stage added, monorepo file-ref wiring.
+
+## 0.6.2 — Turn DAG, identity scrub, fleet customization
+
+- Turn DAG phases 1–3: DAG-native reads, context-scoped recall, fence downgrade.
+- Fleet name substitution for public distribution.
+- Fleet customization guide and single-agent install docs.
+
+## 0.6.0 — Redis removal complete
+
+- SQLite-only cache layer replaces Redis entirely. Zero external service dependencies.
+- Simplified deployment: single binary + SQLite files.
+
 ## 0.5.6 — Content fingerprint dedup and hardening
 
 - O(1) fingerprint dedup across all retrieval paths (temporal, open-domain, semantic, cross-session). Catches rephrased near-duplicates that substring matching missed.
