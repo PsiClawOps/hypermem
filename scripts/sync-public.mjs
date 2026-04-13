@@ -498,6 +498,79 @@ async function main() {
   console.log(`   Internal: ${internalHead}`);
   console.log(`   Public commit: ${publicCommit}`);
   console.log(`   Public remote removed (ephemeral).`);
+
+  // 10. Wait for CI (optional — requires GH_TOKEN or GITHUB_TOKEN)
+  if (!NO_PUSH) {
+    await waitForCI(publicCommit);
+  }
+}
+
+// ─── CI Status Checker ───────────────────────────────────────────
+
+const CI_OWNER = 'PsiClawOps';
+const CI_REPO  = 'hypermem';
+const CI_POLL_INTERVAL_MS = 15_000;  // 15 seconds
+const CI_TIMEOUT_MS = 300_000;       // 5 minutes
+
+async function waitForCI(commitSha) {
+  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_PSICLAWOPS_TOKEN;
+  if (!token) {
+    console.log('\n⏭️  Skipping CI check (no GH_TOKEN/GITHUB_TOKEN set).');
+    console.log('   Check manually: https://github.com/PsiClawOps/hypermem/actions');
+    return;
+  }
+
+  console.log(`\n[CI] Waiting for GitHub Actions on ${commitSha}...`);
+  const apiBase = `https://api.github.com/repos/${CI_OWNER}/${CI_REPO}`;
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'hypermem-sync-public',
+  };
+
+  const start = Date.now();
+  while (Date.now() - start < CI_TIMEOUT_MS) {
+    await new Promise(r => setTimeout(r, CI_POLL_INTERVAL_MS));
+
+    try {
+      const res = await fetch(`${apiBase}/actions/runs?per_page=5`, { headers });
+      if (!res.ok) {
+        console.log(`   ⚠️  GitHub API ${res.status}: ${res.statusText}`);
+        continue;
+      }
+      const data = await res.json();
+      // Find a run that matches our commit (short sha prefix match)
+      const run = data.workflow_runs?.find(r =>
+        r.head_sha?.startsWith(commitSha) || commitSha.startsWith(r.head_sha?.slice(0, 7))
+      );
+
+      if (!run) {
+        const elapsed = Math.round((Date.now() - start) / 1000);
+        process.stdout.write(`   ⏳ No run found yet (${elapsed}s)\r`);
+        continue;
+      }
+
+      if (run.status === 'completed') {
+        if (run.conclusion === 'success') {
+          console.log(`   ✅ CI passed: ${run.html_url}`);
+          return;
+        } else {
+          console.error(`   ❌ CI failed (${run.conclusion}): ${run.html_url}`);
+          process.exitCode = 1;
+          return;
+        }
+      }
+
+      const elapsed = Math.round((Date.now() - start) / 1000);
+      process.stdout.write(`   ⏳ CI ${run.status} (${elapsed}s)\r`);
+    } catch (err) {
+      console.log(`   ⚠️  CI check error: ${err.message}`);
+    }
+  }
+
+  console.log(`\n   ⚠️  CI check timed out after ${CI_TIMEOUT_MS / 1000}s.`);
+  console.log(`   Check manually: https://github.com/${CI_OWNER}/${CI_REPO}/actions`);
 }
 
 main().catch(err => {
