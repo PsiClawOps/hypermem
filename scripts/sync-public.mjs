@@ -96,6 +96,10 @@ const PATH_MAP = [
   { from: /process\.env\.HOME \|\| '\/home\/user'/g,           to: "process.env.HOME || os.homedir()" },
   // Internal workspace repo paths (in comments/examples only — caught by word boundary rules above)
   { from: /~\/\.openclaw\/workspace-council\//g,               to: '~/.openclaw/workspace/' },
+  // Bare home path (with trailing slash)
+  { from: /\/home\/lumadmin\//g, to: '~/' },
+  // Quoted home path (in path.join fallbacks like '/home/lumadmin')
+  { from: /'\/home\/lumadmin'/g, to: "os.homedir()" },
   // Bare string in path.join() calls
   { from: /workspace-council/g, to: 'workspace' },
 ];
