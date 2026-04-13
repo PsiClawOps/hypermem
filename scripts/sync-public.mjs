@@ -102,6 +102,8 @@ const PATH_MAP = [
   { from: /'\/home\/lumadmin'/g, to: "os.homedir()" },
   // Bare string in path.join() calls
   { from: /workspace-council/g, to: 'workspace' },
+  // Internal repo URL → public repo URL
+  { from: /hypermem-internal/g, to: 'hypermem' },
 ];
 
 // Operator name substitutions (in code patterns, not user-facing docs)
@@ -165,7 +167,7 @@ const SANITIZE_EXTENSIONS = new Set([
 ]);
 
 // ─── Directories to sync ─────────────────────────────────────────
-const SYNC_DIRS = ['src', 'test', 'scripts', 'docs', '.github'];
+const SYNC_DIRS = ['src', 'test', 'scripts', 'docs', '.github', 'plugin', 'memory-plugin'];
 const SYNC_ROOT_FILES = [
   'package.json', 'tsconfig.json',
   'README.md', 'CHANGELOG.md', 'INSTALL.md',
@@ -237,6 +239,8 @@ function escapeRegex(str) {
 // ─── File Operations ─────────────────────────────────────────────
 
 function shouldExclude(relativePath) {
+  if (relativePath.includes('node_modules')) return true;
+  if (relativePath.endsWith('package-lock.json') && relativePath !== 'package-lock.json') return true;
   return EXCLUDE_FILES.some(ex => relativePath === ex || relativePath.endsWith('/' + ex));
 }
 
