@@ -8,7 +8,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LATEST_SCHEMA_VERSION = 7;
+export const LATEST_SCHEMA_VERSION = 8;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -262,6 +262,14 @@ export function migrate(db: DatabaseSync): void {
 
     db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(7, nowIso());
+  }
+
+  // v7 → v8: Turn DAG Phase 3 — add context_id index for DAG-native reads
+  if (currentVersion < 8) {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_messages_context_id ON messages(context_id)');
+
+    db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(8, nowIso());
   }
 }
 

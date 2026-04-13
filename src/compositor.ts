@@ -42,6 +42,7 @@ import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
 import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence, getCompactionFence } from './compaction-fence.js';
+import { getActiveContext, type Context } from './context-store.js';
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
 import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
 import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderLightFOS, resolveOutputTier, buildActionVerificationSummary } from './fos-mod.js';
@@ -1169,6 +1170,15 @@ export class Compositor {
     let composedActiveTopicId: string | undefined;
     let composedActiveTopicName: string | undefined;
     if (request.includeHistory !== false) {
+      // Phase 3 (Turn DAG): resolve active context for DAG-native reads.
+      // This is the primary branch-scoping mechanism; fence remains as transitional safety.
+      let activeContext: Context | null = null;
+      try {
+        activeContext = getActiveContext(db, request.agentId, request.sessionKey);
+      } catch {
+        // Context resolution is best-effort — fall back to fence-based reads
+      }
+
       // P3.4: Look up the active topic for this session (non-fatal)
       let activeTopicId: string | undefined;
       let activeTopic: { id: string; name: string } | undefined;
@@ -1203,7 +1213,8 @@ export class Compositor {
         request.historyDepth || this.config.maxHistoryMessages,
         store,
         activeTopicId,
-        fenceMessageId
+        fenceMessageId,
+        activeContext
       );
 
       // Deduplicate history by StoredMessage.id (second line of defense after
@@ -1282,7 +1293,8 @@ export class Compositor {
           keystoneMaxMsgs,
           request.prompt,
           libDb || undefined,
-          fenceMessageId
+          fenceMessageId,
+          activeContext
         );
         if (keystoneResult) {
           keystoneMessages = keystoneResult.keystoneMessages;
@@ -1310,7 +1322,8 @@ export class Compositor {
             includedHistory,
             db,
             3,
-            fenceMessageId
+            fenceMessageId,
+            activeContext
           );
           if (rawCrossTopicKeystones.length > 0) {
             // Token budget: cap the full cross-topic block at 15% of remaining,
@@ -2263,7 +2276,17 @@ export class Compositor {
 
     if (!conversation) return;
 
+    // Phase 3 (Turn DAG): resolve active context for DAG-native warm preload.
+    // Uses context.head_message_id to walk only the active branch.
+    let activeContext: Context | null = null;
+    try {
+      activeContext = getActiveContext(db, agentId, sessionKey);
+    } catch {
+      // Context resolution is best-effort
+    }
+
     // Phase 0 fence enforcement: resolve compaction fence for warm bootstrap.
+    // Fence remains as transitional safety — primary scoping is via DAG walk.
     let warmFenceMessageId: number | undefined;
     try {
       ensureCompactionFenceSchema(db);
@@ -2284,7 +2307,19 @@ export class Compositor {
     const warmBudget = Math.floor(
       effectiveBudget * (this.config.warmHistoryBudgetFraction ?? 0.4)
     );
-    const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages, warmFenceMessageId);
+
+    // Phase 3 (Turn DAG): prefer DAG walk from context head for warm preload.
+    // This ensures only active-branch messages enter the warm cache.
+    let rawHistory: StoredMessage[];
+    if (activeContext?.headMessageId) {
+      rawHistory = store.getHistoryByDAGWalk(activeContext.headMessageId, this.config.maxHistoryMessages);
+      // DAG walk may return empty for legacy data — fall back to fence-scoped query
+      if (rawHistory.length === 0) {
+        rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages, warmFenceMessageId);
+      }
+    } else {
+      rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages, warmFenceMessageId);
+    }
     const transformedForWarm = applyToolGradient(rawHistory, {
       totalWindowTokens: resolveModelWindow(opts?.model, this.config.defaultTokenBudget),
     });
@@ -2344,7 +2379,15 @@ export class Compositor {
     const conversation = store.getConversation(sessionKey);
     if (!conversation) return;
 
-    // Phase 0 fence enforcement for gradient refresh
+    // Phase 3 (Turn DAG): resolve active context for DAG-native gradient refresh
+    let activeContext: Context | null = null;
+    try {
+      activeContext = getActiveContext(db, agentId, sessionKey);
+    } catch {
+      // Context resolution is best-effort
+    }
+
+    // Phase 0 fence enforcement for gradient refresh (transitional safety)
     let gradientFenceMessageId: number | undefined;
     try {
       ensureCompactionFenceSchema(db);
@@ -2354,7 +2397,16 @@ export class Compositor {
       // Fence lookup is best-effort
     }
 
-    const rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages, gradientFenceMessageId);
+    // Phase 3: prefer DAG walk from context head
+    let rawHistory: StoredMessage[];
+    if (activeContext?.headMessageId) {
+      rawHistory = store.getHistoryByDAGWalk(activeContext.headMessageId, this.config.maxHistoryMessages);
+      if (rawHistory.length === 0) {
+        rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages, gradientFenceMessageId);
+      }
+    } else {
+      rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages, gradientFenceMessageId);
+    }
     const transformedHistory = applyToolGradient(rawHistory, {
       totalWindowTokens: tokenBudget && tokenBudget > 0
         ? Math.max(tokenBudget, Math.floor(tokenBudget / 0.80))
@@ -2432,13 +2484,23 @@ export class Compositor {
     limit: number,
     store: MessageStore,
     topicId?: string,
-    fenceMessageId?: number
+    fenceMessageId?: number,
+    activeContext?: Context | null
   ): Promise<NeutralMessage[]> {
     // Pass limit through to Redis — this is the correct enforcement point.
     // Previously getHistory() ignored the limit on the Redis path (LRANGE 0 -1),
     // meaning historyDepth in the compose request had no effect on hot sessions.
     const cached = await this.cache.getHistory(agentId, sessionKey, limit);
     if (cached.length > 0) return cached;
+
+    // Phase 3 (Turn DAG): walk from context.head_message_id backward through
+    // parent_id links. This is the primary correctness mechanism — the fence
+    // remains as transitional safety only.
+    if (activeContext?.headMessageId) {
+      const dagMessages = store.getHistoryByDAGWalk(activeContext.headMessageId, limit);
+      if (dagMessages.length > 0) return dagMessages;
+      // DAG walk returned empty (e.g., legacy data without parent chains) — fall through
+    }
 
     const conversation = store.getConversation(sessionKey);
     if (!conversation) return [];
@@ -2904,7 +2966,8 @@ export class Compositor {
     keystoneMaxMsgs: number,
     prompt?: string,
     libraryDb?: DatabaseSync,
-    fenceMessageId?: number
+    fenceMessageId?: number,
+    activeContext?: Context | null
   ): Promise<{
     keystoneMessages: NeutralMessage[];
     keystoneTokens: number;
@@ -2981,8 +3044,11 @@ export class Compositor {
       };
 
       const fenceClause = fenceMessageId != null ? 'AND m.id >= ?' : '';
+      // Phase 3 (Turn DAG): prefer context_id scoping over conversation_id+fence
+      const contextClause = activeContext ? 'AND m.context_id = ?' : '';
       const baseParams: (string | number | null)[] = [conversationId, cutoffId];
       if (fenceMessageId != null) baseParams.push(fenceMessageId);
+      if (activeContext) baseParams.push(activeContext.id);
 
       const baseQuery = `
         SELECT
@@ -2995,6 +3061,7 @@ export class Compositor {
         WHERE m.conversation_id = ?
           AND m.id < ?
           ${fenceClause}
+          ${contextClause}
           AND m.text_content IS NOT NULL
           AND m.is_heartbeat = 0
           AND m.text_content != ''
@@ -3014,6 +3081,7 @@ export class Compositor {
           try {
             const ftsParams: (string | number | null)[] = [conversationId, cutoffId];
             if (fenceMessageId != null) ftsParams.push(fenceMessageId);
+            if (activeContext) ftsParams.push(activeContext.id);
             ftsParams.push(ftsTerms);
             candidateRows = db.prepare(`
               SELECT
@@ -3026,6 +3094,7 @@ export class Compositor {
               WHERE m.conversation_id = ?
                 AND m.id < ?
                 ${fenceClause}
+                ${contextClause}
                 AND m.text_content IS NOT NULL
                 AND m.is_heartbeat = 0
                 AND m.text_content != ''
@@ -3140,7 +3209,8 @@ export class Compositor {
     currentMessages: NeutralMessage[],
     db: DatabaseSync,
     maxKeystones: number = 3,
-    fenceMessageId?: number
+    fenceMessageId?: number,
+    activeContext?: Context | null
   ): Promise<ScoredKeystone[]> {
     // Fetch all topics for this session except the active one (max 5, most recent first)
     type TopicRow = { id: string; name: string };
@@ -3177,8 +3247,11 @@ export class Compositor {
       let topicMessages: MsgRow[];
       try {
         const topicFenceClause = fenceMessageId != null ? 'AND m.id >= ?' : '';
+        // Phase 3 (Turn DAG): constrain cross-topic queries to active context_id
+        const topicContextClause = activeContext ? 'AND m.context_id = ?' : '';
         const topicParams: (string | number | null)[] = [sessionKey, agentId, topic.id];
         if (fenceMessageId != null) topicParams.push(fenceMessageId);
+        if (activeContext) topicParams.push(activeContext.id);
         topicMessages = db.prepare(`
           SELECT m.id, m.message_index, m.role, m.text_content, m.created_at
           FROM messages m
@@ -3187,6 +3260,7 @@ export class Compositor {
             AND c.agent_id = ?
             AND m.topic_id = ?
             ${topicFenceClause}
+            ${topicContextClause}
             AND m.text_content IS NOT NULL
             AND m.text_content != ''
             AND m.is_heartbeat = 0

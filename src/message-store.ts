@@ -445,6 +445,101 @@ export class MessageStore {
   }
 
   /**
+   * Get messages by walking the parent_id chain from a head message backward.
+   * This is the DAG-native read path introduced in Phase 3.
+   *
+   * Walks from headMessageId backward through parent_id links, collecting
+   * up to `limit` messages in chronological order.
+   *
+   * Falls back to getRecentMessages if the head message has no parent chain
+   * (e.g., legacy data before backfill).
+   */
+  getHistoryByDAGWalk(headMessageId: number, limit: number = 50): StoredMessage[] {
+    try {
+      // Use recursive CTE to walk backward from head
+      const rows = this.db.prepare(`
+        WITH RECURSIVE chain AS (
+          SELECT id, parent_id, depth, conversation_id, agent_id, role,
+                 text_content, tool_calls, tool_results, metadata,
+                 message_index, token_count, is_heartbeat, created_at,
+                 1 AS chain_pos
+          FROM messages
+          WHERE id = ?
+
+          UNION ALL
+
+          SELECT m.id, m.parent_id, m.depth, m.conversation_id, m.agent_id, m.role,
+                 m.text_content, m.tool_calls, m.tool_results, m.metadata,
+                 m.message_index, m.token_count, m.is_heartbeat, m.created_at,
+                 c.chain_pos + 1
+          FROM messages m
+          JOIN chain c ON m.id = c.parent_id
+          WHERE c.chain_pos < ?
+        )
+        SELECT * FROM chain ORDER BY depth ASC, message_index ASC
+      `).all(headMessageId, limit) as Record<string, unknown>[];
+
+      if (rows.length === 0) return [];
+      return rows.map(parseMessageRow);
+    } catch {
+      // DAG walk failed (e.g., no parent chain) — return empty, caller should fall back
+      return [];
+    }
+  }
+
+  /**
+   * Get messages scoped to a specific context_id.
+   * Used by keystone/FTS/topic recall to constrain results to the active branch.
+   */
+  getMessagesByContextId(
+    contextId: number,
+    limit: number = 200,
+    opts?: { excludeHeartbeats?: boolean; requireText?: boolean }
+  ): StoredMessage[] {
+    let sql = 'SELECT * FROM messages WHERE context_id = ?';
+    const params: (string | number | null)[] = [contextId];
+
+    if (opts?.excludeHeartbeats) {
+      sql += ' AND is_heartbeat = 0';
+    }
+    if (opts?.requireText) {
+      sql += " AND text_content IS NOT NULL AND text_content != ''";
+    }
+
+    sql += ' ORDER BY message_index DESC LIMIT ?';
+    params.push(limit);
+
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    return rows.reverse().map(parseMessageRow);
+  }
+
+  /**
+   * Full-text search constrained to a specific context_id.
+   * Phase 3: replaces unscoped searchMessages for composition paths.
+   */
+  searchMessagesByContextId(
+    contextId: number,
+    query: string,
+    limit: number = 20
+  ): StoredMessage[] {
+    try {
+      const rows = this.db.prepare(`
+        WITH fts_matches AS (
+          SELECT rowid, rank FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?
+        )
+        SELECT m.* FROM messages m
+        JOIN fts_matches ON m.id = fts_matches.rowid
+        WHERE m.context_id = ?
+        ORDER BY fts_matches.rank
+      `).all(query, limit * 3, contextId) as Record<string, unknown>[];
+
+      return rows.slice(0, limit).map(parseMessageRow);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Get message count for a conversation.
    */
   getMessageCount(conversationId: number): number {
