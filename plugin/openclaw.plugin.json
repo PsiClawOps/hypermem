@@ -2,6 +2,9 @@
   "id": "hypercompositor",
   "enabledByDefault": false,
   "kind": "context-engine",
+  "activation": {
+    "onCapabilities": ["context-engine"]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
