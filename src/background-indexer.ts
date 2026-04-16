@@ -838,6 +838,9 @@ export class BackgroundIndexer {
           }
 
           maintScanned++;
+          // Any successful scan means we're in a real working state —
+          // clear any stale 'no-conversations' marker from an earlier agent.
+          if (maintExitReason === 'no-conversations') maintExitReason = 'complete';
           const noiseSweepResult = runNoiseSweep(messageDb, conv.id, 20, maxCandidates);
           const toolDecayResult = runToolDecay(messageDb, conv.id, 40, maxCandidates);
           const changed = noiseSweepResult.messagesDeleted + toolDecayResult.messagesUpdated;
