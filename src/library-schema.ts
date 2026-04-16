@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LIBRARY_SCHEMA_VERSION = 15;
+export const LIBRARY_SCHEMA_VERSION = 18;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -1173,6 +1173,50 @@ export function migrateLibrary(db: DatabaseSync, engineVersion?: string): void {
 
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(15, nowIso());
+  }
+
+  if (currentVersion < 16) {
+    // contradiction_audits table — tracks detected contradictions for review
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS contradiction_audits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL CHECK(entity_type IN ('fact')),
+        new_content TEXT NOT NULL,
+        new_domain TEXT,
+        existing_fact_id INTEGER NOT NULL,
+        existing_content TEXT NOT NULL,
+        similarity_score REAL NOT NULL,
+        contradiction_score REAL NOT NULL,
+        reason TEXT NOT NULL,
+        detector TEXT NOT NULL DEFAULT 'heuristic_v1',
+        suggested_resolution TEXT NOT NULL DEFAULT 'review',
+        source_ref TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'dismissed')),
+        resolution_notes TEXT,
+        created_at TEXT NOT NULL,
+        resolved_at TEXT
+      )
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_contradiction_audits_agent_status ON contradiction_audits(agent_id, status, created_at DESC)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_contradiction_audits_existing_fact ON contradiction_audits(existing_fact_id, status)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_contradiction_audits_agent ON contradiction_audits(agent_id, created_at DESC)');
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(16, nowIso());
+  }
+
+  if (currentVersion < 17) {
+    // Stamp v17 — previously applied by an older engine build alongside contradiction_audits.
+    // No additional DDL needed; the table was already created in v16.
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(17, nowIso());
+  }
+
+  if (currentVersion < 18) {
+    // topics dedup unique index — prevents duplicate topic names per agent
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_dedup ON topics(agent_id, lower(name))');
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(18, nowIso());
   }
 
   // Always ensure meta exists before stamping the running engine version.
