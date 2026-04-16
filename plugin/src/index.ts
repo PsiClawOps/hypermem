@@ -1848,8 +1848,9 @@ function createHyperMemEngine(): ContextEngine {
       // (afterTurn invalidates it every turn). Also fixed: was doing setWindow()
       // then invalidateWindow() which is a write-then-delete no-op. Now reads
       // from history list and writes back via replaceHistory().
+      let lastState: Awaited<ReturnType<typeof hm.cache.getModelState>> | null = null;
       try {
-        const lastState = await hm.cache.getModelState(agentId, sk);
+        lastState = await hm.cache.getModelState(agentId, sk);
         const DOWNSHIFT_THRESHOLD = 0.10;
         const isDownshift = lastState &&
           (lastState.tokenBudget - effectiveBudget) / lastState.tokenBudget > DOWNSHIFT_THRESHOLD;
@@ -1926,7 +1927,9 @@ function createHyperMemEngine(): ContextEngine {
         agentId,
         sessionKey: sk,
         tokenBudget: effectiveBudget,
-        historyDepth,
+        historyDepth: lastState?.historyDepth && lastState.historyDepth < historyDepth
+          ? lastState.historyDepth
+          : historyDepth,
         tier,
         model,          // pass model for provider detection
         includeDocChunks: subagentLight ? false : !cachedContextBlock,  // skip doc retrieval on cache hit or subagent light
@@ -2335,7 +2338,8 @@ function createHyperMemEngine(): ContextEngine {
           try {
             const modelState = await hm.cache.getModelState(agentId, sk);
             const gradientBudget = modelState?.tokenBudget;
-            await hm.refreshRedisGradient(agentId, sk, gradientBudget);
+            const gradientDepth = modelState?.historyDepth;
+            await hm.refreshRedisGradient(agentId, sk, gradientBudget, gradientDepth);
           } catch (refreshErr) {
             console.warn('[hypermem-plugin] afterTurn: refreshRedisGradient failed (non-fatal):', (refreshErr as Error).message);
           }

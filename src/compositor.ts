@@ -2374,6 +2374,7 @@ export class Compositor {
     sessionKey: string,
     db: DatabaseSync,
     tokenBudget?: number,
+    historyDepth?: number,
   ): Promise<void> {
     const store = new MessageStore(db);
     const conversation = store.getConversation(sessionKey);
@@ -2398,14 +2399,19 @@ export class Compositor {
     }
 
     // Phase 3: prefer DAG walk from context head
+    const refreshHistoryLimit = Math.min(
+      this.config.maxHistoryMessages,
+      Math.max(1, historyDepth ?? this.config.maxHistoryMessages),
+    );
+
     let rawHistory: StoredMessage[];
     if (activeContext?.headMessageId) {
-      rawHistory = store.getHistoryByDAGWalk(activeContext.headMessageId, this.config.maxHistoryMessages);
+      rawHistory = store.getHistoryByDAGWalk(activeContext.headMessageId, refreshHistoryLimit);
       if (rawHistory.length === 0) {
-        rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages, gradientFenceMessageId);
+        rawHistory = store.getRecentMessages(conversation.id, refreshHistoryLimit, gradientFenceMessageId);
       }
     } else {
-      rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages, gradientFenceMessageId);
+      rawHistory = store.getRecentMessages(conversation.id, refreshHistoryLimit, gradientFenceMessageId);
     }
     const transformedHistory = applyToolGradient(rawHistory, {
       totalWindowTokens: tokenBudget && tokenBudget > 0
@@ -2440,7 +2446,7 @@ export class Compositor {
       }
     }
 
-    await this.cache.replaceHistory(agentId, sessionKey, historyToWrite, this.config.maxHistoryMessages);
+    await this.cache.replaceHistory(agentId, sessionKey, historyToWrite, refreshHistoryLimit);
   }
 
   // ─── Slot Content Resolution ─────────────────────────────────

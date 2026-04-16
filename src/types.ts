@@ -644,4 +644,27 @@ export interface IndexerConfig {
   periodicInterval: number;    // milliseconds
   batchSize: number;           // messages per indexer tick
   maxMessagesPerTick: number;  // total messages processed per tick (all agents)
+  maxActiveConversations?: number;    // proactive pass: max concurrent conversations to scan
+  recentConversationCooldownMs?: number; // proactive pass: cooldown between scans per conversation
+  maxCandidatesPerPass?: number;      // proactive pass: max mutations per maintenance tick
+}
+
+/**
+ * Global write policy for fact ingestion.
+ * 'allow' — facts are written to the library DB normally.
+ * 'deny'  — fact writes are suppressed (read-only / replay mode).
+ */
+export type GlobalWritePolicy = 'allow' | 'deny';
+
+/**
+ * Diagnostics snapshot from a maintenance tick (proactive noise sweep + tool decay).
+ * Stored on BackgroundIndexer.lastMaintenanceDiagnostics after each tick.
+ */
+export interface MaintenanceTickDiagnostics {
+  considered: number;   // conversations evaluated
+  skipped: number;      // conversations skipped due to cooldown
+  scanned: number;      // conversations actually scanned
+  mutated: number;      // total messages mutated (deleted or updated)
+  durationMs: number;   // wall time for the maintenance phase
+  exitReason: 'complete' | 'cap-reached' | 'no-conversations';
 }

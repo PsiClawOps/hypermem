@@ -110,6 +110,9 @@ async function run() {
       prompt: 'kubernetes staging deployment',
     });
 
+    const firstEstimatedTokens = assembleResult.estimatedTokens;
+    const firstSystemPromptAddition = assembleResult.systemPromptAddition;
+
     assert(Array.isArray(assembleResult.messages), 'assemble() returned a message array');
     assert(assembleResult.messages.length > 0, `assemble() returned ${assembleResult.messages.length} messages`);
     assert(typeof assembleResult.estimatedTokens === 'number' && assembleResult.estimatedTokens > 0,
@@ -121,6 +124,22 @@ async function run() {
       'systemPromptAddition contains seeded L4 memory');
     assert(assembleResult.systemPromptAddition.includes('Kubernetes staging deployment'),
       'systemPromptAddition reflects prompt-aware retrieval content');
+
+    const replayResult = await engine.assemble({
+      sessionId: 'plugin-pipeline-session',
+      sessionKey,
+      messages: [],
+      tokenBudget: 12000,
+      model: 'claude-opus-4-6',
+      prompt: 'kubernetes staging deployment',
+    });
+
+    // This verifies cache replay stability for identical assemble() calls.
+    // It does not directly prove single-execution of the compose hot path.
+    assert(replayResult.systemPromptAddition === firstSystemPromptAddition,
+      'repeat assemble() reuses cached context block for identical turn');
+    assert(replayResult.estimatedTokens === firstEstimatedTokens,
+      'repeat assemble() returns stable estimatedTokens for identical turn');
 
     // ── Tight-budget compose proof ──────────────────────────────
     // Proves budget-pressure handling: with a very small budget,

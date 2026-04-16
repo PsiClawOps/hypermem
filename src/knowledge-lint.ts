@@ -100,9 +100,13 @@ export function lintKnowledge(libraryDb: DatabaseSync): LintResult {
     result.orphansFound = orphans.length;
 
     if (orphans.length > 0) {
-      console.log(`[lint] ${orphans.length} orphan topic(s) found (< 3 messages, stale > 48h): ${
-        orphans.map(o => o.name).join(', ')
-      }`);
+      const sample = orphans.slice(0, 10).map(o => o.name).join(', ');
+      const remainder = Math.max(0, orphans.length - 10);
+      console.log(
+        `[lint] ${orphans.length} orphan topic(s) found (< 3 messages, stale > 48h)` +
+        (sample ? `; sample: ${sample}` : '') +
+        (remainder > 0 ? `; +${remainder} more` : '')
+      );
     }
   } catch {
     // Non-fatal

@@ -240,6 +240,11 @@ async function run() {
     `Hot Redis historyDepth=2 returns 2 non-system messages (got ${gateHistoryCount})`);
   assert(gatedResult.tokenCount <= 50000, `Gate 1 token count ${gatedResult.tokenCount} within budget`);
 
+  await compositor.refreshRedisGradient(agentId, sessionKey, msgDb, 50000, 2);
+  const refreshedHistory = await hm.cache.getHistory(agentId, sessionKey, 10);
+  assert(refreshedHistory.length === 2,
+    `refreshRedisGradient respects historyDepth when refreshing hot window (got ${refreshedHistory.length})`);
+
   // ── Test 5: Empty session composition ──
   console.log('\n── Empty Session Composition ──');
 
@@ -275,7 +280,7 @@ async function run() {
   const cachedBoundaryMsg = emptySystemMessages.find(m => m.cache_control && m.cache_control.type === 'ephemeral');
   assert(cachedBoundaryMsg !== undefined, 'Anthropic output marks a static cache boundary');
   assert(
-    cachedBoundaryMsg && typeof cachedBoundaryMsg.content === 'string' && cachedBoundaryMsg.content.includes('## Output Standard'),
+    cachedBoundaryMsg === outputStandardMsg,
     'Cache boundary lands on the stable output-profile prefix'
   );
 
