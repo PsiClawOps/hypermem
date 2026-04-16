@@ -899,7 +899,7 @@ export class BackgroundIndexer {
     const messageDb = this.getMessageDb!(agentId);
 
     const messageStore = new MessageStore(messageDb);
-    const factStore = new FactStore(libraryDb, { globalWritePolicy: this.globalWritePolicy });
+    const factStore = new FactStore(libraryDb);
     const episodeStore = new EpisodeStore(libraryDb);
     const topicStore = new TopicStore(libraryDb);
     const knowledgeStore = new KnowledgeStore(libraryDb);
@@ -1068,7 +1068,7 @@ export class BackgroundIndexer {
 
       // 3. Detect and update topics
       const topicName = detectTopic(content);
-      if (topicName) {
+      if (topicName && topicName.trim().length >= 3) {
         try {
           const existingTopics = topicStore.getActive(agentId, 100);
           const existingTopic = existingTopics.find(
@@ -1076,7 +1076,7 @@ export class BackgroundIndexer {
           );
 
           if (!existingTopic) {
-            topicStore.create(agentId, topicName, `Auto-detected from conversation`);
+            topicStore.findOrCreate(agentId, topicName, `Auto-detected from conversation`);
             topicsUpdated++;
           }
         } catch {

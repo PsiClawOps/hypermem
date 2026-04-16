@@ -181,9 +181,6 @@ export function runNoiseSweep(
     ).slice(0, Number.isFinite(maxCandidates) ? maxCandidates : undefined);
 
     if (toDelete.length === 0) {
-      console.log(
-        `[proactive-pass] Noise sweep conversation=${conversationId} candidates=${candidates.length} noise=0 deleted=0 skippedReferenced=0 cutoff=${cutoff}`
-      );
       return ZERO;
     }
 
@@ -191,9 +188,6 @@ export function runNoiseSweep(
     const { deletableIds: ids, blockedIds } = getDeletableMessageIds(db, candidateIds);
 
     if (ids.length === 0) {
-      console.log(
-        `[proactive-pass] Noise sweep conversation=${conversationId} candidates=${candidates.length} noise=${candidateIds.length} deleted=0 skippedReferenced=${blockedIds.length} cutoff=${cutoff}`
-      );
       return ZERO;
     }
 
@@ -218,9 +212,11 @@ export function runNoiseSweep(
       throw innerErr;
     }
 
-    console.log(
-      `[proactive-pass] Noise sweep conversation=${conversationId} candidates=${candidates.length} noise=${candidateIds.length} deleted=${totalDeleted} skippedReferenced=${blockedIds.length} cutoff=${cutoff}`
-    );
+    if (totalDeleted > 0) {
+      console.log(
+        `[proactive-pass] Noise sweep conversation=${conversationId} candidates=${candidates.length} noise=${candidateIds.length} deleted=${totalDeleted} skippedReferenced=${blockedIds.length} cutoff=${cutoff}`
+      );
+    }
 
     return { messagesDeleted: totalDeleted, passType: 'noise_sweep' };
 
@@ -265,13 +261,11 @@ export function runToolDecay(
     const maxIndex = getMaxMessageIndex(db, conversationId);
 
     if (maxIndex < 0) {
-      console.log(`[proactive-pass] Tool decay conversation=${conversationId} candidates=0 updated=0 bytesFreed=0 cutoff=none reason=empty`);
       return ZERO;
     }
 
     const cutoff = maxIndex - safeWindow;
     if (cutoff <= 0) {
-      console.log(`[proactive-pass] Tool decay conversation=${conversationId} candidates=0 updated=0 bytesFreed=0 cutoff=${cutoff} reason=within-window`);
       return ZERO;
     }
 
@@ -288,7 +282,6 @@ export function runToolDecay(
       .all(conversationId, cutoff) as Array<{ id: number; tool_results: string }>;
 
     if (candidates.length === 0) {
-      console.log(`[proactive-pass] Tool decay conversation=${conversationId} candidates=0 updated=0 bytesFreed=0 cutoff=${cutoff} reason=no-large-tool-results`);
       return ZERO;
     }
 
@@ -332,9 +325,6 @@ export function runToolDecay(
     }
 
     if (updates.length === 0) {
-      console.log(
-        `[proactive-pass] Tool decay conversation=${conversationId} candidates=${candidates.length} updated=0 bytesFreed=0 cutoff=${cutoff} reason=no-truncatable-entries`
-      );
       return ZERO;
     }
 
@@ -355,9 +345,11 @@ export function runToolDecay(
       throw innerErr;
     }
 
-    console.log(
-      `[proactive-pass] Tool decay conversation=${conversationId} candidates=${candidates.length} updated=${totalUpdated} bytesFreed=${totalBytesFreed} cutoff=${cutoff}`
-    );
+    if (totalUpdated > 0) {
+      console.log(
+        `[proactive-pass] Tool decay conversation=${conversationId} candidates=${candidates.length} updated=${totalUpdated} bytesFreed=${totalBytesFreed} cutoff=${cutoff}`
+      );
+    }
 
     return {
       messagesUpdated: totalUpdated,

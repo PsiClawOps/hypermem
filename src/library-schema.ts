@@ -346,6 +346,7 @@ function applyV3Collections(db: DatabaseSync): void {
     )
   `);
   db.exec('CREATE INDEX IF NOT EXISTS idx_topics_agent ON topics(agent_id, status, updated_at DESC)');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_dedup ON topics(agent_id, lower(name))');
 
   // ── Fleet registry ──
   db.exec(`
