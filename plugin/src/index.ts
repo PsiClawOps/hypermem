@@ -1870,7 +1870,7 @@ function createHyperMemEngine(): ContextEngine {
                 await hm.cache.invalidateWindow(agentId, sk);
                 console.log(
                   `[hypermem-plugin] budget-downshift: ${agentId}/${sk} ` +
-                  `${lastState.tokenBudget}→${effectiveBudget} tokens, ` +
+                  `${lastState!.tokenBudget}→${effectiveBudget} tokens, ` +
                   `reshaped ${currentHistory.length}→${reshaped.length} messages`
                 );
               } else {
@@ -1878,7 +1878,7 @@ function createHyperMemEngine(): ContextEngine {
                 // window only as a compose-time view and leave hot history lossless.
                 console.log(
                   `[hypermem-plugin] budget-downshift: ${agentId}/${sk} ` +
-                  `${lastState.tokenBudget}→${effectiveBudget} tokens, ` +
+                  `${lastState!.tokenBudget}→${effectiveBudget} tokens, ` +
                   `view-only reshape ${currentHistory.length}→${reshaped.length} messages (structured tool history preserved)`
                 );
               }
