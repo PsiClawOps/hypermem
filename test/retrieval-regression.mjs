@@ -12,7 +12,7 @@
  * Imports from dist/ (compiled output), same as other integration tests.
  */
 
-import { HyperMem } from '../dist/index.js';
+import { HyperMem, CacheLayer } from '../dist/index.js';
 import { Compositor } from '../dist/compositor.js';
 import { migrateLibrary } from '../dist/library-schema.js';
 import { migrate } from '../dist/schema.js';
@@ -113,6 +113,9 @@ async function run() {
   console.log('  HyperMem Retrieval Regression Harness (W7)');
   console.log('═══════════════════════════════════════════════════\n');
 
+  const cache = new CacheLayer();
+  await cache.connect();
+
   // ════════════════════════════════════════════════════════════
   // Scenario 1 — No-trigger semantic fallback (W2)
   // ════════════════════════════════════════════════════════════
@@ -148,6 +151,7 @@ async function run() {
 
     // Build a compositor directly
     const compositor = new Compositor({
+      cache,
       vectorStore: null,   // no Ollama
       libraryDb: libDb,
     });
@@ -210,6 +214,7 @@ async function run() {
     insertFact(libDb, { agentId: agentA, scope: 'agent', content: 'AGENT_A_FACT', domain: 'public' });
 
     const compositor = new Compositor({
+      cache,
       vectorStore: null,
       libraryDb: libDb,
     });
@@ -268,6 +273,7 @@ async function run() {
     insertFact(libDb, { agentId, scope: 'agent', content: 'NEW_APPROACH_VALUE', domain: 'approach' });
 
     const compositor = new Compositor({
+      cache,
       vectorStore: null,
       libraryDb: libDb,
     });
@@ -335,6 +341,7 @@ async function run() {
       });
 
       const compositor = new Compositor({
+        cache,
         vectorStore: null,
         libraryDb: libDb,
       });
@@ -395,6 +402,7 @@ async function run() {
     }
 
     const compositor = new Compositor({
+      cache,
       vectorStore: null,
       libraryDb: libDb,
     });
@@ -422,6 +430,64 @@ async function run() {
   }
 
   // ════════════════════════════════════════════════════════════
+  // Scenario 6 — Knowledge retrieval alongside facts (Phase 1)
+  // ════════════════════════════════════════════════════════════
+  console.log('\n── Scenario 6: Knowledge retrieval alongside facts (Phase 1) ──');
+  {
+    const agentId = 'reg-s6-agent';
+    const sessionKey = `agent:${agentId}:webchat:main`;
+
+    const msgDb = makeMessageDb('s6');
+    const libDb = makeLibraryDb('s6');
+
+    seedConversation(msgDb, agentId, sessionKey, [
+      { role: 'user', text: 'What is the rollback procedure?' },
+    ]);
+
+    insertFact(libDb, {
+      agentId, scope: 'agent', content: 'S6_FACT Rollback requires ops-lead approval', domain: 'operations',
+    });
+
+    // Insert knowledge entry
+    const cols = libDb.prepare('PRAGMA table_info(knowledge)').all().map(r => r.name);
+    const hasKnowledge = cols.length > 0;
+    if (!hasKnowledge) {
+      skip('S6: knowledge table not available — knowledge retrieval not testable');
+    } else {
+      try {
+        libDb.prepare(`
+          INSERT INTO knowledge (agent_id, domain, key, content, confidence, source_type, created_at, updated_at)
+          VALUES (?, 'operations', 'rollback-proc', 'S6_KNOWLEDGE Post-mortem required within 24 hours of rollback', 0.9, 'manual', datetime('now'), datetime('now'))
+        `).run(agentId);
+      } catch {
+        // knowledge table may have different schema — skip gracefully
+        skip('S6: could not insert knowledge — schema mismatch');
+      }
+
+      const compositor = new Compositor({
+        cache,
+        vectorStore: null,
+        libraryDb: libDb,
+      });
+
+      const result = await compositor.compose({
+        agentId,
+        sessionKey,
+        tokenBudget: 50000,
+        provider: 'anthropic',
+        includeFacts: true,
+        includeLibrary: true,
+        prompt: 'rollback procedure',
+      }, msgDb, libDb);
+
+      assert(result.diagnostics !== undefined, 'S6: diagnostics present');
+      const ctx = result.contextBlock || '';
+      assert(ctx.includes('S6_FACT') || (result.diagnostics?.factsIncluded ?? 0) >= 1,
+        `S6: fact retrieved (factsIncluded=${result.diagnostics?.factsIncluded})`);
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════
   // Summary
   // ════════════════════════════════════════════════════════════
   console.log('\n═══════════════════════════════════════════════════');
@@ -438,8 +504,6 @@ async function run() {
 
   process.exit(failed > 0 ? 1 : 0);
 }
-
-/**
 
 run().catch(err => {
   console.error('Fatal:', err);

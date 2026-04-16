@@ -1,6 +1,6 @@
 # hypermem Tuning Guide
 
-Configuration reference for operators and agents. All settings are optional — hypermem ships with production-tested defaults.
+Configuration reference for operators and agents. All settings are optional, but the installer now writes a fully-expanded `config.json` so operators can see every default in one place.
 
 Config lives in `~/.openclaw/hypermem/config.json` (takes effect on gateway restart) or is passed programmatically via `HyperMem.create()`:
 
@@ -9,6 +9,19 @@ const hm = await HyperMem.create({
   compositor: { budgetFraction: 0.70, hyperformProfile: 'standard' },
 });
 ```
+
+Lookup paths for operators and agents:
+
+```bash
+cat ~/.openclaw/hypermem/config.json
+openclaw config get plugins.entries.hypercompositor.config
+openclaw config get plugins.slots.contextEngine
+```
+
+Resolution order is:
+1. `plugins.entries.hypercompositor.config` in `openclaw.json`
+2. `~/.openclaw/hypermem/config.json`
+3. code defaults
 
 ---
 
@@ -190,7 +203,12 @@ The hypercompositor queries all four storage layers on every turn and composes c
 
 ### How the budget is calculated
 
-Three knobs control the top-level budget:
+The plugin uses this order when deciding the budget source:
+1. runtime `tokenBudget` supplied by OpenClaw
+2. `contextWindowOverrides["provider/model"]` from config, if present
+3. `contextWindowSize` fallback from config
+
+Three knobs then control the top-level budget:
 
 ```
 detected context window × budgetFraction × (1 - contextWindowReserve) = effective budget
@@ -218,7 +236,7 @@ effective budget × (1 - targetBudgetFraction) = history budget
 67,488 × 0.35 = 23,621 (history budget)
 ```
 
-**Model swap resilience:** The budget is computed from the model's actual context window at compose time. If you swap models mid-session (e.g., from a 128k model to a 200k model), the budget automatically recomputes on the next turn. No manual intervention needed. Structured tool history is guarded from being overwritten during a budget downshift — the compositor computes the new allocation but doesn't persist a lower-context snapshot to disk, preserving the full history for when the larger model returns.
+**Model swap resilience:** The budget is computed from the model's actual context window at compose time when OpenClaw passes `tokenBudget`. If runtime metadata is missing, HyperMem falls back to `contextWindowOverrides` and then `contextWindowSize`. Structured tool history is guarded from being overwritten during a budget downshift — the compositor computes the new allocation but doesn't persist a lower-context snapshot to disk, preserving the full history for when the larger model returns.
 
 ### How the budget fills
 
@@ -375,7 +393,9 @@ Large T0 results (>40k chars) at high context pressure (>80%) get head-and-tail 
 | `maxRecentToolPairs` | 3 | Tool pairs kept at full fidelity (T0) |
 | `maxProseToolPairs` | 10 | Tool pairs converted to prose summary before stubbing |
 
-**When `deferToolPruning: true`** (default for Anthropic installs): hypermem skips its own gradient when OpenClaw's native `contextPruning` is active. The native pruner handles tool result trimming on those providers. The gradient remains active as fallback for other providers.
+**When `deferToolPruning: true`**: hypermem skips its own gradient when OpenClaw's native `contextPruning` is active. The native pruner handles tool result trimming on those providers. The gradient remains active as fallback for other providers.
+
+**When `verboseLogging: true`**: HyperMem emits budget-source and trim-decision logs so you can see whether a turn used runtime `tokenBudget`, a manual `contextWindowOverrides` entry, or the `contextWindowSize` fallback.
 
 ---
 
@@ -632,3 +652,16 @@ Higher `contextWindowReserve` (0.30) gives more headroom for large tool results.
 | `hyperformProfile` | `'light'` \| `'standard'` \| `'full'` | `'full'` | Output shaping tier. |
 | `enableFOS` | boolean | `true` | Suppress behavior directives when `false`. |
 | `enableMOD` | boolean | `true` | Suppress model adaptation when `false`. |
+
+### Background Maintenance
+
+Controls for the proactive maintenance passes (noise sweep, tool decay) that run alongside the background indexer. These settings live under the `maintenance` key in config.json.
+
+| Knob | Type | Default | What it controls |
+|---|---|---|---|
+| `maintenance.periodicInterval` | ms | `300000` | Interval between background indexer ticks (5 min default). |
+| `maintenance.maxActiveConversations` | number | `5` | Max active conversations processed per agent per tick. Limits fanout. |
+| `maintenance.recentConversationCooldownMs` | ms | `30000` | Skip conversations processed within this window. Prevents redundant sweeps. |
+| `maintenance.maxCandidatesPerPass` | number | `200` | Cap on total mutations (deletes + truncations) per maintenance tick. |
+
+Per-tick diagnostics are logged when `verboseLogging` is enabled, showing `considered`, `skipped`, `scanned`, `mutated`, `duration`, and `exitReason` fields. These help operators confirm maintenance is running and identify conversations that are generating the most noise.

@@ -64,6 +64,49 @@ function getMaxMessageIndex(db: DatabaseSync, conversationId: number): number {
 }
 
 /**
+ * Filter candidate message ids down to rows that are safe to delete without
+ * violating HyperMem's FK edges.
+ *
+ * Current blockers:
+ *   - summary_messages.message_id -> messages.id
+ *   - messages.parent_id -> messages.id (child rows point at parent rows)
+ */
+function getDeletableMessageIds(db: DatabaseSync, candidateIds: number[]): {
+  deletableIds: number[];
+  blockedIds: number[];
+} {
+  if (candidateIds.length === 0) return { deletableIds: [], blockedIds: [] };
+
+  const placeholders = candidateIds.map(() => '?').join(', ');
+  const blocked = db
+    .prepare(`
+      SELECT DISTINCT id
+      FROM (
+        SELECT sm.message_id AS id
+        FROM summary_messages sm
+        WHERE sm.message_id IN (${placeholders})
+
+        UNION
+
+        SELECT parent.id AS id
+        FROM messages child
+        JOIN messages parent ON parent.id = child.parent_id
+        WHERE child.parent_id IN (${placeholders})
+      ) blocked
+    `)
+    .all(...candidateIds, ...candidateIds) as Array<{ id: number }>;
+
+  if (blocked.length === 0) return { deletableIds: candidateIds, blockedIds: [] };
+
+  const blockedIds = blocked.map(row => row.id);
+  const blockedSet = new Set(blockedIds);
+  return {
+    deletableIds: candidateIds.filter(id => !blockedSet.has(id)),
+    blockedIds,
+  };
+}
+
+/**
  * Decide if a message is noise based on content + is_heartbeat flag.
  *
  * A message is noise when:
@@ -96,6 +139,7 @@ export function runNoiseSweep(
   db: DatabaseSync,
   conversationId: number,
   recentWindowSize: number = 20,
+  maxCandidates: number = Infinity,
 ): NoiseSweepResult {
   const ZERO: NoiseSweepResult = { messagesDeleted: 0, passType: 'noise_sweep' };
 
@@ -131,14 +175,27 @@ export function runNoiseSweep(
 
     if (candidates.length === 0) return ZERO;
 
-    // Filter to noise messages
+    // Filter to noise messages, respecting per-pass candidate cap
     const toDelete = candidates.filter(row =>
       isNoiseMessage(row.text_content, row.is_heartbeat)
-    );
+    ).slice(0, Number.isFinite(maxCandidates) ? maxCandidates : undefined);
 
-    if (toDelete.length === 0) return ZERO;
+    if (toDelete.length === 0) {
+      console.log(
+        `[proactive-pass] Noise sweep conversation=${conversationId} candidates=${candidates.length} noise=0 deleted=0 skippedReferenced=0 cutoff=${cutoff}`
+      );
+      return ZERO;
+    }
 
-    const ids = toDelete.map(r => r.id);
+    const candidateIds = toDelete.map(r => r.id);
+    const { deletableIds: ids, blockedIds } = getDeletableMessageIds(db, candidateIds);
+
+    if (ids.length === 0) {
+      console.log(
+        `[proactive-pass] Noise sweep conversation=${conversationId} candidates=${candidates.length} noise=${candidateIds.length} deleted=0 skippedReferenced=${blockedIds.length} cutoff=${cutoff}`
+      );
+      return ZERO;
+    }
 
     // Delete in a transaction; use chunked IN clauses to avoid
     // SQLite's SQLITE_LIMIT_VARIABLE_NUMBER (default 999).
@@ -160,6 +217,10 @@ export function runNoiseSweep(
       db.prepare('ROLLBACK').run();
       throw innerErr;
     }
+
+    console.log(
+      `[proactive-pass] Noise sweep conversation=${conversationId} candidates=${candidates.length} noise=${candidateIds.length} deleted=${totalDeleted} skippedReferenced=${blockedIds.length} cutoff=${cutoff}`
+    );
 
     return { messagesDeleted: totalDeleted, passType: 'noise_sweep' };
 
@@ -194,7 +255,8 @@ export function runNoiseSweep(
 export function runToolDecay(
   db: DatabaseSync,
   conversationId: number,
-  recentWindowSize: number = 40, // was 80 — cut in half so DB-level truncation fires sooner
+  recentWindowSize: number = 40,
+  maxCandidates: number = Infinity,
 ): ToolDecayResult {
   const ZERO: ToolDecayResult = { messagesUpdated: 0, bytesFreed: 0, passType: 'tool_decay' };
 
@@ -202,10 +264,16 @@ export function runToolDecay(
     const safeWindow = resolveSafeWindow(recentWindowSize);
     const maxIndex = getMaxMessageIndex(db, conversationId);
 
-    if (maxIndex < 0) return ZERO;
+    if (maxIndex < 0) {
+      console.log(`[proactive-pass] Tool decay conversation=${conversationId} candidates=0 updated=0 bytesFreed=0 cutoff=none reason=empty`);
+      return ZERO;
+    }
 
     const cutoff = maxIndex - safeWindow;
-    if (cutoff <= 0) return ZERO;
+    if (cutoff <= 0) {
+      console.log(`[proactive-pass] Tool decay conversation=${conversationId} candidates=0 updated=0 bytesFreed=0 cutoff=${cutoff} reason=within-window`);
+      return ZERO;
+    }
 
     // Fetch messages with large tool_results outside the recent window.
     const candidates = db
@@ -219,12 +287,16 @@ export function runToolDecay(
       `)
       .all(conversationId, cutoff) as Array<{ id: number; tool_results: string }>;
 
-    if (candidates.length === 0) return ZERO;
+    if (candidates.length === 0) {
+      console.log(`[proactive-pass] Tool decay conversation=${conversationId} candidates=0 updated=0 bytesFreed=0 cutoff=${cutoff} reason=no-large-tool-results`);
+      return ZERO;
+    }
 
-    // Build the update list by processing each candidate.
+    // Build the update list by processing each candidate, respecting per-pass cap.
+    const cappedCandidates = Number.isFinite(maxCandidates) ? candidates.slice(0, maxCandidates) : candidates;
     const updates: Array<{ id: number; newJson: string; savedBytes: number }> = [];
 
-    for (const row of candidates) {
+    for (const row of cappedCandidates) {
       let parsed: unknown;
       try {
         parsed = JSON.parse(row.tool_results);
@@ -259,7 +331,12 @@ export function runToolDecay(
       }
     }
 
-    if (updates.length === 0) return ZERO;
+    if (updates.length === 0) {
+      console.log(
+        `[proactive-pass] Tool decay conversation=${conversationId} candidates=${candidates.length} updated=0 bytesFreed=0 cutoff=${cutoff} reason=no-truncatable-entries`
+      );
+      return ZERO;
+    }
 
     let totalUpdated = 0;
     let totalBytesFreed = 0;
@@ -277,6 +354,10 @@ export function runToolDecay(
       db.prepare('ROLLBACK').run();
       throw innerErr;
     }
+
+    console.log(
+      `[proactive-pass] Tool decay conversation=${conversationId} candidates=${candidates.length} updated=${totalUpdated} bytesFreed=${totalBytesFreed} cutoff=${cutoff}`
+    );
 
     return {
       messagesUpdated: totalUpdated,

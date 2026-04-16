@@ -1210,6 +1210,32 @@ ${repeated}`;
       `Aggregate trigger cap: capped below uncapped potential (${triggerBudgetResult.slots.library} < ${uncappedTriggerTokens})`);
   }
 
+  // ── Budget-pressure filtering (Phase 1 fixture) ──
+  console.log('\n── Budget-pressure filtering ──');
+  {
+    const tightBudget = 1500;
+    const pressureResult = await compositor.compose({
+      agentId,
+      sessionKey,
+      tokenBudget: tightBudget,
+      provider: 'anthropic',
+      model: 'claude-opus-4-6',
+      includeHistory: true,
+      includeFacts: true,
+      includeLibrary: true,
+    }, msgDb, libDb);
+
+    assert(typeof pressureResult.tokenCount === 'number',
+      `Budget-pressure: tokenCount is a number (${pressureResult.tokenCount})`);
+    const ceiling = tightBudget * 1.15;
+    assert(pressureResult.tokenCount <= ceiling,
+      `Budget-pressure: tokenCount ${pressureResult.tokenCount} <= ${ceiling} (within 15% tolerance)`);
+    assert(Array.isArray(pressureResult.messages),
+      'Budget-pressure: messages is an array');
+    assert(pressureResult.diagnostics !== undefined,
+      'Budget-pressure: diagnostics present');
+  }
+
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
   await hm.close();

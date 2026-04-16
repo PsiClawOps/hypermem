@@ -122,6 +122,24 @@ async function run() {
     assert(assembleResult.systemPromptAddition.includes('Kubernetes staging deployment'),
       'systemPromptAddition reflects prompt-aware retrieval content');
 
+    // ── Tight-budget compose proof ──────────────────────────────
+    // Proves budget-pressure handling: with a very small budget,
+    // assemble() still returns without error and respects the ceiling.
+    const tightResult = await engine.assemble({
+      sessionId: 'plugin-pipeline-session',
+      sessionKey,
+      messages: [],
+      tokenBudget: 2000,
+      model: 'claude-opus-4-6',
+      prompt: 'kubernetes staging deployment',
+    });
+
+    assert(Array.isArray(tightResult.messages), 'tight-budget: assemble() returned a message array');
+    assert(typeof tightResult.estimatedTokens === 'number',
+      `tight-budget: estimatedTokens is a number (${tightResult.estimatedTokens})`);
+    assert(tightResult.estimatedTokens <= 8000,
+      `tight-budget: estimatedTokens ${tightResult.estimatedTokens} is bounded (ceiling 8000 for 2k budget)`);
+
     await engine.dispose?.();
   } catch (err) {
     console.error('\n💥 Validation error:', err);

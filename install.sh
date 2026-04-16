@@ -292,15 +292,63 @@ write_config() {
   elif [[ "$SELECTED_TIER" == "2" ]]; then
     EMBED_BLOCK="\"embedding\": { \"provider\": \"transformers\", \"model\": \"$EMBED_MODEL\", \"dimensions\": $EMBED_DIMS }"
   elif [[ "$SELECTED_TIER" == "3" ]]; then
-    EMBED_BLOCK="\"embedding\": { \"provider\": \"ollama\", \"model\": \"$EMBED_MODEL\", \"dimensions\": $EMBED_DIMS, \"ollamaBaseUrl\": \"http://localhost:11434\" }"
+    EMBED_BLOCK="\"embedding\": { \"provider\": \"ollama\", \"model\": \"$EMBED_MODEL\", \"dimensions\": $EMBED_DIMS, \"ollamaUrl\": \"http://localhost:11434\" }"
   else
-    EMBED_BLOCK="\"embedding\": { \"provider\": \"openai\", \"model\": \"$EMBED_MODEL\", \"dimensions\": $EMBED_DIMS, \"openaiBaseUrl\": \"$EMBED_BASE_URL\", \"apiKey\": \"$EMBED_API_KEY\" }"
+    EMBED_BLOCK="\"embedding\": { \"provider\": \"openai\", \"model\": \"$EMBED_MODEL\", \"dimensions\": $EMBED_DIMS, \"openaiBaseUrl\": \"$EMBED_BASE_URL\", \"openaiApiKey\": \"$EMBED_API_KEY\" }"
   fi
 
   cat > "$CONFIG_FILE" <<EOF
 {
   "installDir": "$INSTALL_DIR",
   "tier": $SELECTED_TIER,
+  "contextWindowSize": 128000,
+  "contextWindowReserve": 0.25,
+  "deferToolPruning": false,
+  "verboseLogging": false,
+  "contextWindowOverrides": {},
+  "warmCacheReplayThresholdMs": 120000,
+  "subagentWarming": "light",
+  "compositor": {
+    "budgetFraction": 0.703,
+    "reserveFraction": 0.25,
+    "historyFraction": 0.4,
+    "memoryFraction": 0.4,
+    "defaultTokenBudget": 90000,
+    "maxHistoryMessages": 500,
+    "maxFacts": 30,
+    "maxExpertisePatterns": 6,
+    "maxCrossSessionContext": 4000,
+    "maxTotalTriggerTokens": 4000,
+    "maxRecentToolPairs": 3,
+    "maxProseToolPairs": 10,
+    "warmHistoryBudgetFraction": 0.4,
+    "contextWindowReserve": 0.25,
+    "dynamicReserveTurnHorizon": 5,
+    "dynamicReserveMax": 0.5,
+    "dynamicReserveEnabled": true,
+    "keystoneHistoryFraction": 0.2,
+    "keystoneMaxMessages": 15,
+    "keystoneMinSignificance": 0.5,
+    "targetBudgetFraction": 0.65,
+    "enableFOS": true,
+    "enableMOD": true,
+    "hyperformProfile": "standard",
+    "wikiTokenCap": 600,
+    "zigzagOrdering": true
+  },
+  "eviction": {
+    "enabled": true,
+    "imageAgeTurns": 2,
+    "toolResultAgeTurns": 4,
+    "minTokensToEvict": 200,
+    "keepPreviewChars": 120
+  },
+  "maintenance": {
+    "periodicInterval": 300000,
+    "maxActiveConversations": 5,
+    "recentConversationCooldownMs": 30000,
+    "maxCandidatesPerPass": 200
+  },
   $EMBED_BLOCK,
   "vectorStore": {
     "enabled": $([ "$SELECTED_TIER" -gt 1 ] && echo true || echo false)

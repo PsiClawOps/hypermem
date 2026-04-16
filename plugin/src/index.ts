@@ -47,7 +47,6 @@ import { repairToolPairs } from '@psiclawops/hypermem';
 import os from 'os';
 import path from 'path';
 import fs from 'fs/promises';
-import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 
 // Re-export core types for consumers (eliminates local shim drift)
@@ -59,9 +58,8 @@ export type { NeutralMessage, NeutralToolCall, NeutralToolResult, ComposeRequest
 // not installed via npm). Types come from the core package devDependency.
 // This pattern keeps the runtime path stable while TypeScript resolves types
 // from the canonical source — no more local shim drift.
-// Resolved at init time: pluginConfig.hyperMemPath > require.resolve('@psiclawops/hypermem') > dev fallback
+// Resolved at init time: pluginConfig.hyperMemPath > import.meta.resolve('@psiclawops/hypermem') > dev fallback
 let HYPERMEM_PATH = '';
-const require = createRequire(import.meta.url);
 
 // hypermemInstance is the resolved return type of hypermem.create().
 // hypermem has a private constructor (factory pattern), so we can't use
@@ -117,6 +115,113 @@ let _evictionConfig: {
 let _contextWindowSize: number = 128_000;
 let _contextWindowReserve: number = 0.25;
 let _deferToolPruning: boolean = false;
+let _verboseLogging: boolean = false;
+let _contextWindowOverrides: Record<string, { contextTokens?: number; contextWindow?: number }> = {};
+const _budgetFallbackWarnings = new Set<string>();
+
+export const CONTEXT_WINDOW_OVERRIDE_KEY_REGEX = /^[^/\s]+\/[^/\s]+$/;
+export type ContextWindowOverride = { contextTokens?: number; contextWindow?: number };
+
+const contextWindowOverrideSchema = z.object({
+  contextTokens: z.number().int().positive().optional(),
+  contextWindow: z.number().int().positive().optional(),
+}).superRefine((value, ctx) => {
+  if (value.contextTokens == null && value.contextWindow == null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'override must declare contextTokens, contextWindow, or both',
+    });
+  }
+  if (
+    value.contextTokens != null &&
+    value.contextWindow != null &&
+    value.contextTokens > value.contextWindow
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'contextTokens must be less than or equal to contextWindow',
+    });
+  }
+});
+
+export function sanitizeContextWindowOverrides(raw: unknown): {
+  value: Record<string, ContextWindowOverride>;
+  warnings: string[];
+} {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { value: {}, warnings: [] };
+  }
+
+  const value: Record<string, ContextWindowOverride> = {};
+  const warnings: string[] = [];
+
+  for (const [key, candidate] of Object.entries(raw as Record<string, unknown>)) {
+    const normalizedKey = key.trim().toLowerCase();
+    if (!CONTEXT_WINDOW_OVERRIDE_KEY_REGEX.test(normalizedKey)) {
+      warnings.push(`ignoring contextWindowOverrides[${JSON.stringify(key)}]: key must be "provider/model"`);
+      continue;
+    }
+
+    const parsed = contextWindowOverrideSchema.safeParse(candidate);
+    if (!parsed.success) {
+      warnings.push(
+        `ignoring contextWindowOverrides[${JSON.stringify(key)}]: ` +
+        parsed.error.issues.map(issue => issue.message).join('; ')
+      );
+      continue;
+    }
+
+    value[normalizedKey] = parsed.data;
+  }
+
+  return { value, warnings };
+}
+
+export function resolveEffectiveBudget(args: {
+  tokenBudget?: number;
+  model?: string;
+  contextWindowSize: number;
+  contextWindowReserve: number;
+  contextWindowOverrides?: Record<string, ContextWindowOverride>;
+}): { budget: number; source: string } {
+  const { tokenBudget, model, contextWindowSize, contextWindowReserve } = args;
+  if (tokenBudget) {
+    return { budget: tokenBudget, source: 'runtime tokenBudget' };
+  }
+
+  const key = normalizeModelKey(model);
+  const override = key ? args.contextWindowOverrides?.[key] : undefined;
+  const configuredWindow = override?.contextTokens ?? override?.contextWindow;
+  if (configuredWindow) {
+    return {
+      budget: Math.floor(configuredWindow * (1 - contextWindowReserve)),
+      source: `contextWindowOverrides[${key}]`,
+    };
+  }
+
+  return {
+    budget: Math.floor(contextWindowSize * (1 - contextWindowReserve)),
+    source: 'fallback contextWindowSize',
+  };
+}
+
+function normalizeModelKey(model?: string): string | null {
+  if (!model) return null;
+  const key = model.trim().toLowerCase();
+  return key.length > 0 ? key : null;
+}
+
+function verboseLog(message: string): void {
+  if (_verboseLogging) console.log(message);
+}
+
+function resolveConfiguredWindow(model?: string): number | null {
+  const key = normalizeModelKey(model);
+  if (!key) return null;
+  const override = _contextWindowOverrides[key];
+  if (!override) return null;
+  return override.contextTokens ?? override.contextWindow ?? null;
+}
 // Subagent warming mode: 'full' | 'light' | 'off'. Default: 'light'.
 // Controls how much HyperMem context is injected into subagent sessions.
 let _subagentWarming: 'full' | 'light' | 'off' = 'light';
@@ -161,10 +266,43 @@ function getOverheadFallback(tier?: string): number {
  * total context (history + system) exceeds the model window before trim
  * completes, causing result stripping.
  */
-function computeEffectiveBudget(tokenBudget?: number): number {
-  if (tokenBudget) return tokenBudget;
-  // Derived from window config: floor to avoid fractional tokens
-  return Math.floor(_contextWindowSize * (1 - _contextWindowReserve));
+function computeEffectiveBudget(tokenBudget?: number, model?: string): number {
+  const resolved = resolveEffectiveBudget({
+    tokenBudget,
+    model,
+    contextWindowSize: _contextWindowSize,
+    contextWindowReserve: _contextWindowReserve,
+    contextWindowOverrides: _contextWindowOverrides,
+  });
+
+  if (resolved.source === 'runtime tokenBudget') {
+    verboseLog(`[hypermem-plugin] budget source: runtime tokenBudget=${tokenBudget}${model ? ` model=${model}` : ''}`);
+    return resolved.budget;
+  }
+
+  const configuredWindow = resolveConfiguredWindow(model);
+  if (configuredWindow) {
+    verboseLog(
+      `[hypermem-plugin] budget source: contextWindowOverrides[${normalizeModelKey(model)}]=${configuredWindow}, ` +
+      `reserve=${_contextWindowReserve}, effective=${resolved.budget}`
+    );
+    return resolved.budget;
+  }
+
+  verboseLog(
+    `[hypermem-plugin] budget source: fallback contextWindowSize=${_contextWindowSize}, ` +
+    `reserve=${_contextWindowReserve}, effective=${resolved.budget}${model ? ` model=${model}` : ''}`
+  );
+  const warningKey = normalizeModelKey(model) ?? '(unknown-model)';
+  if (!_budgetFallbackWarnings.has(warningKey)) {
+    _budgetFallbackWarnings.add(warningKey);
+    console.warn(
+      `[hypermem-plugin] No runtime tokenBudget${model ? ` for model ${model}` : ''}; ` +
+      `falling back to contextWindowSize=${_contextWindowSize}. ` +
+      `Add contextWindowOverrides["provider/model"] to config.json or openclaw.json if detection is wrong.`
+    );
+  }
+  return resolved.budget;
 }
 
 // ─── Plugin config cache ───────────────────────────────────────
@@ -179,16 +317,34 @@ let _pluginConfig: HypercompositorConfig = {};
  */
 async function loadUserConfig(): Promise<{
   compositor?: Partial<{
+    budgetFraction: number;
+    reserveFraction: number;
+    historyFraction: number;
+    memoryFraction: number;
     defaultTokenBudget: number;
     maxHistoryMessages: number;
     maxFacts: number;
+    maxExpertisePatterns: number;
     maxCrossSessionContext: number;
+    maxTotalTriggerTokens: number;
     maxRecentToolPairs: number;
     maxProseToolPairs: number;
     warmHistoryBudgetFraction: number;
+    contextWindowReserve: number;
+    dynamicReserveTurnHorizon: number;
+    dynamicReserveMax: number;
+    dynamicReserveEnabled: boolean;
     keystoneHistoryFraction: number;
     keystoneMaxMessages: number;
     keystoneMinSignificance: number;
+    targetBudgetFraction: number;
+    enableFOS: boolean;
+    enableMOD: boolean;
+    hyperformProfile: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
+    outputProfile: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
+    outputStandard: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
+    wikiTokenCap: number;
+    zigzagOrdering: boolean;
   }>;
   eviction?: Partial<{
     /** Turns before images are evicted. Default: 2 */
@@ -245,6 +401,18 @@ async function loadUserConfig(): Promise<{
    * Set this when agents.defaults.contextPruning.mode is enabled.
    */
   deferToolPruning?: boolean;
+  /** Enable detailed budget / trim decision logs. Default: false. */
+  verboseLogging?: boolean;
+  /**
+   * Manual context window overrides by fully-qualified model id.
+   * Used only when OpenClaw does not pass tokenBudget.
+   */
+  contextWindowOverrides?: Record<string, {
+    contextTokens?: number;
+    contextWindow?: number;
+  }>;
+  /** Threshold for cache replay fallback path. Default: 120000ms. */
+  warmCacheReplayThresholdMs?: number;
   /**
    * Controls how much HyperMem context is injected into subagent sessions.
    * - 'full'  — same compositor pipeline as parent sessions (all layers)
@@ -274,6 +442,9 @@ async function loadUserConfig(): Promise<{
   if (_pluginConfig.contextWindowSize != null) merged.contextWindowSize = _pluginConfig.contextWindowSize;
   if (_pluginConfig.contextWindowReserve != null) merged.contextWindowReserve = _pluginConfig.contextWindowReserve;
   if (_pluginConfig.deferToolPruning != null) merged.deferToolPruning = _pluginConfig.deferToolPruning;
+  if (_pluginConfig.verboseLogging != null) merged.verboseLogging = _pluginConfig.verboseLogging;
+  if (_pluginConfig.contextWindowOverrides != null) merged.contextWindowOverrides = { ...merged.contextWindowOverrides, ..._pluginConfig.contextWindowOverrides };
+  if (_pluginConfig.warmCacheReplayThresholdMs != null) merged.warmCacheReplayThresholdMs = _pluginConfig.warmCacheReplayThresholdMs;
   if (_pluginConfig.subagentWarming != null) merged.subagentWarming = _pluginConfig.subagentWarming;
   if (_pluginConfig.compositor) merged.compositor = { ...merged.compositor, ..._pluginConfig.compositor };
   if (_pluginConfig.eviction) merged.eviction = { ...merged.eviction, ..._pluginConfig.eviction };
@@ -349,9 +520,15 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         userConfig.contextWindowReserve >= 0 && userConfig.contextWindowReserve <= 0.5) {
       _contextWindowReserve = userConfig.contextWindowReserve;
     }
-    if (userConfig.deferToolPruning === true) {
-      _deferToolPruning = true;
+    _deferToolPruning = userConfig.deferToolPruning === true;
+    if (_deferToolPruning) {
       console.log('[hypermem-plugin] deferToolPruning: true — tool gradient deferred to host contextPruning');
+    }
+    _verboseLogging = userConfig.verboseLogging === true;
+    const sanitizedOverrides = sanitizeContextWindowOverrides(userConfig.contextWindowOverrides);
+    _contextWindowOverrides = sanitizedOverrides.value;
+    for (const warning of sanitizedOverrides.warnings) {
+      console.warn(`[hypermem-plugin] ${warning}`);
     }
     const warmingVal = (userConfig as { subagentWarming?: string }).subagentWarming;
     if (warmingVal === 'full' || warmingVal === 'light' || warmingVal === 'off') {
@@ -367,6 +544,8 @@ async function getHyperMem(): Promise<HyperMemInstance> {
       `${Math.round(_contextWindowReserve * 100)}% reserved (${reservedTokens} tokens), ` +
       `effective history budget: ${_contextWindowSize - reservedTokens} tokens`
     );
+    verboseLog(`[hypermem-plugin] warmCacheReplayThresholdMs=${_cacheReplayThresholdMs}`);
+    verboseLog(`[hypermem-plugin] contextWindowOverrides keys=${Object.keys(_contextWindowOverrides).join(', ') || '(none)'}`);
 
     const instance = await HyperMem.create({
       dataDir: _pluginConfig.dataDir ?? path.join(os.homedir(), '.openclaw/hypermem'),
@@ -388,10 +567,11 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         getMessageDb: (agentId: string) => any,
         getLibraryDb: () => any,
         listAgents: () => string[],
-        config?: Partial<{ enabled: boolean; periodicInterval: number }>,
+        config?: Partial<{ enabled: boolean; periodicInterval: number; maxActiveConversations?: number; recentConversationCooldownMs?: number; maxCandidatesPerPass?: number }>,
         getCursor?: (agentId: string, sessionKey: string) => Promise<unknown>,
         vectorStore?: any,
-        dreamerConfig?: Record<string, unknown>
+        dreamerConfig?: Record<string, unknown>,
+        globalWritePolicy?: string,
       ) => BackgroundIndexer;
     };
     const libraryDb = instance.dbManager.getLibraryDb();
@@ -415,7 +595,13 @@ async function getHyperMem(): Promise<HyperMemInstance> {
             return [];
           }
         },
-        { enabled: true, periodicInterval: 300000 },  // 5-minute interval
+        {
+          enabled: true,
+          periodicInterval: (userConfig as any)?.maintenance?.periodicInterval ?? 300000,
+          maxActiveConversations: (userConfig as any)?.maintenance?.maxActiveConversations ?? 5,
+          recentConversationCooldownMs: (userConfig as any)?.maintenance?.recentConversationCooldownMs ?? 30000,
+          maxCandidatesPerPass: (userConfig as any)?.maintenance?.maxCandidatesPerPass ?? 200,
+        },
         // Cursor fetcher: reads from Redis → SQLite fallback
         async (agentId: string, sessionKey: string) => {
           return instance.getSessionCursor(agentId, sessionKey);
@@ -423,9 +609,20 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         // Pass vector store so new facts/episodes are embedded at index time
         instance.getVectorStore() ?? undefined,
         // Dreaming config — passed from hypermem user config if set
-        (userConfig as { dreaming?: Record<string, unknown> })?.dreaming ?? {}
+        (userConfig as { dreaming?: Record<string, unknown> })?.dreaming ?? {},
+        // KL-01: global write policy — passed from hypermem user config
+        ((userConfig as { globalWritePolicy?: string })?.globalWritePolicy as any) ?? 'deny',
       );
       _indexer.start();
+      if (_verboseLogging) {
+        const mc = (userConfig as any)?.maintenance ?? {};
+        console.log(
+          `[hypermem-plugin] maintenance settings: periodicInterval=${mc.periodicInterval ?? 300000}ms ` +
+          `maxActiveConversations=${mc.maxActiveConversations ?? 5} ` +
+          `cooldown=${mc.recentConversationCooldownMs ?? 30000}ms ` +
+          `maxCandidatesPerPass=${mc.maxCandidatesPerPass ?? 200}`
+        );
+      }
     } catch {
       // Non-fatal — indexer wiring can fail without breaking context assembly
     }
@@ -924,7 +1121,7 @@ async function truncateJsonlIfNeeded(
 function createHyperMemEngine(): ContextEngine {
   return {
     info: {
-      id: 'hypermem',
+      id: 'hypercompositor',
       name: 'hypermem context engine',
       version: '0.6.3',
       // We own compaction — assemble() trims to budget via the compositor safety
@@ -1312,7 +1509,7 @@ function createHyperMemEngine(): ContextEngine {
         // a fixed 80% trim only frees 11% headroom — the wave overflows anyway
         // and results strip silently. Tier the trim target based on pre-trim
         // pressure so high-pressure sessions get real headroom before results land.
-        const effectiveBudget = computeEffectiveBudget(tokenBudget);
+        const effectiveBudget = computeEffectiveBudget(tokenBudget, model);
         try {
           const hm = await getHyperMem();
           const sk = resolveSessionKey(sessionId, sessionKey);
@@ -1618,7 +1815,7 @@ function createHyperMemEngine(): ContextEngine {
       // This is a preventive guard — the compositor's safety valve still trims
       // by token count post-assembly, but limiting depth up front avoids
       // feeding the compactor a window it can't reduce.
-      const effectiveBudget = computeEffectiveBudget(tokenBudget);
+      const effectiveBudget = computeEffectiveBudget(tokenBudget, model);
       const historyDepth = Math.min(250, Math.max(50, Math.floor((effectiveBudget * 0.65) / 500)));
 
       // ── Redis guardrail: trim history to token budget ────────────────────
@@ -1865,14 +2062,16 @@ function createHyperMemEngine(): ContextEngine {
         // Skip if a reshape pass just ran (within last 30s) — avoid double-processing
         // Cache modelState here for reuse in density-aware JSONL truncation below.
         let cachedModelState: Awaited<ReturnType<typeof hm.cache.getModelState>> | null = null;
+        let model: string | undefined;
         try {
           cachedModelState = await hm.cache.getModelState(agentId, sk);
+          model = cachedModelState?.model;
           if (cachedModelState?.reshapedAt) {
             const reshapeAge = Date.now() - new Date(cachedModelState.reshapedAt).getTime();
             // Only skip if session is NOT critically full — nuclear path must bypass this guard.
             // If currentTokenCount > 85% budget, fall through to nuclear compaction below.
             const isCriticallyFull = currentTokenCount != null &&
-              currentTokenCount > (computeEffectiveBudget(tokenBudget) * 0.85);
+              currentTokenCount > (computeEffectiveBudget(tokenBudget, model) * 0.85);
             if (reshapeAge < 30_000 && !isCriticallyFull) {
               console.log(`[hypermem-plugin] compact: skipping — reshape pass ran ${reshapeAge}ms ago`);
               return { ok: true, compacted: false, reason: 'reshape-recently-ran' };
@@ -1887,7 +2086,7 @@ function createHyperMemEngine(): ContextEngine {
         // and system prompt — our estimate only covers the history window. When they
         // diverge significantly upward, the difference is "inbound overhead" consuming
         // budget the history is competing for. We trim history to make room.
-        const effectiveBudget = computeEffectiveBudget(tokenBudget);
+        const effectiveBudget = computeEffectiveBudget(tokenBudget, model);
         const tokensBefore = await estimateWindowTokens(hm, agentId, sk);
 
         // Target depth for both Redis trimming and JSONL truncation.
@@ -2536,20 +2735,44 @@ const hypercompositorConfigSchema = z.object({
   contextWindowReserve: z.number().min(0).max(0.5).optional(),
   /** Defer tool pruning to OpenClaw's contextPruning. Default: false */
   deferToolPruning: z.boolean().optional(),
+  /** Emit detailed budget-source and trim-decision logs. Default: false */
+  verboseLogging: z.boolean().optional(),
+  /** Manual per-model context window fallback table used when runtime tokenBudget is missing. */
+  contextWindowOverrides: z.record(z.string().regex(CONTEXT_WINDOW_OVERRIDE_KEY_REGEX, 'key must be "provider/model"'), contextWindowOverrideSchema).optional(),
+  /** Treat cache replay snapshots older than this as stale. Default: 120000ms */
+  warmCacheReplayThresholdMs: z.number().int().positive().optional(),
   /** Subagent context injection: 'full' | 'light' | 'off'. Default: 'light' */
   subagentWarming: z.enum(['full', 'light', 'off']).optional(),
   /** Compositor tuning overrides */
   compositor: z.object({
+    budgetFraction: z.number().min(0).max(1).optional(),
+    reserveFraction: z.number().min(0).max(1).optional(),
+    historyFraction: z.number().min(0).max(1).optional(),
+    memoryFraction: z.number().min(0).max(1).optional(),
     defaultTokenBudget: z.number().int().positive().optional(),
     maxHistoryMessages: z.number().int().positive().optional(),
     maxFacts: z.number().int().positive().optional(),
+    maxExpertisePatterns: z.number().int().positive().optional(),
     maxCrossSessionContext: z.number().int().nonnegative().optional(),
+    maxTotalTriggerTokens: z.number().int().nonnegative().optional(),
     maxRecentToolPairs: z.number().int().nonnegative().optional(),
     maxProseToolPairs: z.number().int().nonnegative().optional(),
     warmHistoryBudgetFraction: z.number().min(0).max(1).optional(),
+    contextWindowReserve: z.number().min(0).max(1).optional(),
+    dynamicReserveTurnHorizon: z.number().int().positive().optional(),
+    dynamicReserveMax: z.number().min(0).max(1).optional(),
+    dynamicReserveEnabled: z.boolean().optional(),
     keystoneHistoryFraction: z.number().min(0).max(1).optional(),
     keystoneMaxMessages: z.number().int().nonnegative().optional(),
     keystoneMinSignificance: z.number().min(0).max(1).optional(),
+    targetBudgetFraction: z.number().min(0).max(1).optional(),
+    enableFOS: z.boolean().optional(),
+    enableMOD: z.boolean().optional(),
+    hyperformProfile: z.enum(['light', 'standard', 'full', 'starter', 'fleet']).optional(),
+    outputProfile: z.enum(['light', 'standard', 'full', 'starter', 'fleet']).optional(),
+    outputStandard: z.enum(['light', 'standard', 'full', 'starter', 'fleet']).optional(),
+    wikiTokenCap: z.number().int().positive().optional(),
+    zigzagOrdering: z.boolean().optional(),
   }).optional(),
   /** Image/tool eviction settings */
   eviction: z.object({
@@ -2592,14 +2815,14 @@ export default definePluginEntry({
     const pluginCfg = (api.pluginConfig ?? {}) as HypercompositorConfig;
     _pluginConfig = pluginCfg;
 
-    // ── Resolve HYPERMEM_PATH: pluginConfig > npm resolve > dev fallback ──
+    // ── Resolve HYPERMEM_PATH: pluginConfig > ESM package resolve > dev fallback ──
     if (pluginCfg.hyperMemPath) {
       HYPERMEM_PATH = pluginCfg.hyperMemPath;
       console.log(`[hypermem-plugin] Using configured hyperMemPath: ${HYPERMEM_PATH}`);
     } else {
       try {
-        HYPERMEM_PATH = require.resolve('@psiclawops/hypermem');
-        console.log(`[hypermem-plugin] Resolved @psiclawops/hypermem from node_modules: ${HYPERMEM_PATH}`);
+        const resolvedUrl = import.meta.resolve('@psiclawops/hypermem');
+        HYPERMEM_PATH = resolvedUrl.startsWith('file:') ? fileURLToPath(resolvedUrl) : resolvedUrl;
       } catch {
         // Dev fallback: resolve relative to plugin directory
         const __pluginDir = path.dirname(fileURLToPath(import.meta.url));
@@ -2609,6 +2832,56 @@ export default definePluginEntry({
     }
 
     api.registerContextEngine('hypercompositor', () => engine);
+
+    // ── HyperForm config dir init ──
+    // Copy defaults and guide to ~/.openclaw/hypermem/config/ on every load.
+    // Defaults are overwritten on plugin update. Active config files are never touched.
+    void (async () => {
+      try {
+        const dataDir = _pluginConfig.dataDir ?? path.join(os.homedir(), '.openclaw/hypermem');
+        const configDir = path.join(dataDir, 'config');
+        await fs.mkdir(configDir, { recursive: true });
+
+        const __pluginDir = path.dirname(fileURLToPath(import.meta.url));
+        const defaultsSrc = path.resolve(__pluginDir, '../../../config-defaults');
+
+        const defaultFiles = [
+          'hyperform-fos-defaults.json',
+          'hyperform-mod-defaults.json',
+          'HYPERFORM-GUIDE.md',
+        ];
+
+        for (const fname of defaultFiles) {
+          const src = path.join(defaultsSrc, fname);
+          const dest = path.join(configDir, fname);
+          try {
+            await fs.copyFile(src, dest);
+          } catch {
+            // defaults may not exist in dev builds — non-fatal
+          }
+        }
+
+        // On first install, copy defaults as active config if active files don't exist
+        for (const [src, dest] of [
+          ['hyperform-fos-defaults.json', 'hyperform-fos.json'],
+          ['hyperform-mod-defaults.json', 'hyperform-mod.json'],
+        ]) {
+          const destPath = path.join(configDir, dest);
+          try {
+            await fs.access(destPath);
+          } catch {
+            // Active config doesn't exist — copy defaults as starting point
+            try {
+              await fs.copyFile(path.join(configDir, src), destPath);
+            } catch {
+              // non-fatal
+            }
+          }
+        }
+      } catch {
+        // non-fatal — HyperForm config init is best-effort
+      }
+    })();
 
     // P1.7: Bind TaskFlow runtime for task visibility — best-effort.
     // Guard: api.runtime.taskFlow may not exist on older OpenClaw versions.

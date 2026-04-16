@@ -18,7 +18,7 @@
  */
 
 import type { DatabaseSync } from 'node:sqlite';
-import type { StoredMessage, IndexerConfig, EpisodeType, SessionCursor } from './types.js';
+import type { StoredMessage, IndexerConfig, EpisodeType, SessionCursor, MaintenanceTickDiagnostics } from './types.js';
 import { lintKnowledge } from './knowledge-lint.js';
 import { MessageStore } from './message-store.js';
 import { runNoiseSweep, runToolDecay } from './proactive-pass.js';
@@ -29,6 +29,8 @@ import { EpisodeStore } from './episode-store.js';
 import { TopicStore } from './topic-store.js';
 import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore } from './temporal-store.js';
+import { ContradictionDetector } from './contradiction-detector.js';
+import { ContradictionAuditStore } from './contradiction-audit-store.js';
 import { isSafeForSharedVisibility } from './secret-scanner.js';
 import type { VectorStore } from './vector-store.js';
 
@@ -86,6 +88,8 @@ export interface IndexerStats {
   knowledgeUpserted: number;
   /** Number of superseded fact vectors tombstoned from the vector index this tick. */
   tombstoned: number;
+  /** Number of contradiction audits recorded for review this tick. */
+  contradictionAuditsLogged: number;
   elapsedMs: number;
   /** Number of messages that were post-cursor (unseen by model, high-signal priority). */
   postCursorMessages: number;
@@ -488,6 +492,7 @@ function detectTopic(content: string): string | null {
 export class BackgroundIndexer {
   private readonly config: IndexerConfig;
   private readonly dreamerConfig: Partial<DreamerConfig>;
+  private readonly globalWritePolicy: import('./types.js').GlobalWritePolicy;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private vectorStore: VectorStore | null = null;
@@ -497,6 +502,8 @@ export class BackgroundIndexer {
   private consecutiveFailures: number = 0;
   /** True when the indexer is running in backoff mode due to repeated failures. */
   private inBackoff: boolean = false;
+  private readonly _conversationLastProcessed = new Map<number, number>();
+  lastMaintenanceDiagnostics: MaintenanceTickDiagnostics | null = null;
 
   constructor(
     config?: Partial<IndexerConfig>,
@@ -504,7 +511,8 @@ export class BackgroundIndexer {
     private getLibraryDb?: () => DatabaseSync,
     private listAgents?: () => string[],
     private getCursor?: CursorFetcher,
-    dreamerConfig?: Partial<DreamerConfig>
+    dreamerConfig?: Partial<DreamerConfig>,
+    globalWritePolicy?: import('./types.js').GlobalWritePolicy,
   ) {
     // Initialize synthesizer if libraryDb accessor is available
     if (getLibraryDb) {
@@ -530,8 +538,12 @@ export class BackgroundIndexer {
       periodicInterval: config?.periodicInterval ?? 60000,  // 1 minute
       batchSize: config?.batchSize ?? 128,
       maxMessagesPerTick: config?.maxMessagesPerTick ?? 500,
+      maxActiveConversations: config?.maxActiveConversations ?? 5,
+      recentConversationCooldownMs: config?.recentConversationCooldownMs ?? 30000,
+      maxCandidatesPerPass: config?.maxCandidatesPerPass ?? 200,
     };
     this.dreamerConfig = dreamerConfig ?? {};
+    this.globalWritePolicy = globalWritePolicy ?? 'deny';
   }
 
   /**
@@ -788,31 +800,77 @@ export class BackgroundIndexer {
       }
 
       // Run proactive passes on each agent's message DB
+      const maintStart = Date.now();
+      let maintConsidered = 0;
+      let maintSkipped = 0;
+      let maintScanned = 0;
+      let maintMutated = 0;
+      let maintExitReason: MaintenanceTickDiagnostics['exitReason'] = 'complete';
+      const maxConvs = this.config.maxActiveConversations ?? 5;
+      const cooldownMs = this.config.recentConversationCooldownMs ?? 30000;
+      const maxCandidates = this.config.maxCandidatesPerPass ?? 200;
+      const now = Date.now();
+
       for (const agentId of agents) {
         const messageDb = this.getMessageDb!(agentId);
         if (!messageDb) continue;
 
-        // Get active conversations for this agent
         let convRows: Array<{ id: number }>;
         try {
           convRows = messageDb.prepare(
-            `SELECT id FROM conversations WHERE agent_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 10`
-          ).all(agentId) as Array<{ id: number }>;
+            `SELECT id FROM conversations WHERE agent_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT ?`
+          ).all(agentId, maxConvs) as Array<{ id: number }>;
         } catch {
           continue;
         }
 
+        if (convRows.length === 0) {
+          if (maintExitReason === 'complete') maintExitReason = 'no-conversations';
+          continue;
+        }
+
         for (const conv of convRows) {
-          const noiseSweepResult = runNoiseSweep(messageDb, conv.id);
-          const toolDecayResult = runToolDecay(messageDb, conv.id);
-          // Log only if something changed
-          if (noiseSweepResult.messagesDeleted > 0 || toolDecayResult.messagesUpdated > 0) {
+          maintConsidered++;
+          const lastProcessed = this._conversationLastProcessed.get(conv.id) ?? 0;
+          if (now - lastProcessed < cooldownMs) {
+            maintSkipped++;
+            continue;
+          }
+
+          maintScanned++;
+          const noiseSweepResult = runNoiseSweep(messageDb, conv.id, 20, maxCandidates);
+          const toolDecayResult = runToolDecay(messageDb, conv.id, 40, maxCandidates);
+          const changed = noiseSweepResult.messagesDeleted + toolDecayResult.messagesUpdated;
+          if (changed > 0) {
+            maintMutated += changed;
             console.log(
               `[indexer] Proactive pass (conv ${conv.id}): swept ${noiseSweepResult.messagesDeleted} noise msgs, ` +
               `decayed ${toolDecayResult.messagesUpdated} tool results (${toolDecayResult.bytesFreed} bytes freed)`
             );
           }
+          this._conversationLastProcessed.set(conv.id, now);
+
+          if (maintMutated >= maxCandidates) {
+            maintExitReason = 'cap-reached';
+            break;
+          }
         }
+        if (maintExitReason === 'cap-reached') break;
+      }
+
+      this.lastMaintenanceDiagnostics = {
+        considered: maintConsidered,
+        skipped: maintSkipped,
+        scanned: maintScanned,
+        mutated: maintMutated,
+        durationMs: Date.now() - maintStart,
+        exitReason: maintExitReason,
+      };
+      if (maintScanned > 0) {
+        console.log(
+          `[indexer] Maintenance: considered=${maintConsidered} skipped=${maintSkipped} scanned=${maintScanned} mutated=${maintMutated} ` +
+          `duration=${this.lastMaintenanceDiagnostics.durationMs}ms exit=${maintExitReason}`
+        );
       }
 
       // If we reach here, the tick completed without throwing.
@@ -841,7 +899,7 @@ export class BackgroundIndexer {
     const messageDb = this.getMessageDb!(agentId);
 
     const messageStore = new MessageStore(messageDb);
-    const factStore = new FactStore(libraryDb);
+    const factStore = new FactStore(libraryDb, { globalWritePolicy: this.globalWritePolicy });
     const episodeStore = new EpisodeStore(libraryDb);
     const topicStore = new TopicStore(libraryDb);
     const knowledgeStore = new KnowledgeStore(libraryDb);
@@ -870,6 +928,7 @@ export class BackgroundIndexer {
         knowledgeUpserted: 0,
         tombstoned,
         postCursorMessages: 0,
+        contradictionAuditsLogged: 0,
         elapsedMs: Date.now() - start,
       };
     }
@@ -905,7 +964,15 @@ export class BackgroundIndexer {
     let topicsUpdated = 0;
     let knowledgeUpserted = 0;
     let supersededFacts = 0;
+    let contradictionAuditsLogged = 0;
     let maxMessageId = lastProcessedId;
+
+    const contradictionDetector = new ContradictionDetector(factStore, this.vectorStore ?? undefined, {
+      autoResolve: false,
+      maxCandidates: 6,
+      minSimilarity: 0.45,
+    });
+    const contradictionAuditStore = new ContradictionAuditStore(libraryDb);
 
     for (const msg of ordered) {
       const content = msg.textContent || '';
@@ -918,9 +985,24 @@ export class BackgroundIndexer {
       const factCandidates = extractFactCandidates(content);
       for (const { content: factContent, confidence: factConfidence } of factCandidates) {
         try {
+          const factDomain = domainForAgent(agentId);
+          const contradictionResult = await contradictionDetector.detectOnIngest(agentId, {
+            content: factContent,
+            domain: factDomain,
+          });
+          for (const candidate of contradictionResult.contradictions.slice(0, 3)) {
+            contradictionAuditStore.recordFactAudit(
+              agentId,
+              { content: factContent, domain: factDomain },
+              candidate,
+              { sourceRef: `msg:${msg.id}` }
+            );
+            contradictionAuditsLogged++;
+          }
+
           const fact = factStore.addFact(agentId, factContent, {
             scope: 'agent',
-            domain: domainForAgent(agentId),
+            domain: factDomain,
             confidence: factConfidence,
             sourceType: 'indexer',
             sourceSessionKey: this.getSessionKeyForMessage(messageDb, msg.conversationId),
@@ -1035,6 +1117,7 @@ export class BackgroundIndexer {
       topicsUpdated,
       knowledgeUpserted,
       tombstoned,
+      contradictionAuditsLogged,
       postCursorMessages: postCursor.length,
       elapsedMs: Date.now() - start,
     };
@@ -1308,9 +1391,10 @@ export function createIndexer(
   config?: Partial<IndexerConfig>,
   getCursor?: CursorFetcher,
   vectorStore?: VectorStore,
-  dreamerConfig?: Partial<DreamerConfig>
+  dreamerConfig?: Partial<DreamerConfig>,
+  globalWritePolicy?: import('./types.js').GlobalWritePolicy,
 ): BackgroundIndexer {
-  const indexer = new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor, dreamerConfig);
+  const indexer = new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor, dreamerConfig, globalWritePolicy);
   if (vectorStore) indexer.setVectorStore(vectorStore);
   return indexer;
 }
