@@ -1213,7 +1213,23 @@ export function migrateLibrary(db: DatabaseSync, engineVersion?: string): void {
   }
 
   if (currentVersion < 18) {
-    // topics dedup unique index — prevents duplicate topic names per agent
+    // topics dedup unique index — prevents duplicate topic names per agent.
+    // Older live DBs can already contain duplicates, so collapse them first.
+    db.exec(`
+      DELETE FROM topics
+      WHERE id IN (
+        WITH ranked AS (
+          SELECT
+            id,
+            ROW_NUMBER() OVER (
+              PARTITION BY agent_id, lower(name)
+              ORDER BY updated_at DESC, created_at DESC, id DESC
+            ) AS rn
+          FROM topics
+        )
+        SELECT id FROM ranked WHERE rn > 1
+      )
+    `);
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_dedup ON topics(agent_id, lower(name))');
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(18, nowIso());
