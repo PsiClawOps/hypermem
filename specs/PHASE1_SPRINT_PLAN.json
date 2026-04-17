@@ -19,7 +19,8 @@
       "type": "new-file",
       "file": "src/context-store.ts",
       "depends_on": [],
-      "status": "pending"
+      "status": "done",
+      "note": "ensureContextSchema, getOrCreateActiveContext, updateContextHead, archiveContext, rotateSessionContext all implemented."
     },
     {
       "id": "p1-t2",
@@ -27,7 +28,8 @@
       "type": "modify",
       "file": "src/message-store.ts",
       "depends_on": ["p1-t1"],
-      "status": "pending"
+      "status": "done",
+      "note": "getOrCreateConversation calls getOrCreateActiveContext after conversation creation."
     },
     {
       "id": "p1-t3",
@@ -35,7 +37,8 @@
       "type": "modify",
       "file": "src/message-store.ts",
       "depends_on": ["p1-t1"],
-      "status": "pending"
+      "status": "done",
+      "note": "recordMessage accepts contextId; sets context_id, parent_id, depth on INSERT; calls updateContextHead. Phase 2 parent_id/depth fields also wired here."
     },
     {
       "id": "p1-t4",
@@ -43,7 +46,8 @@
       "type": "modify",
       "file": "src/index.ts",
       "depends_on": ["p1-t1", "p1-t2", "p1-t3"],
-      "status": "pending"
+      "status": "done",
+      "note": "recordUserMessage and recordAssistantMessage resolve active context and pass contextId to recordMessage."
     },
     {
       "id": "p1-t5",
@@ -51,7 +55,8 @@
       "type": "new-file",
       "file": "src/context-backfill.ts",
       "depends_on": ["p1-t1"],
-      "status": "pending"
+      "status": "done",
+      "note": "backfillContexts and backfillParentChains implemented. Phase 2 parent_id/depth backfill is bundled here alongside Phase 1 context backfill."
     },
     {
       "id": "p1-t6",
@@ -59,7 +64,21 @@
       "type": "modify",
       "file": "src/index.ts",
       "depends_on": ["p1-t1", "p1-t2", "p1-t3", "p1-t4", "p1-t5"],
-      "status": "pending"
+      "status": "done",
+      "note": "ensureContextSchema exported from index.ts; compositor uses getActiveContext and getHistoryByDAGWalk for DAG-native reads (Phase 3 read paths also shipped)."
     }
-  ]
+  ],
+  "phase_summary": {
+    "phases_complete": ["Phase 0 (fence enforcement)", "Phase 1 (context heads)", "Phase 2 (parent_id/depth + backfill)", "Phase 3 (DAG-native reads in compositor, scoped FTS/keystones)"],
+    "note": "Phases 1–3 were implemented together. The compositor uses getHistoryByDAGWalk for warm, refreshRedisGradient, and getHistory; FTS and keystone recall are scoped by context_id. Stable-prefix assembly and cache boundary marker (CACHE_PREFIX_BOUNDARY_SLOT) are also in place in the compositor, with cache_control applied by provider-translator."
+  },
+  "next_phase": {
+    "id": "B2",
+    "title": "Cache-prefix signal propagation, window cache integration, and end-to-end cache_control boundary verification",
+    "scope": [
+      "Propagate prefixHash signal into cache invalidation and warm-start decisions so stale window cache entries with a mismatched stable prefix are evicted.",
+      "Integrate window cache read/write paths with the stable-prefix boundary so cache hits respect prefix hash consistency.",
+      "End-to-end verification that cache_control: {type: 'ephemeral'} is correctly placed at the CACHE_PREFIX_BOUNDARY_SLOT in real Anthropic provider calls."
+    ]
+  }
 }
