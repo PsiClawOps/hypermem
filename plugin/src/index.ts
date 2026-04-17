@@ -314,6 +314,20 @@ function guardTelemetry(fields: {
   }
 }
 
+// ─── B3: Batch trim with growth allowance ────────────────────────────────
+// Trim fires only when window usage exceeds the soft target by this fraction.
+// Small natural growth (e.g. a short assistant reply) never triggers a trim;
+// only genuine spikes (model switch, cold-start, multi-tool overrun) do.
+// When trim fires, the target is (softTarget * (1 - headroomFraction)) so the
+// window has room to grow for several turns before the next trim fires.
+//
+// softTarget (0.65): matches refreshRedisGradient → steady state never trims
+// growthThreshold (0.05): 5% overage buffer before trim fires
+// headroomFraction (0.10): trim target = softTarget * 0.90 → ~58.5% of budget
+const TRIM_SOFT_TARGET = 0.65;
+const TRIM_GROWTH_THRESHOLD = 0.05; // fire trim when window > softTarget * (1 + this)
+const TRIM_HEADROOM_FRACTION = 0.10; // trim to softTarget * (1 - this) for batch headroom
+
 // Test-only: expose emitters so the unit test can exercise them directly
 // without standing up a real session. Wrapped in a getter object so the flag
 // guard still runs (zero-cost when off).
@@ -325,6 +339,11 @@ export const __telemetryForTests = {
   beginTrimOwnerTurn,
   endTrimOwnerTurn,
   claimTrimOwner,
+  // B3: Expose batch-trim constants so tests can assert against the right values
+  // without embedding magic numbers.
+  TRIM_SOFT_TARGET,
+  TRIM_GROWTH_THRESHOLD,
+  TRIM_HEADROOM_FRACTION,
   reset(): void {
     if (_telemetryStream) {
       try { _telemetryStream.end(); } catch { /* ignore */ }
@@ -2240,18 +2259,31 @@ function createHyperMemEngine(): ContextEngine {
       // find preTokens <= trimBudget and skip the trim entirely. The trim only
       // fires when real excess exists (pressure spikes, model switch, cold start),
       // breaking the unconditional afterTurn→assemble trim churn loop.
+      //
+      // B3: Batch trim with growth allowance.
+      // Trim only fires when the window has grown past the soft target by more
+      // than TRIM_GROWTH_THRESHOLD (5%). When it does fire, trim to
+      // softTarget * (1 - TRIM_HEADROOM_FRACTION) so the window has room to
+      // grow for several turns before the next trim fires. This eliminates
+      // per-turn trim churn from minor natural growth (short assistant replies,
+      // small tool outputs) while still catching genuine pressure spikes.
       try {
-        const trimBudget = Math.floor(effectiveBudget * 0.65);
+        const trimSoftBudget = Math.floor(effectiveBudget * TRIM_SOFT_TARGET);
+        // B3: Trim trigger: only fire when window exceeds soft target + growth allowance.
+        const trimTriggerBudget = Math.floor(trimSoftBudget * (1 + TRIM_GROWTH_THRESHOLD));
+        // B3: Trim target: budget minus headroom so multiple turns fit before next trim.
+        const trimTargetBudget = Math.floor(trimSoftBudget * (1 - TRIM_HEADROOM_FRACTION));
         // Always read preTokens so we can make the skip decision and emit telemetry.
         const preTokensNormal = await estimateWindowTokens(hm, agentId, sk).catch(() => 0);
         const normalPath: TrimTelemetryPath = isSubagent ? 'assemble.subagent' : 'assemble.normal';
 
-        // Sprint 3: skip trim if the window already fits within the target envelope.
-        // refreshRedisGradient (Sprint 3 fix in compositor.ts) caps the gradient
-        // rebuild at the same 0.65 fraction, so in steady state preTokensNormal
-        // will be ≤ trimBudget and we avoid the per-turn churn trim.
-        const windowAlreadyFits = preTokensNormal > 0 && preTokensNormal <= trimBudget;
-        if (windowAlreadyFits) {
+        // B3: Skip trim when window is within the growth-allowance envelope.
+        // This replaces the Sprint 3 `windowAlreadyFits` check (which only
+        // skipped at exactly ≤ softTarget). The growth allowance lets the
+        // window float up to +5% before triggering, avoiding trim on every
+        // turn that ends a few tokens above 65%.
+        const withinGrowthEnvelope = preTokensNormal > 0 && preTokensNormal <= trimTriggerBudget;
+        if (withinGrowthEnvelope) {
           if (telemetryEnabled()) {
             guardTelemetry({
               path: normalPath,
@@ -2268,7 +2300,9 @@ function createHyperMemEngine(): ContextEngine {
           // warned. In development the duplicate throws.
           const normalClaimed = claimTrimOwner(sk, _asmTurnId, normalPath);
           if (normalClaimed) {
-            const trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
+            // B3: trim to the headroom target (below soft target) so the
+            // window has room to grow before the next trim fires.
+            const trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimTargetBudget);
             let normalCacheInvalidated = false;
             if (trimmed > 0) {
               // Invalidate window cache since history changed
@@ -2284,7 +2318,7 @@ function createHyperMemEngine(): ContextEngine {
                 postTokens: postTokensNormal,
                 removed: trimmed,
                 cacheInvalidated: normalCacheInvalidated,
-                reason: `budget*0.65=${trimBudget}`,
+                reason: `b3:trigger=${trimTriggerBudget},target=${trimTargetBudget}`,
               });
             }
           } else if (telemetryEnabled()) {
