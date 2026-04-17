@@ -2413,19 +2413,28 @@ export class Compositor {
     } else {
       rawHistory = store.getRecentMessages(conversation.id, refreshHistoryLimit, gradientFenceMessageId);
     }
+    // Sprint 3 (AfterTurn Rebuild/Trim Loop Fix): cap gradient total-window tokens
+    // at the same 65% target that assemble.normal trims to. Previously this was
+    // tokenBudget/0.80 (≈1.25×budget), which made applyToolGradient preserve more
+    // content than the trim target allowed — causing assemble.normal to always trim
+    // on the next turn even in the steady-state path. Aligning the gradient cap to
+    // the trim target means the rebuilt window already fits within the assemble
+    // envelope by construction.
+    const GRADIENT_ASSEMBLE_TARGET = 0.65; // must match assemble.normal trimBudget fraction
     const transformedHistory = applyToolGradient(rawHistory, {
       totalWindowTokens: tokenBudget && tokenBudget > 0
-        ? Math.max(tokenBudget, Math.floor(tokenBudget / 0.80))
+        ? Math.floor(tokenBudget * GRADIENT_ASSEMBLE_TARGET)
         : TOOL_PLANNING_BASELINE_WINDOW,
     });
 
     // If a token budget is provided, trim the gradient-compressed window to fit
-    // before writing to Redis. Without this, up to maxHistoryMessages messages
-    // land in Redis regardless of size, and trimHistoryToTokenBudget fires
-    // on every subsequent assemble() causing per-turn churn.
+    // before writing to Redis. The cap uses the same GRADIENT_ASSEMBLE_TARGET
+    // (0.65) so the window written to Redis sits inside the assemble.normal trim
+    // envelope. The next assemble() will find the window already within budget
+    // and skip the trim entirely in the steady-state path.
     let historyToWrite: NeutralMessage[] = transformedHistory;
     if (tokenBudget && tokenBudget > 0) {
-      const budgetCap = Math.floor(tokenBudget * 0.8);
+      const budgetCap = Math.floor(tokenBudget * GRADIENT_ASSEMBLE_TARGET);
       let runningTokens = 0;
       const clusters = clusterNeutralMessages(transformedHistory);
       const cappedClusters: NeutralMessageCluster<NeutralMessage>[] = [];

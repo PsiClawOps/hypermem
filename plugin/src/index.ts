@@ -201,6 +201,7 @@ const GUARD_TELEMETRY_REASONS = [
   'reshape-downshift-demoted',
   'duplicate-claim-suppressed',
   'afterturn-secondary-demoted',
+  'window-within-budget-skip',
 ] as const;
 type GuardTelemetryReason = typeof GUARD_TELEMETRY_REASONS[number];
 
@@ -2178,47 +2179,69 @@ function createHyperMemEngine(): ContextEngine {
       // Prevents model-switch bloat: if an agent previously ran on a larger
       // context window, Redis history may exceed the current model's budget.
       // Trimming here (before compose) ensures the compositor never sees a
-      // history window it can't fit. Uses 80% of budget as the trim ceiling
-      // to leave room for system prompt, facts, and identity slots.
+      // history window it can't fit.
+      //
+      // Sprint 3 (AfterTurn Rebuild/Trim Loop Fix): the assemble.normal trim now
+      // first checks whether the window is already within trimBudget. When
+      // afterTurn's refreshRedisGradient caps the rebuilt window at the same
+      // 0.65 fraction (Sprint 3 compositor fix), the steady-state path will
+      // find preTokens <= trimBudget and skip the trim entirely. The trim only
+      // fires when real excess exists (pressure spikes, model switch, cold start),
+      // breaking the unconditional afterTurn→assemble trim churn loop.
       try {
         const trimBudget = Math.floor(effectiveBudget * 0.65);
-        const preTokensNormal = telemetryEnabled()
-          ? await estimateWindowTokens(hm, agentId, sk).catch(() => 0)
-          : 0;
-        // Steady-state trim owner claim (Sprint 2.2a): route assemble.normal
-        // and assemble.subagent through the shared helper keyed by
-        // (sessionKey, _asmTurnId). The real trim + its `event:'trim'`
-        // emission are gated on the claim so a duplicate steady-state claim
-        // in the same turn is actually suppressed in production, not just
-        // warned. In development the duplicate throws.
+        // Always read preTokens so we can make the skip decision and emit telemetry.
+        const preTokensNormal = await estimateWindowTokens(hm, agentId, sk).catch(() => 0);
         const normalPath: TrimTelemetryPath = isSubagent ? 'assemble.subagent' : 'assemble.normal';
-        const normalClaimed = claimTrimOwner(sk, _asmTurnId, normalPath);
-        if (normalClaimed) {
-          const trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
-          let normalCacheInvalidated = false;
-          if (trimmed > 0) {
-            // Invalidate window cache since history changed
-            await hm.cache.invalidateWindow(agentId, sk);
-            normalCacheInvalidated = true;
-          }
+
+        // Sprint 3: skip trim if the window already fits within the target envelope.
+        // refreshRedisGradient (Sprint 3 fix in compositor.ts) caps the gradient
+        // rebuild at the same 0.65 fraction, so in steady state preTokensNormal
+        // will be ≤ trimBudget and we avoid the per-turn churn trim.
+        const windowAlreadyFits = preTokensNormal > 0 && preTokensNormal <= trimBudget;
+        if (windowAlreadyFits) {
           if (telemetryEnabled()) {
-            const postTokensNormal = await estimateWindowTokens(hm, agentId, sk).catch(() => 0);
-            trimTelemetry({
+            guardTelemetry({
               path: normalPath,
               agentId, sessionKey: sk,
-              preTokens: preTokensNormal,
-              postTokens: postTokensNormal,
-              removed: trimmed,
-              cacheInvalidated: normalCacheInvalidated,
-              reason: `budget*0.65=${trimBudget}`,
+              reason: 'window-within-budget-skip',
             });
           }
-        } else if (telemetryEnabled()) {
-          guardTelemetry({
-            path: normalPath,
-            agentId, sessionKey: sk,
-            reason: 'duplicate-claim-suppressed',
-          });
+        } else {
+          // Steady-state trim owner claim (Sprint 2.2a): route assemble.normal
+          // and assemble.subagent through the shared helper keyed by
+          // (sessionKey, _asmTurnId). The real trim + its `event:'trim'`
+          // emission are gated on the claim so a duplicate steady-state claim
+          // in the same turn is actually suppressed in production, not just
+          // warned. In development the duplicate throws.
+          const normalClaimed = claimTrimOwner(sk, _asmTurnId, normalPath);
+          if (normalClaimed) {
+            const trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
+            let normalCacheInvalidated = false;
+            if (trimmed > 0) {
+              // Invalidate window cache since history changed
+              await hm.cache.invalidateWindow(agentId, sk);
+              normalCacheInvalidated = true;
+            }
+            if (telemetryEnabled()) {
+              const postTokensNormal = await estimateWindowTokens(hm, agentId, sk).catch(() => 0);
+              trimTelemetry({
+                path: normalPath,
+                agentId, sessionKey: sk,
+                preTokens: preTokensNormal,
+                postTokens: postTokensNormal,
+                removed: trimmed,
+                cacheInvalidated: normalCacheInvalidated,
+                reason: `budget*0.65=${trimBudget}`,
+              });
+            }
+          } else if (telemetryEnabled()) {
+            guardTelemetry({
+              path: normalPath,
+              agentId, sessionKey: sk,
+              reason: 'duplicate-claim-suppressed',
+            });
+          }
         }
       } catch (trimErr) {
         // Non-fatal — compositor's budget-fit walk is the second line of defense
