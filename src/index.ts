@@ -175,6 +175,7 @@ export type {
   EvidenceRelationship,
   ArchivedMiningQuery,
   ArchivedMiningResult,
+  MultiContextMiningOptions,
 } from './types.js';
 
 export type { ProviderType } from './provider-translator.js';
@@ -217,6 +218,7 @@ import { KnowledgeGraph, type EntityType, type KnowledgeLink, type GraphNode, ty
 import { DesiredStateStore, type DesiredStateEntry, type DriftStatus } from './desired-state-store.js';
 import { CacheLayer } from './cache.js';
 import { Compositor } from './compositor.js';
+import { getArchivedContexts, type Context } from './context-store.js';
 import { VectorStore, type VectorSearchResult, type VectorIndexStats } from './vector-store.js';
 import { userMessageToNeutral, fromProviderFormat } from './provider-translator.js';
 import { stripMessageMetadata } from './topic-detector.js';
@@ -231,6 +233,9 @@ import type {
   StoredMessage,
   Conversation,
   ChannelType,
+  ArchivedMiningQuery,
+  ArchivedMiningResult,
+  MultiContextMiningOptions,
 } from './types.js';
 import { crossAgentQuery, defaultOrgRegistry, buildOrgRegistryFromDb, loadOrgRegistryFromDb, type OrgRegistry } from './cross-agent.js';
 import path from 'node:path';
@@ -469,6 +474,53 @@ export class HyperMem {
     const db = this.dbManager.getMessageDb(request.agentId);
     const libraryDb = this.dbManager.getLibraryDb();
     return this.compositor.compose(request, db, libraryDb);
+  }
+
+  // ─── Archived Mining (L2: Messages) ─────────────────────────
+
+  /**
+   * List archived or forked contexts for an agent.
+   *
+   * Operator-safe enumeration path. This is the approved archived-context
+   * listing surface. Active composition remains separate.
+   */
+  listArchivedContexts(
+    agentId: string,
+    opts?: {
+      sessionKey?: string;
+      limit?: number;
+    }
+  ): Context[] {
+    const db = this.dbManager.getMessageDb(agentId);
+    return getArchivedContexts(db, agentId, opts);
+  }
+
+  /**
+   * Mine a single archived or forked context through the archived-mining
+   * surface. This does not widen active composition.
+   */
+  mineArchivedContext(
+    agentId: string,
+    query: ArchivedMiningQuery,
+  ): ArchivedMiningResult<StoredMessage[]> {
+    const db = this.dbManager.getMessageDb(agentId);
+    const store = new MessageStore(db);
+    return store.mineArchivedContext(query);
+  }
+
+  /**
+   * Mine multiple archived or forked contexts through the capped archived-
+   * mining surface. This does not expose raw DAG helpers and does not widen
+   * active composition.
+   */
+  mineArchivedContexts(
+    agentId: string,
+    contextIds: number[],
+    opts?: MultiContextMiningOptions,
+  ): ArchivedMiningResult<StoredMessage[]>[] {
+    const db = this.dbManager.getMessageDb(agentId);
+    const store = new MessageStore(db);
+    return store.mineArchivedContexts(contextIds, opts);
   }
 
   /**

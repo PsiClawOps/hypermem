@@ -208,6 +208,7 @@ export function archiveContext(
  * Returns null if not found.
  *
  * @boundary INSPECTION ONLY — not a mining entry point.
+ * @policy See specs/DAG_HELPER_POLICY.md for helper classifications.
  * Do not use this function to retrieve messages for active composition or
  * historical mining. Use getArchivedContext + mineArchivedContext for archived
  * mining, and getActiveContext for composition-path access.
@@ -228,6 +229,9 @@ export function getContextById(
  * Get all archived or forked contexts for an agent.
  * Optionally filter by sessionKey and/or limit.
  * Returns in reverse-chronological order (most recently updated first).
+ *
+ * @policy See specs/DAG_HELPER_POLICY.md. This is the operator-safe
+ * archived-context enumeration path.
  */
 export function getArchivedContexts(
   db: DatabaseSync,
@@ -259,6 +263,9 @@ export function getArchivedContexts(
 /**
  * Get an archived or forked context by id.
  * Returns null if the context does not exist OR if it is active.
+ *
+ * @policy See specs/DAG_HELPER_POLICY.md. This is the operator-safe
+ * single-context lookup path.
  */
 export function getArchivedContext(
   db: DatabaseSync,
@@ -280,6 +287,7 @@ export function getArchivedContext(
  *
  * @boundary STATUS-CROSSING BY DESIGN — this function traverses across
  * active, archived, and forked contexts without filtering by status.
+ * @policy See specs/DAG_HELPER_POLICY.md for the call-site filtering rule.
  * If you need only archived/forked contexts in the lineage chain, filter
  * the returned array at the call site (e.g. `.filter(c => c.status !== 'active')`).
  */
@@ -314,8 +322,9 @@ export function getContextLineage(
  * Returns in ascending creation order.
  *
  * @boundary STATUS-CROSSING BY DESIGN — returns children regardless of their status
- * (may include active, archived, or forked children). Filter at the call site if
- * archived-only results are needed.
+ * (may include active, archived, or forked children).
+ * @policy See specs/DAG_HELPER_POLICY.md for the call-site filtering rule.
+ * Filter at the call site if archived-only results are needed.
  */
 export function getForkChildren(
   db: DatabaseSync,

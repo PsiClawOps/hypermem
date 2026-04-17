@@ -1,5 +1,5 @@
 /**
- * Archived Mining Tests (Phase 4 Sprint 2)
+ * Archived Mining Tests (Phase 4 Sprint 2 / Sprint 3)
  *
  * Covers:
  *   - mineArchivedContext: positive path, active rejection, missing rejection,
@@ -480,6 +480,142 @@ describe('Regression: active composition paths remain archived-blind', () => {
     const activeHistory = store.getHistoryByDAGWalk(activeCtx.headMessageId, 100);
     assert.equal(activeHistory.length, 1);
     assert.equal(activeHistory[0].textContent, 'New context msg');
+
+    db.close();
+  });
+});
+
+// ─── Sprint 3 Task 1: maxContexts gate ────────────────────────────────────────
+//
+// Design decision: caller-supplied maxContexts above the hard ceiling (50) is
+// CLAMPED to the ceiling — not rejected. Callers should not need to know the
+// exact constant value, only that their request will be bounded safely.
+//
+// Behavior under test:
+//   1. Exactly at effective limit → succeeds
+//   2. Over effective limit → throws immediately (before any DB access)
+//   3. Explicit lower limit → honored, lower threshold applies
+//   4. Caller requests above hard ceiling → clamped to ceiling (not thrown)
+
+describe('mineArchivedContexts: maxContexts gate (Sprint 3 Task 1)', () => {
+  // Helper: create N archived contexts in a fresh DB
+  function createNArchivedContexts(n) {
+    const db = createTestDb();
+    const store = new MessageStore(db);
+    const agentId = 'agent-gate';
+    const contextIds = [];
+
+    for (let i = 0; i < n; i++) {
+      const sessionKey = `session-gate-${i}`;
+      const convId = insertConversation(db, agentId, sessionKey);
+      const ctx = getOrCreateActiveContext(db, agentId, sessionKey, convId);
+      recordMsg(store, convId, agentId, ctx.id, 'user', `Gate msg ${i}`);
+      rotateSessionContext(db, agentId, sessionKey, convId);
+      contextIds.push(ctx.id);
+    }
+
+    return { db, store, contextIds };
+  }
+
+  it('succeeds when contextIds.length exactly equals the default limit (20)', () => {
+    const { db, store, contextIds } = createNArchivedContexts(20);
+
+    let results;
+    assert.doesNotThrow(() => {
+      results = store.mineArchivedContexts(contextIds);
+    }, 'should not throw when at default limit');
+
+    assert.equal(results.length, 20, 'should return 20 results');
+    assert.ok(results.every(r => r.isHistorical === true), 'all isHistorical');
+
+    db.close();
+  });
+
+  it('throws when contextIds.length exceeds the default limit (21 > 20)', () => {
+    const { db, store, contextIds } = createNArchivedContexts(21);
+
+    assert.throws(
+      () => store.mineArchivedContexts(contextIds),
+      (err) => {
+        assert.ok(err instanceof Error, 'should throw Error');
+        assert.ok(
+          err.message.includes('too many contextIds'),
+          `error message should mention "too many contextIds": ${err.message}`
+        );
+        assert.ok(
+          err.message.includes('21'),
+          `error message should include the count (21): ${err.message}`
+        );
+        return true;
+      },
+      'should throw when over default limit'
+    );
+
+    db.close();
+  });
+
+  it('honors an explicit lower maxContexts limit (throws at 6 when limit is 5)', () => {
+    const { db, store, contextIds } = createNArchivedContexts(6);
+
+    assert.throws(
+      () => store.mineArchivedContexts(contextIds, { maxContexts: 5 }),
+      (err) => {
+        assert.ok(err instanceof Error, 'should throw Error');
+        assert.ok(
+          err.message.includes('too many contextIds'),
+          `error should mention "too many contextIds": ${err.message}`
+        );
+        assert.ok(
+          err.message.includes('6'),
+          `error should mention actual count (6): ${err.message}`
+        );
+        return true;
+      },
+      'should throw when over explicit lower limit'
+    );
+
+    const fiveIds = contextIds.slice(0, 5);
+    let results;
+    assert.doesNotThrow(() => {
+      results = store.mineArchivedContexts(fiveIds, { maxContexts: 5 });
+    }, 'should not throw at exactly the explicit lower limit');
+    assert.equal(results.length, 5);
+
+    db.close();
+  });
+
+  it('clamps caller-supplied maxContexts above hard ceiling to ceiling (not rejected)', () => {
+    // 51 contexts: maxContexts=1000 gets clamped to 50, so 51 > 50 → throws
+    const { db, store, contextIds } = createNArchivedContexts(51);
+
+    assert.throws(
+      () => store.mineArchivedContexts(contextIds, { maxContexts: 1000 }),
+      (err) => {
+        assert.ok(err instanceof Error);
+        assert.ok(
+          err.message.includes('too many contextIds'),
+          `should throw (ceiling enforced via clamp): ${err.message}`
+        );
+        assert.ok(
+          err.message.includes('51'),
+          `error should include actual count (51): ${err.message}`
+        );
+        assert.ok(
+          err.message.includes('50'),
+          `error should reference the hard ceiling (50): ${err.message}`
+        );
+        return true;
+      },
+      'should throw (ceiling enforced via clamp) when 51 > 50'
+    );
+
+    // 50 contexts with maxContexts=1000 (clamped to 50) → succeeds
+    const fiftyIds = contextIds.slice(0, 50);
+    let results;
+    assert.doesNotThrow(() => {
+      results = store.mineArchivedContexts(fiftyIds, { maxContexts: 1000 });
+    }, 'should succeed for 50 contextIds even when maxContexts is over-ceiling (clamped to 50)');
+    assert.equal(results.length, 50, 'should return 50 results');
 
     db.close();
   });

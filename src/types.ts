@@ -793,6 +793,35 @@ export interface ArchivedMiningQuery {
 }
 
 /**
+ * Options for mineArchivedContexts (multi-context mining).
+ *
+ * Extends the per-context ArchivedMiningQuery options with a `maxContexts` gate
+ * that controls how many contextIds are accepted in a single call.
+ *
+ * ## maxContexts gate
+ * - Default effective cap: 20 (ARCHIVED_MULTI_CONTEXT_DEFAULT_MAX).
+ * - Hard ceiling: 50 (ARCHIVED_MULTI_CONTEXT_HARD_CEILING). Callers may not
+ *   exceed this regardless of what they pass.
+ * - A caller may supply a lower explicit limit (e.g. 10) to restrict the call
+ *   further; that lower limit is honored.
+ * - If a caller supplies a value above the hard ceiling, it is silently clamped
+ *   to the hard ceiling — callers need not know the exact constant.
+ * - If contextIds.length exceeds the effective max, mineArchivedContexts throws
+ *   immediately (before any DB access). Do not truncate silently.
+ */
+export interface MultiContextMiningOptions extends Omit<ArchivedMiningQuery, 'contextId'> {
+  /**
+   * Maximum number of contextIds accepted in this call.
+   *
+   * - Default: ARCHIVED_MULTI_CONTEXT_DEFAULT_MAX (20).
+   * - Hard ceiling: ARCHIVED_MULTI_CONTEXT_HARD_CEILING (50).
+   * - Values above the hard ceiling are clamped to the ceiling.
+   * - Values at or below the ceiling are used as-is.
+   */
+  maxContexts?: number;
+}
+
+/**
  * Result wrapper returned by mineArchivedContext / mineArchivedContexts.
  *
  * The stable marker `isHistorical: true` distinguishes mining results from

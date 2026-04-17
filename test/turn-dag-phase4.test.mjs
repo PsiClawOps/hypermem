@@ -12,6 +12,9 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
@@ -27,6 +30,7 @@ import {
   getContextLineage,
   getForkChildren,
 } from '../dist/context-store.js';
+import { HyperMem } from '../dist/index.js';
 import { MessageStore } from '../dist/message-store.js';
 import { migrate } from '../dist/schema.js';
 
@@ -438,6 +442,57 @@ describe('Turn DAG Phase 4: limit-path coverage for archived helpers', () => {
     assert.equal(lineage.length, 5, 'lineage chain should traverse all 5 contexts');
 
     db.close();
+  });
+});
+
+// ─── HyperMem Facade Integration (Sprint 3) ───────────────────
+
+describe('Turn DAG Phase 4: HyperMem archived mining facade', () => {
+  it('exposes archived listing and mining without widening the active path', async () => {
+    const dataDir = mkdtempSync(path.join(tmpdir(), 'hypermem-phase4-'));
+    const hm = await HyperMem.create({ dataDir });
+    const agentId = 'agent-hm-arc1';
+    const sessionKey = 'session-hm-arc1';
+
+    await hm.recordUserMessage(agentId, sessionKey, 'Archived branch message A');
+    await hm.recordUserMessage(agentId, sessionKey, 'Archived branch message B');
+
+    const db = hm.dbManager.getMessageDb(agentId);
+    const store = new MessageStore(db);
+    const conversation = store.getConversation(sessionKey);
+    assert.ok(conversation, 'conversation should exist after recording');
+
+    const archivedContext = getActiveContext(db, agentId, sessionKey);
+    assert.ok(archivedContext, 'active context should exist before rotation');
+
+    rotateSessionContext(db, agentId, sessionKey, conversation.id);
+    await hm.recordUserMessage(agentId, sessionKey, 'Active branch message C');
+
+    const archived = hm.listArchivedContexts(agentId, { sessionKey });
+    assert.equal(archived.length, 1, 'should list the rotated archived context');
+    assert.equal(archived[0].id, archivedContext.id, 'should return the rotated context');
+
+    const minedSingle = hm.mineArchivedContext(agentId, { contextId: archivedContext.id });
+    assert.equal(minedSingle.isHistorical, true, 'single-context result should be historical');
+    assert.equal(minedSingle.data.length, 2, 'single-context mining should return archived messages');
+    assert.deepEqual(
+      minedSingle.data.map(m => m.textContent),
+      ['Archived branch message A', 'Archived branch message B'],
+      'single-context mining should return only archived branch messages'
+    );
+
+    const minedMulti = hm.mineArchivedContexts(agentId, [archivedContext.id], { maxContexts: 5 });
+    assert.equal(minedMulti.length, 1, 'multi-context mining should return one result');
+    assert.equal(minedMulti[0].contextId, archivedContext.id, 'multi-context mining should preserve the archived context id');
+
+    const activeContext = getActiveContext(db, agentId, sessionKey);
+    assert.ok(activeContext?.headMessageId, 'new active context should have a head message');
+    const activeHistory = store.getHistoryByDAGWalk(activeContext.headMessageId, 100);
+    assert.deepEqual(
+      activeHistory.map(m => m.textContent),
+      ['Active branch message C'],
+      'active DAG walk should remain archived-blind after archived mining facade calls'
+    );
   });
 });
 
