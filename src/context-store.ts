@@ -203,6 +203,178 @@ export function archiveContext(
   ).run(now, contextId);
 }
 
+// ─── Phase 4.1: Context Inspection and Fork APIs ──────────────────────────
+
+/**
+ * Get any context row by its primary key (any status).
+ * Returns null if no context with that id exists.
+ * Used by operator inspection and archived-mining read surfaces.
+ */
+export function getContextById(
+  db: DatabaseSync,
+  contextId: number
+): Context | null {
+  const row = db
+    .prepare('SELECT * FROM contexts WHERE id = ?')
+    .get(contextId) as Record<string, unknown> | undefined;
+
+  if (!row) return null;
+  return parseContextRow(row);
+}
+
+export interface ListContextsOpts {
+  status?: 'active' | 'archived' | 'forked' | 'all';
+}
+
+/**
+ * List all context rows for a given (agentId, sessionKey) pair,
+ * optionally filtered by status. Sorted newest-updated first.
+ *
+ * opts.status defaults to 'all' — callers opt in to which slice they want.
+ */
+export function listContextsForSession(
+  db: DatabaseSync,
+  agentId: string,
+  sessionKey: string,
+  opts?: ListContextsOpts
+): Context[] {
+  const status = opts?.status ?? 'all';
+
+  let rows: Array<Record<string, unknown>>;
+  if (status === 'all') {
+    rows = db
+      .prepare(
+        'SELECT * FROM contexts WHERE agent_id = ? AND session_key = ? ORDER BY updated_at DESC'
+      )
+      .all(agentId, sessionKey) as Array<Record<string, unknown>>;
+  } else {
+    rows = db
+      .prepare(
+        'SELECT * FROM contexts WHERE agent_id = ? AND session_key = ? AND status = ? ORDER BY updated_at DESC'
+      )
+      .all(agentId, sessionKey, status) as Array<Record<string, unknown>>;
+  }
+
+  return rows.map(parseContextRow);
+}
+
+/**
+ * Convenience wrapper: list only archived contexts for a given session.
+ * Naming signals intent — no boolean footgun.
+ */
+export function listArchivedContextsForSession(
+  db: DatabaseSync,
+  agentId: string,
+  sessionKey: string
+): Context[] {
+  return listContextsForSession(db, agentId, sessionKey, { status: 'archived' });
+}
+
+/**
+ * Create an explicit branch fork:
+ *   1. Archives the source context (within the same transaction).
+ *   2. Creates a new active child context with parent_context_id pointing
+ *      at the source and head_message_id set to the given headMessageId.
+ *
+ * This is distinct from rotateSessionContext (which handles restart rotation).
+ * Use this for deliberate branch forking.
+ *
+ * Returns the newly created active context.
+ * Throws if the source context does not exist.
+ */
+export function createForkedContext(
+  db: DatabaseSync,
+  sourceContextId: number,
+  headMessageId: number,
+  agentId: string,
+  sessionKey: string,
+  metadata?: Record<string, unknown>
+): Context {
+  const source = getContextById(db, sourceContextId);
+  if (!source) {
+    throw new Error(`createForkedContext: source context ${sourceContextId} not found`);
+  }
+
+  const now = nowIso();
+  const metadataJson = metadata != null ? JSON.stringify(metadata) : null;
+
+  // Run archive + insert in a single transaction for atomicity.
+  let newId: number;
+  db.exec('BEGIN');
+  try {
+    // Archive the source context (idempotent if already archived).
+    db.prepare(
+      `UPDATE contexts SET status = 'archived', updated_at = ? WHERE id = ? AND status != 'archived'`
+    ).run(now, sourceContextId);
+
+    // Insert the new forked context as active.
+    const result = db
+      .prepare(
+        `INSERT INTO contexts
+           (agent_id, session_key, conversation_id, head_message_id, parent_context_id, status, created_at, updated_at, metadata_json)
+         VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`
+      )
+      .run(
+        agentId,
+        sessionKey,
+        source.conversationId,
+        headMessageId,
+        sourceContextId,
+        now,
+        now,
+        metadataJson
+      );
+
+    newId = Number(result.lastInsertRowid);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+
+  return {
+    id: newId!,
+    agentId,
+    sessionKey,
+    conversationId: source.conversationId,
+    headMessageId,
+    parentContextId: sourceContextId,
+    status: 'active',
+    createdAt: now,
+    updatedAt: now,
+    metadataJson,
+  };
+}
+
+/**
+ * Merge a metadata patch into an existing context's metadata_json blob.
+ * Creates the JSON object from scratch if metadata_json is currently null.
+ * Useful for annotating archive/fork origin or adding operator-level notes.
+ */
+export function setContextMetadata(
+  db: DatabaseSync,
+  contextId: number,
+  patch: Record<string, unknown>
+): void {
+  const row = db
+    .prepare('SELECT metadata_json FROM contexts WHERE id = ?')
+    .get(contextId) as { metadata_json: string | null } | undefined;
+
+  if (!row) return;
+
+  const existing: Record<string, unknown> =
+    row.metadata_json ? (JSON.parse(row.metadata_json) as Record<string, unknown>) : {};
+
+  const merged = { ...existing, ...patch };
+  const now = nowIso();
+
+  db.prepare(
+    'UPDATE contexts SET metadata_json = ?, updated_at = ? WHERE id = ?'
+  ).run(JSON.stringify(merged), now, contextId);
+}
+
+// ─── Session Context Rotation ────────────────────────────────────────────────
+
 /**
  * Rotate a session's active context: archive the current active context
  * and create a new one, optionally linking back via parent_context_id.
