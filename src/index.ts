@@ -28,7 +28,7 @@ export type { FleetAgent, FleetOrg, AgentCapability } from './fleet-store.js';
 export { SystemStore } from './system-store.js';
 export type { SystemState, SystemEvent } from './system-store.js';
 export { WorkStore } from './work-store.js';
-export { ensureContextSchema, getActiveContext, getOrCreateActiveContext, updateContextHead, archiveContext, rotateSessionContext } from './context-store.js';
+export { ensureContextSchema, getActiveContext, getOrCreateActiveContext, updateContextHead, archiveContext, rotateSessionContext, getContextById, getArchivedContexts, getArchivedContext, getContextLineage, getForkChildren } from './context-store.js';
 export type { Context } from './context-store.js';
 export type { WorkItem, WorkEvent, WorkStatus } from './work-store.js';
 export { DesiredStateStore } from './desired-state-store.js';

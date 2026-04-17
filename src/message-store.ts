@@ -15,7 +15,7 @@ import type {
   ConversationStatus,
   RecentTurn,
 } from './types.js';
-import { getOrCreateActiveContext, updateContextHead } from './context-store.js';
+import { getOrCreateActiveContext, updateContextHead, getArchivedContext } from './context-store.js';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -547,6 +547,27 @@ export class MessageStore {
       .prepare('SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?')
       .get(conversationId) as { count: number };
     return row.count;
+  }
+
+  /**
+   * Get the full message chain for an archived or forked context.
+   *
+   * Throws if the context does not exist or is active (not archived/forked).
+   * Returns an empty array if the context has no head message.
+   * Delegates to getHistoryByDAGWalk for the actual chain retrieval.
+   */
+  getArchivedChain(contextId: number, limit?: number): StoredMessage[] {
+    const context = getArchivedContext(this.db, contextId);
+
+    if (!context) {
+      throw new Error('getArchivedChain: context must be archived or forked');
+    }
+
+    if (context.headMessageId === null) {
+      return [];
+    }
+
+    return this.getHistoryByDAGWalk(context.headMessageId, limit ?? 200);
   }
 
   // ─── Helpers ─────────────────────────────────────────────────
