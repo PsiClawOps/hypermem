@@ -5,7 +5,7 @@
 **Phase:** 4 of 5 (Turn DAG Migration)
 **Spec:** `specs/TURN_DAG_MIGRATION_SPEC.md`
 **Priority:** P0
-**Status:** Sprint 2 complete, closeout captured, Sprint 3 ready
+**Status:** Phase 4 complete, Sprint 3 closeout captured, Phase 5 next
 
 ## Execution Contract
 
@@ -169,3 +169,45 @@ Sprint 3 outcomes:
 - `ftsQuery` remains a client-side substring filter for Sprint 3, with SQL FTS deferred to Phase 5
 - `HyperMem` now exposes `listArchivedContexts`, `mineArchivedContext`, and `mineArchivedContexts`
 - `BackgroundIndexer` remains active-scope by design, with no archived-mining wiring added in Sprint 3
+
+## Sprint 3 closeout
+
+**Implementation commit:** `e4ddded` `feat(archived-mining): add capped operator facade`
+
+### Closeout classification
+
+**Must-fix now**
+- none
+
+**Explicitly deferred to Phase 5**
+- operator-facing historical search stays on client-side `ftsQuery` substring filtering until a Phase 5 SQL FTS promotion is justified
+- storage and performance work stays in Phase 5 scope: active-only FTS index maintenance, cached token estimates on insert, blob/compression strategy, optional garbage collection
+- `BackgroundIndexer` remains active-scope by design unless a concrete historical indexing requirement appears later
+
+**Blocked by external prerequisite**
+- none
+
+### Project learnings
+
+- the `maxContexts` gate had to land before operator wiring, otherwise a clean API surface would still have unsafe blast radius
+- archived mining stayed safe because the operator surface is explicit, capped, and separate from composition
+- the helper-boundary policy now lives in the repo, which means future operator work can inherit it instead of rediscovering it
+
+### Repo learnings and failure modes
+
+- `src/message-store.ts` remains the main hotspot for archived-mining behavior and future performance work
+- `src/index.ts` is now the sanctioned operator surface for historical access, and bypassing it should be treated as regression
+- status-crossing DAG helpers are safe only because the call-site policy is now explicit and reviewable
+
+### Phase verdict
+
+Phase 4 is complete. The acceptance criteria are met: archived contexts are invisible to standard composition, archived mining is intentional and operator-safe, and operators can inspect historical chains without widening the active prompt path.
+
+### Carry-forward into Phase 5
+
+Phase 5 now owns the remaining storage and performance work:
+- active-only FTS index maintenance
+- cached token estimates on insert
+- blob/compression strategy
+- optional garbage collection
+- possible SQL FTS promotion for operator-facing historical search if performance warrants it

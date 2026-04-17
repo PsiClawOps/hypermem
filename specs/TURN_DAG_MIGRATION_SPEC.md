@@ -1,6 +1,6 @@
 # Turn DAG Migration Spec
 
-**Status:** Phases 0–3 and B2 implemented; Phase 4 next
+**Status:** Phases 0–4 and B2 implemented; Phase 5 next
 **Priority:** P0 (correctness + productivity)
 **Filed:** 2026-04-13
 **Filed by:** Forge
@@ -249,28 +249,33 @@ Stable-prefix signal propagation is now implemented and verified.
 
 ---
 
-## Phase 4 — pending
+## Phase 4 — complete
 
 **Separate live composition from archived mining**
 
-**Execution mode:** HyperBuilder-managed (`turn-dag-phase4-full-fleet`). Do not begin Phase 4 implementation until a fresh phase brief or sprint contract carries that exact HyperBuilder configuration.
+**Execution mode used:** HyperBuilder-managed (`turn-dag-phase4-full-fleet`)
 
-### Changes
-- introduce context lifecycle: `active`, `archived`, `forked`
-- define explicit APIs/jobs for mining archived contexts
-- fact extraction jobs may scan archived branches by policy, never by accident
+### Delivered
+- explicit context lifecycle support for `active`, `archived`, and `forked`
+- archived-context inspection helpers and archived-chain read paths
+- archived mining APIs that require explicit archived context selection and label results as historical
+- hard server-side `maxContexts` protection on `mineArchivedContexts`, with default 20 and hard ceiling 50
+- sanctioned operator facade on `HyperMem`: `listArchivedContexts`, `mineArchivedContext`, and `mineArchivedContexts`
+- canonical shared DAG helper policy in `specs/DAG_HELPER_POLICY.md`
+- explicit decision that `BackgroundIndexer` remains active-scope only in Phase 4
 
 ### Why this matters
-We want two different behaviors:
-- **composition:** only active branch
+We now have two different behaviors with a hard boundary:
+- **composition:** active branch only
 - **research/mining:** archived branches allowed when explicitly requested
 
 This preserves discoverability of old work without poisoning routine prompts.
 
-### Acceptance criteria
+### Acceptance criteria — met
 - archived contexts are invisible to standard composition
 - mining jobs can still access archived contexts intentionally
 - operators can inspect old chains without changing active prompt behavior
+- multi-context archived mining is capped before operator-facing use
 
 ## Phase 5
 
