@@ -41,16 +41,299 @@ import type {
   BackgroundIndexer,
   FleetStore,
 } from '@psiclawops/hypermem';
-import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow, canPersistReshapedHistory, OPENCLAW_BOOTSTRAP_FILES } from '@psiclawops/hypermem';
+import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow, OPENCLAW_BOOTSTRAP_FILES } from '@psiclawops/hypermem';
 import { evictStaleContent } from '@psiclawops/hypermem/image-eviction';
 import { repairToolPairs } from '@psiclawops/hypermem';
 import os from 'os';
 import path from 'path';
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
+import fsSync from 'fs';
 
 // Re-export core types for consumers (eliminates local shim drift)
 export type { NeutralMessage, NeutralToolCall, NeutralToolResult, ComposeRequest, ComposeResult };
+
+// ─── Telemetry (Phase A Sprint 1) ─────────────────────────────────────
+//
+// Structured logging around every trimHistoryToTokenBudget() call site and
+// every assemble() entry. Zero-cost when HYPERMEM_TELEMETRY !== '1'. When on,
+// appends JSONL to process.env.HYPERMEM_TELEMETRY_PATH (default
+// './hypermem-telemetry.jsonl'). Intentionally NOT using console.log so the
+// telemetry stream does not mingle with plugin diagnostic output.
+//
+// Telemetry is behavior-neutral: emit sites never throw, never block the hot
+// path, and the flag check is a plain env read (no allocations when off).
+type TrimTelemetryPath =
+  | 'assemble.normal'
+  | 'assemble.toolLoop'
+  | 'assemble.subagent'
+  | 'reshape'
+  | 'compact.nuclear'
+  | 'compact.history'
+  | 'compact.history2'
+  | 'afterTurn.secondary'
+  | 'warmstart';
+
+let _telemetryStream: fsSync.WriteStream | null = null;
+let _telemetryStreamFailed = false;
+let _telemetryTurnCounter = 0;
+
+function telemetryEnabled(): boolean {
+  return process.env.HYPERMEM_TELEMETRY === '1';
+}
+
+function getTelemetryStream(): fsSync.WriteStream | null {
+  if (_telemetryStream || _telemetryStreamFailed) return _telemetryStream;
+  try {
+    const p = process.env.HYPERMEM_TELEMETRY_PATH || './hypermem-telemetry.jsonl';
+    _telemetryStream = fsSync.createWriteStream(p, { flags: 'a' });
+    _telemetryStream.on('error', () => {
+      _telemetryStreamFailed = true;
+      _telemetryStream = null;
+    });
+  } catch {
+    _telemetryStreamFailed = true;
+    _telemetryStream = null;
+  }
+  return _telemetryStream;
+}
+
+function trimTelemetry(fields: {
+  path: TrimTelemetryPath;
+  agentId: string;
+  sessionKey: string;
+  preTokens: number;
+  postTokens: number;
+  removed: number;
+  cacheInvalidated: boolean;
+  reason: string;
+}): void {
+  if (!telemetryEnabled()) return;
+  const stream = getTelemetryStream();
+  if (!stream) return;
+  try {
+    const record = {
+      event: 'trim',
+      ts: new Date().toISOString(),
+      ...fields,
+    };
+    stream.write(JSON.stringify(record) + '\n');
+  } catch {
+    // Telemetry must never throw
+  }
+}
+
+function assembleTrace(fields: {
+  agentId: string;
+  sessionKey: string;
+  turnId: string;
+  path: 'cold' | 'replay' | 'subagent';
+  toolLoop: boolean;
+  msgCount: number;
+}): void {
+  if (!telemetryEnabled()) return;
+  const stream = getTelemetryStream();
+  if (!stream) return;
+  try {
+    const record = {
+      event: 'assemble',
+      ts: new Date().toISOString(),
+      ...fields,
+    };
+    stream.write(JSON.stringify(record) + '\n');
+  } catch {
+    // Telemetry must never throw
+  }
+}
+
+function nextTurnId(): string {
+  _telemetryTurnCounter = (_telemetryTurnCounter + 1) >>> 0;
+  return `${Date.now().toString(36)}-${_telemetryTurnCounter.toString(36)}`;
+}
+
+// ─── Trim Ownership (Phase A Sprint 2) ───────────────────────────
+//
+// Sprint 2 consolidates trim ownership: the assemble-owned family
+// (assemble.normal, assemble.subagent, assemble.toolLoop) is the single
+// steady-state trim owner. Compact paths (compact.nuclear, compact.history,
+// compact.history2) are exempted — they're exception-only. warmstart,
+// reshape, and afterTurn.secondary are demoted in sub-tasks 2.2 and 2.3.
+//
+// This block adds:
+//   1. A per-session turn context (beginTrimOwnerTurn/endTrimOwnerTurn) scoped
+//      by the main assemble() flow.
+//   2. A single shared trimOwner claim helper that lets exactly one **real**
+//      steady-state trim claim ownership per turn and throws loudly in
+//      development (NODE_ENV='development') when a second real steady-state
+//      trim path attempts to claim the same turn.
+//   3. A non-counting guard/noop telemetry helper (same JSONL channel) that
+//      demoted paths can emit to preserve visibility of warm-start/reshape
+//      without consuming a steady-state owner slot.
+//
+// Sub-task 2.1 only adds the scaffolding + invariant; no existing trim call
+// is removed here. Demotions of warm-start/reshape/afterTurn.secondary land
+// in 2.2 and 2.3.
+
+const STEADY_STATE_TRIM_PATHS = new Set<TrimTelemetryPath>([
+  'assemble.normal',
+  'assemble.subagent',
+  'assemble.toolLoop',
+]);
+
+const COMPACT_TRIM_PATHS = new Set<TrimTelemetryPath>([
+  'compact.nuclear',
+  'compact.history',
+  'compact.history2',
+]);
+
+// ─── Guard-telemetry reason enum (Phase A Sprint 2.2a) ──────────────────
+// Plugin-local, constant-backed union of allowed `reason` values on
+// `event: 'trim-guard'` records. Keeping this bounded prevents ad-hoc
+// numeric/user strings from leaking into the telemetry JSONL channel and
+// makes downstream reporting stable. Do NOT widen this to arbitrary
+// strings — add a new member here first, then reference it at call sites.
+//
+// Scope note: this union is plugin-local (per planner 2.2 §C). It is not
+// re-exported via `src/types.ts` because the shared public types surface
+// must not gain a telemetry-reason enum as part of this sprint.
+const GUARD_TELEMETRY_REASONS = [
+  'warmstart-pressure-demoted',
+  'reshape-downshift-demoted',
+  'duplicate-claim-suppressed',
+  'afterturn-secondary-demoted',
+] as const;
+type GuardTelemetryReason = typeof GUARD_TELEMETRY_REASONS[number];
+
+interface TrimOwnerTurnContext {
+  turnId: string;
+  claimedPath?: TrimTelemetryPath;
+}
+
+// Turn-scoped ownership map (Phase A Sprint 2.2a).
+//
+// Previously keyed by `sessionKey` alone, which clobbered overlapping same-
+// session assemble() flows (Sprint 2.1 security eval, medium finding #1).
+// Now keyed by the composite `sessionKey|turnId` so two concurrent turns on
+// the same session key remain isolated: each `beginTrimOwnerTurn` gets its
+// own slot, `claimTrimOwner` checks the exact turn's slot, and
+// `endTrimOwnerTurn` removes only that turn's slot.
+const _trimOwnerTurns = new Map<string, TrimOwnerTurnContext>();
+
+function _trimOwnerKey(sessionKey: string, turnId: string): string {
+  return `${sessionKey}|${turnId}`;
+}
+
+function beginTrimOwnerTurn(sessionKey: string, turnId: string): void {
+  _trimOwnerTurns.set(_trimOwnerKey(sessionKey, turnId), { turnId });
+}
+
+function endTrimOwnerTurn(sessionKey: string, turnId: string): void {
+  _trimOwnerTurns.delete(_trimOwnerKey(sessionKey, turnId));
+}
+
+/**
+ * Claim the steady-state trim owner slot for the current turn.
+ *
+ * Behavior:
+ *   - compact.* paths are exception-only and pass through without claiming.
+ *   - Non-steady paths (warmstart, reshape, afterTurn.secondary) also pass
+ *     through without claiming. Demoted/no-op sites should normally emit
+ *     via guardTelemetry() instead so they stay visible without contending
+ *     for ownership (sub-tasks 2.2 and 2.3 wire this in).
+ *   - Steady-state paths (assemble.normal, assemble.subagent,
+ *     assemble.toolLoop) claim the single owner slot for the current turn.
+ *     The first such claim succeeds. A second steady-state claim against the
+ *     same turn is a duplicate-turn violation: it throws loudly under
+ *     NODE_ENV='development' and warns in other environments (returning
+ *     false so non-dev runtimes keep working).
+ *
+ * Callers should invoke this immediately before the real
+ * trimHistoryToTokenBudget() call. Guard telemetry does NOT route through
+ * this helper — it is explicitly excluded from the steady-state invariant.
+ *
+ * Returns true when the claim succeeds (or is exempt); false on a swallowed
+ * duplicate claim in non-development. In development the duplicate throws
+ * before returning.
+ */
+function claimTrimOwner(sessionKey: string, turnId: string, path: TrimTelemetryPath): boolean {
+  // Compact paths: exempt — they represent an exceptional pressure path and
+  // never contend for the steady-state slot.
+  if (COMPACT_TRIM_PATHS.has(path)) return true;
+  // Non-steady paths: pass through (warmstart/reshape/afterTurn.secondary).
+  // Warmstart + reshape are demoted to guardTelemetry in 2.2a.
+  if (!STEADY_STATE_TRIM_PATHS.has(path)) return true;
+  const ctx = _trimOwnerTurns.get(_trimOwnerKey(sessionKey, turnId));
+  if (!ctx) return true; // No active assemble-turn scope — nothing to enforce here.
+  if (ctx.claimedPath) {
+    const msg =
+      `[hypermem-plugin] trimOwner: duplicate steady-state trim claim in turn ` +
+      `${ctx.turnId} (sessionKey=${sessionKey}): first=${ctx.claimedPath} second=${path}`;
+    if (process.env.NODE_ENV === 'development') {
+      throw new Error(msg);
+    }
+    // Non-development: do not throw, but leave a loud trail so telemetry
+    // surfaces the violation. Callers MUST honor the false return and skip
+    // the second real trim (Sprint 2.2a enforcement).
+    console.warn(msg);
+    return false;
+  }
+  ctx.claimedPath = path;
+  return true;
+}
+
+/**
+ * Non-counting guard / noop telemetry.
+ *
+ * Emits a `trim-guard` record on the same JSONL channel as trimTelemetry()
+ * but with a distinct event name so per-turn reporting (scripts/trim-report.mjs,
+ * future ownership dashboards) can keep it out of `trimCount`. Used by
+ * demoted/no-op call sites in 2.2 and 2.3 so their path labels stay visible
+ * in telemetry without consuming a steady-state owner slot.
+ *
+ * Zero-cost when telemetry is off. Never throws.
+ */
+function guardTelemetry(fields: {
+  path: TrimTelemetryPath;
+  agentId: string;
+  sessionKey: string;
+  reason: GuardTelemetryReason;
+}): void {
+  if (!telemetryEnabled()) return;
+  const stream = getTelemetryStream();
+  if (!stream) return;
+  try {
+    const record = {
+      event: 'trim-guard',
+      ts: new Date().toISOString(),
+      ...fields,
+    };
+    stream.write(JSON.stringify(record) + '\n');
+  } catch {
+    // Telemetry must never throw
+  }
+}
+
+// Test-only: expose emitters so the unit test can exercise them directly
+// without standing up a real session. Wrapped in a getter object so the flag
+// guard still runs (zero-cost when off).
+export const __telemetryForTests = {
+  trimTelemetry,
+  assembleTrace,
+  guardTelemetry,
+  nextTurnId,
+  beginTrimOwnerTurn,
+  endTrimOwnerTurn,
+  claimTrimOwner,
+  reset(): void {
+    if (_telemetryStream) {
+      try { _telemetryStream.end(); } catch { /* ignore */ }
+    }
+    _telemetryStream = null;
+    _telemetryStreamFailed = false;
+    _telemetryTurnCounter = 0;
+    _trimOwnerTurns.clear();
+  },
+};
 
 // ─── hypermem singleton ────────────────────────────────────────
 
@@ -1251,17 +1534,20 @@ function createHyperMemEngine(): ContextEngine {
           const warmBudget = 90_000;
           const warmPressure = postWarmTokens / warmBudget;
           if (warmPressure > 0.80) {
-            const warmTrimTarget = warmPressure > 0.90 ? 0.40 : 0.55;
-            const warmTrimBudget = Math.floor(warmBudget * warmTrimTarget);
-            const warmTrimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, warmTrimBudget);
-            if (warmTrimmed > 0) {
-              await hm.cache.invalidateWindow(agentId, sk);
-              console.log(
-                `[hypermem-plugin] bootstrap: high-pressure startup ` +
-                `(${(warmPressure * 100).toFixed(1)}%), pre-trimmed Redis to ` +
-                `~${warmTrimTarget * 100}% (${warmTrimmed} msgs dropped)`
-              );
-            }
+            // Sprint 2.2a: demote warmstart to guard telemetry.
+            //
+            // Previously this path performed a real trim + invalidateWindow
+            // and emitted `event:'trim'` with path='warmstart'. Assemble
+            // (tool-loop + normal/subagent) is the steady-state owner now,
+            // so the first turn's assemble.* trim absorbs any remaining
+            // post-warm pressure. Keeping the pressure check + threshold
+            // branch here preserves observability via `event:'trim-guard'`
+            // without mutating Redis history or the window cache.
+            guardTelemetry({
+              path: 'warmstart',
+              agentId, sessionKey: sk,
+              reason: 'warmstart-pressure-demoted',
+            });
           }
         } catch {
           // Non-fatal — first turn's tool-loop trim is the fallback
@@ -1496,6 +1782,40 @@ function createHyperMemEngine(): ContextEngine {
       // pass-through that never re-injects context on tool-loop calls.
       const lastMsg = messages[messages.length - 1] as unknown as InboundMessage | undefined;
       const isToolLoop = lastMsg?.role === 'toolResult' || lastMsg?.role === 'tool';
+
+      // Telemetry: emit one assembleTrace at entry. Path taxonomy:
+      //   'subagent' - session key matches the subagent pattern
+      //   'cold'     - normal full-assembly or tool-loop entry (a separate
+      //                'replay' trace is emitted if the cache replay fast
+      //                path is taken below)
+      // Zero-cost when HYPERMEM_TELEMETRY !== '1'.
+      //
+      // Trim-ownership turn context (Sprint 2): the turnId is also used to
+      // scope the shared trim-owner claim helper so duplicate steady-state
+      // trims in a single assemble() turn can be detected and (under
+      // NODE_ENV='development') throw loudly. We always allocate the turnId
+      // and open the scope — the map write is cheap and keeps enforcement
+      // active even when telemetry is off. The scope is closed in the
+      // finally block wrapping the full assemble body below.
+      const _asmSk = resolveSessionKey(sessionId, sessionKey);
+      const _asmTurnId = nextTurnId();
+      beginTrimOwnerTurn(_asmSk, _asmTurnId);
+      if (telemetryEnabled()) {
+        const _agentId = extractAgentId(_asmSk);
+        const _entryPath: 'cold' | 'replay' | 'subagent' = _asmSk.includes('subagent:')
+          ? 'subagent'
+          : 'cold';
+        assembleTrace({
+          agentId: _agentId,
+          sessionKey: _asmSk,
+          turnId: _asmTurnId,
+          path: _entryPath,
+          toolLoop: isToolLoop,
+          msgCount: messages.length,
+        });
+      }
+
+      try {
       if (isToolLoop) {
         // Tool-loop turns: pass messages through unchanged but still:
         //   1. Run the trim guardrail — tool loops accumulate history as fast
@@ -1606,9 +1926,45 @@ function createHyperMemEngine(): ContextEngine {
           }
 
           const trimBudget = Math.floor(effectiveBudget * trimTarget);
-          const trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
-          if (trimmed > 0) {
-            await hm.cache.invalidateWindow(agentId, sk);
+          // Steady-state trim owner claim (Sprint 2.2a): route through the
+          // shared helper keyed by (sessionKey, turnId). In development a
+          // duplicate steady-state trim in the same assemble() turn throws.
+          // In non-development a duplicate returns false; the real trim +
+          // its `event:'trim'` emission are gated on the successful claim so
+          // a duplicate claim is actually suppressed, not just warned.
+          // Compact.* paths are exempt; this path is assemble-owned.
+          const toolLoopClaimed = claimTrimOwner(sk, _asmTurnId, 'assemble.toolLoop');
+          let trimmed = 0;
+          let toolLoopCacheInvalidated = false;
+          if (toolLoopClaimed) {
+            trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
+            if (trimmed > 0) {
+              await hm.cache.invalidateWindow(agentId, sk);
+              toolLoopCacheInvalidated = true;
+            }
+            if (telemetryEnabled()) {
+              const postTrimTokens = await estimateWindowTokens(hm, agentId, sk).catch(() => 0);
+              trimTelemetry({
+                path: 'assemble.toolLoop',
+                agentId, sessionKey: sk,
+                preTokens: preTrimTokens,
+                postTokens: postTrimTokens,
+                removed: trimmed,
+                cacheInvalidated: toolLoopCacheInvalidated,
+                reason: isJsonlReplay
+                  ? 'jsonl-replay'
+                  : `pressure=${(pressure * 100).toFixed(1)}%`,
+              });
+            }
+          } else if (telemetryEnabled()) {
+            // Surface the suppressed-duplicate as a bounded guard record so
+            // downstream reporting can see how often the gate fires. No
+            // history or window mutation here.
+            guardTelemetry({
+              path: 'assemble.toolLoop',
+              agentId, sessionKey: sk,
+              reason: 'duplicate-claim-suppressed',
+            });
           }
 
           // Also trim the messages array itself to match the budget.
@@ -1826,10 +2182,43 @@ function createHyperMemEngine(): ContextEngine {
       // to leave room for system prompt, facts, and identity slots.
       try {
         const trimBudget = Math.floor(effectiveBudget * 0.65);
-        const trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
-        if (trimmed > 0) {
-          // Invalidate window cache since history changed
-          await hm.cache.invalidateWindow(agentId, sk);
+        const preTokensNormal = telemetryEnabled()
+          ? await estimateWindowTokens(hm, agentId, sk).catch(() => 0)
+          : 0;
+        // Steady-state trim owner claim (Sprint 2.2a): route assemble.normal
+        // and assemble.subagent through the shared helper keyed by
+        // (sessionKey, _asmTurnId). The real trim + its `event:'trim'`
+        // emission are gated on the claim so a duplicate steady-state claim
+        // in the same turn is actually suppressed in production, not just
+        // warned. In development the duplicate throws.
+        const normalPath: TrimTelemetryPath = isSubagent ? 'assemble.subagent' : 'assemble.normal';
+        const normalClaimed = claimTrimOwner(sk, _asmTurnId, normalPath);
+        if (normalClaimed) {
+          const trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
+          let normalCacheInvalidated = false;
+          if (trimmed > 0) {
+            // Invalidate window cache since history changed
+            await hm.cache.invalidateWindow(agentId, sk);
+            normalCacheInvalidated = true;
+          }
+          if (telemetryEnabled()) {
+            const postTokensNormal = await estimateWindowTokens(hm, agentId, sk).catch(() => 0);
+            trimTelemetry({
+              path: normalPath,
+              agentId, sessionKey: sk,
+              preTokens: preTokensNormal,
+              postTokens: postTokensNormal,
+              removed: trimmed,
+              cacheInvalidated: normalCacheInvalidated,
+              reason: `budget*0.65=${trimBudget}`,
+            });
+          }
+        } else if (telemetryEnabled()) {
+          guardTelemetry({
+            path: normalPath,
+            agentId, sessionKey: sk,
+            reason: 'duplicate-claim-suppressed',
+          });
         }
       } catch (trimErr) {
         // Non-fatal — compositor's budget-fit walk is the second line of defense
@@ -1856,41 +2245,25 @@ function createHyperMemEngine(): ContextEngine {
           (lastState.tokenBudget - effectiveBudget) / lastState.tokenBudget > DOWNSHIFT_THRESHOLD;
 
         if (isDownshift && !_deferToolPruning) {
-          // Read from history list — window cache is always null here because
-          // afterTurn() calls invalidateWindow() on every turn.
-          const currentHistory = await hm.cache.getHistory(agentId, sk);
-          if (currentHistory && currentHistory.length > 0) {
-            const reshaped = applyToolGradientToWindow(currentHistory, effectiveBudget);
-            if (reshaped.length < currentHistory.length) {
-              const reshapedAt = new Date().toISOString();
-              if (canPersistReshapedHistory(currentHistory)) {
-                // No structured tool turns in canonical history, safe to persist
-                // the reshaped window back to cache/history.
-                await hm.cache.replaceHistory(agentId, sk, reshaped);
-                await hm.cache.invalidateWindow(agentId, sk);
-                console.log(
-                  `[hypermem-plugin] budget-downshift: ${agentId}/${sk} ` +
-                  `${lastState!.tokenBudget}→${effectiveBudget} tokens, ` +
-                  `reshaped ${currentHistory.length}→${reshaped.length} messages`
-                );
-              } else {
-                // Tool-bearing history must remain canonical. Use the reshaped
-                // window only as a compose-time view and leave hot history lossless.
-                console.log(
-                  `[hypermem-plugin] budget-downshift: ${agentId}/${sk} ` +
-                  `${lastState!.tokenBudget}→${effectiveBudget} tokens, ` +
-                  `view-only reshape ${currentHistory.length}→${reshaped.length} messages (structured tool history preserved)`
-                );
-              }
-              await hm.cache.setModelState(agentId, sk, {
-                model: model ?? 'unknown',
-                tokenBudget: effectiveBudget,
-                composedAt: new Date().toISOString(),
-                historyDepth,
-                reshapedAt,
-              });
-            }
-          }
+          // Sprint 2.2a: demote reshape to guard telemetry.
+          //
+          // Previously this branch re-ran applyToolGradientToWindow, wrote
+          // back via replaceHistory, invalidated the window cache, and
+          // stamped `reshapedAt` on model state. Assemble.* is the
+          // steady-state owner, so the subsequent assemble.normal /
+          // assemble.subagent trim (gated by claimTrimOwner) handles any
+          // real downshift pressure. Keeping the detection branch preserves
+          // observability; guardTelemetry records the would-be-reshape
+          // without mutating history, the window, or model state.
+          //
+          // CRITICAL: do NOT call setModelState({ reshapedAt, … }) here.
+          // compact() skips when reshapedAt is recent, which would cause it
+          // to skip on the strength of a reshape that never ran.
+          guardTelemetry({
+            path: 'reshape',
+            agentId, sessionKey: sk,
+            reason: 'reshape-downshift-demoted',
+          });
         }
       } catch (reshapeErr) {
         // Non-fatal — compositor safety valve is still the last defense
@@ -1912,6 +2285,16 @@ function createHyperMemEngine(): ContextEngine {
             cachedContextBlock = await hm.cache.getSlot(agentId, sk, 'assemblyContextBlock');
             if (cachedContextBlock) {
               console.log(`[hypermem-plugin] assemble: cache replay hit for ${agentId} (${Math.round((Date.now() - parseInt(cachedAt)) / 1000)}s old)`);
+              if (telemetryEnabled()) {
+                assembleTrace({
+                  agentId,
+                  sessionKey: sk,
+                  turnId: _asmTurnId,
+                  path: 'replay',
+                  toolLoop: isToolLoop,
+                  msgCount: messages.length,
+                });
+              }
             }
           }
         } catch {
@@ -2039,6 +2422,15 @@ function createHyperMemEngine(): ContextEngine {
         console.error('[hypermem-plugin] assemble error (stack):', (err as Error).stack ?? err);
         throw err; // Re-throw so the runtime falls back to legacy pipeline
       }
+      } finally {
+        // End the trim-owner turn scope opened at assemble entry. Paired
+        // with beginTrimOwnerTurn(_asmSk, _asmTurnId) above; runs on every
+        // exit path (normal return, tool-loop return, replay return, error
+        // re-throw). Turn-scoped keying (Sprint 2.2a) means this only
+        // removes THIS turn's slot, so concurrent same-session turns remain
+        // isolated instead of clobbering each other.
+        endTrimOwnerTurn(_asmSk, _asmTurnId);
+      }
     },
 
     /**
@@ -2112,10 +2504,21 @@ function createHyperMemEngine(): ContextEngine {
           // Keeps very recent context, clears the long tool-heavy tail.
           const nuclearDepth = Math.max(10, Math.floor(targetDepth * 0.20));
           const nuclearBudget = Math.floor(effectiveBudget * 0.25);
-          await hm.cache.trimHistoryToTokenBudget(agentId, sk, nuclearBudget);
+          const nuclearRemoved = await hm.cache.trimHistoryToTokenBudget(agentId, sk, nuclearBudget);
           await hm.cache.invalidateWindow(agentId, sk).catch(() => {});
           await truncateJsonlIfNeeded(sessionFile, nuclearDepth, true);
           const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
+          if (telemetryEnabled()) {
+            trimTelemetry({
+              path: 'compact.nuclear',
+              agentId, sessionKey: sk,
+              preTokens: tokensBefore,
+              postTokens: tokensAfter,
+              removed: nuclearRemoved,
+              cacheInvalidated: true,
+              reason: `currentTokenCount=${currentTokenCount}/${effectiveBudget}`,
+            });
+          }
           console.log(
             `[hypermem-plugin] compact: NUCLEAR — session at ${currentTokenCount}/${effectiveBudget} tokens ` +
             `(${Math.round((currentTokenCount / effectiveBudget) * 100)}% full), ` +
@@ -2139,6 +2542,17 @@ function createHyperMemEngine(): ContextEngine {
               await hm.cache.invalidateWindow(agentId, sk).catch(() => {});
               const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
               await truncateJsonlIfNeeded(sessionFile, targetDepth);
+              if (telemetryEnabled()) {
+                trimTelemetry({
+                  path: 'compact.history',
+                  agentId, sessionKey: sk,
+                  preTokens: tokensBefore,
+                  postTokens: tokensAfter,
+                  removed: historyTrimmed,
+                  cacheInvalidated: true,
+                  reason: `inbound-overhead=${inboundOverhead}`,
+                });
+              }
               console.log(
                 `[hypermem-plugin] compact: large-inbound-content (gap=${inboundOverhead} tokens), ` +
                 `trimmed history ${tokensBefore}→${tokensAfter} (budget-for-history=${budgetForHistory}, trimmed=${historyTrimmed} messages)`
@@ -2195,6 +2609,17 @@ function createHyperMemEngine(): ContextEngine {
         await hm.cache.invalidateWindow(agentId, sk).catch(() => {});
 
         const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
+        if (telemetryEnabled()) {
+          trimTelemetry({
+            path: 'compact.history2',
+            agentId, sessionKey: sk,
+            preTokens: tokensBefore,
+            postTokens: tokensAfter,
+            removed: historyTrimmed,
+            cacheInvalidated: true,
+            reason: `over-budget tokensBefore=${tokensBefore}/${effectiveBudget}`,
+          });
+        }
         console.log(`[hypermem-plugin] compact: trimmed ${tokensBefore} → ${tokensAfter} tokens (budget: ${effectiveBudget})`);
 
         // Density-aware JSONL truncation: derive target depth from actual avg tokens/message
@@ -2387,20 +2812,28 @@ function createHyperMemEngine(): ContextEngine {
             const redisPostTokens = await estimateWindowTokens(hm, agentId, sk);
             const postTurnTokens = Math.max(runtimePostTokens, redisPostTokens);
             const postTurnPressure = postTurnTokens / modelState.tokenBudget;
-            // Two-tier afterTurn trim (EC3 fix, 2026-04-05):
-            //   >90% → trim to 45%: deep saturation recovery — 70% target leaves only ~8k
-            //           after system prompt (20-30k), which is not enough for any real tool work.
-            //   >80% → trim to 70%: mild pressure, preserve more history.
-            const afterTurnTrimTarget = postTurnPressure > 0.90 ? 0.45 : 0.70;
+            // Sprint 2.2b: demote afterTurn.secondary to guard-only no-op.
+            //
+            // Previously this path was a two-tier real trim that fired after
+            // every turn ending at >80% pressure, calling
+            // trimHistoryToTokenBudget() and emitting `event:'trim'` with
+            // path='afterTurn.secondary'. Sprint 2 consolidates steady-state
+            // trim ownership in assemble.* (tool-loop + normal/subagent),
+            // with compact.* as the only exception family. The afterTurn
+            // post-turn pressure path is now redundant: the next turn's
+            // assemble.* trim absorbs any residual pressure.
+            //
+            // Pattern matches the warmstart/reshape demotion from 2.2a:
+            // keep the pressure predicate + threshold branch so observability
+            // via `event:'trim-guard'` is preserved, but emit NO real trim,
+            // NO invalidateWindow, NO mutation. The compact skip-gate stays
+            // correct because this path never stamped any model state.
             if (postTurnPressure > 0.80) {
-              const headroomBudget = Math.floor(modelState.tokenBudget * afterTurnTrimTarget);
-              const secondaryTrimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, headroomBudget);
-              if (secondaryTrimmed > 0) {
-                console.log(
-                  `[hypermem-plugin] afterTurn: pre-emptive trim — session exiting at ` +
-                  `${(postTurnPressure * 100).toFixed(1)}%, trimmed ${secondaryTrimmed} msgs to create headroom`
-                );
-              }
+              guardTelemetry({
+                path: 'afterTurn.secondary',
+                agentId, sessionKey: sk,
+                reason: 'afterturn-secondary-demoted',
+              });
             }
           }
         } catch {

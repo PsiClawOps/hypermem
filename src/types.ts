@@ -668,3 +668,73 @@ export interface MaintenanceTickDiagnostics {
   durationMs: number;   // wall time for the maintenance phase
   exitReason: 'complete' | 'cap-reached' | 'no-conversations';
 }
+
+// ─── Telemetry Types (Phase A Sprint 1) ──────────────────────────
+//
+// Structured logging around every trimHistoryToTokenBudget() call site and
+// every assemble() entry in the HyperMem plugin path. Emitters are zero-cost
+// when process.env.HYPERMEM_TELEMETRY !== '1' (the default).
+//
+// Event stream is JSONL, one record per line, at
+// process.env.HYPERMEM_TELEMETRY_PATH (default './hypermem-telemetry.jsonl').
+
+/**
+ * Labels for each trim call site. The set is closed — any new trim site must
+ * be added here before being instrumented.
+ */
+export type TrimTelemetryPath =
+  | 'assemble.normal'
+  | 'assemble.toolLoop'
+  | 'assemble.subagent'
+  | 'reshape'
+  | 'compact.nuclear'
+  | 'compact.history'
+  | 'compact.history2'
+  | 'afterTurn.secondary'
+  | 'warmstart';
+
+/**
+ * Emitted once per invocation of trimHistoryToTokenBudget() (or a caller that
+ * wraps it). Every trim site MUST emit exactly one of these, even if the
+ * underlying trim returned 0.
+ */
+export interface TrimTelemetryEvent {
+  event: 'trim';
+  ts: string;                 // ISO-8601 timestamp
+  path: TrimTelemetryPath;    // call-site label
+  agentId: string;
+  sessionKey: string;
+  preTokens: number;          // estimated window tokens before trim (best-effort, may be 0)
+  postTokens: number;         // estimated window tokens after trim (best-effort, may be 0)
+  removed: number;            // messages removed (return value of trimHistoryToTokenBudget)
+  cacheInvalidated: boolean;  // whether invalidateWindow() was called afterwards
+  reason: string;             // short textual reason ("pressure>85", "downshift", "afterTurn>80", etc.)
+}
+
+/**
+ * Emitted to trace assemble() entry + regime resolution. path captures the
+ * high-level compose regime:
+ *   - 'cold'     : first call of a session (no prior compose cache)
+ *   - 'subagent' : subagent session (sessionKey matches subagent pattern)
+ *   - 'replay'   : cache replay fast path taken
+ *
+ * Emission convention:
+ *   At assemble() entry we emit ONE trace with path='cold' or 'subagent'
+ *   because replay is not known until the cache-replay hit block executes.
+ *   When the cache-replay fast path fires, a SECOND trace is emitted with
+ *   path='replay' sharing the same turnId as the entry trace. Per-turn
+ *   analysis tools should group by (agentId, sessionKey, turnId) and
+ *   prefer the terminal path as the authoritative regime for that turn.
+ */
+export interface AssembleTraceEvent {
+  event: 'assemble';
+  ts: string;
+  agentId: string;
+  sessionKey: string;
+  turnId: string;             // stable per-turn id (timestamp + counter)
+  path: 'cold' | 'replay' | 'subagent';
+  toolLoop: boolean;          // true when last inbound message is a toolResult
+  msgCount: number;           // messages array length at entry
+}
+
+export type HyperMemTelemetryEvent = TrimTelemetryEvent | AssembleTraceEvent;
