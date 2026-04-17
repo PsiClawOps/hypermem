@@ -372,3 +372,72 @@ describe('Turn DAG Phase 4: Regressions', () => {
     db.close();
   });
 });
+
+// ─── Limit-Path Coverage for Archived Helpers ──────────────
+
+describe('Turn DAG Phase 4: limit-path coverage for archived helpers', () => {
+  it('getArchivedContexts respects limit option', () => {
+    const db = createTestDb();
+    const agentId = 'agent-lim1';
+    const convId = insertConversation(db, agentId, 'session-lim1');
+
+    // Create 3 archived contexts
+    getOrCreateActiveContext(db, agentId, 'session-lim1', convId);
+    rotateSessionContext(db, agentId, 'session-lim1', convId);
+    rotateSessionContext(db, agentId, 'session-lim1', convId);
+    rotateSessionContext(db, agentId, 'session-lim1', convId);
+    // 3 archived, 1 active
+
+    const all = getArchivedContexts(db, agentId);
+    assert.equal(all.length, 3, 'should have 3 archived contexts');
+
+    const limited = getArchivedContexts(db, agentId, { limit: 2 });
+    assert.equal(limited.length, 2, 'limit: 2 should return only 2 contexts');
+
+    const limited1 = getArchivedContexts(db, agentId, { limit: 1 });
+    assert.equal(limited1.length, 1, 'limit: 1 should return only 1 context');
+
+    db.close();
+  });
+
+  it('getArchivedChain respects limit argument', () => {
+    const db = createTestDb();
+    const store = new MessageStore(db);
+    const agentId = 'agent-lim2';
+    const convId = insertConversation(db, agentId, 'session-lim2');
+
+    const ctx = getOrCreateActiveContext(db, agentId, 'session-lim2', convId);
+    for (let i = 0; i < 10; i++) {
+      recordWithContext(store, convId, agentId, ctx.id, 'user', `Limit test msg ${i + 1}`);
+    }
+    rotateSessionContext(db, agentId, 'session-lim2', convId);
+
+    const full = store.getArchivedChain(ctx.id);
+    assert.equal(full.length, 10, 'full chain should be 10 messages');
+
+    const limited = store.getArchivedChain(ctx.id, 3);
+    assert.ok(limited.length <= 3, `limited chain should have at most 3, got ${limited.length}`);
+
+    db.close();
+  });
+
+  it('getContextLineage traversal is capped (no infinite loops)', () => {
+    const db = createTestDb();
+    const agentId = 'agent-lim3';
+    const convId = insertConversation(db, agentId, 'session-lim3');
+
+    // Build a chain of 5 contexts
+    getOrCreateActiveContext(db, agentId, 'session-lim3', convId);
+    rotateSessionContext(db, agentId, 'session-lim3', convId);
+    rotateSessionContext(db, agentId, 'session-lim3', convId);
+    rotateSessionContext(db, agentId, 'session-lim3', convId);
+    const ctx5 = rotateSessionContext(db, agentId, 'session-lim3', convId);
+
+    // ctx5 is active; lineage walk from ctx5 should return 5 contexts
+    const lineage = getContextLineage(db, ctx5.id);
+    assert.equal(lineage.length, 5, 'lineage chain should traverse all 5 contexts');
+
+    db.close();
+  });
+});
+

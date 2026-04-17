@@ -173,6 +173,8 @@ export type {
   RecentTurn,
   ExpertiseSourceType,
   EvidenceRelationship,
+  ArchivedMiningQuery,
+  ArchivedMiningResult,
 } from './types.js';
 
 export type { ProviderType } from './provider-translator.js';

@@ -14,6 +14,8 @@ import type {
   ChannelType,
   ConversationStatus,
   RecentTurn,
+  ArchivedMiningQuery,
+  ArchivedMiningResult,
 } from './types.js';
 import { getOrCreateActiveContext, updateContextHead, getArchivedContext } from './context-store.js';
 
@@ -453,6 +455,11 @@ export class MessageStore {
    *
    * Falls back to getRecentMessages if the head message has no parent chain
    * (e.g., legacy data before backfill).
+   *
+   * @boundary SHARED DAG PRIMITIVE — not for direct call at mining call sites.
+   * Use mineArchivedContext / mineArchivedContexts for archived context mining,
+   * and the active-composition paths for live session history. Direct call sites
+   * outside this class should be limited to exceptional diagnostic use.
    */
   getHistoryByDAGWalk(headMessageId: number, limit: number = 50): StoredMessage[] {
     try {
@@ -568,6 +575,105 @@ export class MessageStore {
     }
 
     return this.getHistoryByDAGWalk(context.headMessageId, limit ?? 200);
+  }
+
+  // ─── Archived Mining (Phase 4 Sprint 2) ───────────────────────
+
+  /**
+   * Mine messages from a single archived or forked context.
+   *
+   * - Rejects active or missing contexts with a clear error.
+   * - Hard-caps limit at 200.
+   * - Defaults excludeHeartbeats to true.
+   * - Optionally filters by ftsQuery (client-side substring match for this sprint).
+   * - Routes through getHistoryByDAGWalk for DAG-native retrieval.
+   * - Returns ArchivedMiningResult<StoredMessage[]> with isHistorical: true.
+   *
+   * This method does NOT widen active composition — it only operates on
+   * explicitly non-active (archived/forked) contexts.
+   */
+  mineArchivedContext(query: ArchivedMiningQuery): ArchivedMiningResult<StoredMessage[]> {
+    const { contextId, limit, excludeHeartbeats = true, ftsQuery } = query;
+
+    const context = getArchivedContext(this.db, contextId);
+    if (!context) {
+      throw new Error(
+        `mineArchivedContext: context ${contextId} does not exist or is not archived/forked. ` +
+        `Only archived or forked contexts may be mined.`
+      );
+    }
+
+    // Hard cap at 200
+    const effectiveLimit = Math.min(limit ?? 200, 200);
+
+    let messages: StoredMessage[] = [];
+
+    if (context.headMessageId !== null) {
+      messages = this.getHistoryByDAGWalk(context.headMessageId, effectiveLimit);
+    }
+
+    // Apply heartbeat filter (default: exclude)
+    if (excludeHeartbeats) {
+      messages = messages.filter(m => !m.isHeartbeat);
+    }
+
+    // Client-side ftsQuery filter (substring match for Sprint 2)
+    if (ftsQuery && ftsQuery.trim().length > 0) {
+      const q = ftsQuery.trim().toLowerCase();
+      messages = messages.filter(m =>
+        (m.textContent ?? '').toLowerCase().includes(q)
+      );
+    }
+
+    return {
+      isHistorical: true,
+      contextId: context.id,
+      agentId: context.agentId,
+      sessionKey: context.sessionKey,
+      contextStatus: context.status as 'archived' | 'forked',
+      contextUpdatedAt: context.updatedAt,
+      data: messages,
+    };
+  }
+
+  /**
+   * Mine messages from multiple archived or forked contexts.
+   *
+   * - Soft-skips active or missing contextIds with a warning (does not throw).
+   * - Preserves input order in the result array.
+   * - Applies per-context limit and same filters as mineArchivedContext.
+   * - Returns one ArchivedMiningResult per valid archived context.
+   *
+   * This method does NOT widen active composition — it only operates on
+   * explicitly non-active (archived/forked) contexts.
+   */
+  mineArchivedContexts(
+    contextIds: number[],
+    opts?: Omit<ArchivedMiningQuery, 'contextId'>
+  ): ArchivedMiningResult<StoredMessage[]>[] {
+    const results: ArchivedMiningResult<StoredMessage[]>[] = [];
+
+    for (const contextId of contextIds) {
+      const context = getArchivedContext(this.db, contextId);
+      if (!context) {
+        console.warn(
+          `[hypermem:message-store] mineArchivedContexts: skipping contextId ${contextId} ` +
+          `— does not exist or is not archived/forked (may be active or missing).`
+        );
+        continue;
+      }
+
+      try {
+        results.push(this.mineArchivedContext({ contextId, ...opts }));
+      } catch (err) {
+        console.warn(
+          `[hypermem:message-store] mineArchivedContexts: skipping contextId ${contextId} ` +
+          `— ${(err as Error).message}`
+        );
+      }
+    }
+
+    return results;
   }
 
   // ─── Helpers ─────────────────────────────────────────────────

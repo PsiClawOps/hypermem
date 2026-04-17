@@ -770,3 +770,50 @@ export interface AssembleTraceEvent {
 }
 
 export type HyperMemTelemetryEvent = TrimTelemetryEvent | AssembleTraceEvent;
+
+// ─── Archived Mining Types (Phase 4 Sprint 2) ────────────────────
+
+/**
+ * Query parameters for mining a single archived/forked context.
+ *
+ * - contextId: must reference an archived or forked context (not active).
+ * - limit: per-context message cap; hard-capped at 200 in the implementation.
+ * - excludeHeartbeats: when true (default), heartbeat messages are omitted.
+ * - ftsQuery: optional keyword filter applied client-side for Sprint 2.
+ */
+export interface ArchivedMiningQuery {
+  /** Explicit archived or forked contextId — active contexts are rejected. */
+  contextId: number;
+  /** Maximum number of messages to return. Hard-capped at 200. Default: 200. */
+  limit?: number;
+  /** When true (default), exclude heartbeat messages from results. */
+  excludeHeartbeats?: boolean;
+  /** Optional FTS/keyword filter applied client-side this sprint. */
+  ftsQuery?: string;
+}
+
+/**
+ * Result wrapper returned by mineArchivedContext / mineArchivedContexts.
+ *
+ * The stable marker `isHistorical: true` distinguishes mining results from
+ * active-composition results. Consumers MUST check this before using results
+ * in active-composition paths.
+ *
+ * @template T - The payload type (typically StoredMessage[]).
+ */
+export interface ArchivedMiningResult<T> {
+  /** Always `true` — stable discriminator for archived/historical data. */
+  isHistorical: true;
+  /** The archived or forked context id that was mined. */
+  contextId: number;
+  /** The agentId owning this context. */
+  agentId: string;
+  /** The sessionKey the context belongs to. */
+  sessionKey: string;
+  /** The status of the context ('archived' | 'forked'). */
+  contextStatus: 'archived' | 'forked';
+  /** ISO timestamp of the context's last update. */
+  contextUpdatedAt: string;
+  /** The mined payload. */
+  data: T;
+}

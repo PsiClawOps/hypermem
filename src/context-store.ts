@@ -206,6 +206,11 @@ export function archiveContext(
 /**
  * Get any context by id, regardless of status.
  * Returns null if not found.
+ *
+ * @boundary INSPECTION ONLY — not a mining entry point.
+ * Do not use this function to retrieve messages for active composition or
+ * historical mining. Use getArchivedContext + mineArchivedContext for archived
+ * mining, and getActiveContext for composition-path access.
  */
 export function getContextById(
   db: DatabaseSync,
@@ -272,6 +277,11 @@ export function getArchivedContext(
  * Returns contexts in leaf-to-root order (starting context first).
  * Includes the starting context itself.
  * Caps traversal depth at 100 to avoid corrupt loops.
+ *
+ * @boundary STATUS-CROSSING BY DESIGN — this function traverses across
+ * active, archived, and forked contexts without filtering by status.
+ * If you need only archived/forked contexts in the lineage chain, filter
+ * the returned array at the call site (e.g. `.filter(c => c.status !== 'active')`).
  */
 export function getContextLineage(
   db: DatabaseSync,
@@ -302,6 +312,10 @@ export function getContextLineage(
 /**
  * Get direct fork children of a context (contexts with parent_context_id = parentContextId).
  * Returns in ascending creation order.
+ *
+ * @boundary STATUS-CROSSING BY DESIGN — returns children regardless of their status
+ * (may include active, archived, or forked children). Filter at the call site if
+ * archived-only results are needed.
  */
 export function getForkChildren(
   db: DatabaseSync,
