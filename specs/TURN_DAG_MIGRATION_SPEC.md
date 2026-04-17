@@ -1,6 +1,6 @@
 # Turn DAG Migration Spec
 
-**Status:** Phases 0–3 implemented; B2 next
+**Status:** Phases 0–3 and B2 implemented; Phase 4 next
 **Priority:** P0 (correctness + productivity)
 **Filed:** 2026-04-13
 **Filed by:** Forge
@@ -207,17 +207,24 @@ Purpose: stop zombie pollution immediately.
 - no cross-branch leakage in composition
 - restart continuity works via context rotation
 
-### Open / B2 scope
-Stable-prefix signal is computed and the boundary is marked, but prefixHash is not yet wired into cache invalidation or window cache hit decisions. This is the B2 scope (see below).
+### Phase B2 outcome
+Stable-prefix signal propagation is now implemented and verified.
 
-## Phase B2 — next
+## Phase B2 — complete
 
 **Cache-prefix signal propagation and end-to-end verification**
 
-### Scope
-- Propagate `prefixHash` into cache invalidation: stale window cache entries with a mismatched stable prefix should be evicted rather than returned as hits
-- Integrate window cache read/write paths with the stable-prefix boundary so cache hits are prefix-hash consistent
-- End-to-end verification that `cache_control: {type: 'ephemeral'}` lands correctly at `CACHE_PREFIX_BOUNDARY_SLOT` in real Anthropic provider calls
+### Delivered
+- `prefixHash` is propagated into cache invalidation so stale window cache entries with a mismatched stable prefix are bypassed instead of returned as hits
+- window cache read and write paths are stable-prefix aware, including the volatile-only fast-exit path and bypass diagnostics via `prevPrefixHash`
+- end-to-end verification covers `cache_control: {type: 'ephemeral'}` placement at `CACHE_PREFIX_BOUNDARY_SLOT`
+- session lifecycle coverage includes `rotateSessionContext` continuity checks
+
+### Acceptance criteria — met
+- stale cache entries with mismatched stable prefix do not return as hits
+- unchanged stable prefix can return `windowCacheHit: true` on the volatile-only path
+- bypasses surface the previous prefix hash for diagnostics
+- boundary-scoped `cache_control: {type: 'ephemeral'}` placement is verified
 
 ---
 
