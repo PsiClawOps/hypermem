@@ -1337,6 +1337,8 @@ export class Compositor {
     if (request.includeHistory !== false) {
       // Phase 3 (Turn DAG): resolve active context for DAG-native reads.
       // This is the primary branch-scoping mechanism; fence remains as transitional safety.
+      // Phase 4: active-only — do not widen context resolution to archived contexts;
+      // only the currently active context head is valid for composition.
       let activeContext: Context | null = null;
       try {
         activeContext = getActiveContext(db, request.agentId, request.sessionKey);
@@ -2521,6 +2523,7 @@ export class Compositor {
 
     // Phase 3 (Turn DAG): resolve active context for DAG-native warm preload.
     // Uses context.head_message_id to walk only the active branch.
+    // Phase 4: active-only — warmSession must not warm from archived context heads.
     let activeContext: Context | null = null;
     try {
       activeContext = getActiveContext(db, agentId, sessionKey);
@@ -2624,6 +2627,7 @@ export class Compositor {
     if (!conversation) return;
 
     // Phase 3 (Turn DAG): resolve active context for DAG-native gradient refresh
+    // Phase 4: active-only — gradient refresh must only use the active context head.
     let activeContext: Context | null = null;
     try {
       activeContext = getActiveContext(db, agentId, sessionKey);
@@ -2642,6 +2646,8 @@ export class Compositor {
     }
 
     // Phase 3: prefer DAG walk from context head
+    // Phase 4: active-only — DAG walk uses the active context head exclusively.
+    // No fallback that widens to archived context heads.
     const refreshHistoryLimit = Math.min(
       this.config.maxHistoryMessages,
       Math.max(1, historyDepth ?? this.config.maxHistoryMessages),
@@ -2754,6 +2760,8 @@ export class Compositor {
     // Phase 3 (Turn DAG): walk from context.head_message_id backward through
     // parent_id links. This is the primary correctness mechanism — the fence
     // remains as transitional safety only.
+    // Phase 4: active-only — do not widen to archived. getHistory() only receives
+    // the active context; archived context heads must never be passed here.
     if (activeContext?.headMessageId) {
       const dagMessages = store.getHistoryByDAGWalk(activeContext.headMessageId, limit);
       if (dagMessages.length > 0) return dagMessages;
@@ -3169,6 +3177,9 @@ export class Compositor {
   // TODO Phase 1: buildCrossSessionContext queries OTHER conversations. Each has its
   // own compaction fence. Per-conversation fence filtering should be added here so
   // zombie messages from other sessions don't leak into cross-session context.
+  // Phase 4: active-only — cross-session context is scoped to conversations with
+  // status='active' (see WHERE c.status = 'active' in the query below).
+  // Archived contexts in other sessions are not included in this surface.
   private buildCrossSessionContext(
     agentId: string,
     currentSessionKey: string,
@@ -3354,6 +3365,8 @@ export class Compositor {
 
       const fenceClause = fenceMessageId != null ? 'AND m.id >= ?' : '';
       // Phase 3 (Turn DAG): prefer context_id scoping over conversation_id+fence
+      // Phase 4: active-only — activeContext is always the current active context;
+      // archived contexts must never be passed here as the scope filter.
       const contextClause = activeContext ? 'AND m.context_id = ?' : '';
       const baseParams: (string | number | null)[] = [conversationId, cutoffId];
       if (fenceMessageId != null) baseParams.push(fenceMessageId);
@@ -3557,6 +3570,8 @@ export class Compositor {
       try {
         const topicFenceClause = fenceMessageId != null ? 'AND m.id >= ?' : '';
         // Phase 3 (Turn DAG): constrain cross-topic queries to active context_id
+        // Phase 4: active-only — topicContextClause scopes to the active context only;
+        // cross-topic keystones must not traverse archived context branches.
         const topicContextClause = activeContext ? 'AND m.context_id = ?' : '';
         const topicParams: (string | number | null)[] = [sessionKey, agentId, topic.id];
         if (fenceMessageId != null) topicParams.push(fenceMessageId);
