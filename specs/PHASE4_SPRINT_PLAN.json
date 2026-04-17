@@ -1,0 +1,82 @@
+{
+  "sprint": {
+    "name": "Turn DAG Phase 4: Active vs Archived Context Split",
+    "project": "hypermem",
+    "root": "/home/lumadmin/.openclaw/workspace/repo/hypermem",
+    "phase": "4 of 5",
+    "priority": "P0"
+  },
+  "execution_order": [
+    { "wave": 1, "sprints": ["p4-t1"] },
+    { "wave": 2, "sprints": ["p4-t2", "p4-t3"] },
+    { "wave": 3, "sprints": ["p4-t4"] },
+    { "wave": 4, "sprints": ["p4-t5"] }
+  ],
+  "contracts": [
+    {
+      "id": "p4-t1",
+      "title": "Context lifecycle and inspection APIs",
+      "type": "modify",
+      "file": "src/context-store.ts",
+      "depends_on": [],
+      "status": "todo",
+      "note": "Add get-by-id, list-by-session/status, and explicit archive/fork inspection helpers so operators can inspect archived contexts without touching live compose APIs."
+    },
+    {
+      "id": "p4-t2",
+      "title": "Explicit archived mining read surfaces",
+      "type": "modify",
+      "file": "src/message-store.ts",
+      "depends_on": ["p4-t1"],
+      "status": "todo",
+      "note": "Add explicit archived retrieval/search helpers and avoid widening normal live-path reads behind includeArchived defaults."
+    },
+    {
+      "id": "p4-t3",
+      "title": "Active-only enforcement on compositor and recall paths",
+      "type": "modify",
+      "file": "src/compositor.ts",
+      "depends_on": ["p4-t1", "p4-t2"],
+      "status": "todo",
+      "note": "Verify standard composition, warming, keystones, FTS, semantic recall, and cross-session context remain active-only."
+    },
+    {
+      "id": "p4-t4",
+      "title": "Routine indexing vs explicit archived mining split",
+      "type": "modify",
+      "file": "src/background-indexer.ts",
+      "depends_on": ["p4-t1", "p4-t2", "p4-t3"],
+      "status": "todo",
+      "note": "Default background indexing must stay active-only; archived mining requires a separate explicit entrypoint exposed from the HyperMem facade."
+    },
+    {
+      "id": "p4-t5",
+      "title": "Phase 4 regression suite",
+      "type": "test",
+      "file": "test/turn-dag-phase4.test.mjs",
+      "depends_on": ["p4-t1", "p4-t2", "p4-t3", "p4-t4"],
+      "status": "todo",
+      "note": "Prove archived contexts are invisible to standard composition and routine indexing but reachable through explicit archived-mining APIs."
+    }
+  ],
+  "phase_summary": {
+    "phases_complete": [
+      "Phase 0 (fence enforcement)",
+      "Phase 1 (context heads)",
+      "Phase 2 (parent_id/depth + backfill)",
+      "Phase 3 (DAG-native reads and context-scoped recall)",
+      "Phase B2 (stable-prefix cache signal propagation and verification)"
+    ],
+    "note": "Phase 4 is a product-surface split, not a fresh schema push. The existing context lifecycle fields and context-scoped retrieval primitives should be reused."
+  },
+  "next_phase": {
+    "id": "4",
+    "title": "Separate live composition from archived mining",
+    "scope": [
+      "Keep standard composition on the active branch only.",
+      "Expose archived context inspection and mining through explicit APIs.",
+      "Prevent routine fact extraction and recall from scanning archived branches by accident.",
+      "Add regression coverage for active-only live paths and explicit archived-mining paths."
+    ]
+  }
+}
