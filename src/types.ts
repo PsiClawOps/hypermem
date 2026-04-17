@@ -313,6 +313,23 @@ export interface ComposeDiagnostics {
   fingerprintCollisions?: number;
   /** True when the window cache fast-exit fired and full compose was skipped */
   windowCacheHit?: boolean;
+  // ── Sprint 4: pre-compose history depth tightening ──────────────────────
+  /**
+   * Session type derived from observed message density.
+   * 'plain-chat'  — text-only or low tool ratio (< 20% tool messages)
+   * 'tool-heavy'  — high tool ratio (>= 20% tool messages in recent sample)
+   */
+  sessionType?: 'plain-chat' | 'tool-heavy';
+  /** The history depth actually requested from the store this compose pass. */
+  historyDepthChosen?: number;
+  /** Average estimated tokens per message observed in the density sample. */
+  estimatedMsgDensityTokens?: number;
+  /**
+   * True when the budget-fit walk had to drop history clusters after the
+   * gradient transform — i.e. a rescue trim fired despite pre-compose depth
+   * tightening. Should be false in steady state for well-classified sessions.
+   */
+  rescueTrimFired?: boolean;
 }
 
 export interface ComposeResult {

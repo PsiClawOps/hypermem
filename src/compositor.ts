@@ -210,6 +210,85 @@ function computeDynamicReserve(
   return { reserve: dynamicFrac, avgTurnCost, dynamic: true, pressureHigh: false };
 }
 
+// ─── Sprint 4: Pre-Compose History Depth Tightening ───────────────────────
+
+/** Session classification labels — used for adaptive depth selection. */
+export type SessionType = 'plain-chat' | 'tool-heavy';
+
+/**
+ * Classify a session based on the ratio of tool messages in the recent sample.
+ * 'tool-heavy': >= 20% of sampled messages carry tool calls or tool results.
+ * 'plain-chat': below that threshold (text-only or occasional tool use).
+ *
+ * The 20% threshold is intentionally conservative: most tool-heavy agents
+ * have tool messages on every assistant turn, so the ratio quickly exceeds
+ * the threshold without false-positive risk for light tool users.
+ */
+export function classifySessionType(messages: NeutralMessage[]): SessionType {
+  if (messages.length === 0) return 'plain-chat';
+  const toolCount = messages.filter(m => hasToolContent(m)).length;
+  return toolCount / messages.length >= 0.20 ? 'tool-heavy' : 'plain-chat';
+}
+
+/**
+ * Estimate the average token cost per message from a recent message sample.
+ * Uses the same estimateMessageTokens heuristic as the compositor budget walk
+ * so the returned depth is directly comparable to the historyFillCap check.
+ *
+ * Returns a conservative floor (100 tokens) when the sample is empty to avoid
+ * returning Infinity when historyBudget is divided by density.
+ */
+export function estimateObservedMsgDensity(messages: NeutralMessage[]): number {
+  if (messages.length === 0) return 100;
+  const total = messages.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
+  return Math.max(1, Math.ceil(total / messages.length));
+}
+
+/**
+ * Compute an adaptive history depth that pre-fits the session type.
+ *
+ * For plain-chat sessions: divides historyBudget by observed density to get a
+ * depth that fills the budget without overflow, bounded by the default maximum.
+ * Recall quality is preserved because the density estimate is honest for
+ * text-only turns.
+ *
+ * For tool-heavy sessions: applies a post-gradient compression factor
+ * (TOOL_GRADIENT_DENSITY_FACTOR = 0.30) to the observed pre-gradient density.
+ * This accounts for the gradient transform collapsing large tool payloads to
+ * prose stubs before the budget-fit walk runs. A tighter depth is chosen so
+ * the gradient-compressed messages fit inside historyFillCap without triggering
+ * a rescue trim.
+ *
+ * A 0.85 safety margin is applied to both paths so estimates that are
+ * slightly off don't cause immediate overflow on the first warm compose.
+ *
+ * Min/max bounds ensure the compositor always sees a meaningful window:
+ *   - plain-chat min: 20 messages (enough for short recent context)
+ *   - tool-heavy min: 15 messages (recent tool context + a few prior turns)
+ *   - shared max: config.maxHistoryMessages (never exceed the DB fetch ceiling)
+ */
+export function computeAdaptiveHistoryDepth(
+  sessionType: SessionType,
+  observedDensity: number,
+  historyBudgetTokens: number,
+  maxHistoryMessages: number,
+): number {
+  const SAFETY_MARGIN = 0.85;
+  if (sessionType === 'tool-heavy') {
+    // Tool-heavy: post-gradient density is much lower than pre-gradient.
+    // Gradient tiers collapse T2/T3 payloads to compact stubs (15-30% of original).
+    // Use a blended factor of 0.30 as the expected post-gradient density ratio.
+    const TOOL_GRADIENT_DENSITY_FACTOR = 0.30;
+    const postGradientDensity = Math.max(50, Math.floor(observedDensity * TOOL_GRADIENT_DENSITY_FACTOR));
+    const depth = Math.floor((historyBudgetTokens * SAFETY_MARGIN) / postGradientDensity);
+    return Math.min(maxHistoryMessages, Math.max(15, depth));
+  }
+  // Plain-chat: pre-gradient and post-gradient density are the same.
+  // historyBudget / avgMsgCost gives the message count that fills the budget.
+  const depth = Math.floor((historyBudgetTokens * SAFETY_MARGIN) / observedDensity);
+  return Math.min(maxHistoryMessages, Math.max(20, depth));
+}
+
 const DEFAULT_CONFIG: CompositorConfig = {
   // Primary budget controls
   budgetFraction: 0.703,
@@ -1046,6 +1125,31 @@ export class Compositor {
     const { reserve: dynamicReserve, avgTurnCost, dynamic: isDynamic, pressureHigh } =
       computeDynamicReserve(sampleMessages, totalWindow, this.config);
     const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget, dynamicReserve, this.config.budgetFraction);
+
+    // Sprint 4: Pre-compose history depth tightening.
+    // Classify the session and compute an adaptive depth from observed message
+    // density. This replaces the old fixed maxHistoryMessages ceiling that over-
+    // fed the compositor for tool-heavy sessions.
+    //
+    // If the caller already passed historyDepth (plugin assemble path), honour it
+    // as an explicit cap — the adaptive depth still applies as a lower bound so
+    // we never request more than the budget can absorb.
+    const s4SessionType: SessionType = classifySessionType(sampleMessages);
+    const s4ObservedDensity: number = estimateObservedMsgDensity(sampleMessages);
+    const s4HistoryBudget: number = this.config.historyFraction != null
+      ? Math.floor(budget * this.config.historyFraction)
+      : Math.floor(budget * 0.40);
+    const s4AdaptiveDepth: number = computeAdaptiveHistoryDepth(
+      s4SessionType,
+      s4ObservedDensity,
+      s4HistoryBudget,
+      this.config.maxHistoryMessages,
+    );
+    // Effective depth: caller-provided historyDepth overrides adaptive when it is
+    // the tighter constraint; otherwise use the adaptive depth.
+    const s4EffectiveDepth: number = request.historyDepth
+      ? Math.min(request.historyDepth, s4AdaptiveDepth)
+      : s4AdaptiveDepth;
     let remaining = budget;
 
     // Phase 0 fence enforcement: resolve the compaction fence for this conversation.
@@ -1166,6 +1270,8 @@ export class Compositor {
 
     // ─── Conversation History ──────────────────────────────────
     let diagCrossTopicKeystones = 0;
+    // Sprint 4: hoisted so diagnostics block can read it regardless of includeHistory branch.
+    let s4RescueTrimFired = false;
     // Hoisted: activeTopicId/name resolved inside history block, used for window dual-write (VS-1) and wiki page injection
     let composedActiveTopicId: string | undefined;
     let composedActiveTopicName: string | undefined;
@@ -1210,7 +1316,7 @@ export class Compositor {
       const rawHistoryMessages = await this.getHistory(
         request.agentId,
         request.sessionKey,
-        request.historyDepth || this.config.maxHistoryMessages,
+        s4EffectiveDepth,   // Sprint 4: adaptive depth (replaces fixed maxHistoryMessages)
         store,
         activeTopicId,
         fenceMessageId,
@@ -1264,6 +1370,7 @@ export class Compositor {
         if (historyTokens + cluster.tokenCost > historyFillCap && includedClusters.length > 0) {
           const droppedMsgCount = budgetClusters.slice(0, i + 1).reduce((s, c) => s + c.messages.length, 0);
           warnings.push(`History truncated at cluster ${i + 1}/${budgetClusters.length} (${droppedMsgCount} messages dropped)`);
+          s4RescueTrimFired = true;
           break;
         }
         includedClusters.unshift(cluster);
@@ -2159,6 +2266,11 @@ export class Compositor {
       fingerprintDedups: diagFingerprintDedups,
       fingerprintCollisions: diagFingerprintCollisions,
       windowCacheHit: false,
+      // Sprint 4 fields
+      sessionType: s4SessionType,
+      historyDepthChosen: s4EffectiveDepth,
+      estimatedMsgDensityTokens: s4ObservedDensity,
+      rescueTrimFired: s4RescueTrimFired,
     };
 
     if (pressureHigh) {
