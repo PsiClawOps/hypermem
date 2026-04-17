@@ -161,4 +161,11 @@ Sprint 2 should absorb the deferred items above directly in its contract, alongs
 
 ### Carry-forward into Sprint 3
 
-Sprint 3 should take the `maxContexts` cap as task one, then finish operator/job integration on top of the capped archived-mining surface with the helper-boundary and `ftsQuery` decisions made in writing.
+Sprint 3 took the `maxContexts` cap as task one, then completed operator-facing archived-mining integration on top of the capped surface.
+
+Sprint 3 outcomes:
+- `mineArchivedContexts` now enforces a hard server-side `maxContexts` gate with default 20 and hard ceiling 50
+- shared DAG helper policy is now canonical in `specs/DAG_HELPER_POLICY.md`
+- `ftsQuery` remains a client-side substring filter for Sprint 3, with SQL FTS deferred to Phase 5
+- `HyperMem` now exposes `listArchivedContexts`, `mineArchivedContext`, and `mineArchivedContexts`
+- `BackgroundIndexer` remains active-scope by design, with no archived-mining wiring added in Sprint 3
