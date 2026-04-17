@@ -10,6 +10,8 @@
 
 Turn DAG Phase 4 and later are **HyperBuilder-managed**.
 
+Required HyperBuilder configuration for this workstream: `turn-dag-phase4-full-fleet`.
+
 Before any new implementation work starts for a HyperBuilder-managed phase, the controlling artifact must name the required HyperBuilder configuration:
 - composition tier or named pipeline profile
 - mandatory stage roles
@@ -251,7 +253,7 @@ Stable-prefix signal propagation is now implemented and verified.
 
 **Separate live composition from archived mining**
 
-**Execution mode:** HyperBuilder-managed. Do not begin Phase 4 implementation until a fresh phase brief names the required HyperBuilder configuration for this phase.
+**Execution mode:** HyperBuilder-managed (`turn-dag-phase4-full-fleet`). Do not begin Phase 4 implementation until a fresh phase brief or sprint contract carries that exact HyperBuilder configuration.
 
 ### Changes
 - introduce context lifecycle: `active`, `archived`, `forked`

@@ -1,5 +1,9 @@
 # AGENTS.md — HyperMem
 
+<!-- hyperbuilder-managed: true -->
+<!-- hyperbuilder-required-configuration: turn-dag-phase4-full-fleet -->
+<!-- hyperbuilder-required-stage-roles: planner, generator, build-evaluator, security-evaluator, finding-verifier, cross-validator, integrator -->
+
 ## Build Execution Policy
 
 HyperMem allows both normal repo work and HyperBuilder-managed workstreams.
