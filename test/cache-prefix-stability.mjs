@@ -180,13 +180,10 @@ export async function runCachePrefixStabilitySuite(assert) {
     // after new messages). Actually to test C4 stable fast-exit we need:
     // same messages, same prefix. Test the bypass path instead:
     // Change identity (prefix input mutation) and verify full compose runs.
-    await compositor.warmSession(agentId, sessionKey, msgDb, {
-      systemPrompt: 'You are the HyperMem test agent.',
-      identity: 'prefix-agent identity CHANGED',  // different identity = prefix mutation
-      libraryDb: libDb,
-      model: 'claude-opus-4-6',
-    });
-    // Force a new window cache write with old prefixHash by seeding manually:
+    // Mutate only the identity slot — do NOT call warmSession, which would
+    // call invalidateWindow and wipe the cached bundle we just wrote. We need
+    // the cache to survive so the C4 bypass can fire and set prevPrefixHash.
+    await hm.cache.setSlot(agentId, sessionKey, 'identity', 'prefix-agent identity CHANGED');
     // The real test: do a compose WITHOUT skipWindowCache — it should detect
     // the prefixInputHash mismatch and fall through to full compose.
     const b2AfterChange = await compositor.compose({
@@ -210,6 +207,8 @@ export async function runCachePrefixStabilitySuite(assert) {
     const b2ChangedHash = b2AfterChange.diagnostics?.prefixHash;
     assert(b2ChangedHash !== b2FirstHash,
       `B2: new prefixHash after identity change differs (old=${b2FirstHash?.slice(0,8)}, new=${b2ChangedHash?.slice(0,8)})`);
+    assert(typeof b2AfterChange.diagnostics?.prevPrefixHash === 'string',
+      'B2: prevPrefixHash set on bypass');
 
     // ── B2: Unchanged prefix, volatile-only change: cache bypass should NOT fire ──
     // Restore identity v1
@@ -235,14 +234,23 @@ export async function runCachePrefixStabilitySuite(assert) {
       skipProviderTranslation: true,
       skipWindowCache: true,
     }, msgDb, libDb);
-    // Now call with skipWindowCache: false — same inputs, same message count.
-    // The cursor check in getFreshWindowBundle will gate on lastSentId vs newestMsgId.
-    // If no new messages have been added, newestMsgId is still the same, so
-    // with cursor freshness, the C4 fast-exit should succeed (windowCacheHit=true).
-    // (cursor.lastSentId is set only after a real compose with history; if not set,
-    //  getFreshWindowBundle returns null. So this test verifies at minimum that
-    //  the prefix-hash bypass does NOT fire when inputs are unchanged.)
-    const b2Stable = await compositor.compose({
+
+    // Stamp the cursor so getFreshWindowBundle can validate freshness.
+    // lastSentAt must match meta.composedAt; lastSentId must be >= newestMsgId.
+    const b2SeedMeta = await hm.cache.getWindowMeta(agentId, sessionKey);
+    assert(b2SeedMeta !== null, 'B2: seed meta present before cursor stamp');
+    const b2NewestRow = msgDb.prepare('SELECT MAX(id) AS maxId FROM messages WHERE agent_id = ?').get(agentId);
+    await hm.cache.setCursor(agentId, sessionKey, {
+      lastSentId: b2NewestRow.maxId,
+      lastSentIndex: 4,
+      lastSentAt: b2SeedMeta.composedAt,
+      windowSize: 4,
+      tokenCount: b2SeedMeta.totalTokens,
+    });
+
+    // Now call with skipWindowCache: false — same inputs, cursor is fresh.
+    // C4 fast-exit should fire: windowCacheHit=true, no prevPrefixHash bypass.
+    const b2CacheHit = await compositor.compose({
       agentId,
       sessionKey,
       tokenBudget: 12000,
@@ -257,9 +265,9 @@ export async function runCachePrefixStabilitySuite(assert) {
       skipProviderTranslation: true,
       skipWindowCache: false,
     }, msgDb, libDb);
-    // Either cache hit (fast-exit) or full compose with NO prevPrefixHash bypass
-    // (prevPrefixHash should be undefined since inputs didn't change)
-    assert(b2Stable.diagnostics?.prevPrefixHash === undefined,
+    assert(b2CacheHit.diagnostics?.windowCacheHit === true,
+      'B2: volatile-only path returns windowCacheHit: true');
+    assert(b2CacheHit.diagnostics?.prevPrefixHash === undefined,
       'B2: stable prefix — no prevPrefixHash emitted (bypass did not fire)');
 
     // ── B2: E2E cache_control:ephemeral on last stable system message ─
