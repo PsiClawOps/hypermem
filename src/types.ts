@@ -340,11 +340,36 @@ export interface ComposeDiagnostics {
   /** Average estimated tokens per message observed in the density sample. */
   estimatedMsgDensityTokens?: number;
   /**
-   * True when the budget-fit walk had to drop history clusters after the
-   * gradient transform — i.e. a rescue trim fired despite pre-compose depth
-   * tightening. Should be false in steady state for well-classified sessions.
+   * True when budget-fit walk had to drop history clusters after gradient transform.
+   * Should be false in steady state for well-classified sessions.
    */
   rescueTrimFired?: boolean;
+  // ── B4: Model-aware lane budgets ─────────────────────────────────────────────────────────────────────────────
+  /**
+   * MECW model profile that matched (e.g. 'claude', 'gemini', 'gpt').
+   * Undefined when no MECW entry matched for the current model.
+   */
+  mecwProfile?: string;
+  /**
+   * True when MECW blending adjusted the historyFraction or memoryFraction
+   * from the configured defaults. Indicates model-aware lane adjustment fired.
+   */
+  mecwApplied?: boolean;
+  /**
+   * Linear blend factor used in MECW lane adjustment (0.0 = below MECW floor,
+   * 1.0 = at/above MECW ceiling). At 0 the config fractions are used unchanged;
+   * at 1 the preferred fractions are used in full.
+   */
+  mecwBlend?: number;
+  /**
+   * Effective historyFraction used this compose pass (post-B4 blending).
+   * Compare against the configured historyFraction to see how much B4 moved it.
+   */
+  effectiveHistoryFraction?: number;
+  /**
+   * Effective memoryFraction used this compose pass (post-B4 blending).
+   */
+  effectiveMemoryFraction?: number;
 }
 
 export interface ComposeResult {

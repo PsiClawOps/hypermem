@@ -98,6 +98,128 @@ const MODEL_CONTEXT_WINDOWS: Array<{ pattern: string; tokens: number }> = [
   { pattern: 'deepseek',         tokens: 131_072 },
 ];
 
+// ─── B4: Model-Aware Lane Budgets ────────────────────────────────────────────
+
+/**
+ * MECW = Minimum Effective Context Window (empirically observed trustable budget).
+ *
+ * Even when a model advertises a large context window, the practical effective
+ * context for reasoning degrades past a threshold — the model starts to drop
+ * facts, lose track of earlier content, or produce lower-quality output.
+ *
+ * The MECW tuple:
+ *   - mecwFloor:   token floor below which the model always works correctly
+ *   - mecwCeiling: token ceiling above which trustability degrades; lane
+ *                  budgets are scaled to stay within this ceiling
+ *
+ * When totalBudget <= mecwFloor: use fixed fractions (all budget is safe)
+ * When totalBudget > mecwFloor and <= mecwCeiling: scale lane budgets linearly
+ * When totalBudget > mecwCeiling: clamp history+memory fractions so their
+ *   combined token allocation stays at or below mecwCeiling.
+ *
+ * Observation sources:
+ *   - Anthropic Claude 200k: effective retrieval degrades above ~140k input tokens (empirical)
+ *   - OpenAI 128k: reliable through 128k (no observed degradation)
+ *   - Gemini 1M: MECW ceiling empirically around 180k for reliable recall
+ *   - Small windows (GLM, Qwen, DeepSeek 131k): small enough to use full window
+ */
+interface ModelMECW {
+  /** Pattern matched against lowercased model string (same format as MODEL_CONTEXT_WINDOWS) */
+  pattern: string;
+  /** Tokens up to which the model reliably handles all injected content */
+  mecwFloor: number;
+  /** Tokens above which injected content starts to drop / degrade quality */
+  mecwCeiling: number;
+  /**
+   * Preferred historyFraction when the model is under MECW ceiling pressure.
+   * When budget > mecwFloor, history fraction is blended toward this value
+   * so history doesn't crowd out memory when the model can't see all of it.
+   */
+  preferredHistoryFraction: number;
+  /**
+   * Preferred memoryFraction when the model is under MECW ceiling pressure.
+   * History + memory combined should leave ~5-10% for fixed overhead.
+   */
+  preferredMemoryFraction: number;
+}
+
+const MODEL_MECW: ModelMECW[] = [
+  // Claude 200k: effective recall degrades above ~140k; clamp composite budget
+  { pattern: 'claude',    mecwFloor: 80_000,   mecwCeiling: 140_000, preferredHistoryFraction: 0.35, preferredMemoryFraction: 0.45 },
+  // Gemini 1M: reliable up to ~180k for grounded retrieval; less for recall
+  { pattern: 'gemini',   mecwFloor: 100_000,  mecwCeiling: 180_000, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.45 },
+  // OpenAI 128k: full window is trustable; use standard fractions
+  { pattern: 'gpt',      mecwFloor: 128_000,  mecwCeiling: 128_000, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+  { pattern: 'o3',       mecwFloor: 128_000,  mecwCeiling: 128_000, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+  { pattern: 'o4',       mecwFloor: 128_000,  mecwCeiling: 128_000, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+  // Smaller windows: full window is trustable
+  { pattern: 'qwen3',    mecwFloor: 262_144,  mecwCeiling: 262_144, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+  { pattern: 'qwen',     mecwFloor: 131_072,  mecwCeiling: 131_072, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+  { pattern: 'glm',      mecwFloor: 131_072,  mecwCeiling: 131_072, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+  { pattern: 'deepseek', mecwFloor: 131_072,  mecwCeiling: 131_072, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+];
+
+/**
+ * B4: Compute model-aware lane budget fractions.
+ *
+ * Resolves the effective historyFraction and memoryFraction for a compose pass
+ * given the model and its effective budget. Uses the MECW catalog to blend
+ * away from fixed fractions when the budget approaches the MECW ceiling,
+ * so the compositor allocates proportionally for what the model can actually use.
+ *
+ * Returns:
+ *   historyFraction — fraction of effective budget to give history
+ *   memoryFraction  — fraction of effective budget to give memory pool
+ *   mecwProfile     — which MECW entry matched (undefined = no match / full window)
+ *   mecwApplied     — true when MECW adjustment changed the fractions
+ *   mecwBlend       — 0..1 blend factor (0 = below floor, 1 = at/above ceiling)
+ */
+export function resolveModelLaneBudgets(
+  model: string | undefined,
+  effectiveBudget: number,
+  configHistoryFraction: number,
+  configMemoryFraction: number,
+): {
+  historyFraction: number;
+  memoryFraction: number;
+  mecwProfile: string | undefined;
+  mecwApplied: boolean;
+  mecwBlend: number;
+} {
+  if (!model) {
+    return { historyFraction: configHistoryFraction, memoryFraction: configMemoryFraction, mecwProfile: undefined, mecwApplied: false, mecwBlend: 0 };
+  }
+  const normalized = model.toLowerCase();
+  for (const entry of MODEL_MECW) {
+    if (!normalized.includes(entry.pattern)) continue;
+
+    // Budget is at or below the floor — full window is safe, use config fractions
+    if (effectiveBudget <= entry.mecwFloor) {
+      return { historyFraction: configHistoryFraction, memoryFraction: configMemoryFraction, mecwProfile: entry.pattern, mecwApplied: false, mecwBlend: 0 };
+    }
+
+    // Budget is at or above the ceiling — use preferred fractions fully
+    if (effectiveBudget >= entry.mecwCeiling) {
+      return { historyFraction: entry.preferredHistoryFraction, memoryFraction: entry.preferredMemoryFraction, mecwProfile: entry.pattern, mecwApplied: true, mecwBlend: 1 };
+    }
+
+    // Budget is between floor and ceiling — linear blend
+    const blend = (effectiveBudget - entry.mecwFloor) / (entry.mecwCeiling - entry.mecwFloor);
+    const historyFraction = configHistoryFraction + blend * (entry.preferredHistoryFraction - configHistoryFraction);
+    const memoryFraction = configMemoryFraction + blend * (entry.preferredMemoryFraction - configMemoryFraction);
+    return {
+      historyFraction: Math.round(historyFraction * 1000) / 1000,
+      memoryFraction: Math.round(memoryFraction * 1000) / 1000,
+      mecwProfile: entry.pattern,
+      mecwApplied: true,
+      mecwBlend: Math.round(blend * 1000) / 1000,
+    };
+  }
+
+  // No MECW entry matched — use config fractions unchanged
+  return { historyFraction: configHistoryFraction, memoryFraction: configMemoryFraction, mecwProfile: undefined, mecwApplied: false, mecwBlend: 0 };
+}
+
 /**
  * Resolve effective token budget from model string.
  * Returns the context window for the model, minus the configured reserve fraction
@@ -1185,6 +1307,21 @@ export class Compositor {
       computeDynamicReserve(sampleMessages, totalWindow, this.config);
     const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget, dynamicReserve, this.config.budgetFraction);
 
+    // B4: Model-aware lane budgets.
+    // Resolve historyFraction and memoryFraction by blending config values toward
+    // model-preferred fractions when the effective budget approaches the MECW ceiling.
+    // This ensures the compositor doesn't allocate more history than the model can
+    // reliably reason over, and adjusts the memory pool proportionally.
+    const _b4ConfigHistoryFraction = this.config.historyFraction ?? 0.40;
+    const _b4ConfigMemoryFraction = this.config.memoryFraction ?? 0.40;
+    const {
+      historyFraction: b4HistoryFraction,
+      memoryFraction: b4MemoryFraction,
+      mecwProfile: b4MecwProfile,
+      mecwApplied: b4MecwApplied,
+      mecwBlend: b4MecwBlend,
+    } = resolveModelLaneBudgets(request.model, budget, _b4ConfigHistoryFraction, _b4ConfigMemoryFraction);
+
     // Sprint 4: Pre-compose history depth tightening.
     // Classify the session and compute an adaptive depth from observed message
     // density. This replaces the old fixed maxHistoryMessages ceiling that over-
@@ -1195,9 +1332,7 @@ export class Compositor {
     // we never request more than the budget can absorb.
     const s4SessionType: SessionType = classifySessionType(sampleMessages);
     const s4ObservedDensity: number = estimateObservedMsgDensity(sampleMessages);
-    const s4HistoryBudget: number = this.config.historyFraction != null
-      ? Math.floor(budget * this.config.historyFraction)
-      : Math.floor(budget * 0.40);
+    const s4HistoryBudget: number = Math.floor(budget * b4HistoryFraction);
     const s4AdaptiveDepth: number = computeAdaptiveHistoryDepth(
       s4SessionType,
       s4ObservedDensity,
@@ -1419,9 +1554,9 @@ export class Compositor {
       // Pre-allocate history budget. historyFraction is a fraction of the
       // effective token budget (post-reserve). Falls back to unbounded fill
       // (remaining) when historyFraction is not set.
-      const historyBudget = this.config.historyFraction != null
-        ? Math.floor(budget * this.config.historyFraction)
-        : remaining;
+      // B4: uses b4HistoryFraction (model-aware, blended from MECW catalog) instead
+      // of raw config.historyFraction so history doesn't overflow MECW ceiling.
+      const historyBudget = Math.floor(budget * b4HistoryFraction);
       const historyFillCap = Math.min(historyBudget, remaining);
 
       for (let i = budgetClusters.length - 1; i >= 0; i--) {
@@ -1566,17 +1701,12 @@ export class Compositor {
 
       // Memory budget pool: facts, wiki, semantic recall, cross-session, and
       // trigger-fired doc chunks all draw from this shared pool via `remaining`.
-      // memoryFraction is a fraction of the effective token budget (post-reserve).
-      // Falls back to targetBudgetFraction cap behavior when memoryFraction is not set.
+      // B4: uses b4MemoryFraction (model-aware, blended from MECW catalog) instead
+      // of raw config.memoryFraction so the memory pool scales with what the model
+      // can effectively attend to within its MECW ceiling.
       let memoryBudget: number;
-      if (this.config.memoryFraction != null) {
-        memoryBudget = Math.floor(budget * this.config.memoryFraction);
-        if (remaining > memoryBudget) {
-          remaining = memoryBudget;
-        }
-      } else {
-        const targetFraction = this.config.targetBudgetFraction ?? 0.65;
-        memoryBudget = Math.floor(budget * targetFraction);
+      {
+        memoryBudget = Math.floor(budget * b4MemoryFraction);
         if (remaining > memoryBudget) {
           remaining = memoryBudget;
         }
@@ -2392,6 +2522,12 @@ export class Compositor {
       historyDepthChosen: s4EffectiveDepth,
       estimatedMsgDensityTokens: s4ObservedDensity,
       rescueTrimFired: s4RescueTrimFired,
+      // B4: model-aware lane budget diagnostics
+      mecwProfile: b4MecwProfile,
+      mecwApplied: b4MecwApplied,
+      mecwBlend: b4MecwBlend,
+      effectiveHistoryFraction: b4HistoryFraction,
+      effectiveMemoryFraction: b4MemoryFraction,
     };
 
     if (pressureHigh) {
