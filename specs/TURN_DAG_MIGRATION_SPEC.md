@@ -6,6 +6,25 @@
 **Filed by:** Forge
 **Last updated:** 2026-04-17
 
+## Execution Policy
+
+Turn DAG Phase 4 and later are **HyperBuilder-managed**.
+
+Before any new implementation work starts for a HyperBuilder-managed phase, the controlling artifact must name the required HyperBuilder configuration:
+- composition tier or named pipeline profile
+- mandatory stage roles
+- required evaluation lanes
+- any allowed override path
+
+Until that configuration is written down in the phase brief or sprint contract, implementation is blocked.
+
+Out of policy for HyperBuilder-managed work:
+- ad hoc single-agent implementation
+- partial-role or simplified pipeline execution
+- swapping to a different HyperBuilder configuration without updating the controlling artifact first
+
+Only ragesaq can approve a one-off deviation, and that approval must be explicit for the exact run.
+
 ## Problem
 
 `messages.db` stores conversation history as flat per-conversation lists. That model has three operational failures:
@@ -231,6 +250,8 @@ Stable-prefix signal propagation is now implemented and verified.
 ## Phase 4 — pending
 
 **Separate live composition from archived mining**
+
+**Execution mode:** HyperBuilder-managed. Do not begin Phase 4 implementation until a fresh phase brief names the required HyperBuilder configuration for this phase.
 
 ### Changes
 - introduce context lifecycle: `active`, `archived`, `forked`
