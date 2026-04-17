@@ -12,6 +12,7 @@ import { HyperMem, toProviderFormat, repairToolCallPairs } from '../dist/index.j
 import { Compositor, DEFAULT_TRIGGERS } from '../dist/compositor.js';
 import { chunkMarkdown } from '../dist/doc-chunker.js';
 import { DocChunkStore } from '../dist/doc-chunk-store.js';
+import { runCachePrefixStabilitySuite } from './cache-prefix-stability.mjs';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -1240,6 +1241,8 @@ ${repeated}`;
     assert(pressureResult.diagnostics !== undefined,
       'Budget-pressure: diagnostics present');
   }
+
+  await runCachePrefixStabilitySuite(assert);
 
   // ── Cleanup ──
   console.log('\n── Cleanup ──');

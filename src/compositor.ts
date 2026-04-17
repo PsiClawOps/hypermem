@@ -12,6 +12,7 @@
  */
 
 import type { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import type {
   ComposeRequest,
   ComposeResult,
@@ -59,6 +60,8 @@ export const OPENCLAW_BOOTSTRAP_FILES = new Set([
   'SOUL.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md',
   'AGENTS.md', 'HEARTBEAT.md', 'MEMORY.md', 'BOOTSTRAP.md',
 ]);
+
+const CACHE_PREFIX_BOUNDARY_SLOT = 'cache-prefix-boundary';
 
 /**
  * Model context window sizes by provider/model string (or partial match).
@@ -469,6 +472,31 @@ function estimateMessageTokens(msg: NeutralMessage): number {
   // Overhead per message (role, formatting)
   tokens += 4;
   return tokens;
+}
+
+
+function isDynamicBoundaryMessage(msg: NeutralMessage): boolean {
+  return Boolean((msg.metadata as Record<string, unknown> | undefined)?.dynamicBoundary);
+}
+
+function getStablePrefixMessages(messages: NeutralMessage[]): NeutralMessage[] {
+  const prefix: NeutralMessage[] = [];
+  for (const msg of messages) {
+    if (msg.role !== 'system') break;
+    if (isDynamicBoundaryMessage(msg)) break;
+    prefix.push(msg);
+  }
+  return prefix;
+}
+
+function computeStablePrefixHash(messages: NeutralMessage[]): string | undefined {
+  if (messages.length === 0) return undefined;
+  const hash = createHash('sha256');
+  for (const msg of messages) {
+    hash.update(msg.textContent ?? '');
+    hash.update('\n␞\n');
+  }
+  return hash.digest('hex');
 }
 
 function parseToolArgs(argumentsJson: string): Record<string, unknown> {
@@ -1054,6 +1082,11 @@ export class Compositor {
     // Particularly effective for low-frequency sessions (heartbeat agents, council
     // seats between rounds). TTL on the cache write remains 120s — this is a
     // conservative early-exit before the TTL expires, not a TTL extension.
+    //
+    // B2: prevPrefixHash is set when a cached bundle is found but bypassed due to
+    // prefix-input mutation. It is surfaced in the full-compose diagnostics so
+    // callers can confirm the bypass fired correctly.
+    let _prevPrefixHashFromBypass: string | undefined;
     if (request.includeHistory !== false && request.skipWindowCache !== true) {
       try {
         const newestRow = db.prepare(
@@ -1083,7 +1116,29 @@ export class Compositor {
             // we can't slice a cached bundle safely, so skip cache.
             const depthOk = !request.historyDepth;
 
-            if (budgetOk && factsOk && libraryOk && contextOk && depthOk) {
+            // B2: Stable-prefix hash check.
+            // If the system/identity slots changed since this cache entry was
+            // written, the stable prefix is stale even if cursor freshness
+            // passes. Compute a cheap input hash from slot contents and compare
+            // against the one stored in the cache meta. If no stored hash exists
+            // (pre-B2 cache entries), fall through to prefix check on the
+            // cached message content itself.
+            let prefixInputOk = true;
+            const _cachedPrefixInputHash = cachedBundle.meta.prefixInputHash;
+            if (_cachedPrefixInputHash) {
+              const _sysSlot = await this.cache.getSlot(request.agentId, request.sessionKey, 'system');
+              const _idSlot = await this.cache.getSlot(request.agentId, request.sessionKey, 'identity');
+              const _incomingInputHash = createHash('sha256')
+                .update(_sysSlot ?? '')
+                .update('\n␞\n')
+                .update(_idSlot ?? '')
+                .digest('hex');
+              if (_incomingInputHash !== _cachedPrefixInputHash) {
+                prefixInputOk = false;
+              }
+            }
+
+            if (budgetOk && factsOk && libraryOk && contextOk && depthOk && prefixInputOk) {
               const cachedSlots: SlotTokenCounts = {
                 system: cachedBundle.meta.slots['system'] ?? 0,
                 identity: cachedBundle.meta.slots['identity'] ?? 0,
@@ -1102,10 +1157,14 @@ export class Compositor {
                 diagnostics: {
                   ...cachedBundle.meta.diagnostics,
                   windowCacheHit: true,
+                  // Carry forward the stored prefixHash so callers can observe it.
+                  prefixHash: cachedBundle.meta.prefixHash ?? cachedBundle.meta.diagnostics.prefixHash,
                 },
               };
             }
-            // Incompatible request — fall through to full compose
+            // Incompatible request — fall through to full compose.
+            // Surface prevPrefixHash so the full compose diagnostics can report it.
+            _prevPrefixHashFromBypass = cachedBundle.meta.prefixHash ?? cachedBundle.meta.diagnostics.prefixHash;
           }
         }
       } catch {
@@ -1551,11 +1610,12 @@ export class Compositor {
       }
     }
 
-    // ─── Injected Context Block ────────────────────────────────
-    // Facts, knowledge, preferences, semantic recall, and cross-session
-    // context are assembled into a single system message injected before
-    // conversation history (after system/identity).
-    const contextParts: string[] = [];
+    // ─── Cache-ordered context assembly ─────────────────────────
+    // Stable, reusable material is lifted above the cache boundary as its
+    // own system messages. Session-volatile material stays in the dynamic
+    // context block below that boundary.
+    const stablePrefixMessages: NeutralMessage[] = [];
+    const volatileContextParts: string[] = [];
     let contextTokens = 0;
 
     // ── C1: Content fingerprint dedup set ────────────────────
@@ -1608,14 +1668,14 @@ export class Compositor {
       if (wikiContent) {
         const tokens = estimateTokens(wikiContent);
         if (tokens <= remaining) {
-          contextParts.push(wikiContent);
+          volatileContextParts.push(wikiContent);
           contextTokens += tokens;
           remaining -= tokens;
           slots.library += tokens;
         } else if (remaining > 200) {
           const truncated = this.truncateToTokens(wikiContent, remaining);
           const truncTokens = estimateTokens(truncated);
-          contextParts.push(truncated);
+          volatileContextParts.push(truncated);
           contextTokens += truncTokens;
           remaining -= truncTokens;
           slots.library += truncTokens;
@@ -1627,33 +1687,65 @@ export class Compositor {
     // scope: agent — filtered by agentId via filterByScope after fetch
     // Draws from the shared memory budget pool (remaining is pre-capped by memoryBudget).
     if (request.includeFacts !== false && remaining > 500) {
-      const factsContent = this.buildFactsFromDb(request.agentId, request.sessionKey, libDb || db);
-      if (factsContent !== null) {
-        const [content, factCount, scopeFiltered] = factsContent;
-        diagFactsIncluded += factCount;
-        diagScopeFiltered += scopeFiltered;
-        if (content) {
-          const tokens = estimateTokens(content);
+      const factSections = this.buildFactSectionsFromDb(request.agentId, request.sessionKey, libDb || db);
+      if (factSections !== null) {
+        const { stableContent, stableCount, volatileContent, volatileCount, filteredCount } = factSections;
+        diagFactsIncluded += stableCount + volatileCount;
+        diagScopeFiltered += filteredCount;
+
+        if (stableContent) {
+          const stableFactsBlock = `## Stable Facts\n${stableContent}`;
+          const tokens = estimateTokens(stableFactsBlock);
           if (tokens <= remaining) {
-            contextParts.push(`## Active Facts\n${content}`);
+            stablePrefixMessages.push({
+              role: 'system',
+              textContent: stableFactsBlock,
+              toolCalls: null,
+              toolResults: null,
+            });
             contextTokens += tokens;
             remaining -= tokens;
-            slots.facts = tokens;
+            slots.facts += tokens;
           } else if (remaining > 200) {
-            const truncated = this.truncateToTokens(content, remaining);
+            const truncated = this.truncateToTokens(stableFactsBlock, remaining);
             const truncTokens = estimateTokens(truncated);
-            contextParts.push(`## Active Facts (truncated)\n${truncated}`);
+            stablePrefixMessages.push({
+              role: 'system',
+              textContent: truncated,
+              toolCalls: null,
+              toolResults: null,
+            });
             contextTokens += truncTokens;
             remaining -= truncTokens;
-            slots.facts = truncTokens;
-            warnings.push('Facts truncated to fit memory budget');
+            slots.facts += truncTokens;
+            warnings.push('Stable facts truncated to fit memory budget');
           }
-          // C1: Fingerprint each fact line so downstream dedup paths can skip duplicates
-          const factLines = content.split('\n');
-          for (const line of factLines) {
-            if (line.startsWith('- [')) {
-              addFingerprint(line);
-            }
+
+          for (const line of stableContent.split('\n')) {
+            if (line.startsWith('- [')) addFingerprint(line);
+          }
+        }
+
+        if (volatileContent) {
+          const volatileFactsBlock = `## Active Facts\n${volatileContent}`;
+          const tokens = estimateTokens(volatileFactsBlock);
+          if (tokens <= remaining) {
+            volatileContextParts.push(volatileFactsBlock);
+            contextTokens += tokens;
+            remaining -= tokens;
+            slots.facts += tokens;
+          } else if (remaining > 200) {
+            const truncated = this.truncateToTokens(volatileFactsBlock, remaining);
+            const truncTokens = estimateTokens(truncated);
+            volatileContextParts.push(truncated);
+            contextTokens += truncTokens;
+            remaining -= truncTokens;
+            slots.facts += truncTokens;
+            warnings.push('Active facts truncated to fit memory budget');
+          }
+
+          for (const line of volatileContent.split('\n')) {
+            if (line.startsWith('- [')) addFingerprint(line);
           }
         }
       }
@@ -1674,7 +1766,6 @@ export class Compositor {
           });
 
           if (temporalFacts.length > 0) {
-            // C1: Use fingerprint dedup instead of fragile substring match
             const beforeCount = temporalFacts.length;
             const novel = temporalFacts.filter(f => !isDuplicate(f.content));
             diagFingerprintDedups += beforeCount - novel.length;
@@ -1691,17 +1782,17 @@ export class Compositor {
 
               const temporalSection = `## Temporal Context\n${temporalBlock}`;
               const tempTokens = estimateTokens(temporalSection);
-              const tempBudget = Math.floor(remaining * 0.20); // Cap at 20% of remaining
+              const tempBudget = Math.floor(remaining * 0.20);
 
               if (tempTokens <= tempBudget) {
-                contextParts.push(temporalSection);
+                volatileContextParts.push(temporalSection);
                 contextTokens += tempTokens;
                 remaining -= tempTokens;
                 slots.facts = (slots.facts ?? 0) + tempTokens;
               } else {
                 const truncated = this.truncateToTokens(temporalSection, tempBudget);
                 const truncTokens = estimateTokens(truncated);
-                contextParts.push(truncated);
+                volatileContextParts.push(truncated);
                 contextTokens += truncTokens;
                 remaining -= truncTokens;
                 slots.facts = (slots.facts ?? 0) + truncTokens;
@@ -1720,8 +1811,6 @@ export class Compositor {
       // questions. Primary fix for LoCoMo open-domain F1 gap (0.133 baseline).
       if (request.includeSemanticRecall !== false && queryText && isOpenDomainQuery(queryText) && db && remaining > 300) {
         try {
-          // searchOpenDomain still does intra-result dedup. Existing-context dedup
-          // now happens here via fingerprints so we keep one dedup path.
           const rawOdResults = searchOpenDomain(db, queryText, '', 10);
           const beforeOd = rawOdResults.length;
           const odResults = rawOdResults.filter(r => !isDuplicate(r.content));
@@ -1744,17 +1833,17 @@ export class Compositor {
 
             const odSection = `## Open Domain Context\n${odBlock}`;
             const odTokens = estimateTokens(odSection);
-            const odBudget = Math.floor(remaining * 0.20); // Cap at 20% of remaining
+            const odBudget = Math.floor(remaining * 0.20);
 
             if (odTokens <= odBudget) {
-              contextParts.push(odSection);
+              volatileContextParts.push(odSection);
               contextTokens += odTokens;
               remaining -= odTokens;
               slots.facts = (slots.facts ?? 0) + odTokens;
             } else {
               const truncated = this.truncateToTokens(odSection, odBudget);
               const truncTokens = estimateTokens(truncated);
-              contextParts.push(truncated);
+              volatileContextParts.push(truncated);
               contextTokens += truncTokens;
               remaining -= truncTokens;
               slots.facts = (slots.facts ?? 0) + truncTokens;
@@ -1771,16 +1860,27 @@ export class Compositor {
     if (request.includeLibrary !== false && remaining > 500 && libDb) {
       const knowledgeContent = this.buildKnowledgeFromDb(request.agentId, libDb);
       if (knowledgeContent) {
-        const tokens = estimateTokens(knowledgeContent);
-        if (tokens <= remaining * 0.2) { // Cap knowledge at 20% of remaining
-          contextParts.push(`## Knowledge\n${knowledgeContent}`);
+        const stableKnowledgeBlock = `## Knowledge\n${knowledgeContent}`;
+        const tokens = estimateTokens(stableKnowledgeBlock);
+        if (tokens <= remaining * 0.2) {
+          stablePrefixMessages.push({
+            role: 'system',
+            textContent: stableKnowledgeBlock,
+            toolCalls: null,
+            toolResults: null,
+          });
           contextTokens += tokens;
           remaining -= tokens;
           slots.library += tokens;
         } else {
-          const truncated = this.truncateToTokens(knowledgeContent, Math.floor(remaining * 0.2));
+          const truncated = this.truncateToTokens(stableKnowledgeBlock, Math.floor(remaining * 0.2));
           const truncTokens = estimateTokens(truncated);
-          contextParts.push(`## Knowledge (truncated)\n${truncated}`);
+          stablePrefixMessages.push({
+            role: 'system',
+            textContent: truncated,
+            toolCalls: null,
+            toolResults: null,
+          });
           contextTokens += truncTokens;
           remaining -= truncTokens;
           slots.library += truncTokens;
@@ -1794,9 +1894,15 @@ export class Compositor {
     if (request.includeLibrary !== false && remaining > 300 && libDb) {
       const prefsContent = this.buildPreferencesFromDb(request.agentId, libDb);
       if (prefsContent) {
-        const tokens = estimateTokens(prefsContent);
-        if (tokens <= remaining * 0.1) { // Cap preferences at 10% of remaining
-          contextParts.push(`## User Preferences\n${prefsContent}`);
+        const stablePrefsBlock = `## User Preferences\n${prefsContent}`;
+        const tokens = estimateTokens(stablePrefsBlock);
+        if (tokens <= remaining * 0.1) {
+          stablePrefixMessages.push({
+            role: 'system',
+            textContent: stablePrefsBlock,
+            toolCalls: null,
+            toolResults: null,
+          });
           contextTokens += tokens;
           remaining -= tokens;
           slots.library += tokens;
@@ -1836,7 +1942,7 @@ export class Compositor {
           );
           if (semanticContent) {
             const tokens = estimateTokens(semanticContent);
-            contextParts.push(`## Related Memory\n${semanticContent}`);
+            volatileContextParts.push(`## Related Memory\n${semanticContent}`);
             contextTokens += tokens;
             remaining -= tokens;
             // Semantic recall draws from multiple sources, attribute to context
@@ -1979,7 +2085,7 @@ export class Compositor {
         }
 
         if (docParts.length > 0) {
-          contextParts.push(docParts.join('\n\n'));
+          volatileContextParts.push(docParts.join('\n\n'));
         }
       } else if (remaining > 400 && (this.vectorStore || libDb)) {
         // Trigger-miss fallback: no trigger fired — attempt bounded semantic retrieval
@@ -2001,7 +2107,7 @@ export class Compositor {
             ),
           ]);
           if (fallbackContent) {
-            contextParts.push(`## Related Memory\n${fallbackContent}`);
+            volatileContextParts.push(`## Related Memory\n${fallbackContent}`);
             const fallbackTokens = estimateTokens(fallbackContent);
             contextTokens += fallbackTokens;
             remaining -= fallbackTokens;
@@ -2038,7 +2144,7 @@ export class Compositor {
             spawnTokens += chunk.tokenEstimate;
           }
           if (spawnLines.length > 0) {
-            contextParts.push(`## Spawn Context Documents\n${spawnLines.join('\n\n')}`);
+            volatileContextParts.push(`## Spawn Context Documents\n${spawnLines.join('\n\n')}`);
             contextTokens += spawnTokens;
             remaining -= spawnTokens;
             slots.library += spawnTokens;
@@ -2067,14 +2173,14 @@ export class Compositor {
         );
 
         if (tokens <= maxContextTokens) {
-          contextParts.push(`## Other Active Sessions\n${crossSessionContent}`);
+          volatileContextParts.push(`## Other Active Sessions\n${crossSessionContent}`);
           contextTokens += tokens;
           remaining -= tokens;
           slots.context += tokens;
         } else {
           const truncated = this.truncateToTokens(crossSessionContent, maxContextTokens);
           const truncTokens = estimateTokens(truncated);
-          contextParts.push(`## Other Active Sessions (truncated)\n${truncated}`);
+          volatileContextParts.push(`## Other Active Sessions (truncated)\n${truncated}`);
           contextTokens += truncTokens;
           remaining -= truncTokens;
           slots.context += truncTokens;
@@ -2091,7 +2197,7 @@ export class Compositor {
       if (actionSummary) {
         const actionTokens = Math.ceil(actionSummary.length / 4);
         if (actionTokens <= remaining) {
-          contextParts.push(actionSummary);
+          volatileContextParts.push(actionSummary);
           contextTokens += actionTokens;
           remaining -= actionTokens;
           slots.context += actionTokens;
@@ -2099,8 +2205,15 @@ export class Compositor {
       }
     }
 
+    const firstNonSystem = messages.findIndex(m => m.role !== 'system');
+    const stableInsertIdx = firstNonSystem === -1 ? messages.length : firstNonSystem;
+
+    if (stablePrefixMessages.length > 0) {
+      messages.splice(stableInsertIdx, 0, ...stablePrefixMessages);
+    }
+
     // ── Inject assembled context block ──────────────────────
-    const assembledContextBlock = contextParts.length > 0 ? contextParts.join('\n\n') : undefined;
+    const assembledContextBlock = volatileContextParts.length > 0 ? volatileContextParts.join('\n\n') : undefined;
 
     if (assembledContextBlock) {
       const contextMsg: NeutralMessage = {
@@ -2108,19 +2221,20 @@ export class Compositor {
         textContent: assembledContextBlock,
         toolCalls: null,
         toolResults: null,
-        // DYNAMIC_BOUNDARY: this slot is session-specific (facts, recall, episodes).
-        // It must NOT be included in any prompt caching boundary that spans static content.
-        // The provider translator will insert a cache_control ephemeral marker BEFORE
-        // this message so providers can cache everything up to identity/system as static context.
-        metadata: { dynamicBoundary: true },
+        // CACHE_PREFIX_BOUNDARY_SLOT: this message starts the volatile side of the
+        // prompt. Everything above it is stable-prefix material eligible for reuse;
+        // everything at or below it is per-session / per-turn context.
+        metadata: { dynamicBoundary: true, cacheBoundarySlot: CACHE_PREFIX_BOUNDARY_SLOT },
       };
-      // Insert after system/identity, before history
-      // Insert context after all system/identity messages, before conversation history.
-      // findIndex returns -1 when all messages are system-role — handle explicitly.
-      const firstNonSystem = messages.findIndex(m => m.role !== 'system');
-      const insertIdx = firstNonSystem === -1 ? messages.length : firstNonSystem;
-      messages.splice(insertIdx, 0, contextMsg);
+      messages.splice(stableInsertIdx + stablePrefixMessages.length, 0, contextMsg);
     }
+
+    const stablePrefix = getStablePrefixMessages(messages);
+    const prefixSegmentCount = stablePrefix.length;
+    const prefixTokens = stablePrefix.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
+    const volatileHistoryTokens = messages.slice(prefixSegmentCount)
+      .reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
+    const prefixHash = computeStablePrefixHash(stablePrefix);
 
     // ─── Safety Valve: Post-Assembly Budget Check ───────────────────
     // Re-estimate total tokens after all slots are assembled. If the
@@ -2233,7 +2347,7 @@ export class Compositor {
 
     // W3: Build compose diagnostics
     let zeroResultReason: import('./types.js').ComposeDiagnostics['zeroResultReason'];
-    if (contextParts.length === 0) {
+    if (volatileContextParts.length === 0 && stablePrefixMessages.length === 0) {
       if (diagScopeFiltered > 0 && diagFactsIncluded === 0 && diagSemanticResults === 0) {
         zeroResultReason = 'scope_filtered_all';
       } else if (remaining <= 0) {
@@ -2266,6 +2380,13 @@ export class Compositor {
       fingerprintDedups: diagFingerprintDedups,
       fingerprintCollisions: diagFingerprintCollisions,
       windowCacheHit: false,
+      prefixSegmentCount,
+      prefixTokens,
+      prefixHash,
+      // B2: Surface the previous cached prefixHash when this full compose was
+      // triggered by a cache bypass (stable-prefix mutation detected).
+      prevPrefixHash: _prevPrefixHashFromBypass,
+      volatileHistoryTokens,
       // Sprint 4 fields
       sessionType: s4SessionType,
       historyDepthChosen: s4EffectiveDepth,
@@ -2289,6 +2410,14 @@ export class Compositor {
     // VS-1: Dual-write, session-scoped key for backwards compat;
     // topic-scoped key for per-topic window retrieval when activeTopicId is set.
     try {
+      // B2: Compute a cheap prefix input hash from the system + identity slot
+      // contents that fed the stable prefix. Stored in WindowCacheMeta so the
+      // C4 fast-exit can detect prefix mutations without re-running full compose.
+      const _prefixInputHash = createHash('sha256')
+        .update(systemContent ?? '')
+        .update('\n␞\n')
+        .update(identityContent ?? '')
+        .digest('hex');
       await this.cache.setWindow(request.agentId, request.sessionKey, messages, 120);
       await this.cache.setWindowMeta(request.agentId, request.sessionKey, {
         slots: slots as unknown as Record<string, number>,
@@ -2296,6 +2425,8 @@ export class Compositor {
         warnings,
         diagnostics,
         composedAt,
+        prefixHash,
+        prefixInputHash: _prefixInputHash,
       }, 120);
     } catch {
       // Window cache write is best-effort
@@ -2654,6 +2785,31 @@ export class Compositor {
     sessionKey: string,
     db: DatabaseSync | null,
   ): [string | null, number, number] | null {
+    const sections = this.buildFactSectionsFromDb(agentId, sessionKey, db);
+    if (!sections) return null;
+
+    const combined = [sections.stableContent, sections.volatileContent]
+      .filter((value): value is string => Boolean(value))
+      .join('\n');
+
+    return [
+      combined || null,
+      sections.stableCount + sections.volatileCount,
+      sections.filteredCount,
+    ];
+  }
+
+  private buildFactSectionsFromDb(
+    agentId: string,
+    sessionKey: string,
+    db: DatabaseSync | null,
+  ): {
+    stableContent: string | null;
+    stableCount: number;
+    volatileContent: string | null;
+    volatileCount: number;
+    filteredCount: number;
+  } | null {
     if (!db) return null;
 
     const tableExists = db.prepare(
@@ -2680,9 +2836,16 @@ export class Compositor {
       scope: string | null;
     }>;
 
-    if (rawRows.length === 0) return [null, 0, 0];
+    if (rawRows.length === 0) {
+      return {
+        stableContent: null,
+        stableCount: 0,
+        volatileContent: null,
+        volatileCount: 0,
+        filteredCount: 0,
+      };
+    }
 
-    // W1: Apply scope filter — enforce retrieval access control
     const ctx = { agentId, sessionKey };
     const { allowed, filteredCount } = filterByScope(
       rawRows.map(r => ({
@@ -2693,22 +2856,41 @@ export class Compositor {
       ctx,
     );
 
-    if (allowed.length === 0) return [null, 0, filteredCount];
+    if (allowed.length === 0) {
+      return {
+        stableContent: null,
+        stableCount: 0,
+        volatileContent: null,
+        volatileCount: 0,
+        filteredCount,
+      };
+    }
 
-    const content = allowed
-      .map(r => {
-        // Session attribution: label facts from a different session so the model
-        // can distinguish current-session context from cross-session facts.
-        // Shows last 8 chars of session key as a stable short identifier.
-        const fromOtherSession = r.sessionKey && r.sessionKey !== sessionKey;
-        const sessionSuffix = fromOtherSession
-          ? `, session:${r.sessionKey!.slice(-8)}`
-          : '';
-        return `- [${r.domain || 'general'}${sessionSuffix}] ${r.content}`;
-      })
-      .join('\n');
+    const formatRows = (rows: typeof allowed): string | null => {
+      if (rows.length === 0) return null;
+      return rows
+        .map(r => {
+          const fromOtherSession = r.sessionKey && r.sessionKey !== sessionKey;
+          const sessionSuffix = fromOtherSession
+            ? `, session:${r.sessionKey!.slice(-8)}`
+            : '';
+          return `- [${r.domain || 'general'}${sessionSuffix}] ${r.content}`;
+        })
+        .join('\n');
+    };
 
-    return [content, allowed.length, filteredCount];
+    const stableRows = allowed.filter(r =>
+      r.scope !== 'session' && (!r.sessionKey || r.sessionKey !== sessionKey)
+    );
+    const volatileRows = allowed.filter(r => !stableRows.includes(r));
+
+    return {
+      stableContent: formatRows(stableRows),
+      stableCount: stableRows.length,
+      volatileContent: formatRows(volatileRows),
+      volatileCount: volatileRows.length,
+      filteredCount,
+    };
   }
 
   /**

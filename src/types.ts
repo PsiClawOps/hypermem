@@ -313,6 +313,21 @@ export interface ComposeDiagnostics {
   fingerprintCollisions?: number;
   /** True when the window cache fast-exit fired and full compose was skipped */
   windowCacheHit?: boolean;
+  /** Number of system messages in the stable cacheable prefix */
+  prefixSegmentCount?: number;
+  /** Estimated token cost of the stable cacheable prefix */
+  prefixTokens?: number;
+  /** Deterministic hash of the stable cacheable prefix content */
+  prefixHash?: string;
+  /**
+   * The prefixHash stored in the window cache from the previous compose.
+   * Emitted on full-compose passes when a cached bundle was found but had a
+   * different prefixHash (i.e. stable prefix changed). Useful for verifying
+   * that prefix mutations correctly bypassed the C4 fast-exit.
+   */
+  prevPrefixHash?: string;
+  /** Estimated token cost of all content below the stable prefix boundary */
+  volatileHistoryTokens?: number;
   // ── Sprint 4: pre-compose history depth tightening ──────────────────────
   /**
    * Session type derived from observed message density.

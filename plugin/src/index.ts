@@ -41,7 +41,7 @@ import type {
   BackgroundIndexer,
   FleetStore,
 } from '@psiclawops/hypermem';
-import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow, OPENCLAW_BOOTSTRAP_FILES } from '@psiclawops/hypermem';
+import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow, OPENCLAW_BOOTSTRAP_FILES, rotateSessionContext } from '@psiclawops/hypermem';
 import { evictStaleContent } from '@psiclawops/hypermem/image-eviction';
 import { repairToolPairs } from '@psiclawops/hypermem';
 import os from 'os';
@@ -1434,6 +1434,58 @@ function createHyperMemEngine(): ContextEngine {
         const agentId = extractAgentId(sk);
 
         // EC1 JSONL truncation moved to maintain() — bootstrap stays fast.
+
+        // B2: Session-restart detection — rotateSessionContext hook.
+        // When the runtime starts a new session (new sessionId) for an existing
+        // sessionKey, archive the old context head and create a fresh active
+        // context so the new conversation starts clean. This prevents the new
+        // session from inheriting a stale context head pointer from the prior run.
+        //
+        // Detection: if a conversation row exists for this sessionKey AND the
+        // stored session_id differs from the incoming sessionId (runtime-assigned),
+        // treat this as a session restart.
+        //
+        // Non-fatal: context rotation is best-effort and never blocks bootstrap.
+        if (sessionId) {
+          try {
+            const _msgDb = hm.dbManager.getMessageDb(agentId);
+            if (_msgDb) {
+              const _existingConv = _msgDb.prepare(
+                'SELECT id, session_id FROM conversations WHERE session_key = ? LIMIT 1'
+              ).get(sk) as { id: number; session_id: string | null } | undefined;
+              if (
+                _existingConv &&
+                _existingConv.session_id !== null &&
+                _existingConv.session_id !== sessionId
+              ) {
+                // Distinct sessionId — this is a session restart for an existing sessionKey.
+                rotateSessionContext(_msgDb, agentId, sk, _existingConv.id);
+                // Update the stored session_id to the new one.
+                try {
+                  _msgDb.prepare('UPDATE conversations SET session_id = ? WHERE id = ?')
+                    .run(sessionId, _existingConv.id);
+                } catch {
+                  // Best-effort — column may not exist in older schemas
+                }
+                console.log(
+                  `[hypermem-plugin] bootstrap: session restart detected for ${agentId}/${sk} ` +
+                  `(prev session_id=${_existingConv.session_id}, new=${sessionId}) — context rotated`
+                );
+              } else if (_existingConv && _existingConv.session_id === null && sessionId) {
+                // Conversation exists but session_id was never recorded — stamp it now.
+                try {
+                  _msgDb.prepare('UPDATE conversations SET session_id = ? WHERE id = ?')
+                    .run(sessionId, _existingConv.id);
+                } catch {
+                  // Best-effort
+                }
+              }
+            }
+          } catch (rotateErr) {
+            // Non-fatal — never block bootstrap on context rotation
+            console.warn('[hypermem-plugin] bootstrap: rotateSessionContext failed (non-fatal):', (rotateErr as Error).message);
+          }
+        }
 
         // Fast path: if session already has history in Redis, skip warm entirely.
         // sessionExists() is a single EXISTS call — sub-millisecond cost.

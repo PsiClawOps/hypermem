@@ -1,8 +1,9 @@
 /**
  * HyperMem Plugin Pipeline Validation
  *
- * Verifies the real context-engine plugin assemble() path returns a non-empty
- * systemPromptAddition when facts/knowledge are seeded for a live session.
+ * Verifies the real context-engine plugin assemble() path returns seeded L4
+ * memory in the assembled system context when facts/knowledge are present.
+ * The context may arrive via system messages, systemPromptAddition, or both.
  *
  * This is intentionally a validation script (not part of root npm test) because
  * it exercises the built plugin dist and its hardcoded home-relative HyperMem
@@ -112,18 +113,24 @@ async function run() {
 
     const firstEstimatedTokens = assembleResult.estimatedTokens;
     const firstSystemPromptAddition = assembleResult.systemPromptAddition;
+    const firstSystemContext = [
+      ...(assembleResult.messages || [])
+        .filter(msg => msg.role === 'system')
+        .map(msg => typeof msg.content === 'string' ? msg.content : ''),
+      assembleResult.systemPromptAddition || '',
+    ].filter(Boolean).join('\n\n');
 
     assert(Array.isArray(assembleResult.messages), 'assemble() returned a message array');
     assert(assembleResult.messages.length > 0, `assemble() returned ${assembleResult.messages.length} messages`);
     assert(typeof assembleResult.estimatedTokens === 'number' && assembleResult.estimatedTokens > 0,
       `assemble() estimated tokens: ${assembleResult.estimatedTokens}`);
-    assert(typeof assembleResult.systemPromptAddition === 'string' && assembleResult.systemPromptAddition.length > 0,
-      'assemble() returned non-empty systemPromptAddition');
-    assert(assembleResult.systemPromptAddition.includes('PLUGIN_PIPELINE_FACT')
-      || assembleResult.systemPromptAddition.includes('PLUGIN_PIPELINE_KNOWLEDGE'),
-      'systemPromptAddition contains seeded L4 memory');
-    assert(assembleResult.systemPromptAddition.includes('Kubernetes staging deployment'),
-      'systemPromptAddition reflects prompt-aware retrieval content');
+    assert(firstSystemContext.length > 0,
+      'assemble() returned non-empty assembled system context');
+    assert(firstSystemContext.includes('PLUGIN_PIPELINE_FACT')
+      || firstSystemContext.includes('PLUGIN_PIPELINE_KNOWLEDGE'),
+      'assembled system context contains seeded L4 memory');
+    assert(firstSystemContext.includes('Kubernetes staging deployment'),
+      'assembled system context reflects prompt-aware retrieval content');
 
     const replayResult = await engine.assemble({
       sessionId: 'plugin-pipeline-session',
@@ -134,10 +141,19 @@ async function run() {
       prompt: 'kubernetes staging deployment',
     });
 
+    const replaySystemContext = [
+      ...(replayResult.messages || [])
+        .filter(msg => msg.role === 'system')
+        .map(msg => typeof msg.content === 'string' ? msg.content : ''),
+      replayResult.systemPromptAddition || '',
+    ].filter(Boolean).join('\n\n');
+
     // This verifies cache replay stability for identical assemble() calls.
     // It does not directly prove single-execution of the compose hot path.
+    assert(replaySystemContext === firstSystemContext,
+      'repeat assemble() reuses stable assembled system context for identical turn');
     assert(replayResult.systemPromptAddition === firstSystemPromptAddition,
-      'repeat assemble() reuses cached context block for identical turn');
+      'repeat assemble() preserves context-block replay contract');
     assert(replayResult.estimatedTokens === firstEstimatedTokens,
       'repeat assemble() returns stable estimatedTokens for identical turn');
 

@@ -22,6 +22,17 @@ export interface WindowCacheMeta {
   warnings: string[];
   diagnostics: ComposeDiagnostics;
   composedAt: string;
+  /**
+   * Deterministic SHA-256 hash of the stable cacheable prefix at compose time.
+   * Stored so the C4 fast-exit can detect stable-prefix mutations even when
+   * the cursor (message id) has not advanced (e.g. system prompt / identity changed).
+   */
+  prefixHash?: string;
+  /**
+   * SHA-256 hash of the system + identity slot contents that fed the stable prefix.
+   * Used by C4 to cheaply detect slot mutations without re-running full compose.
+   */
+  prefixInputHash?: string;
 }
 
 const DEFAULT_CONFIG: CacheConfig = {
