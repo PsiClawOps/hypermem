@@ -15,7 +15,7 @@ import type {
   ConversationStatus,
   RecentTurn,
 } from './types.js';
-import { getOrCreateActiveContext, updateContextHead, getContextById, listContextsForSession } from './context-store.js';
+import { getOrCreateActiveContext, updateContextHead } from './context-store.js';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -537,99 +537,6 @@ export class MessageStore {
     } catch {
       return [];
     }
-  }
-
-  // ─── Phase 4.2: Explicit Archived Mining Read Surfaces ─────────────────────
-
-  /**
-   * Get messages scoped to an archived or forked context_id.
-   * Phase 4: explicit archived mining surface — never use on live composition paths.
-   *
-   * Status guard: throws if called on an active context. This prevents accidental
-   * use of this helper on the live composition path (use getMessagesByContextId instead).
-   *
-   * Supports the same opts as getMessagesByContextId.
-   */
-  getArchivedMessagesByContextId(
-    contextId: number,
-    opts?: { excludeHeartbeats?: boolean; requireText?: boolean; limit?: number }
-  ): StoredMessage[] {
-    const ctx = getContextById(this.db, contextId);
-    if (!ctx) return [];
-    if (ctx.status === 'active') {
-      throw new Error(
-        `getArchivedMessagesByContextId: context ${contextId} is active — use getMessagesByContextId for live composition`
-      );
-    }
-    return this.getMessagesByContextId(contextId, opts?.limit ?? 200, {
-      excludeHeartbeats: opts?.excludeHeartbeats,
-      requireText: opts?.requireText,
-    });
-  }
-
-  /**
-   * Full-text search constrained to an archived or forked context_id.
-   * Phase 4: explicit archived mining surface — never use on live composition paths.
-   *
-   * Status guard: throws if called on an active context.
-   */
-  searchArchivedMessagesByContextId(
-    contextId: number,
-    query: string,
-    opts?: { limit?: number }
-  ): StoredMessage[] {
-    const ctx = getContextById(this.db, contextId);
-    if (!ctx) return [];
-    if (ctx.status === 'active') {
-      throw new Error(
-        `searchArchivedMessagesByContextId: context ${contextId} is active — use searchMessagesByContextId for live composition`
-      );
-    }
-    return this.searchMessagesByContextId(contextId, query, opts?.limit ?? 20);
-  }
-
-  /**
-   * Cross-context FTS mining across archived (and optionally forked) contexts.
-   * Phase 4: primary cross-context mining surface — never use on live composition paths.
-   *
-   * Walks all contexts for (agentId, sessionKey) matching the requested status,
-   * runs searchMessagesByContextId per context, and returns a merged result set
-   * tagged with contextId and contextStatus per match.
-   *
-   * opts.status:
-   *   - 'archived' (default) — only archived contexts
-   *   - 'forked'             — only forked contexts
-   *   - 'all'               — archived + forked contexts (active is always excluded)
-   *
-   * Active contexts are NEVER included regardless of opts.status.
-   */
-  searchSessionContexts(
-    agentId: string,
-    sessionKey: string,
-    query: string,
-    opts?: { status?: 'archived' | 'forked' | 'all'; limit?: number }
-  ): Array<StoredMessage & { contextId: number; contextStatus: string }> {
-    const targetStatus = opts?.status ?? 'archived';
-    const perContextLimit = opts?.limit ?? 20;
-
-    // Fetch contexts, then hard-filter out any active ones regardless of targetStatus.
-    // 'all' here means we want archived + forked, never active.
-    const contexts = listContextsForSession(this.db, agentId, sessionKey, {
-      status: targetStatus === 'all' ? 'all' : (targetStatus as 'archived' | 'forked'),
-    });
-
-    // Phase 4: active contexts are always off-limits for mining — filter them out.
-    const miningContexts = contexts.filter(c => c.status !== 'active');
-
-    const results: Array<StoredMessage & { contextId: number; contextStatus: string }> = [];
-    for (const ctx of miningContexts) {
-      const msgs = this.searchMessagesByContextId(ctx.id, query, perContextLimit);
-      for (const msg of msgs) {
-        results.push({ ...msg, contextId: ctx.id, contextStatus: ctx.status });
-      }
-    }
-
-    return results;
   }
 
   /**
