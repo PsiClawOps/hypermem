@@ -5,7 +5,7 @@
 **Phase:** 4 of 5 (Turn DAG Migration)
 **Spec:** `specs/TURN_DAG_MIGRATION_SPEC.md`
 **Priority:** P0
-**Status:** Sprint 1 complete, closeout captured
+**Status:** Sprint 2 complete, closeout captured, Sprint 3 ready
 
 ## Execution Contract
 
@@ -72,8 +72,10 @@ Do not redo those phases. Build on them.
 
 ### Sprint 3
 **Operator and job integration**
+- add the hard `maxContexts` cap on `mineArchivedContexts` before any operator-facing wiring begins
 - wire archived mining surfaces into the operator / job-facing entry points that need them
 - keep policy boundaries explicit and documented
+- decide the archived-wrapper policy and `ftsQuery` scope at the operator boundary
 - finish validation and rollout notes
 
 ## Acceptance criteria
@@ -125,3 +127,38 @@ The kickoff implementation contract for Sprint 1 lives at:
 ### Carry-forward into Sprint 2
 
 Sprint 2 should absorb the deferred items above directly in its contract, alongside the existing planned work for explicit mining APIs and historical metadata labeling.
+
+## Sprint 2
+
+**Implementation commit:** `006cfb5` `feat(turn-dag): add archived mining APIs`
+
+### Closeout classification
+
+**Must-fix now**
+- none
+
+**Explicitly deferred to Sprint 3**
+- `mineArchivedContexts` needs a hard `maxContexts` cap on input `contextIds` before any operator-facing wiring begins
+- shared DAG helper policy must be written down for operator-facing call sites, especially around `getHistoryByDAGWalk`
+- `getContextById` and `getContextLineage` need inspection-only boundary callouts matching the status-crossing warning already used on `getForkChildren`
+- Sprint 3 must decide whether status-crossing helpers need archived-only wrappers or whether documented boundary policy plus call-site review is sufficient
+- Sprint 3 must decide whether `ftsQuery` stays client-side or graduates to SQL FTS for operator-facing search surfaces
+
+**Blocked by external prerequisite**
+- none
+
+### Project learnings
+
+- explicit archived mining APIs plus `isHistorical: true` kept historical data visibly separate from live composition
+- the remaining real risk shifted from compose leakage to operator fan-out, which means the cap must land before integration wiring
+- helper-boundary policy needs to be written before operator-facing code starts, not rediscovered during evaluation
+
+### Repo learnings and failure modes
+
+- `src/message-store.ts` is still the main hotspot for archived-mining behavior and performance risk in Phase 4
+- status-crossing helpers are safe only when the call-site intent is explicit and documented
+- client-side `ftsQuery` is acceptable as an internal sprint detail, but operator-facing use needs an explicit correctness and performance story
+
+### Carry-forward into Sprint 3
+
+Sprint 3 should take the `maxContexts` cap as task one, then finish operator/job integration on top of the capped archived-mining surface with the helper-boundary and `ftsQuery` decisions made in writing.
