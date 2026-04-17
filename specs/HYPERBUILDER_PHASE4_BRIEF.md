@@ -5,7 +5,7 @@
 **Phase:** 4 of 5 (Turn DAG Migration)
 **Spec:** `specs/TURN_DAG_MIGRATION_SPEC.md`
 **Priority:** P0
-**Status:** Ready for managed execution
+**Status:** Sprint 1 complete, closeout captured
 
 ## Execution Contract
 
@@ -67,6 +67,8 @@ Do not redo those phases. Build on them.
 - keep composition APIs active-only
 - label archived results as historical in returned metadata
 - add regression coverage proving archived contexts do not leak into composition
+- document or constrain status-blind helper usage at mining call sites
+- add explicit limit-path coverage for archived inspection helpers
 
 ### Sprint 3
 **Operator and job integration**
@@ -95,3 +97,31 @@ Do not redo those phases. Build on them.
 
 The kickoff implementation contract for Sprint 1 lives at:
 `/home/lumadmin/.openclaw/workspace/repo/hyperbuilder/tasks/hypermem-phase4-sprint-1.md`
+
+## Sprint 1 closeout
+
+**Implementation commit:** `ee98144` `feat(turn-dag): add archived context inspection APIs`
+
+### Closeout classification
+
+**Must-fix now**
+- none
+
+**Explicitly deferred to Sprint 2**
+- `getHistoryByDAGWalk` remains public, Sprint 2 should define call-site policy around shared DAG primitives used by mining surfaces
+- `getContextById` is intentionally status-blind, Sprint 2 should document it as inspection-only or wrap it behind narrower mining entry points
+- lineage and fork helpers can cross status boundaries by design, Sprint 2 should decide whether mining-facing surfaces need archived-only wrappers or explicit status filtering guidance
+- archived inspection helpers do not yet have explicit limit-path coverage, Sprint 2 should add it alongside the mining query surface tests
+
+**Blocked by external prerequisite**
+- none
+
+### Project learnings
+
+- explicit archived API naming plus zero compositor imports kept active composition archived-blind, keep that separation hard
+- the full evaluator wave was useful even without code blockers, the closeout sprint still has to happen so deferred items do not vanish into chat history
+- for archived-mining work, "by design but status-blind" helpers need to be called out in the next sprint contract up front, not rediscovered at the evaluator stage
+
+### Carry-forward into Sprint 2
+
+Sprint 2 should absorb the deferred items above directly in its contract, alongside the existing planned work for explicit mining APIs and historical metadata labeling.
