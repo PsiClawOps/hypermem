@@ -2,11 +2,13 @@
 
 ## Quick Start
 
+> **Disk space:** plugin installs pull OpenClaw as a dev dependency. Allow at least 2 GB free before starting.
+
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git
 cd hypermem
 npm install && npm run build
-npm --prefix plugin install && npm --prefix plugin run build
+npm --prefix plugin install && npm --prefix plugin run build   # ~1 min on a clean machine
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
 ```
 
@@ -58,6 +60,8 @@ Everything runs in-process. No external database services required.
 | Gemini API key | Gemini embeddings only | Alternative: [aistudio.google.com](https://aistudio.google.com/apikey) |
 
 `sqlite-vec` is the only native dependency and installs automatically via npm.
+
+> **Package versions:** the root package (`hypermem`) and the two plugins (`hypercompositor`, `hypermem-memory`) are versioned independently. Plugin versions trail the core by one minor version when no plugin-facing API changes ship in a release — this is expected.
 
 The **embedding layer** (L3 semantic search) requires a configured provider. Without one, hypermem falls back to FTS5 keyword matching. This is functional but degrades recall quality. See [Embedding Providers](#embedding-providers) below.
 
@@ -171,8 +175,9 @@ Verify:
 
 ```bash
 npm test
-# Should print: ALL N TESTS PASSED ✅
 ```
+
+The full suite takes 30–60 seconds. When complete, output ends with `ALL N TESTS PASSED ✅`. If you see `ENOSPC`, free up disk space and retry.
 
 ### Step 2 — Wire the plugins
 

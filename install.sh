@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # HyperMem Installer
-# curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem-internal/main/install.sh | bash
+# curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 set -euo pipefail
 
 # ─────────────────────────────────────────────
