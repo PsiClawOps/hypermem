@@ -1073,17 +1073,20 @@ export class BackgroundIndexer {
       const topicName = detectTopic(content);
       if (topicName && topicName.trim().length >= 3) {
         try {
-          const existingTopics = topicStore.getActive(agentId, 100);
-          const existingTopic = existingTopics.find(
-            (t) => (t as { name: string }).name.toLowerCase() === topicName.toLowerCase()
+          const msgSessionKey =
+            this.getSessionKeyForMessage(messageDb, msg.conversationId) || '';
+          // findOrCreate handles case-insensitive dedup at the schema level;
+          // always touch afterward so message_count reflects real activity
+          // rather than sitting at 0 forever (which made every topic an orphan).
+          const topic = topicStore.findOrCreate(
+            agentId,
+            topicName,
+            `Auto-detected from conversation`
           );
-
-          if (!existingTopic) {
-            topicStore.findOrCreate(agentId, topicName, `Auto-detected from conversation`);
-            topicsUpdated++;
-          }
+          topicStore.touch(topic.id, msgSessionKey, 1);
+          topicsUpdated++;
         } catch {
-          // Skip topic creation errors
+          // Skip topic creation/touch errors
         }
       }
 
