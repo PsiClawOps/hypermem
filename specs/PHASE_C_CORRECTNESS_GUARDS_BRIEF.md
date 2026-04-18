@@ -164,3 +164,5 @@ Phase C is complete when:
 A clean Phase C is the difference between “better compositor internals” and “release-worthy prompt-path behavior.”
 
 For `0.8.0`, Phase C should be treated as correctness hardening, not optional polish.
+
+See also: `specs/RELEASE_HARDENING_0.8.0.md` for the release-sequenced follow-on plan after the Phase C code landed.
