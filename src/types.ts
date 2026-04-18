@@ -512,10 +512,11 @@ export interface HyperMemConfig {
 export interface EmbeddingProviderConfig {
   /**
    * Embedding provider. Default: 'ollama'.
+   * - 'none': disable all embedding calls — semantic search disabled, FTS5 fallback only
    * - 'ollama': local Ollama (nomic-embed-text or any pulled model)
    * - 'openai': OpenAI Embeddings API (text-embedding-3-small / 3-large)
    */
-  provider?: 'ollama' | 'openai' | 'gemini';
+  provider?: 'none' | 'ollama' | 'openai' | 'gemini';
   /** Ollama base URL. Default: http://localhost:11434 */
   ollamaUrl: string;
   /** OpenAI API key. Required when provider is 'openai'. */

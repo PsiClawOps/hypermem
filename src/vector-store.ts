@@ -22,11 +22,12 @@ import { join, dirname, delimiter } from 'node:path';
 export interface EmbeddingConfig {
   /**
    * Embedding provider. Default: 'ollama'.
+   * - 'none': disable all embedding calls — semantic search disabled, FTS5 fallback only
    * - 'ollama': local Ollama instance (nomic-embed-text or any pull'd model)
    * - 'openai': OpenAI Embeddings API (text-embedding-3-small / 3-large)
    * - 'gemini': Google Gemini Embedding API (gemini-embedding-2-preview)
    */
-  provider?: 'ollama' | 'openai' | 'gemini';
+  provider?: 'none' | 'ollama' | 'openai' | 'gemini';
   /** Ollama base URL. Default: http://localhost:11434 */
   ollamaUrl: string;
   /** OpenAI API key. Required when provider is 'openai'. */
@@ -589,6 +590,9 @@ export async function generateEmbeddings(
   texts: string[],
   config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG
 ): Promise<Float32Array[]> {
+  // 'none' provider: explicit no-op — semantic search disabled, FTS5 fallback only
+  if (config.provider === 'none') return [];
+
   // Apply provider-specific defaults when provider is 'openai' and fields are at Ollama defaults
   if (config.provider === 'openai') {
     // Merge: OpenAI defaults fill in any unset fields, user-supplied values always win

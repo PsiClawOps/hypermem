@@ -94,11 +94,21 @@ Pick a tier based on your hardware:
 
 ### Minimal (no embedder)
 
-No config needed. hypermem detects the missing provider at startup and falls back to FTS5. You lose semantic recall ("find facts about X even if X isn't mentioned literally") but history, facts, and fleet registry all work.
+No Ollama, no API key. Set `provider: 'none'` explicitly in `~/.openclaw/hypermem/config.json` to disable embedding entirely:
+
+```json
+{
+  "embedding": {
+    "provider": "none"
+  }
+}
+```
+
+Without a config file, the default provider is `ollama` — if Ollama isn't running, the vector store initialization fails non-fatally and hypermem falls back to FTS5. Using `provider: 'none'` makes the intent explicit and avoids the init attempt.
 
 You'll see in the logs:
 ```
-[hypermem] No embedding provider configured — semantic search disabled, using FTS5 fallback
+[hypermem] Embedding provider: none — semantic search disabled, using FTS5 fallback
 ```
 
 Upgrade to a higher tier later without losing stored data.

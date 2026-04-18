@@ -630,21 +630,25 @@ export class HyperMem {
     // hybridSearch() continues in FTS5-only mode.
     // The vector store is shared (not per-agent) — facts/episodes from all agents
     // are indexed together, keyed by (source_table, source_id).
-    try {
-      const vectorDb = hm.dbManager.getSharedVectorDb();
-      if (vectorDb) {
-        const vs = new VectorStore(vectorDb, merged.embedding, hm.dbManager.getLibraryDb());
-        vs.ensureTables();
-        hm.compositor.setVectorStore(vs);
-        const embeddingDesc = merged.embedding.provider === 'openai'
-          ? `${merged.embedding.openaiBaseUrl?.includes('openrouter') ? 'openrouter' : 'openai'}/${merged.embedding.model ?? 'text-embedding-3-small'}`
-          : `ollama/${merged.embedding.model ?? 'nomic-embed-text'}`;
-        console.log(`[hypermem] Vector store initialized (sqlite-vec + ${embeddingDesc})`);
-      } else {
-        console.warn('[hypermem] sqlite-vec unavailable — semantic recall in FTS5-only mode');
+    if (merged.embedding.provider === 'none') {
+      console.log('[hypermem] Embedding provider: none — semantic search disabled, using FTS5 fallback');
+    } else {
+      try {
+        const vectorDb = hm.dbManager.getSharedVectorDb();
+        if (vectorDb) {
+          const vs = new VectorStore(vectorDb, merged.embedding, hm.dbManager.getLibraryDb());
+          vs.ensureTables();
+          hm.compositor.setVectorStore(vs);
+          const embeddingDesc = merged.embedding.provider === 'openai'
+            ? `${merged.embedding.openaiBaseUrl?.includes('openrouter') ? 'openrouter' : 'openai'}/${merged.embedding.model ?? 'text-embedding-3-small'}`
+            : `ollama/${merged.embedding.model ?? 'nomic-embed-text'}`;
+          console.log(`[hypermem] Vector store initialized (sqlite-vec + ${embeddingDesc})`);
+        } else {
+          console.warn('[hypermem] sqlite-vec unavailable — semantic recall in FTS5-only mode');
+        }
+      } catch (err) {
+        console.warn('[hypermem] Vector store init failed (non-fatal):', (err as Error).message);
       }
-    } catch (err) {
-      console.warn('[hypermem] Vector store init failed (non-fatal):', (err as Error).message);
     }
 
     const autoStartupFleetSeeding =
