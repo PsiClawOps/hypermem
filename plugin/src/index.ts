@@ -88,6 +88,21 @@ type TrimTelemetryPath =
   | 'afterTurn.secondary'
   | 'warmstart';
 
+type DegradationTelemetryPath = 'compose' | 'toolLoop';
+
+interface DegradationTelemetryFields {
+  agentId: string;
+  sessionKey: string;
+  turnId: string;
+  path: DegradationTelemetryPath;
+  toolChainCoEjections?: number;
+  toolChainStubReplacements?: number;
+  artifactDegradations?: number;
+  artifactOversizeThresholdTokens?: number;
+  replayState?: 'entering' | 'stabilizing' | 'exited';
+  replayReason?: string;
+}
+
 let _telemetryStream: fsSync.WriteStream | null = null;
 let _telemetryStreamFailed = false;
 let _telemetryTurnCounter = 0;
@@ -151,6 +166,22 @@ function assembleTrace(fields: {
   try {
     const record = {
       event: 'assemble',
+      ts: new Date().toISOString(),
+      ...fields,
+    };
+    stream.write(JSON.stringify(record) + '\n');
+  } catch {
+    // Telemetry must never throw
+  }
+}
+
+function degradationTelemetry(fields: DegradationTelemetryFields): void {
+  if (!telemetryEnabled()) return;
+  const stream = getTelemetryStream();
+  if (!stream) return;
+  try {
+    const record = {
+      event: 'degradation',
       ts: new Date().toISOString(),
       ...fields,
     };
@@ -348,6 +379,7 @@ function guardTelemetry(fields: {
 export const __telemetryForTests = {
   trimTelemetry,
   assembleTrace,
+  degradationTelemetry,
   guardTelemetry,
   nextTurnId,
   beginTrimOwnerTurn,
@@ -2258,6 +2290,17 @@ function createHyperMemEngine(): ContextEngine {
             budget: effectiveBudget,
           });
           await persistReplayRecoveryState(hm, agentId, sk, replayRecovery.nextState);
+          degradationTelemetry({
+            agentId,
+            sessionKey: sk,
+            turnId: _asmTurnId,
+            path: 'toolLoop',
+            toolChainCoEjections: 0,
+            toolChainStubReplacements: 0,
+            artifactDegradations: 0,
+            replayState: replayRecovery.emittedMarker?.state,
+            replayReason: replayRecovery.emittedMarker?.reason,
+          });
           const overhead = _overheadCache.get(sk) ?? getOverheadFallback();
           return {
             messages: trimmedMessages as any,
@@ -2511,6 +2554,19 @@ function createHyperMemEngine(): ContextEngine {
       };
 
       const result: ComposeResult = await hm.compose(request);
+
+      degradationTelemetry({
+        agentId,
+        sessionKey: sk,
+        turnId: _asmTurnId,
+        path: 'compose',
+        toolChainCoEjections: result.diagnostics?.toolChainCoEjections ?? 0,
+        toolChainStubReplacements: result.diagnostics?.toolChainStubReplacements ?? 0,
+        artifactDegradations: result.diagnostics?.artifactDegradations ?? 0,
+        artifactOversizeThresholdTokens: result.diagnostics?.artifactOversizeThresholdTokens,
+        replayState: replayRecovery.emittedMarker?.state,
+        replayReason: replayRecovery.emittedMarker?.reason,
+      });
 
       // Use cached contextBlock if available (cache replay), otherwise use fresh result.
       // After a full compose, write the new contextBlock to cache for the next turn.

@@ -33,6 +33,9 @@ node test/compositor.mjs
 # Plugin pipeline (requires plugin build)
 npm run validate:plugin-pipeline
 
+# Release path hardening harness (builds core + plugin)
+npm run validate:release-path
+
 # Compose report (operator-readable diagnostics)
 node scripts/compose-report.mjs
 ```
@@ -49,6 +52,7 @@ node scripts/compose-report.mjs
 | `retrieval-regression.mjs` | Scope isolation, superseded-fact filtering, budget pressure, knowledge retrieval |
 | `compositor.mjs` | Four-layer compose, trigger routing, keystone injection, budget-pressure filtering |
 | `plugin-pipeline.mjs` | Real plugin assemble() path with seeded L4 memory, tight-budget proof |
+| `release-gateway-path.mjs` | Real plugin release-path proof: tool-chain ejection counters, ArtifactRef, replay marker, and degradation telemetry |
 | `compose-report.mjs` | Operator-readable diagnostics showing layer counts and budget decisions |
 
 ---

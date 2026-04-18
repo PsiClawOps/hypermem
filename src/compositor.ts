@@ -2455,24 +2455,24 @@ export class Compositor {
             let chunkTokens = 0;
 
             for (const chunk of chunks) {
-              if (chunkTokens + chunk.tokenEstimate > maxTokens) break;
               // Skip chunks from files OpenClaw already injects into the system prompt
               const chunkBasename = chunk.sourcePath.split('/').pop() || '';
               if (OPENCLAW_BOOTSTRAP_FILES.has(chunkBasename)) continue;
-              // C2: degrade oversized chunks to canonical artifact references instead of
-              // injecting raw content that would fill the lane and trigger trim churn.
+
+              // C2: degrade oversized chunks to canonical artifact references before
+              // enforcing the per-collection budget gate. Otherwise an oversized raw
+              // chunk gets dropped before the tiny degraded ref ever has a chance to fit.
               const c2ChunkRef = degradeOversizedDocChunk(chunk.id, chunk.sourcePath, chunk.content, c2ArtifactThresholdTokens);
-              if (c2ChunkRef !== null) {
-                // Degraded: inject the reference string (tiny token cost) instead of raw content.
-                // Preserve headroom: count the reference size, not the original chunk.
-                const refTokens = estimateTokens(c2ChunkRef);
-                chunkLines.push(`### ${chunk.sectionPath}\n${c2ChunkRef}`);
-                chunkTokens += refTokens;
-                c2ArtifactDegradations++;
-              } else {
-                chunkLines.push(`### ${chunk.sectionPath}\n${chunk.content}`);
-                chunkTokens += chunk.tokenEstimate;
-              }
+              const renderedChunk = c2ChunkRef !== null
+                ? `### ${chunk.sectionPath}\n${c2ChunkRef}`
+                : `### ${chunk.sectionPath}\n${chunk.content}`;
+              const renderedTokens = estimateTokens(renderedChunk);
+
+              if (chunkTokens + renderedTokens > maxTokens) break;
+
+              chunkLines.push(renderedChunk);
+              chunkTokens += renderedTokens;
+              if (c2ChunkRef !== null) c2ArtifactDegradations++;
             }
 
             if (chunkLines.length > 0) {
@@ -2544,17 +2544,17 @@ export class Compositor {
           let spawnTokens = 0;
           const maxSpawnTokens = Math.floor(remaining * 0.15);
           for (const chunk of spawnChunks) {
-            if (spawnTokens + chunk.tokenEstimate > maxSpawnTokens) break;
-            // C2: degrade oversized spawn chunks to artifact references to preserve headroom.
+            // C2: degrade oversized spawn chunks before enforcing the lane budget,
+            // so a bounded reference can fit even when the raw chunk cannot.
             const c2SpawnRef = degradeOversizedDocChunk(chunk.id, chunk.sourcePath, chunk.content, c2ArtifactThresholdTokens);
-            if (c2SpawnRef !== null) {
-              spawnLines.push(c2SpawnRef);
-              spawnTokens += estimateTokens(c2SpawnRef);
-              c2ArtifactDegradations++;
-            } else {
-              spawnLines.push(chunk.content);
-              spawnTokens += chunk.tokenEstimate;
-            }
+            const renderedChunk = c2SpawnRef ?? chunk.content;
+            const renderedTokens = estimateTokens(renderedChunk);
+
+            if (spawnTokens + renderedTokens > maxSpawnTokens) break;
+
+            spawnLines.push(renderedChunk);
+            spawnTokens += renderedTokens;
+            if (c2SpawnRef !== null) c2ArtifactDegradations++;
           }
           if (spawnLines.length > 0) {
             volatileContextParts.push(`## Spawn Context Documents\n${spawnLines.join('\n\n')}`);
