@@ -214,6 +214,7 @@ const GUARD_TELEMETRY_REASONS = [
   'duplicate-claim-suppressed',
   'afterturn-secondary-demoted',
   'window-within-budget-skip',
+  'pressure-accounting-anomaly',
 ] as const;
 type GuardTelemetryReason = typeof GUARD_TELEMETRY_REASONS[number];
 
@@ -1231,6 +1232,81 @@ function estimateTokens(text: string | null | undefined): number {
   return Math.ceil(text.length / 4);
 }
 
+function estimateMessagePartTokens(part: Record<string, unknown>): number {
+  if (part.type === 'image' || part.type === 'image_url') {
+    const src = (part.source as Record<string, unknown> | undefined)?.data;
+    const url = (part.image_url as Record<string, unknown> | undefined)?.url as string | undefined;
+    const dataStr = typeof src === 'string' ? src : (typeof url === 'string' ? url : '');
+    return Math.ceil(dataStr.length / 3);
+  }
+  if (part.type === 'toolCall' || part.type === 'tool_use') {
+    return Math.ceil(JSON.stringify(part).length / 2);
+  }
+  const textVal = typeof part.text === 'string' ? part.text
+    : typeof part.content === 'string' ? part.content
+    : part.content != null ? JSON.stringify(part.content) : null;
+  return estimateTokens(textVal);
+}
+
+function estimateMessageTokens(msg: Record<string, unknown>): number {
+  let total = estimateTokens(typeof msg.textContent === 'string' ? msg.textContent : null);
+  if (typeof msg.content === 'string' && typeof msg.textContent !== 'string') {
+    total += estimateTokens(msg.content);
+  }
+  if (msg.toolCalls) total += Math.ceil(JSON.stringify(msg.toolCalls).length / 2);
+  if (msg.toolResults) total += Math.ceil(JSON.stringify(msg.toolResults).length / 2);
+  if (Array.isArray(msg.content)) {
+    total += (msg.content as Array<Record<string, unknown>>).reduce(
+      (sum, part) => sum + estimateMessagePartTokens(part),
+      0,
+    );
+  }
+  return total;
+}
+
+function estimateMessageArrayTokens(messages: unknown[]): number {
+  return messages.reduce(
+    (sum: number, msg: unknown) => sum + estimateMessageTokens(msg as Record<string, unknown>),
+    0,
+  );
+}
+
+function maybeLogPressureAccountingAnomaly(fields: {
+  path: TrimTelemetryPath;
+  agentId: string;
+  sessionKey: string;
+  runtimeTokens: number;
+  redisTokens: number;
+  composedTokens: number;
+  budget: number;
+}): void {
+  const threshold = Math.max(500, Math.floor(fields.budget * 0.05));
+  const deltas = {
+    runtimeVsComposed: Math.abs(fields.runtimeTokens - fields.composedTokens),
+    redisVsComposed: Math.abs(fields.redisTokens - fields.composedTokens),
+    runtimeVsRedis: Math.abs(fields.runtimeTokens - fields.redisTokens),
+  };
+  if (
+    deltas.runtimeVsComposed < threshold &&
+    deltas.redisVsComposed < threshold &&
+    deltas.runtimeVsRedis < threshold
+  ) {
+    return;
+  }
+
+  console.warn(
+    `[hypermem-plugin] pressure-accounting anomaly: path=${fields.path} ` +
+    `runtime=${fields.runtimeTokens} redis=${fields.redisTokens} composed=${fields.composedTokens} ` +
+    `budget=${fields.budget} threshold=${threshold}`
+  );
+
+  guardTelemetry({
+    path: fields.path,
+    agentId: fields.agentId,
+    sessionKey: fields.sessionKey,
+    reason: 'pressure-accounting-anomaly',
+  });
+}
 
 function hasStructuredToolCallMessage(msg: Record<string, unknown>): boolean {
   if (Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0) return true;
@@ -1326,13 +1402,7 @@ async function estimateWindowTokens(hm: HyperMemInstance, agentId: string, sessi
     const window = await hm.cache.getWindow(agentId, sessionKey)
       ?? await hm.cache.getHistory(agentId, sessionKey);
     if (!window || window.length === 0) return 0;
-    return window.reduce((sum: number, msg: any) => {
-      let t = estimateTokens(msg.textContent);
-      // Tool payloads are dense JSON — use /2 not /4 to avoid systematic undercount
-      if (msg.toolCalls) t += Math.ceil(JSON.stringify(msg.toolCalls).length / 2);
-      if (msg.toolResults) t += Math.ceil(JSON.stringify(msg.toolResults).length / 2);
-      return sum + t;
-    }, 0);
+    return estimateMessageArrayTokens(window as unknown[]);
   } catch {
     return 0;
   }
@@ -1955,70 +2025,25 @@ function createHyperMemEngine(): ContextEngine {
             }
           }
 
-          // Measure pressure BEFORE trim to pick the right tier.
-          // Critical: use the runtime-provided messages array, NOT estimateWindowTokens()
-          // which reads Redis. After a gateway restart Redis is empty — estimateWindowTokens
-          // returns ~0, pressure reads as 0%, and the trim tiers never fire even though
-          // the session is at 98% from JSONL loaded at runtime. The messages param is
-          // always authoritative — it's what the runtime actually sent to the model.
-          const runtimeTokens = messages.reduce((sum: number, m: unknown) => {
-            const msg = m as Record<string, unknown>;
-            const textCost = estimateTokens(typeof msg.textContent === 'string' ? msg.textContent : null);
-            const toolCallCost = msg.toolCalls ? Math.ceil(JSON.stringify(msg.toolCalls).length / 2) : 0;
-            const toolResultCost = msg.toolResults ? Math.ceil(JSON.stringify(msg.toolResults).length / 2) : 0;
-            // FIX (Bug 2): count content arrays in OpenClaw native format.
-            // Native tool result messages store content as c.content (not c.text).
-            // Old code always read c.text, returning 0 for native format — severe undercount.
-            const contentCost = Array.isArray(msg.content)
-              ? (msg.content as unknown[]).reduce((s: number, c: unknown) => {
-                  const part = c as Record<string, unknown>;
-                  const textVal = typeof part.text === 'string' ? part.text
-                    : typeof part.content === 'string' ? part.content
-                    : part.content != null ? JSON.stringify(part.content) : null;
-                  return s + estimateTokens(textVal);
-                }, 0)
-              : 0;
-            // Count image parts — base64 images are large and invisible to the text estimator
-            const imageCost = Array.isArray(msg.content)
-              ? (msg.content as unknown[]).reduce((s: number, c: unknown) => {
-                  const part = c as Record<string, unknown>;
-                  if (part.type === 'image' || part.type === 'image_url') {
-                    const src = (part.source as Record<string, unknown> | undefined)?.data;
-                    const url = (part.image_url as Record<string, unknown> | undefined)?.url as string | undefined;
-                    const dataStr = typeof src === 'string' ? src : (typeof url === 'string' ? url : '');
-                    return s + Math.ceil(dataStr.length / 3); // base64 ~1.33x bytes, ~1 token/4 bytes
-                  }
-                  return s;
-                }, 0)
-              : 0;
-            return sum + textCost + toolCallCost + toolResultCost + contentCost + imageCost;
-          }, 0);
-          // Redis window is a useful cross-check; use whichever is higher so we never
-          // underestimate when Redis is ahead of the runtime snapshot.
+          // Measure pressure from the in-memory message array we are actually about
+          // to shape and return. Redis remains a cross-check only.
+          const runtimeTokens = estimateMessageArrayTokens(workingMessages as unknown[]);
           const redisTokens = await estimateWindowTokens(hm, agentId, sk);
-          const preTrimTokens = Math.max(runtimeTokens, redisTokens);
+          const preTrimTokens = runtimeTokens;
           const pressure = preTrimTokens / effectiveBudget;
 
-          // Pressure-tiered trim targets:
-          //   JSONL-replay (EC1): runtimeTokens >> redisTokens means session
-          //   loaded from a large JSONL but Redis is cold (post-restart). Trim
-          //   aggressively to 30% so system prompt + this turn's tool results fit.
-          //   >85% (critical) → trim to 50%: blast headroom for incoming wave
-          //   >80% (high)     → trim to 60%: 40% headroom
-          //   >75% (elevated) → trim to 65%: 35% headroom
-          //   ≤75% (normal)   → trim to 80%: existing behaviour
-          const isJsonlReplay = runtimeTokens > effectiveBudget * 0.80 && redisTokens < runtimeTokens * 0.20;
+          // Pressure-tiered trim targets use a single authority: the working
+          // message array. Redis drift is logged as an anomaly, never used as
+          // a trim trigger.
           let trimTarget: number;
-          if (isJsonlReplay) {
-            trimTarget = 0.20; // EC1: cold Redis + hot JSONL = post-restart replay, need max headroom
-          } else if (pressure > 0.85) {
+          if (pressure > 0.85) {
             trimTarget = 0.40; // critical: 60% headroom for incoming wave
           } else if (pressure > 0.80) {
             trimTarget = 0.50; // high: 50% headroom
           } else if (pressure > 0.75) {
             trimTarget = 0.55; // elevated: 45% headroom
           } else {
-            trimTarget = 0.65; // normal: 35% headroom (was 0.80 — too tight)
+            trimTarget = 0.65; // normal: 35% headroom
           }
 
           const trimBudget = Math.floor(effectiveBudget * trimTarget);
@@ -2047,9 +2072,7 @@ function createHyperMemEngine(): ContextEngine {
                 postTokens: postTrimTokens,
                 removed: trimmed,
                 cacheInvalidated: toolLoopCacheInvalidated,
-                reason: isJsonlReplay
-                  ? 'jsonl-replay'
-                  : `pressure=${(pressure * 100).toFixed(1)}%`,
+                reason: `pressure=${(pressure * 100).toFixed(1)}%`,
               });
             }
           } else if (telemetryEnabled()) {
@@ -2125,31 +2148,12 @@ function createHyperMemEngine(): ContextEngine {
             });
             // Fill from the back within budget
             let budget = trimBudget;
-            // Reserve tokens for system messages
+            // Reserve tokens for system messages using the same accounting
+            // function as the final composed-array estimate.
             for (const sm of systemMsgs) {
-              const t = estimateTokens(typeof sm.textContent === 'string' ? sm.textContent : null)
-                + (Array.isArray(sm.content) ? (sm.content as Array<Record<string,unknown>>).reduce(
-                    (s: number, c: Record<string,unknown>) => {
-                      const textVal = typeof c.text === 'string' ? c.text
-                        : typeof c.content === 'string' ? c.content : null;
-                      return s + estimateTokens(textVal);
-                    }, 0) : 0);
-              budget -= t;
+              budget -= estimateMessageTokens(sm);
             }
-            const msgCost = (m: Record<string, unknown>): number =>
-              estimateTokens(typeof m.textContent === 'string' ? m.textContent : null)
-              + (m.toolCalls ? Math.ceil(JSON.stringify(m.toolCalls).length / 2) : 0)
-              + (m.toolResults ? Math.ceil(JSON.stringify(m.toolResults).length / 2) : 0)
-              + (Array.isArray(m.content) ? (m.content as Array<Record<string,unknown>>).reduce(
-                  (s: number, c: Record<string,unknown>) => {
-                    if (c.type === 'toolCall' || c.type === 'tool_use') {
-                      return s + Math.ceil(JSON.stringify(c).length / 2);
-                    }
-                    const textVal = typeof c.text === 'string' ? c.text
-                      : typeof c.content === 'string' ? c.content
-                      : c.content != null ? JSON.stringify(c.content) : null;
-                    return s + estimateTokens(textVal);
-                  }, 0) : 0);
+            const msgCost = (m: Record<string, unknown>): number => estimateMessageTokens(m);
 
             const clusters = clusterTranscriptMessages(processedConvMsgs as Array<Record<string, unknown>>);
             const keptClusters: Array<Array<Record<string, unknown>>> = [];
@@ -2172,7 +2176,7 @@ function createHyperMemEngine(): ContextEngine {
             const keptCount = processedConvMsgs.length - kept.length;
             if (keptCount > 0) {
               console.log(
-                `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}%${isJsonlReplay ? ' [jsonl-replay]' : ''} → ` +
+                `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}% → ` +
                 `target=${(trimTarget * 100).toFixed(0)}% (redis=${trimmed} msgs, messages=${keptCount} dropped)`
               );
               trimmedMessages = [...systemMsgs, ...kept] as unknown as typeof messages;
@@ -2212,11 +2216,20 @@ function createHyperMemEngine(): ContextEngine {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           trimmedMessages = repairToolPairs(trimmedMessages as unknown as any[]) as unknown as typeof trimmedMessages;
 
-          const windowTokens = await estimateWindowTokens(hm, agentId, sk);
+          const composedTokens = estimateMessageArrayTokens(trimmedMessages as unknown[]);
+          maybeLogPressureAccountingAnomaly({
+            path: 'assemble.toolLoop',
+            agentId,
+            sessionKey: sk,
+            runtimeTokens: preTrimTokens,
+            redisTokens,
+            composedTokens,
+            budget: effectiveBudget,
+          });
           const overhead = _overheadCache.get(sk) ?? getOverheadFallback();
           return {
             messages: trimmedMessages as any,
-            estimatedTokens: windowTokens + overhead,
+            estimatedTokens: composedTokens + overhead,
           };
         } catch {
           // Non-fatal: return conservative estimate so guard doesn't go blind
@@ -2242,10 +2255,7 @@ function createHyperMemEngine(): ContextEngine {
         console.log(`[hypermem-plugin] assemble: subagent warming=off, passthrough (sk: ${sk})`);
         return {
           messages: messages as any,
-          estimatedTokens: messages.reduce((sum: number, m: unknown) => {
-            const msg = m as Record<string, unknown>;
-            return sum + Math.ceil((typeof msg.textContent === 'string' ? msg.textContent.length : 0) / 4);
-          }, 0),
+          estimatedTokens: estimateMessageArrayTokens(messages as unknown[]),
         };
       }
       if (isSubagent) {
@@ -2922,28 +2932,20 @@ function createHyperMemEngine(): ContextEngine {
         try {
           const modelState = await hm.cache.getModelState(agentId, sk);
           if (modelState?.tokenBudget) {
-            // Use the same dual-source pressure estimate as the tool-loop trim:
-            // max(runtime messages, Redis) so a post-restart empty-Redis session
-            // still fires correctly.
-            const runtimePostTokens = messages.reduce((sum: number, m: unknown) => {
-              const msg = m as Record<string, unknown>;
-              const textCost = estimateTokens(typeof msg.textContent === 'string' ? msg.textContent : null);
-              const toolCallCost = msg.toolCalls ? Math.ceil(JSON.stringify(msg.toolCalls).length / 2) : 0;
-              const toolResultCost = msg.toolResults ? Math.ceil(JSON.stringify(msg.toolResults).length / 2) : 0;
-              const contentCost = Array.isArray(msg.content)
-                ? (msg.content as unknown[]).reduce((s: number, c: unknown) => {
-                    const part = c as Record<string, unknown>;
-                    // FIX (Bug 2 — afterTurn estimator): read c.content for native format
-                    const textVal = typeof part.text === 'string' ? part.text
-                      : typeof part.content === 'string' ? part.content
-                      : part.content != null ? JSON.stringify(part.content) : null;
-                    return s + estimateTokens(textVal);
-                  }, 0)
-                : 0;
-              return sum + textCost + toolCallCost + toolResultCost + contentCost;
-            }, 0);
+            // Use the runtime message array as the only trim-pressure source.
+            // Redis remains a drift signal for anomaly logging.
+            const runtimePostTokens = estimateMessageArrayTokens(messages as unknown[]);
             const redisPostTokens = await estimateWindowTokens(hm, agentId, sk);
-            const postTurnTokens = Math.max(runtimePostTokens, redisPostTokens);
+            const postTurnTokens = runtimePostTokens;
+            maybeLogPressureAccountingAnomaly({
+              path: 'afterTurn.secondary',
+              agentId,
+              sessionKey: sk,
+              runtimeTokens: runtimePostTokens,
+              redisTokens: redisPostTokens,
+              composedTokens: postTurnTokens,
+              budget: modelState.tokenBudget,
+            });
             const postTurnPressure = postTurnTokens / modelState.tokenBudget;
             // Sprint 2.2b: demote afterTurn.secondary to guard-only no-op.
             //
