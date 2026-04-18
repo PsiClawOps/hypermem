@@ -276,11 +276,80 @@ async function appendToMemoryFile(
 // ─── Promotion-time content filter ─────────────────────────────────────────
 
 /**
+ * Temporal-state markers that indicate a fact is time-bound or conditional.
+ *
+ * Facts containing any of these markers MUST carry structured recency metadata
+ * (`validFrom` / `invalidAt` columns) to be eligible for durable promotion.
+ * Plain ISO dates in the content text do NOT satisfy this requirement — a
+ * dated sentence like "suspended pending X as of 2026-04-18" is still temporary
+ * and would harden stale state if promoted.
+ *
+ * Exported so tests and downstream callers can verify coverage and extend it.
+ * Keep this list centralized; do not fork copies into other modules.
+ */
+export const TEMPORAL_MARKERS: RegExp[] = [
+  /\bas of\b/i,
+  /\buntil\b/i,
+  /\bcurrently\b/i,
+  /\bfor now\b/i,
+  /\bsuspended\b/i,
+  /\bpending\b/i,
+  /\brollout\b/i,
+  /\bphase\b/i,
+  /\btemporary\b/i,
+  /\btemporarily\b/i,
+  /\brecheck\b/i,
+  /\bpaused\b/i,
+  /\bblocked\b/i,
+  /\btrial\b/i,
+  /\bexperiment(?:al)?\b/i,
+  /\bexploratory period\b/i,
+  /\bin effect during\b/i,
+  /\bwhile .* (?:continues|ongoing|in progress|rolls out|rolling out)\b/i,
+  /\boverride\b/i,
+  /\bhotfix\b/i,
+  /\bworkaround\b/i,
+  /\bmigration (?:ongoing|in progress|underway)\b/i,
+  /\bfreeze(?:d)?\b/i,
+  /\bpre-release\b/i,
+];
+
+/**
+ * Returns true if content contains any temporal-state marker.
+ * Exported for test coverage and for callers that want to gate their own writes.
+ */
+export function hasTemporalMarker(content: string): boolean {
+  return TEMPORAL_MARKERS.some((re) => re.test(content));
+}
+
+/**
+ * Structured recency metadata from the facts table.
+ * Either field being set (non-null, non-empty) signals the fact row was
+ * authored with temporal bounds the store can enforce.
+ */
+export interface FactRecencyMeta {
+  validFrom?: string | null;
+  invalidAt?: string | null;
+}
+
+function hasStrongRecencyMetadata(meta?: FactRecencyMeta): boolean {
+  if (!meta) return false;
+  const vf = (meta.validFrom ?? '').trim();
+  const ia = (meta.invalidAt ?? '').trim();
+  return vf.length > 0 || ia.length > 0;
+}
+
+/**
  * Reject facts that are clearly noise at promotion time.
  * A second line of defense — the indexer's isQualityFact() is the primary filter,
  * but legacy noise in the DB (pre-TUNE-013) still needs to be caught here.
+ *
+ * Additionally blocks promotion of temporally-scoped facts that lack structured
+ * recency metadata. A fact like "model frozen until provider routing stable"
+ * without `validFrom`/`invalidAt` would harden a temporary state into durable
+ * memory forever. Plain ISO dates in content text do NOT bypass this check.
  */
-function isPromotable(content: string): boolean {
+export function isPromotable(content: string, meta?: FactRecencyMeta): boolean {
   // Multi-line content — reject both actual newlines AND escaped \n sequences
   // (some facts stored pre-TUNE-013 have literal \n in the string value)
   if (content.includes('\n') || content.includes('\\n')) return false;
@@ -325,6 +394,13 @@ function isPromotable(content: string): boolean {
 
   // Minimum meaningful length: 50 chars as promotion floor (stricter than indexer's 40)
   if (content.trim().length < 50) return false;
+
+  // Temporal-state screen: if the content is time-bound ("until X", "suspended
+  // pending Y", "rollout phase", etc.) it must carry structured recency
+  // metadata. Otherwise the promoter would harden a temporary state into
+  // durable memory. Plain ISO dates in the content do NOT satisfy this — a
+  // dated sentence confirms the claim is temporary, it does not unblock it.
+  if (hasTemporalMarker(content) && !hasStrongRecencyMetadata(meta)) return false;
 
   return true;
 }
@@ -383,6 +459,8 @@ export async function runDreamingPromoter(
       content,
       confidence,
       decay_score,
+      valid_from,
+      invalid_at,
       ROUND((julianday('now') - julianday(created_at)), 2) AS age_days
     FROM facts
     WHERE agent_id = ?
@@ -401,6 +479,8 @@ export async function runDreamingPromoter(
     content: string;
     confidence: number;
     decay_score: number;
+    valid_from: string | null;
+    invalid_at: string | null;
     age_days: number;
   }>;
 
@@ -408,7 +488,7 @@ export async function runDreamingPromoter(
 
   // 4. Score and rank
   const scored: FactCandidate[] = rawFacts
-    .filter(f => isPromotable(f.content))
+    .filter(f => isPromotable(f.content, { validFrom: f.valid_from, invalidAt: f.invalid_at }))
     .map(f => ({
     id: f.id,
     agentId: f.agent_id,

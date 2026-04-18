@@ -3,7 +3,42 @@
 **Project:** HyperMem  
 **Root:** `/home/lumadmin/.openclaw/workspace/repo/hypermem`  
 **Author:** Forge  
-**Date:** 2026-04-17
+**Date:** 2026-04-17  
+**Updated:** 2026-04-18 (track 4 moved to 0.8.2; track 3 closed; temporal screen added)
+
+## Status snapshot (2026-04-18)
+
+- Track 1 production-path verification — **Done.** Prompt-path verification harness landed (`9411a8a`). Full Phase C correctness cluster landed (`7795afd` → `d31eef1`). Unified pressure accounting, B4 model-aware budgeting, oversized artifact degradation, budget cluster drop telemetry, replay recovery isolation, canonical degradation fixtures all merged.
+- Track 2 startup completeness — **Done.** Fleet seeding on startup landed (`bb66cb7`).
+- Track 3 fact contradiction handling — **Done.** Tiered contradiction resolution policy landed (`37fa1b5`, schema v19). Supersede/invalidateFact/log-only tiers active. Background indexer records audits.
+- Track 3 follow-up: dreaming promoter temporal-marker screen — **In this release.** Blocks durable promotion of time-bound facts lacking `validFrom`/`invalidAt` metadata. Adds `docs/MEMORY_MD_AUTHORING.md` static-vs-dynamic contract section and `test/dreaming-promoter-temporal.mjs`.
+- Track 4 council/bootstrap weight reduction — **Moved to 0.8.2.** See 0.8.2 shelf below.
+- Tool-artifact store (adjacent work) — **Done.** Durable tool result storage for wave-guard (`8b2e7e2`), Sprint 2.1 active-turn hydration (`4327aac`), Sprint 2.2 retention sweep + sensitive-artifact flag (`08b9192`).
+
+## Remaining for 0.8.0 packaging
+
+After the temporal-screen PR lands, the remaining work is release packaging, not HyperMem feature work:
+
+1. Bump `package.json` from `0.7.0` to `0.8.0`
+2. Write `CHANGELOG.md` entry for 0.8.0 (verify, seed, supersede, screen)
+3. Capture one real gateway verification run into `docs/RELEASE_0.8.0_VERIFICATION.md`
+4. Run the publication pipeline: internal repo → public repo sync (currently manual per WQ-20260412-001)
+5. Cut git tag `v0.8.0` on public repo
+6. Publish release notes
+
+## 0.8.2 shelf (deferred from this release)
+
+- **Track 4 council/bootstrap weight reduction** — governance-doc seed pass, trigger-based demand loading for `JOB.md`/`MOTIVATIONS.md`/`WORKQUEUE.md`, archive oversized historical council transcripts.
+- **Enhanced dreaming features** — expose `plugins.entries.hypermem.config.dreaming` knob, one-seat opt-in rollout with telemetry, human review cycle before fleet-wide enable.
+- **Contradiction-aware decay** (`specs/CONTRADICTION_AWARE_DECAY.md`) — accelerated decay for superseded facts, sibling to V19 tiered resolution.
+- **Cache-aware prompt boundary tracking** (`WQ-20260411-001`) — stable-prefix/dynamic-suffix compositor pattern, sticky latches, cache-hit optimization.
+- **Benchmark harnesses** (WQ-BENCH-001/002/003) — LongMemEval, LOCOMO, BEAM. Pylon-owned.
+- **Obsidian Vault integration** (`WQ-20260406-002`) — re-targeted from stale 0.5.0 tag.
+
+## 0.9.0 shelf (scale work)
+
+- **Phase 5 storage/performance** from `TURN_DAG_MIGRATION_SPEC.md`: content-addressed blob store, zstd compression, cached token estimates, GC, active-only FTS index maintenance, optional SQL FTS promotion.
+- **MCP Server Wrapper** (`WQ-20260406-001`) — third-party interface layer. Blocked on Sentinel auth review.
 
 ## Goal
 
@@ -150,9 +185,13 @@ Do not call `0.8.0` release-ready until all of these are true:
 
 - Phase C behavior is proven in a real gateway session, not just unit fixtures
 - cold-start fleet seeding is automatic and idempotent
-- contradiction handling writes `superseded_by` chains correctly
-- council doc demand-loading is working for at least one real seat without prompt regressions
-- README and release notes describe the new hardening guarantees plainly
+- contradiction handling writes `superseded_by` chains correctly via the V19 tiered policy
+- dreaming promoter temporal-marker screen blocks time-bound facts without recency metadata (Track 3 follow-up)
+- static-vs-dynamic `MEMORY.md` contract is documented in `docs/MEMORY_MD_AUTHORING.md`
+- `CHANGELOG.md` entry and release notes describe the hardening guarantees plainly
+- public repo is in sync with internal (manual sync until CI pipeline in `WQ-20260412-001` lands)
+
+**Explicitly deferred from the 0.8.0 gate:** Track 4 council/bootstrap weight reduction. Moved to 0.8.2. See shelf above.
 
 ## What not to do next
 

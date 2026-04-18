@@ -146,3 +146,98 @@ A good daily file helps you resume tomorrow. A good `MEMORY.md` helps you resume
 If an entry no longer earns its place, delete it.
 
 A shorter `MEMORY.md` with current signal beats a larger one full of expired truth.
+
+## Static index vs runtime tail (compositor contract)
+
+`MEMORY.md` has two regions. The contract between them is enforced by the
+compositor and must be preserved by anyone editing the file.
+
+```
+┌─────────────────────────────────────────────┐
+│  Static curated index (human-authored)      │
+│  • identity, pointers, durable facts        │
+│  • edit this region by hand                 │
+├─────────────────────────────────────────────┤
+│  <!-- OPENCLAW_CACHE_BOUNDARY -->           │
+├─────────────────────────────────────────────┤
+│  Runtime tail (compositor-generated)        │
+│  • Active Facts                             │
+│  • Temporal Context                         │
+│  • Other Active Sessions                    │
+│  • Recent Actions                           │
+│  • Dynamic Project Context                  │
+└─────────────────────────────────────────────┘
+```
+
+### Rules
+
+1. **On-disk `MEMORY.md` is the curated static index.** It holds identity
+   anchors, pointer entries with `memory_search()` hints, and durable facts
+   that earn their place long-term.
+
+2. **Everything below `<!-- OPENCLAW_CACHE_BOUNDARY -->` is the compositor's
+   runtime tail.** It is regenerated on session warm from live stores: the
+   fact table, contradiction audits, topic activity, recent tool actions,
+   and dynamic project context. Treat the text below the boundary as a
+   snapshot, not a source of truth.
+
+3. **Do not hand-edit the runtime tail.** Anything you write there will be
+   overwritten on the next compositor pass.
+
+4. **Do not copy runtime tail content back up into the static index.**
+   Facts in the runtime tail originate from the fact store. Copying them
+   into the static region:
+   - duplicates the content between two layers,
+   - hardens a temporary state into a durable record,
+   - and bypasses the promoter's quality filters and temporal-marker screen.
+
+   If a runtime fact genuinely belongs in the durable index, let the
+   dreaming promoter handle it, or re-author the claim manually with the
+   durability rules above.
+
+5. **The compositor owns the boundary marker.** Do not delete, move, or
+   relabel `<!-- OPENCLAW_CACHE_BOUNDARY -->`. Deleting it makes the entire
+   file look static to the compositor and breaks the runtime tail rebuild.
+
+### Why this matters
+
+The runtime tail exists to surface what is live right now: active facts,
+recent actions, other sessions, current project context. The static index
+exists to hold what will still be true next month. Conflating the two
+produces the exact failure mode the temporal-marker screen guards against:
+temporary state hardens into durable memory, and the agent loses the
+ability to tell "fresh right now" from "true forever."
+
+## Promoter temporal-marker screen
+
+The dreaming promoter (`src/dreaming-promoter.ts`) uses a second line of
+defense to keep time-bound facts out of durable memory: the
+temporal-marker screen.
+
+**How it works.** When `isPromotable()` evaluates a candidate fact, it
+checks the content against a centralized list of temporal markers:
+
+- explicit time bounds: `as of`, `until`, `currently`, `for now`
+- transitional states: `suspended`, `pending`, `paused`, `blocked`, `frozen`
+- rollout language: `rollout`, `phase`, `migration ongoing`, `pre-release`
+- experimental language: `temporary`, `trial`, `experiment(al)`, `exploratory period`, `override`, `hotfix`, `workaround`, `recheck`
+- conditional scope: `in effect during`, `active while … continues/ongoing/rolling out`
+
+If any marker matches, the fact must carry structured recency metadata
+(`validFrom` or `invalidAt` on the facts row) to be eligible for durable
+promotion. Plain ISO dates in the content text are **not** a bypass: a
+sentence like `suspended pending X as of 2026-04-18` still contains the
+temporal markers `suspended` and `pending`, and the date only confirms
+that the claim is time-bound.
+
+**Extending the marker list.** The list is exported from
+`src/dreaming-promoter.ts` as `TEMPORAL_MARKERS`. Keep it centralized.
+Tests in `test/dreaming-promoter-temporal.mjs` exercise coverage on both
+direct and disguised phrasing; add new fixtures there when adding markers.
+
+**Implications for hand-written `MEMORY.md` entries.** The same
+discipline applies at the authoring layer. If you find yourself writing
+"currently," "for now," "pending X," or "in effect during Y" in the
+static index, add an explicit date-stamped condition or move the note to
+a daily file. The promoter's screen is a safety net, not a substitute
+for good authoring.
