@@ -63,7 +63,21 @@ Everything runs in-process. No external database services required.
 
 > **Package versions:** the root package (`hypermem`) and the two plugins (`hypercompositor`, `hypermem-memory`) are versioned independently. Plugin versions trail the core by one minor version when no plugin-facing API changes ship in a release — this is expected.
 
-The **embedding layer** (L3 semantic search) requires a configured provider. Without one, hypermem falls back to FTS5 keyword matching. This is functional but degrades recall quality. See [Embedding Providers](#embedding-providers) below.
+The **embedding layer** (L3 semantic search) requires a configured provider. Without one, hypermem falls back to FTS5 keyword matching. This is functional but degrades recall quality. See [Setup Styles](#setup-styles) below.
+
+---
+
+## Setup Styles
+
+Pick a style based on your hardware and cost tolerance. All styles support full history, fact recall, and session continuity — the differences are in semantic search quality and local resource requirements.
+
+| Style | Embedding | Reranker | Semantic recall | Cost | Hardware |
+|---|---|---|---|---|---|
+| **Lightweight** | None (FTS5 only) | None | Keyword match only | Free | None |
+| **Local** | Ollama nomic-embed-text | Ollama Qwen3-Reranker | Good | Free | ~2GB RAM |
+| **High** | OpenRouter Qwen3-8B | OpenRouter Cohere Rerank 4 | Best (MTEB #1) | ~pennies/day | API key |
+
+The **reranker is optional at every tier.** Without one, results are ordered by RRF fusion score (FTS5 + vector). The reranker re-orders candidates by semantic relevance to the actual query, which measurably improves recall precision — but the system works without it.
 
 ---
 
@@ -153,6 +167,79 @@ Fresh installs don't need this.
 
 ---
 
+## Reranker (Optional)
+
+The reranker re-orders semantic search candidates by relevance before injection. Without it, results are ordered by RRF fusion score (FTS5 + KNN). The reranker is optional — the system degrades gracefully to original order on any failure.
+
+| Provider | Model | Cost | Requires |
+|---|---|---|---|
+| **None** | — | Free | Nothing (default) |
+| **Ollama (local)** | Qwen3-Reranker-0.6B | Free | Ollama + ~600MB RAM |
+| **OpenRouter** | cohere/rerank-4-pro | ~pennies/day | API key |
+| **ZeroEntropy** | zerank-2 | ~pennies/day | API key |
+
+### No reranker (default)
+
+No config needed. RRF fusion of FTS5 + vector results is the default ordering. For most deployments this is sufficient.
+
+### Local — Ollama Qwen3-Reranker-0.6B
+
+Best option for air-gapped or cost-sensitive setups. Slower than hosted (sequential inference per document) but free.
+
+```bash
+ollama pull dengcao/Qwen3-Reranker-0.6B:Q5_K_M
+```
+
+Add to `~/.openclaw/hypermem/config.json`:
+
+```json
+{
+  "reranker": {
+    "provider": "local",
+    "ollamaUrl": "http://localhost:11434",
+    "ollamaModel": "dengcao/Qwen3-Reranker-0.6B:Q5_K_M",
+    "topK": 10,
+    "minCandidates": 5
+  }
+}
+```
+
+### Hosted — OpenRouter (Cohere Rerank 4)
+
+Fastest, highest quality. Uses the same OpenRouter key as hosted embeddings if you already have one.
+
+```json
+{
+  "reranker": {
+    "provider": "openrouter",
+    "openrouterApiKey": "sk-or-YOUR_OPENROUTER_KEY",
+    "openrouterModel": "cohere/rerank-4-pro",
+    "topK": 10,
+    "minCandidates": 5
+  }
+}
+```
+
+### Hosted — ZeroEntropy (zerank-2)
+
+Alternative hosted option, specialized reranking service.
+
+```json
+{
+  "reranker": {
+    "provider": "zeroentropy",
+    "zeroEntropyApiKey": "YOUR_ZEROENTROPY_KEY",
+    "zeroEntropyModel": "zerank-2",
+    "topK": 10,
+    "minCandidates": 5
+  }
+}
+```
+
+Get a key at [zeroentropy.dev](https://zeroentropy.dev).
+
+---
+
 ## Installation Steps
 
 ### Step 1 — Clone and build
@@ -204,9 +291,9 @@ openclaw config get plugins.allow
 openclaw config get plugins.load.paths
 ```
 
-### Step 3 — Choose embedding tier
+### Step 3 — Choose setup style
 
-See [Embedding Providers](#embedding-providers) above. For Minimal, skip this step. For Local, pull the model. For Hosted or Gemini, create `~/.openclaw/hypermem/config.json` with the appropriate config block.
+See [Setup Styles](#setup-styles) above. For Lightweight, skip this step. For Local, pull the Ollama models. For High, create `~/.openclaw/hypermem/config.json` with the embedding and optional reranker config blocks.
 
 ### Step 4 — Restart and verify
 
