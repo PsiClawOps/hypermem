@@ -389,6 +389,16 @@ export interface ComposeDiagnostics {
    * could not be cleanly removed (e.g. the result message also carries text).
    */
   toolChainStubReplacements?: number;
+  /**
+   * C2: Number of retrieved doc chunks degraded to canonical ArtifactRef references
+   * because their token cost exceeded the model-aware oversize threshold.
+   */
+  artifactDegradations?: number;
+  /**
+   * C2: The computed artifact oversize threshold (tokens) for this compose pass.
+   * Scales with the effective model budget from B4.
+   */
+  artifactOversizeThresholdTokens?: number;
 }
 
 export interface ComposeResult {

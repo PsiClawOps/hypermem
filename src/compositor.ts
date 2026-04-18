@@ -51,7 +51,7 @@ import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
 import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
 import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
-import { formatToolChainStub, type DegradationReason } from './degradation.js';
+import { formatToolChainStub, formatArtifactRef, isArtifactRef, type ArtifactRef, type DegradationReason } from './degradation.js';
 
 /**
  * Files that OpenClaw's contextInjection injects into the system prompt.
@@ -1059,6 +1059,122 @@ function evictLargeToolResults<T extends NeutralMessage>(messages: T[]): T[] {
   }) as T[];
 }
 
+// ─── C2: Oversized artifact handling ────────────────────────────────────────
+
+/**
+ * C2: Resolve the artifact oversize threshold (in tokens) for the current compose pass.
+ *
+ * The threshold scales with the effective model budget from B4 so:
+ *   - Small-window models (16k–32k effective) get a proportionally tighter threshold
+ *     (threshold = budget × ARTIFACT_OVERSIZE_FRACTION, floor 500, ceiling 8000).
+ *   - Large-window models (200k+) get a higher ceiling but it still stays bounded
+ *     so artifacts never fill the lane unconditionally.
+ *
+ * ARTIFACT_BUDGET_FRACTION: fraction of the soft budget above which a single
+ * retrieved artifact/chunk is considered oversized. Default 0.10 (10%).
+ *
+ * Headroom preservation comes from replacing the oversized artifact with a cheap
+ * reference, not from shrinking the threshold itself.
+ */
+const ARTIFACT_BUDGET_FRACTION = 0.10;    // 10% of soft budget is the raw threshold
+const ARTIFACT_THRESHOLD_FLOOR = 500;     // never below 500 tokens (~2k chars)
+const ARTIFACT_THRESHOLD_CEILING = 8_000; // never above 8k tokens (~32k chars)
+
+export function resolveArtifactOversizeThreshold(effectiveBudget: number): number {
+  const { softBudget } = resolveTrimBudgets(effectiveBudget);
+  const raw = Math.floor(softBudget * ARTIFACT_BUDGET_FRACTION);
+  return Math.min(ARTIFACT_THRESHOLD_CEILING, Math.max(ARTIFACT_THRESHOLD_FLOOR, raw));
+}
+
+/**
+ * C2: Degrade an oversized doc chunk to a canonical ArtifactRef string.
+ *
+ * When a retrieved chunk's content exceeds the oversize threshold (in tokens),
+ * replace it with a fetchable canonical reference instead of injecting raw content.
+ * This preserves headroom in the lane instead of filling it with a large payload.
+ *
+ * Returns:
+ *   - `null`  → content is within the threshold; caller should inject as-is.
+ *   - `string` → canonical artifact reference; caller should inject this instead of raw content.
+ *
+ * The sizeTokens reported in the reference is the ACTUAL estimated size so downstream
+ * tooling can make informed decisions about whether to fetch.
+ */
+export function degradeOversizedDocChunk(
+  chunkId: string,
+  sourcePath: string,
+  content: string,
+  thresholdTokens: number,
+): string | null {
+  const contentTokens = estimateTokens(content);
+  if (contentTokens <= thresholdTokens) return null;
+
+  const ref: ArtifactRef = {
+    id: chunkId,
+    path: sourcePath,
+    sizeTokens: contentTokens,
+    status: 'degraded',
+    reason: 'artifact_oversize',
+    fetchHint: 'memory_search or re-read source file',
+  };
+  return formatArtifactRef(ref);
+}
+
+/**
+ * C2: Resolve oversized artifacts in a history message array.
+ *
+ * Scans the message array and replaces user/assistant messages whose text content
+ * exceeds the model-aware artifact oversize threshold with canonical ArtifactRef
+ * strings. System messages, tool-call messages, and tool-result messages are always
+ * passed through unchanged.
+ *
+ * @param messages — neutral message array (already-assembled history window)
+ * @param effectiveBudget — effective model budget from B4 (drives the threshold)
+ * @returns { messages, refCount, tokensSaved }
+ */
+export function resolveOversizedArtifacts<T extends NeutralMessage>(
+  messages: T[],
+  effectiveBudget: number,
+): { messages: T[]; refCount: number; tokensSaved: number } {
+  const thresholdTokens = resolveArtifactOversizeThreshold(effectiveBudget);
+  let refCount = 0;
+  let tokensSaved = 0;
+
+  const out = messages.map(msg => {
+    // System messages are never degraded (they are in the stable prefix).
+    if (msg.role === 'system') return msg;
+    // Tool content (calls/results) is C1's domain — never touch here.
+    if (msg.toolResults || msg.toolCalls) return msg;
+    const text = msg.textContent ?? '';
+    // Already a ref — idempotent; don't re-degrade.
+    if (isArtifactRef(text)) return msg;
+    const contentTokens = estimateTokens(text);
+    if (contentTokens <= thresholdTokens) return msg;
+
+    // Oversized — replace with canonical artifact reference.
+    const meta = msg as unknown as Record<string, unknown>;
+    const id = (typeof meta['_artifactId'] === 'string' ? meta['_artifactId'] : null)
+      ?? `msg-${createHash('sha1').update(`${msg.role}:${text}`).digest('hex').slice(0, 12)}`;
+    const path = (typeof meta['_artifactPath'] === 'string' ? meta['_artifactPath'] : null)
+      ?? '/unknown/artifact';
+    const ref: ArtifactRef = {
+      id,
+      path,
+      sizeTokens: contentTokens,
+      status: 'degraded',
+      reason: 'artifact_oversize',
+      fetchHint: 'memory_search',
+    };
+    const refText = formatArtifactRef(ref);
+    const refTokens = estimateTokens(refText);
+    tokensSaved += contentTokens - refTokens;
+    refCount++;
+    return { ...msg, textContent: refText };
+  });
+
+  return { messages: out, refCount, tokensSaved };
+}
+
 // ─── C1: Tool-chain dependency ejection ──────────────────────────────────────
 
 /**
@@ -1445,6 +1561,11 @@ export class Compositor {
       mecwBlend: b4MecwBlend,
     } = resolveModelLaneBudgets(request.model, budget, _b4ConfigHistoryFraction, _b4ConfigMemoryFraction);
 
+    // C2: Compute the artifact oversize threshold once per compose pass from the
+    // effective model budget (from B4). Chunk injection paths consult this threshold
+    // to degrade retrieved payloads that would fill the lane instead of injecting them.
+    const c2ArtifactThresholdTokens = resolveArtifactOversizeThreshold(budget);
+    let c2ArtifactDegradations = 0;
     // Sprint 4: Pre-compose history depth tightening.
     // Classify the session and compute an adaptive depth from observed message
     // density. This replaces the old fixed maxHistoryMessages ceiling that over-
@@ -1667,13 +1788,15 @@ export class Compositor {
       // Replace oversized stale results with stubs so they don't burn budget.
       // Current-turn results (turn age 0) are never evicted.
       const evictedHistory = evictLargeToolResults(transformedHistory);
+      const c2ResolvedHistory = resolveOversizedArtifacts(evictedHistory, budget);
+      c2ArtifactDegradations += c2ResolvedHistory.refCount;
 
       // ── Budget-fit: walk newest→oldest, drop whole clusters ─────────────
       // Group tool_use + tool_result messages into clusters so they are kept
       // or dropped as a unit. Breaking mid-cluster creates orphaned tool
       // pairs that repairToolPairs has to strip downstream — wasting budget
       // and leaving gaps in conversation continuity.
-      const budgetClusters = clusterNeutralMessages(evictedHistory);
+      const budgetClusters = clusterNeutralMessages(c2ResolvedHistory.messages);
       let historyTokens = 0;
       const includedClusters: NeutralMessageCluster<NeutralMessage>[] = [];
 
@@ -2336,8 +2459,20 @@ export class Compositor {
               // Skip chunks from files OpenClaw already injects into the system prompt
               const chunkBasename = chunk.sourcePath.split('/').pop() || '';
               if (OPENCLAW_BOOTSTRAP_FILES.has(chunkBasename)) continue;
-              chunkLines.push(`### ${chunk.sectionPath}\n${chunk.content}`);
-              chunkTokens += chunk.tokenEstimate;
+              // C2: degrade oversized chunks to canonical artifact references instead of
+              // injecting raw content that would fill the lane and trigger trim churn.
+              const c2ChunkRef = degradeOversizedDocChunk(chunk.id, chunk.sourcePath, chunk.content, c2ArtifactThresholdTokens);
+              if (c2ChunkRef !== null) {
+                // Degraded: inject the reference string (tiny token cost) instead of raw content.
+                // Preserve headroom: count the reference size, not the original chunk.
+                const refTokens = estimateTokens(c2ChunkRef);
+                chunkLines.push(`### ${chunk.sectionPath}\n${c2ChunkRef}`);
+                chunkTokens += refTokens;
+                c2ArtifactDegradations++;
+              } else {
+                chunkLines.push(`### ${chunk.sectionPath}\n${chunk.content}`);
+                chunkTokens += chunk.tokenEstimate;
+              }
             }
 
             if (chunkLines.length > 0) {
@@ -2410,8 +2545,16 @@ export class Compositor {
           const maxSpawnTokens = Math.floor(remaining * 0.15);
           for (const chunk of spawnChunks) {
             if (spawnTokens + chunk.tokenEstimate > maxSpawnTokens) break;
-            spawnLines.push(chunk.content);
-            spawnTokens += chunk.tokenEstimate;
+            // C2: degrade oversized spawn chunks to artifact references to preserve headroom.
+            const c2SpawnRef = degradeOversizedDocChunk(chunk.id, chunk.sourcePath, chunk.content, c2ArtifactThresholdTokens);
+            if (c2SpawnRef !== null) {
+              spawnLines.push(c2SpawnRef);
+              spawnTokens += estimateTokens(c2SpawnRef);
+              c2ArtifactDegradations++;
+            } else {
+              spawnLines.push(chunk.content);
+              spawnTokens += chunk.tokenEstimate;
+            }
           }
           if (spawnLines.length > 0) {
             volatileContextParts.push(`## Spawn Context Documents\n${spawnLines.join('\n\n')}`);
@@ -2696,6 +2839,9 @@ export class Compositor {
       // C1: tool-chain ejection telemetry
       toolChainCoEjections: c1CoEjections > 0 ? c1CoEjections : undefined,
       toolChainStubReplacements: c1StubReplacements > 0 ? c1StubReplacements : undefined,
+      // C2: artifact oversize degradation telemetry
+      artifactDegradations: c2ArtifactDegradations > 0 ? c2ArtifactDegradations : undefined,
+      artifactOversizeThresholdTokens: c2ArtifactThresholdTokens,
     };
 
     if (pressureHigh) {
@@ -2789,7 +2935,7 @@ export class Compositor {
       }
     }
 
-    console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode} crossTopicKeystones=${diagCrossTopicKeystones}`);
+    console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode} crossTopicKeystones=${diagCrossTopicKeystones} c2_degradations=${c2ArtifactDegradations} c2_threshold=${c2ArtifactThresholdTokens}`);
     return {
       messages: outputMessages,
       tokenCount: totalTokens,

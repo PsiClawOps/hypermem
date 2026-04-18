@@ -133,7 +133,7 @@ export interface ArtifactRef {
   fetchHint: string;
 }
 
-const ARTIFACT_REF_RE = /^\[artifact:([^\s\]]+) path=([^\s\]]+) size=(\d+) status=(degraded) reason=([^\s\]]+) fetch=(.*)\]$/s;
+const ARTIFACT_REF_RE = /^\[artifact:(.+?) path=(.+?) size=(\d+) status=(degraded) reason=(.+?) fetch=(.*)\]$/s;
 
 export function formatArtifactRef(ref: ArtifactRef): string {
   const id = clampInline(ref.id, DEGRADATION_LIMITS.artifactId);
