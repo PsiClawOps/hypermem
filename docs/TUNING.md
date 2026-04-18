@@ -54,21 +54,19 @@ That said, not every deployment needs full context richness. If you're running a
 
 ### What each preset costs per turn
 
-Estimates on a 128k model. Actual cost depends on session length and trigger hits.
-
-**On a 200k model (Claude Sonnet).** Actual cost depends on session length and trigger hits.
+Estimates on a 200k model (Claude Sonnet). Scale proportionally for smaller windows — on a 128k model expect roughly 60% of these figures. Actual cost depends on session length and indexer trigger hits.
 
 | Preset | Turn 1 (warm) | Turn 5+ (established) | Layers active |
 |---|---|---|---|
 | `light` | **12–18k** | 25–35k | History, facts (10 cap), keystones (5 cap), behavior |
-| `standard` (default) | **40–55k** | 60–85k | All layers, default caps |
-| `full` | **35–50k** | 55–80k | All layers, raised caps |
+| `standard` (default) | **35–50k** | 55–80k | All layers, default caps |
+| `full` | **40–55k** | 60–85k | All layers, raised caps, cross-session on |
 
-**Turn 1 is where token-conscious users will react.** Light vs full on turn 1 is roughly 20–35k tokens — the number that shows up in provider dashboards. By turn 5 the gap is still real, but the value case is easier to make because the user has already experienced continuity.
+Standard turn 1 is lower than full because `warmHistoryBudgetFraction` is the same, but full enables cross-session context which adds tokens immediately; by turn 5 full overtakes standard as more layers accumulate history.
 
-**At Claude Sonnet input pricing ($3/M tokens):** the turn-1 delta between light and standard is roughly $0.06–$0.11. The question is whether you recover that in fewer follow-up turns. For agents doing multi-session work, the answer is almost always yes.
+**Turn 1 is where token-conscious users will react.** Light vs full on turn 1 is roughly 25–40k tokens — the number that shows up in provider dashboards. By turn 5 the gap is still real, but the value case is easier to make because the user has already experienced continuity.
 
-The gap between `light` and `full` on a 128k model narrows proportionally — expect light at 8–15k on turn 1, standard at 25–40k.
+**At Claude Sonnet input pricing ($3/M tokens):** the turn-1 delta between light and standard is roughly $0.06–$0.11 per turn. The question is whether you recover that in fewer follow-up turns. For agents doing multi-session work, the answer is almost always yes.
 
 ### Light setup
 
@@ -100,13 +98,38 @@ The key lever here is `warmHistoryBudgetFraction`: it controls how much of the b
 }
 ```
 
-Estimated context per turn: **30–50k tokens** on a 128k model, lower on turn 1 and growing naturally as history accumulates. Fact recall and keystone injection are active but conservative. Good for: users trying HyperMem for the first time, single-agent setups on smaller models, or any deployment where turn-1 context size is a concern.
+Estimated context per turn: **12–35k tokens** on a 200k model (lower on smaller models), rising from turn 1 as history accumulates. Fact recall and keystone injection are active but conservative. Good for: users trying HyperMem for the first time, single-agent setups on smaller models, or any deployment where turn-1 context size is a concern.
 
 **Session continuity still works at light budget.** Cross-session history threads carry over, so returning users don't start from scratch. The semantic recall layer fires against the content of each incoming message — so by turn 2 or 3, as the user starts expressing what they actually want to work on, recall naturally surfaces relevant facts and context for that topic. Turn 1 is lean; the session warms into the right knowledge as the conversation takes shape. Users who are token-conscious will see a modest first turn, then progressively richer context as their topic clarifies — which is exactly when they need it.
 
+### Standard setup
+
+The default out-of-the-box configuration. All memory layers active with balanced caps. Good for most single-agent deployments.
+
+```json
+{
+  "compositor": {
+    "budgetFraction": 0.703,
+    "contextWindowReserve": 0.25,
+    "maxFacts": 28,
+    "maxHistoryMessages": 250,
+    "maxCrossSessionContext": 0,
+    "keystoneHistoryFraction": 0.20,
+    "keystoneMaxMessages": 15,
+    "hyperformProfile": "standard"
+  },
+  "indexer": {
+    "factExtractionMode": "tiered",
+    "periodicInterval": 300000
+  }
+}
+```
+
+Estimated context per turn: **35–80k tokens** on a 200k model. This is what ships if you don't touch the config.
+
 ### Full performance setup
 
-For long-running sessions, multi-agent fleets, or any deployment where the agent needs to remember what happened and why. All memory layers active.
+For long-running sessions, multi-agent fleets, or any deployment where the agent needs to remember what happened and why. All memory layers active, caps raised.
 
 ```json
 {
@@ -133,7 +156,7 @@ For long-running sessions, multi-agent fleets, or any deployment where the agent
 }
 ```
 
-Estimated context per turn: **65–90k tokens** on a 128k model. Full fact recall, semantic search, keystone injection, cross-session context, and behavioral directives. Good for: persistent agents, council seats, agents that work across multiple sessions on the same project.
+Estimated context per turn: **40–85k tokens** on a 200k model. Full fact recall, semantic search, keystone injection, cross-session context, and behavioral directives all active. Good for: persistent agents, council seats, agents that work across multiple sessions on the same project.
 
 ### Tuning down from full without going to light
 
