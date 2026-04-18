@@ -58,7 +58,7 @@ Estimates on a 128k model. Actual cost depends on session length and trigger hit
 
 | Preset | Context injected | Effective input tokens | What you give up |
 |---|---|---|---|
-| `light` | History + behavior (~100 tok) | 35–50k | Fact recall, wiki, semantic search, keystones, cross-session |
+| `light` | History + facts (conservative) + behavior (~100 tok) | 30–50k | Wiki, cross-session context, memory promotion; reduced first-turn warming |
 | `standard` | History + facts + wiki + behavior | 55–75k | Cross-session context, model adaptation |
 | `full` | All layers | 70–95k | Nothing — all layers active |
 | `full` + reduced | Tuned via knobs | 50–70k | Configurable per layer (see below) |
@@ -67,22 +67,27 @@ The gap between `light` and `full` is roughly 20–40k tokens per turn. On Claud
 
 ### Light setup
 
-For cost-sensitive or simple deployments. Minimal memory overhead. History only — no fact recall, no semantic search, no cross-session context.
+For cost-sensitive deployments or users who want a gentler start. The light philosophy is not "turn it off" — it's **lower first-turn warming and less aggressive fact loading**. Every memory layer still runs; it just loads less on turn 1 and scales up as the session accumulates history.
+
+The key lever here is `warmHistoryBudgetFraction`: it controls how much of the budget is used for history on the first warm session turn. Lowering it reduces the turn-1 context sticker shock without disabling recall for the rest of the session.
 
 ```json
 {
   "compositor": {
     "budgetFraction": 0.55,
     "contextWindowReserve": 0.30,
-    "maxFacts": 5,
-    "maxHistoryMessages": 80,
+    "warmHistoryBudgetFraction": 0.20,
+    "maxFacts": 10,
+    "maxHistoryMessages": 150,
     "maxCrossSessionContext": 0,
-    "keystoneHistoryFraction": 0,
-    "wikiTokenCap": 0,
+    "keystoneHistoryFraction": 0.10,
+    "keystoneMaxMessages": 5,
+    "wikiTokenCap": 200,
     "hyperformProfile": "light"
   },
   "indexer": {
-    "factExtractionMode": "off"
+    "factExtractionMode": "pattern",
+    "periodicInterval": 600000
   },
   "dreaming": {
     "enabled": false
@@ -90,7 +95,7 @@ For cost-sensitive or simple deployments. Minimal memory overhead. History only 
 }
 ```
 
-Estimated context per turn: **30–45k tokens** on a 128k model. No background indexing, no fact extraction, no memory promotion. Good for: one-shot tools, CI pipelines, short sessions where continuity doesn't matter.
+Estimated context per turn: **30–50k tokens** on a 128k model, lower on turn 1 and growing naturally as history accumulates. Fact recall and keystone injection are active but conservative. Good for: users trying HyperMem for the first time, single-agent setups on smaller models, or any deployment where turn-1 context size is a concern.
 
 ### Full performance setup
 
