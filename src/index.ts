@@ -85,6 +85,14 @@ export type {
   DegradationEvent,
 } from './degradation.js';
 
+export {
+  REPLAY_RECOVERY_POLICY,
+  decideReplayRecovery,
+  isColdRedisReplay,
+  isReplayRecovered,
+} from './replay-recovery.js';
+export type { ReplayRecoveryInputs, ReplayRecoveryDecision } from './replay-recovery.js';
+
 export { Compositor, type CompositorDeps, applyToolGradientToWindow, canPersistReshapedHistory, OPENCLAW_BOOTSTRAP_FILES, resolveToolChainEjections, type ToolChainEjectionResult } from './compositor.js';
 
 export {

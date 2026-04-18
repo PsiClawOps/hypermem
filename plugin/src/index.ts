@@ -53,6 +53,8 @@ import {
   TRIM_HEADROOM_FRACTION,
   resolveTrimBudgets,
   formatToolChainStub,
+  decideReplayRecovery,
+  isReplayState,
 } from '@psiclawops/hypermem';
 import { evictStaleContent } from '@psiclawops/hypermem/image-eviction';
 import { repairToolPairs } from '@psiclawops/hypermem';
@@ -1308,6 +1310,25 @@ function maybeLogPressureAccountingAnomaly(fields: {
   });
 }
 
+function normalizeReplayRecoveryState(value: string | null | undefined): '' | 'entering' | 'stabilizing' | 'exited' | null {
+  if (value == null) return null;
+  if (value === '') return '';
+  return isReplayState(value) ? value : null;
+}
+
+async function persistReplayRecoveryState(
+  hm: HyperMemInstance,
+  agentId: string,
+  sessionKey: string,
+  nextState: string | null,
+): Promise<void> {
+  try {
+    await hm.cache.setSlot(agentId, sessionKey, 'replayRecoveryState', nextState ?? '');
+  } catch {
+    // Non-fatal
+  }
+}
+
 function hasStructuredToolCallMessage(msg: Record<string, unknown>): boolean {
   if (Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0) return true;
   if (!Array.isArray(msg.content)) return false;
@@ -2029,14 +2050,24 @@ function createHyperMemEngine(): ContextEngine {
           // to shape and return. Redis remains a cross-check only.
           const runtimeTokens = estimateMessageArrayTokens(workingMessages as unknown[]);
           const redisTokens = await estimateWindowTokens(hm, agentId, sk);
+          const replayRecovery = decideReplayRecovery({
+            currentState: normalizeReplayRecoveryState(await hm.cache.getSlot(agentId, sk, 'replayRecoveryState').catch(() => '')),
+            runtimeTokens,
+            redisTokens,
+            effectiveBudget,
+          });
+          const replayMarkerText = replayRecovery.emittedText;
           const preTrimTokens = runtimeTokens;
           const pressure = preTrimTokens / effectiveBudget;
 
           // Pressure-tiered trim targets use a single authority: the working
           // message array. Redis drift is logged as an anomaly, never used as
-          // a trim trigger.
+          // a trim trigger. Replay recovery gets its own explicit bounded mode
+          // instead of sharing the steady-state pressure heuristics.
           let trimTarget: number;
-          if (pressure > 0.85) {
+          if (typeof replayRecovery.trimTargetOverride === 'number') {
+            trimTarget = replayRecovery.trimTargetOverride;
+          } else if (pressure > 0.85) {
             trimTarget = 0.40; // critical: 60% headroom for incoming wave
           } else if (pressure > 0.80) {
             trimTarget = 0.50; // high: 50% headroom
@@ -2226,10 +2257,12 @@ function createHyperMemEngine(): ContextEngine {
             composedTokens,
             budget: effectiveBudget,
           });
+          await persistReplayRecoveryState(hm, agentId, sk, replayRecovery.nextState);
           const overhead = _overheadCache.get(sk) ?? getOverheadFallback();
           return {
             messages: trimmedMessages as any,
             estimatedTokens: composedTokens + overhead,
+            systemPromptAddition: replayMarkerText || undefined,
           };
         } catch {
           // Non-fatal: return conservative estimate so guard doesn't go blind
@@ -2279,6 +2312,17 @@ function createHyperMemEngine(): ContextEngine {
       // feeding the compactor a window it can't reduce.
       const effectiveBudget = computeEffectiveBudget(tokenBudget, model);
       const historyDepth = Math.min(250, Math.max(50, Math.floor((effectiveBudget * 0.65) / 500)));
+      const runtimeEntryTokens = estimateMessageArrayTokens(messages as unknown[]);
+      const redisEntryTokens = await estimateWindowTokens(hm, agentId, sk);
+      const replayRecovery = decideReplayRecovery({
+        currentState: normalizeReplayRecoveryState(await hm.cache.getSlot(agentId, sk, 'replayRecoveryState').catch(() => '')),
+        runtimeTokens: runtimeEntryTokens,
+        redisTokens: redisEntryTokens,
+        effectiveBudget,
+      });
+      const replayHistoryDepth = replayRecovery.active && replayRecovery.historyDepthCap
+        ? Math.min(historyDepth, replayRecovery.historyDepthCap)
+        : historyDepth;
 
       // ── Redis guardrail: trim history to token budget ────────────────────
       // Prevents model-switch bloat: if an agent previously ran on a larger
@@ -2421,7 +2465,7 @@ function createHyperMemEngine(): ContextEngine {
       // (contextBlock) is cached, since that's what determines prefix identity.
       const cacheReplayThresholdMs = _cacheReplayThresholdMs;
       let cachedContextBlock: string | null = null;
-      if (cacheReplayThresholdMs > 0) {
+      if (cacheReplayThresholdMs > 0 && !replayRecovery.shouldSkipCacheReplay) {
         try {
           const cachedAt = await hm.cache.getSlot(agentId, sk, 'assemblyContextAt');
           if (cachedAt && Date.now() - parseInt(cachedAt) < cacheReplayThresholdMs) {
@@ -2453,9 +2497,9 @@ function createHyperMemEngine(): ContextEngine {
         agentId,
         sessionKey: sk,
         tokenBudget: effectiveBudget,
-        historyDepth: lastState?.historyDepth && lastState.historyDepth < historyDepth
+        historyDepth: lastState?.historyDepth && lastState.historyDepth < replayHistoryDepth
           ? lastState.historyDepth
-          : historyDepth,
+          : replayHistoryDepth,
         tier,
         model,          // pass model for provider detection
         includeDocChunks: subagentLight ? false : !cachedContextBlock,  // skip doc retrieval on cache hit or subagent light
@@ -2472,7 +2516,7 @@ function createHyperMemEngine(): ContextEngine {
       // After a full compose, write the new contextBlock to cache for the next turn.
       if (cachedContextBlock) {
         result.contextBlock = cachedContextBlock;
-      } else if (result.contextBlock && cacheReplayThresholdMs > 0) {
+      } else if (result.contextBlock && cacheReplayThresholdMs > 0 && !replayRecovery.shouldSkipCacheReplay && !replayRecovery.emittedText) {
         // Write cache async — never block the assemble() return on this
         const blockToCache = result.contextBlock;
         const nowStr = Date.now().toString();
@@ -2484,6 +2528,13 @@ function createHyperMemEngine(): ContextEngine {
           // Extend TTL on the cached keys to 2× the threshold
           // setSlot uses the sessionTTL from RedisLayer config — acceptable fallback
         }).catch(() => { /* Non-fatal */ });
+      }
+
+      if (replayRecovery.emittedText) {
+        result.contextBlock = result.contextBlock
+          ? `${result.contextBlock}
+${replayRecovery.emittedText}`
+          : replayRecovery.emittedText;
       }
 
       // Convert NeutralMessage[] → AgentMessage[] for the OpenClaw runtime.
@@ -2541,6 +2592,8 @@ function createHyperMemEngine(): ContextEngine {
       const contextBlockTokens = Math.ceil((result.contextBlock?.length ?? 0) / 4);
       const runtimeSystemTokens = getOverheadFallback(tier);
       _overheadCache.set(sk, contextBlockTokens + runtimeSystemTokens);
+
+      await persistReplayRecoveryState(hm, agentId, sk, replayRecovery.nextState);
 
       // Update model state for downshift detection on next turn
       try {
