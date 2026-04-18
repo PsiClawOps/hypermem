@@ -534,7 +534,7 @@ function discoverStartupFleetCandidates(
   for (const candidate of resolved) {
     const preferredLead =
       candidate.reportTargets.find(target => councilIds.has(target)) ||
-      candidate.reportTargets.find(target => knownIds.has(target) && target !== 'ragesaq') ||
+      candidate.reportTargets.find(target => knownIds.has(target)) ||
       null;
 
     if (candidate.tier === 'council' && !candidate.orgId) {
@@ -549,7 +549,8 @@ function discoverStartupFleetCandidates(
     if (!candidate.reportsTo && preferredLead && candidate.tier !== 'director') {
       candidate.reportsTo = preferredLead;
     }
-    if (candidate.reportsTo === 'ragesaq') {
+    // Null out reportsTo if it points outside the known fleet (e.g. a human operator ID)
+    if (candidate.reportsTo && !knownIds.has(candidate.reportsTo)) {
       candidate.reportsTo = null;
     }
 

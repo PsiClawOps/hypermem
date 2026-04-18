@@ -138,6 +138,7 @@ const OPERATOR_BROAD_MAP = [
 // the sync fails. Case-insensitive matching.
 const LEAK_TERMS = [
   'lumadmin',
+  'ragesaq',
   // ClawText is a legitimate public product name (predecessor to HyperMem)
   // 'ClawText',
   'ClawDash',

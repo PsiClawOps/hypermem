@@ -44,7 +44,7 @@ async function run() {
     writeIdentity(councilRoot, 'compass', `# IDENTITY.md — Compass, Vision\n\n- **Name:** Compass\n- **Role:** Council vision seat — holds the destination\n`);
     writeIdentity(councilRoot, 'helm', `# IDENTITY.md — Helm, Strategy\n\n- **Name:** Helm\n- **Role:** Strategy Director — translates vision into executable direction\n- **Reports to:** Compass\n`);
     writeIdentity(councilRoot, 'pylon', `# IDENTITY.md — Pylon, Infrastructure\n\n- **Name:** Pylon\n- **Role:** Infrastructure Director — executes infra changes\n- **Reports to:** Forge\n`);
-    writeIdentity(councilRoot, 'relay', `# IDENTITY.md — Relay, Aide-de-Camp\n\n- **Name:** Relay\n- **Role:** Aide-de-Camp — direct operational support\n- **Reports to:** ragesaq (direct)\n`);
+    writeIdentity(councilRoot, 'relay', `# IDENTITY.md — Relay, Aide-de-Camp\n\n- **Name:** Relay\n- **Role:** Aide-de-Camp — direct operational support\n- **Reports to:** operator (direct)\n`);
 
     // Simulate an existing messages.db agent directory that has not yet been
     // backfilled into fleet_agents.

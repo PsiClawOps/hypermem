@@ -39,7 +39,7 @@ const markerSamples = [
   'model frozen until provider routing stable',
   'dreaming is currently disabled fleet-wide',
   'council mode paused for now while migration lands',
-  'council mode suspended pending ragesaq review',
+  'council mode suspended pending operator review',
   'V19 schema rollout phase 2 is active',
   'Track 4 deferred to 0.8.2, temporary parking',
   'recheck this after next gateway restart',
@@ -64,7 +64,7 @@ for (const sample of markerSamples) {
 console.log('\nPart 2: historical facts without temporal markers pass through');
 
 const historicalSamples = [
-  'Council cutover completed 2026-03-23 verified by ragesaq',
+  'Council cutover completed 2026-03-23 verified by operator',
   'V19 schema shipped 2026-04-18, adds tiered contradiction resolution',
   'PsiClawOps public repos use Apache-2.0 license',
   'Fleet has five council seats plus Forge and Vanguard',
@@ -146,7 +146,7 @@ for (const content of datedButStillTemporary) {
 console.log('\nPart 6: historical facts promote cleanly (no metadata required)');
 
 const promotableHistorical = [
-  'Council cutover completed 2026-03-23 verified by ragesaq durable record',
+  'Council cutover completed 2026-03-23 verified by operator durable record',
   'V19 schema shipped 2026-04-18, adds tiered contradiction resolution policy',
   'PsiClawOps public repositories use the Apache-2.0 license for all source',
   'Fleet includes council seats Anvil Compass Clarity Sentinel Forge Vanguard',
