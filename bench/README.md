@@ -17,7 +17,7 @@ Sequential A/B testing on identical OpenClaw stacks. The ONLY variable between r
 | System | Type | Hook adapter |
 |---|---|---|
 | noop (baseline) | No memory | Passes through raw context, no retrieval |
-| hypermem | SQLite + Redis compositor | Native Node.js hook |
+| hypermem | SQLite hot-cache compositor | Native Node.js hook |
 | Mem0 | Vector + graph memory | Python subprocess adapter |
 | Letta (MemGPT) | Self-editing memory | REST API adapter |
 

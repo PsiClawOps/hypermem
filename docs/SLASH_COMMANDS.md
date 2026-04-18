@@ -6,7 +6,7 @@ hypermem supports operator-defined slash commands that hook into session lifecyc
 
 ## `/fresh` — Start an Unwarmed Session
 
-Flushes the current session's Redis hot cache and starts fresh. Long-term memory (facts, vectors, episodes, knowledge graph) is preserved and will re-warm naturally on the next bootstrap.
+Flushes the current session's hot cache and starts fresh. Long-term memory (facts, vectors, episodes, knowledge graph) is preserved and will re-warm naturally on the next bootstrap.
 
 **Use case:** A user wants to start a new conversation without any session warmth bleeding in from a previous context.
 
@@ -33,11 +33,11 @@ Flushes the current session's Redis hot cache and starts fresh. Long-term memory
 
 ```typescript
 import { flushSession } from 'hypermem';
-import type { RedisLayer } from 'hypermem';
+import type { CacheLayer } from 'hypermem';
 
 // In your slash command handler:
 if (input.trim() === '/fresh') {
-  const result = await flushSession(redis, agentId, sessionKey);
+  const result = await flushSession(cache, agentId, sessionKey);
 
   if (result.success) {
     return `Session cache cleared. Starting fresh — long-term memory is preserved.\nFlushed at: ${result.flushedAt}`;
@@ -54,7 +54,7 @@ If you need a bound helper (e.g. inside an agent that always operates as a fixed
 ```typescript
 import { SessionFlusher } from 'hypermem';
 
-const flusher = new SessionFlusher(redis, 'my-agent');
+const flusher = new SessionFlusher(cache, 'my-agent');
 
 // Later, when /fresh is received:
 const result = await flusher.flush(sessionKey);

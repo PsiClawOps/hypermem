@@ -21,7 +21,7 @@ frozen as of 0.5.0. Breaking changes require a 1.0.0 semver bump — no exceptio
 
 ## Internal APIs
 
-Everything else — `FactStore`, `RedisLayer`, `Compositor`, `HybridRetrieval`,
+Everything else — `FactStore`, `CacheLayer`, `Compositor`, `HybridRetrieval`,
 `DreamingPromoter`, etc. — is internal and may change between minor versions.
 These are exported for advanced use but carry no stability guarantee until 1.0.
 

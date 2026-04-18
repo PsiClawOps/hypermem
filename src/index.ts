@@ -4,7 +4,7 @@
  * @module @psiclawops/hypermem
  *
  * Architecture:
- *   L1: Redis       — hot session working memory
+ *   L1: CacheLayer  — SQLite `:memory:` hot session working memory
  *   L2: messages.db — per-agent conversation log (rotatable)
  *   L3: vectors.db  — per-agent semantic search index (reconstructable)
  *   L4: library.db  — fleet-wide structured knowledge (crown jewel)

@@ -7,7 +7,7 @@ _Agent-centric memory that outlives sessions._
 ## Memory Layers
 
 ```
-L1  Redis (Hot)              Active session working memory
+L1  SQLite Cache (Hot)       Active session working memory
      │                       Slots: system, identity, messages, facts, context
      │                       Sub-millisecond reads, evicts on session end
      │                       Fleet cache: agent profiles, fleet summary
@@ -27,6 +27,10 @@ L4  Library DB               Fleet-wide structured knowledge
                               Desired state, agent capabilities
                               Knowledge graph (DAG links between entities)
 ```
+
+> Note: some internal method names and telemetry reasons still contain `redis`
+> for backward compatibility. The runtime hot layer is SQLite `:memory:` cache,
+> not an external Redis service.
 
 ## Database Schema
 
@@ -70,7 +74,7 @@ Assembles LLM prompts from all four layers with token budgeting:
 ```
 User message arrives
   │
-  ├── L1 Redis: system prompt, identity, cached slots
+  ├── L1 Hot cache: system prompt, identity, cached slots
   ├── L2 Messages: recent conversation history (budget-truncated)
   ├── L3 Vectors: KNN semantic recall on user's latest message
   │     └── Related facts/knowledge/episodes with relevance scores
@@ -104,14 +108,14 @@ Compositor behavior is tuned via parameters tracked in `tune/TUNING_REGISTRY.md`
 - **Compaction fence:** Per-conversation boundary protecting the LLM's recent tail from compaction. Only moves forward (monotone progress). No fence = no compaction (explicit opt-in).
 - **Preservation gate:** Nomic-space geometric verification that summaries stay faithful to source content. Centroid alignment + source coverage → combined score (threshold: 0.65).
 
-## Fleet Cache (Redis Hot Layer)
+## Fleet Cache (Hot Cache Layer)
 
 ```
 fleet:agent:{id}   — Composite profile: registry + capabilities + desired state
 fleet:summary      — Fleet-wide stats: agent count, drift count, tier breakdown
 ```
 
-- **Cache-aside** on reads: Redis first, SQLite fallback, warm on miss
+- **Cache-aside** on reads: hot cache first, SQLite fallback, warm on miss
 - **Write-through invalidation** on fleet mutations
 - **Hydration** on gateway startup: bulk-populate from library.db
 - TTL: agent profiles 10min, summary 2min
@@ -165,9 +169,9 @@ This means:
 
 ```
 gateway:startup     → Init hypermem, auto-rotate DBs, seed fleet registry from workspace identities, hydrate fleet cache
-agent:bootstrap     → Warm session (history, facts, profile → Redis)
+agent:bootstrap     → Warm session (history, facts, profile → hot cache)
 context:assemble    → Full four-layer prompt assembly within token budget
-agent:afterTurn     → Ingest new messages to SQLite + Redis, trigger background indexer
+agent:afterTurn     → Ingest new messages to SQLite + hot cache, trigger background indexer
 ```
 
 Registers with `ownsCompaction: true` — runtime skips legacy compaction entirely.
@@ -185,7 +189,7 @@ Registers with `ownsCompaction: true` — runtime skips legacy compaction entire
 
 ```
                     ┌──────────────────────────────────────────────────┐
-                    │             REDIS (L1 Hot Layer)                  │
+                    │      HOT CACHE (SQLite :memory: CacheLayer)       │
                     │                                                  │
                     │  hm:{a}:{s}:history  ── Session archive (250 cap │
                     │    (append-only)        at bootstrap, 1000 soft  │
@@ -210,20 +214,20 @@ Data Flow (current — P0 stabilized, window/cursor active):
   ▸ sessionExists() → skip if hot  compose()                    slice(prePromptCount)
   ▸ SQLite ─→ warmSession()        ─→ getHistory(limit) ✅      ─→ record*Message()
            ─→ pushHistory(250)     ─→ dedup by id               ─→ pushHistory(1, dedup)
-           ─→ Redis :history       ─→ budget assembly            ─→ Redis :history
-                                   ─→ write :window (120s)      ─→ invalidateWindow()
-                                   ─→ write :cursor (24h)       ─→ background indexer
+           ─→ cache history        ─→ budget assembly            ─→ cache history
+                                   ─→ write window bundle       ─→ invalidateWindow()
+                                   ─→ write cursor metadata     ─→ background indexer
                                    ─→ → runtime → provider
 
 ### Key Invariants
 
-1. Redis `history` is the warm archive. Append-only. Nothing reads it for direct submission.
-2. Redis `window` is the compositor's output cache. Written ONLY by `compose()`. Read ONLY by `assemble()`. Invalidated by `afterTurn`.
-3. Redis `cursor` tracks the newest message in the last window. Used by background indexer for high-signal mining.
+1. Hot-cache `history` is the warm archive. Append-only. Nothing reads it for direct submission.
+2. Hot-cache `window` is the compositor's output cache. Written ONLY by `compose()`. Read ONLY by `assemble()`. Invalidated by `afterTurn`.
+3. Hot-cache `cursor` tracks the newest message in the last window. Used by background indexer for high-signal mining.
 4. `warmSession()` seeds `history` only (capped at 250). Never writes `window`.
-5. `pushHistory()` tail-checks before append (no duplicate IDs in Redis list).
+5. `pushHistory()` tail-checks before append (no duplicate IDs in the hot-cache history list).
 6. `compose()` deduplicates history by `id` before budget assembly.
-7. `getHistory()` honors its `limit` parameter on BOTH Redis and SQLite paths.
+7. `getHistory()` honors its `limit` parameter on BOTH hot-cache and SQLite paths.
 
 Design spec: `specs/HYPERMEM_QUEUE_SPLIT.md`
 Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
@@ -258,7 +262,7 @@ Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
 | `fleet-store.ts` | ~440 | L4 | Fleet registry + capabilities |
 | `db.ts` | ~440 | - | Database manager + rotation |
 | `knowledge-graph.ts` | ~420 | L4 | DAG traversal + shortest path |
-| `redis.ts` | ~530 | L1 | Redis operations, window cache, cursor, fleet cache |
+| `cache.ts` | ~700 | L1 | SQLite `:memory:` hot-cache operations, window cache, cursor, fleet cache |
 | `doc-chunker.ts` | ~400 | - | Section-aware markdown/file parser |
 | `work-store.ts` | ~400 | L4 | Work queue + FTS5 |
 | `provider-translator.ts` | ~390 | - | Neutral ↔ provider format conversion |
@@ -287,12 +291,12 @@ _Test count reflects assertions, not individual test blocks. Suites contain inli
 | Suite | Key coverage |
 |---|---|
 | smoke | End-to-end create/write/read/close, provider translation |
-| redis-integration | Redis ops, slots, history limits, window cache, cursor, warming, dedup |
+| redis-integration | Legacy suite name, covers hot-cache ops, slots, history limits, window cache, cursor, warming, dedup |
 | cross-agent | Cross-agent queries, fleet search, visibility tiers |
 | vector-search | Embedding, KNN, batch indexing |
 | library | All L4 collections (facts → desired state) |
 | compositor | Four-layer composition, budgets, providers, safety valve, Gate 1 |
-| fleet-cache | Redis fleet cache, hydration, cache-aside |
+| fleet-cache | Fleet hot-cache hydration and cache-aside behavior |
 | rotation | DB rotation, auto-rotate, collision handling |
 | knowledge-graph | DAG traversal, shortest path, analytics |
 | rate-limiter | Token bucket, priority, timeout, embedder |
@@ -301,6 +305,6 @@ _Test count reflects assertions, not individual test blocks. Suites contain inli
 ## Dependencies
 
 - `node:sqlite` (Node 22+ built-in) — zero-dependency SQLite
-- `ioredis` — Redis client
+- No external cache service dependency — hot cache is SQLite `:memory:`
 - `sqlite-vec` — optional, vector search extension
 - Ollama (localhost:11434) — optional, embedding generation

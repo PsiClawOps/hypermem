@@ -113,7 +113,7 @@ Check that `maintenance.periodicInterval` is set in config.json. Default is 3000
 ## What Remains Unverified After Phase 1
 
 - **Vector/semantic retrieval**: all Phase 1 tests run FTS-only (no Ollama dependency)
-- **Redis hot-path caching**: tests use direct compositor, not the full Redis→compose pipeline
+- **Full hot-cache plugin path inside Phase 1 itself**: these checks use the direct compositor, not the full cache-layer assemble lifecycle. Use `npm run validate:release-path` for that proof.
 - **Multi-agent fleet interactions**: scope isolation is tested, but fleet-wide maintenance behavior is not
 - **Provider-specific formatting**: tests use `provider: 'anthropic'` only
 - **Real model token counting**: tests use the char/4 heuristic estimator, not tiktoken

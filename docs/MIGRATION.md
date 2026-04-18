@@ -41,10 +41,13 @@ All migration scripts default to **dry-run**. Add `--apply` to write data.
 
 ## Schema compatibility map
 
-| hypermem version | Main DB schema | Library DB schema | Min Node | Min Redis |
+Current releases do **not** require Redis. The hot cache is SQLite `:memory:`.
+Older versions below 0.5.0 used Redis, so the table keeps that history explicit.
+
+| hypermem version | Main DB schema | Library DB schema | Min Node | External cache |
 |---|---|---|---|---|
-| 0.5.0 | v6 | v12 | 22.0.0 | 7.0.0 |
-| 0.4.0 | v5 | v10 | 20.0.0 | 6.0.0 |
+| 0.5.0 | v6 | v12 | 22.0.0 | none, SQLite `:memory:` hot cache |
+| 0.4.0 | v5 | v10 | 20.0.0 | Redis 6.0.0 |
 
 Schema versions are importable for programmatic checks:
 ```ts

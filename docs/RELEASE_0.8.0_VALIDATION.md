@@ -19,7 +19,7 @@ It verifies four release-path behaviors in one run:
 1. **normal compose path** returns assembled context through `engine.assemble()`
 2. **artifact degradation** emits a canonical `[artifact:...]` reference in system context
 3. **tool-chain ejection** is recorded through real compose-path co-ejection counters in telemetry
-4. **tool-loop replay recovery** emits the canonical `[replay state=entering ...]` marker when runtime history is hot and Redis is cold
+4. **tool-loop replay recovery** emits the canonical `[replay state=entering ...]` marker when runtime history is hot and the hot cache is cold
 
 ## Telemetry contract
 
@@ -36,7 +36,7 @@ Per event fields:
 - `artifactDegradations`
 - `artifactOversizeThresholdTokens`
 - `replayState`
-- `replayReason`
+- `replayReason` (legacy machine reason strings may still contain `redis` for compatibility)
 
 The release harness asserts those counters against prompt-visible behavior, so the telemetry is not just emitted, it is verified.
 

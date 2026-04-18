@@ -4,7 +4,7 @@
  * Implements OpenClaw's ContextEngine interface backed by hypermem's
  * four-layer memory architecture:
  *
- *   L1 Redis    — hot session working memory
+ *   L1 Cache    — SQLite `:memory:` hot session working memory
  *   L2 Messages — per-agent conversation history (SQLite)
  *   L3 Vectors  — semantic + keyword search (KNN + FTS5)
  *   L4 Library  — facts, knowledge, episodes, preferences
@@ -14,7 +14,7 @@
  *   assemble()   → compositor builds context from all four layers
  *   compact()    → delegate to runtime (ownsCompaction: false)
  *   afterTurn()  → trigger background indexer (fire-and-forget)
- *   bootstrap()  → warm Redis session, register agent in fleet
+ *   bootstrap()  → warm hot-cache session, register agent in fleet
  *   dispose()    → close hypermem connections
  *
  * Session key format expected: "agent:<agentId>:<channel>:<name>"
@@ -3488,7 +3488,7 @@ const engine = createHyperMemEngine();
 export default definePluginEntry({
   id: 'hypercompositor',
   name: 'HyperCompositor — context engine',
-  description: 'Four-layer memory architecture for OpenClaw agents: Redis hot cache, message history, vector search, and structured library.',
+  description: 'Four-layer memory architecture for OpenClaw agents: SQLite hot cache, message history, vector search, and structured library.',
   kind: 'context-engine',
   configSchema: buildPluginConfigSchema(hypercompositorConfigSchema),
   register(api) {

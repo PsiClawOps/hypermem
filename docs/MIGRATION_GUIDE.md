@@ -32,7 +32,7 @@ Understanding the data model sets expectations for what migrates and what doesn'
 - Structured knowledge entries
 
 **Does not migrate (by design):**
-- The Redis hot cache — ephemeral, rebuilds automatically on first use
+- The hot cache — ephemeral, SQLite-backed in current releases, and rebuilt automatically on first use
 - Embeddings — hypermem regenerates these from imported text on the next indexer run
 - Tool call payloads from sessions where only text content was stored (tool results preserved as prose where available)
 - Graph structure from graph databases (edges, weights, triplets) — these are flattened to facts on import
