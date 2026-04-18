@@ -54,6 +54,37 @@ export {
   resolveTrimBudgets,
 } from './budget-policy.js';
 
+// ── Phase C0.2: Canonical degradation contracts ───────────────────────────────
+export {
+  // Reason enum + all values
+  DEGRADATION_REASONS,
+  DEGRADATION_LIMITS,
+  isDegradationReason,
+  isReplayState,
+  // Tool-chain stub
+  formatToolChainStub,
+  parseToolChainStub,
+  isToolChainStub,
+  // Artifact reference
+  formatArtifactRef,
+  parseArtifactRef,
+  isArtifactRef,
+  // Replay marker
+  formatReplayMarker,
+  parseReplayMarker,
+  isReplayMarker,
+  // Generic detector
+  isDegradedContent,
+} from './degradation.js';
+export type {
+  DegradationReason,
+  ToolChainStub,
+  ArtifactRef,
+  ReplayMarker,
+  ReplayState,
+  DegradationEvent,
+} from './degradation.js';
+
 export { Compositor, type CompositorDeps, applyToolGradientToWindow, canPersistReshapedHistory, OPENCLAW_BOOTSTRAP_FILES } from './compositor.js';
 
 export {

@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "reasonSurface": [
+    "gradient_t2_prose",
+    "gradient_t3_stub",
+    "eviction_oversize",
+    "eviction_turn0_trim",
+    "wave_guard_pressure_high",
+    "wave_guard_pressure_elevated",
+    "budget_cluster_drop",
+    "artifact_oversize",
+    "artifact_fetch_hint",
+    "replay_cold_redis",
+    "replay_stabilizing",
+    "replay_exited",
+    "pressure_mismatch",
+    "unknown"
+  ],
+  "toolChainStub": {
+    "input": {
+      "name": "read",
+      "id": "hm_tool_001",
+      "status": "ejected",
+      "reason": "eviction_oversize",
+      "summary": "large result replaced with bounded stub"
+    },
+    "expected": "[tool:read id=hm_tool_001 status=ejected reason=eviction_oversize summary=large result replaced with bounded stub]"
+  },
+  "artifactRef": {
+    "input": {
+      "id": "doc-42",
+      "path": "/docs/arch.md",
+      "sizeTokens": 3500,
+      "status": "degraded",
+      "reason": "artifact_fetch_hint",
+      "fetchHint": "memory_search"
+    },
+    "expected": "[artifact:doc-42 path=/docs/arch.md size=3500 status=degraded reason=artifact_fetch_hint fetch=memory_search]"
+  },
+  "replayMarkers": [
+    {
+      "input": {
+        "state": "entering",
+        "status": "bounded",
+        "reason": "replay_cold_redis",
+        "summary": "cold restart, keep the window bounded"
+      },
+      "expected": "[replay state=entering status=bounded reason=replay_cold_redis summary=cold restart, keep the window bounded]"
+    },
+    {
+      "input": {
+        "state": "exited",
+        "status": "bounded",
+        "reason": "replay_exited",
+        "summary": "stable window restored"
+      },
+      "expected": "[replay state=exited status=bounded reason=replay_exited summary=stable window restored]"
+    }
+  ]
+}

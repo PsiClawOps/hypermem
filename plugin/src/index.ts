@@ -52,6 +52,7 @@ import {
   TRIM_GROWTH_THRESHOLD,
   TRIM_HEADROOM_FRACTION,
   resolveTrimBudgets,
+  formatToolChainStub,
 } from '@psiclawops/hypermem';
 import { evictStaleContent } from '@psiclawops/hypermem/image-eviction';
 import { repairToolPairs } from '@psiclawops/hypermem';
@@ -1767,7 +1768,13 @@ function createHyperMemEngine(): ContextEngine {
               if (tr.isError) return tr; // preserve error results intact
               return {
                 ...tr,
-                content: `[tool result omitted by wave-guard at ${(redisPressure * 100).toFixed(0)}% Redis pressure]`,
+                content: formatToolChainStub({
+                  name: tr.name || 'tool_result',
+                  id: tr.callId || 'unknown',
+                  status: 'ejected',
+                  reason: 'wave_guard_pressure_high',
+                  summary: `omitted at ${(redisPressure * 100).toFixed(0)}% Redis pressure`,
+                }),
               };
             });
             const stubNeutral = { ...neutral, toolResults: stubbedResults };
@@ -1785,7 +1792,13 @@ function createHyperMemEngine(): ContextEngine {
                 if (content.length <= MAX_TOOL_RESULT_CHARS) return tr;
                 return {
                   ...tr,
-                  content: `[truncated by wave-guard at ${(redisPressure * 100).toFixed(0)}% pressure: ${Math.ceil(content.length / 4)} tokens]`,
+                  content: formatToolChainStub({
+                    name: tr.name || 'tool_result',
+                    id: tr.callId || 'unknown',
+                    status: 'ejected',
+                    reason: 'wave_guard_pressure_elevated',
+                    summary: `truncated at ${(redisPressure * 100).toFixed(0)}% pressure: ${Math.ceil(content.length / 4)} tokens`,
+                  }),
                 };
               }),
             };

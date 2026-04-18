@@ -51,6 +51,7 @@ import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
 import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
 import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
+import { formatToolChainStub } from './degradation.js';
 
 /**
  * Files that OpenClaw's contextInjection injects into the system prompt.
@@ -1044,7 +1045,13 @@ function evictLargeToolResults<T extends NeutralMessage>(messages: T[]): T[] {
       const approxKTokens = Math.round(content.length / 4 / 1000);
       return {
         ...result,
-        content: `[tool result evicted: ~${approxKTokens}k tokens \u2014 use memory_search or re-run if needed]`,
+        content: formatToolChainStub({
+          name: result.name || 'tool_result',
+          id: result.callId || 'unknown',
+          status: 'ejected',
+          reason: 'eviction_oversize',
+          summary: `~${approxKTokens}k tokens, use memory_search or re-run if needed`,
+        }),
       };
     });
     return { ...msg, toolResults: evicted };
