@@ -56,14 +56,19 @@ That said, not every deployment needs full context richness. If you're running a
 
 Estimates on a 128k model. Actual cost depends on session length and trigger hits.
 
-| Preset | Context injected | Effective input tokens | What you give up |
-|---|---|---|---|
-| `light` | History + facts (conservative) + behavior (~100 tok) | 30–50k | Wiki, cross-session context, memory promotion; reduced first-turn warming |
-| `standard` | History + facts + wiki + behavior | 55–75k | Cross-session context, model adaptation |
-| `full` | All layers | 70–95k | Nothing — all layers active |
-| `full` + reduced | Tuned via knobs | 50–70k | Configurable per layer (see below) |
+**On a 200k model (Claude Sonnet).** Actual cost depends on session length and trigger hits.
 
-The gap between `light` and `full` is roughly 20–40k tokens per turn. On Claude Sonnet at $3/M input tokens, that's $0.06–$0.12 per turn. At typical usage, cross-session continuity and avoided re-explanation often recover that cost in fewer total turns.
+| Preset | Turn 1 (warm) | Turn 5+ (established) | Layers active |
+|---|---|---|---|
+| `light` | **12–18k** | 25–35k | History, facts (10 cap), keystones (5 cap), behavior |
+| `standard` (default) | **40–55k** | 60–85k | All layers, default caps |
+| `full` | **35–50k** | 55–80k | All layers, raised caps |
+
+**Turn 1 is where token-conscious users will react.** Light vs full on turn 1 is roughly 20–35k tokens — the number that shows up in provider dashboards. By turn 5 the gap is still real, but the value case is easier to make because the user has already experienced continuity.
+
+**At Claude Sonnet input pricing ($3/M tokens):** the turn-1 delta between light and standard is roughly $0.06–$0.11. The question is whether you recover that in fewer follow-up turns. For agents doing multi-session work, the answer is almost always yes.
+
+The gap between `light` and `full` on a 128k model narrows proportionally — expect light at 8–15k on turn 1, standard at 25–40k.
 
 ### Light setup
 
