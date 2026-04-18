@@ -42,6 +42,15 @@ function sha256Hex(s: string): string {
   return createHash('sha256').update(s).digest('hex');
 }
 
+export interface ToolArtifactRetentionPolicy {
+  /** TTL in ms for non-sensitive artifacts (e.g. 7 * 24 * 60 * 60 * 1000). */
+  standardTtlMs: number;
+  /** TTL in ms for sensitive artifacts. Should be <= standardTtlMs. */
+  sensitiveTtlMs: number;
+  /** Optional: max artifacts to keep per (agent_id, session_key). Excess removed oldest-first. */
+  maxPerSession?: number;
+}
+
 export interface ToolArtifactRecord {
   id: string;
   contentHash: string;
@@ -61,6 +70,7 @@ export interface ToolArtifactRecord {
   createdAt: string;
   lastUsedAt: string;
   refCount: number;
+  isSensitive: boolean;
 }
 
 export interface PutToolArtifactInput {
@@ -75,6 +85,7 @@ export interface PutToolArtifactInput {
   contentType?: string;
   payload: string;
   summary?: string;
+  isSensitive?: boolean;
 }
 
 function rowToRecord(row: Record<string, unknown>): ToolArtifactRecord {
@@ -97,6 +108,7 @@ function rowToRecord(row: Record<string, unknown>): ToolArtifactRecord {
     createdAt: row.created_at as string,
     lastUsedAt: row.last_used_at as string,
     refCount: row.ref_count as number,
+    isSensitive: (row.is_sensitive as number) === 1,
   };
 }
 
@@ -116,6 +128,7 @@ export class ToolArtifactStore {
     const tokenEstimate = estimateTokens(payload);
     const contentType = input.contentType ?? 'text/plain';
     const isError = input.isError ? 1 : 0;
+    const isSensitive = input.isSensitive ? 1 : 0;
 
     // Dedupe within (agentId, sessionKey) — same hash bumps ref_count and
     // updates last_used_at, returning the existing record.
@@ -139,7 +152,7 @@ export class ToolArtifactStore {
              WHERE id = ?`,
         )
         .run(ts, existing.id as string);
-      return rowToRecord({ ...existing, ref_count: (existing.ref_count as number) + 1, last_used_at: ts });
+      return rowToRecord({ ...existing, ref_count: (existing.ref_count as number) + 1, last_used_at: ts, is_sensitive: existing.is_sensitive ?? 0 });
     }
 
     const id = newArtifactId();
@@ -152,12 +165,12 @@ export class ToolArtifactStore {
             conversation_id, message_id, turn_id, tool_call_id,
             tool_name, is_error, content_type,
             size_bytes, token_estimate, payload, summary,
-            created_at, last_used_at, ref_count
+            created_at, last_used_at, ref_count, is_sensitive
           ) VALUES (?, ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?, ?,
-                    ?, ?, 1)`,
+                    ?, ?, 1, ?)`,
       )
       .run(
         id,
@@ -177,6 +190,7 @@ export class ToolArtifactStore {
         input.summary ?? null,
         ts,
         ts,
+        isSensitive,
       );
 
     return {
@@ -198,6 +212,7 @@ export class ToolArtifactStore {
       createdAt: ts,
       lastUsedAt: ts,
       refCount: 1,
+      isSensitive: input.isSensitive ?? false,
     };
   }
 
@@ -272,6 +287,52 @@ export class ToolArtifactStore {
     this.db
       .prepare('UPDATE tool_artifacts SET last_used_at = ? WHERE id = ?')
       .run(nowIso(), id);
+  }
+
+  /**
+   * GC sweep: delete artifacts that exceed their TTL or per-session count cap.
+   * Returns total rows deleted.
+   *
+   * Sensitive artifacts use sensitiveTtlMs (shorter); standard artifacts use
+   * standardTtlMs. Optional maxPerSession bounds row count per (agent, session)
+   * using a ROW_NUMBER() window query — oldest last_used_at removed first.
+   */
+  sweep(policy: ToolArtifactRetentionPolicy): number {
+    const now = Date.now();
+    const standardCutoff = new Date(now - policy.standardTtlMs).toISOString();
+    const sensitiveCutoff = new Date(now - policy.sensitiveTtlMs).toISOString();
+
+    const ttlResult = this.db
+      .prepare(
+        `DELETE FROM tool_artifacts
+           WHERE (is_sensitive = 0 AND last_used_at < ?)
+              OR (is_sensitive = 1 AND last_used_at < ?)`,
+      )
+      .run(standardCutoff, sensitiveCutoff) as { changes: number };
+
+    let deleted = ttlResult.changes ?? 0;
+
+    if (policy.maxPerSession != null) {
+      const boundResult = this.db
+        .prepare(
+          `DELETE FROM tool_artifacts
+             WHERE id IN (
+               SELECT id FROM (
+                 SELECT id,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY agent_id, session_key
+                          ORDER BY last_used_at DESC
+                        ) AS rn
+                 FROM tool_artifacts
+               )
+               WHERE rn > ?
+             )`,
+        )
+        .run(policy.maxPerSession) as { changes: number };
+      deleted += boundResult.changes ?? 0;
+    }
+
+    return deleted;
   }
 
   /**

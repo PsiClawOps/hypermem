@@ -8,7 +8,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LATEST_SCHEMA_VERSION = 9;
+export const LATEST_SCHEMA_VERSION = 10;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -311,6 +311,19 @@ export function migrate(db: DatabaseSync): void {
 
     db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(9, nowIso());
+  }
+
+  // v9 → v10: Retention sweep — add is_sensitive flag to tool_artifacts.
+  // Enables differential TTL: sensitive artifacts expire sooner than standard ones.
+  // See: ToolArtifactStore.sweep() and ToolArtifactRetentionPolicy.
+  if (currentVersion < 10) {
+    const taCols = (db.prepare('PRAGMA table_info(tool_artifacts)').all() as Array<{ name: string }>)
+      .map(r => r.name);
+    if (!taCols.includes('is_sensitive')) {
+      db.exec('ALTER TABLE tool_artifacts ADD COLUMN is_sensitive INTEGER NOT NULL DEFAULT 0');
+    }
+    db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(10, nowIso());
   }
 }
 
