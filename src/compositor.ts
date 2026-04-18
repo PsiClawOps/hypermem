@@ -51,7 +51,7 @@ import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
 import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
 import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
-import { formatToolChainStub } from './degradation.js';
+import { formatToolChainStub, type DegradationReason } from './degradation.js';
 
 /**
  * Files that OpenClaw's contextInjection injects into the system prompt.
@@ -478,6 +478,7 @@ export { CollectionTrigger, DEFAULT_TRIGGERS, matchTriggers } from './trigger-re
 // ─── Test-only exports (not part of public API) ───────────────────────────
 // These are exported solely for unit testing. Do not use in production code.
 export { getTurnAge, applyToolGradient, appendToolSummary, truncateWithHeadTail, applyTierPayloadCap, evictLargeToolResults };
+// resolveToolChainEjections is a first-class export (C1); defined below evictLargeToolResults.
 
 
 interface NeutralMessageCluster<T extends NeutralMessage> {
@@ -1056,6 +1057,120 @@ function evictLargeToolResults<T extends NeutralMessage>(messages: T[]): T[] {
     });
     return { ...msg, toolResults: evicted };
   }) as T[];
+}
+
+// ─── C1: Tool-chain dependency ejection ──────────────────────────────────────
+
+/**
+ * Result of a single tool-chain ejection pass.
+ * Returned by resolveToolChainEjections so callers can accumulate telemetry.
+ */
+export interface ToolChainEjectionResult<T extends NeutralMessage> {
+  /** The transformed message array (may contain stubs in place of results). */
+  messages: T[];
+  /** Number of tool-result messages fully co-ejected (removed from the array). */
+  coEjections: number;
+  /** Number of tool-result payloads replaced with a canonical stub string. */
+  stubReplacements: number;
+}
+
+/**
+ * C1: Centralized tool-chain dependency ejection.
+ *
+ * Given a set of tool-use message indices that are being ejected from the
+ * context window, this function ensures that no orphaned tool-results survive:
+ *
+ *   - For each ejected assistant message carrying toolCalls, collect the set
+ *     of call IDs being removed.
+ *   - Walk the remaining messages: if a message's toolResults reference any
+ *     of those ejected IDs:
+ *       a) If the message carries ONLY tool-results and no other text, co-eject
+ *          it (remove it entirely). This is the zero-cost path.
+ *       b) If the message also carries text content, replace only the dependent
+ *          toolResults entries with canonical ToolChainStub strings so the
+ *          message is not silently mutilated.
+ *
+ * The caller is responsible for removing the ejected messages by index BEFORE
+ * or AFTER calling this function; this function operates on the full array and
+ * marks the ejected indices for removal, returning the cleaned result.
+ *
+ * @param messages       Full message array (order preserved)
+ * @param ejectIndices   Set of indices into `messages` that are being ejected
+ *                       (these are the tool-use / assistant messages being removed).
+ * @param reason         DegradationReason to embed in any canonical stubs.
+ * @returns              Cleaned message array + telemetry counters.
+ */
+export function resolveToolChainEjections<T extends NeutralMessage>(
+  messages: T[],
+  ejectIndices: Set<number>,
+  reason: DegradationReason = 'eviction_oversize',
+): ToolChainEjectionResult<T> {
+  // Collect all tool-call IDs that are being ejected.
+  const ejectedCallIds = new Set<string>();
+  for (const idx of ejectIndices) {
+    const msg = messages[idx];
+    if (!msg) continue;
+    if (msg.toolCalls) {
+      for (const tc of msg.toolCalls) {
+        if (tc.id) ejectedCallIds.add(tc.id);
+      }
+    }
+  }
+
+  let coEjections = 0;
+  let stubReplacements = 0;
+
+  // If no call IDs were ejected, nothing to do beyond dropping the ejected messages.
+  if (ejectedCallIds.size === 0) {
+    const result = messages.filter((_, idx) => !ejectIndices.has(idx)) as T[];
+    return { messages: result, coEjections, stubReplacements };
+  }
+
+  // Walk all messages and handle dependent tool-results.
+  const transformed = messages.map((msg, idx): T | null => {
+    // Already being ejected — remove.
+    if (ejectIndices.has(idx)) return null;
+
+    if (!msg.toolResults || msg.toolResults.length === 0) return msg;
+
+    // Determine which results in this message depend on ejected calls.
+    const dependentResultIds = msg.toolResults
+      .map(r => r.callId)
+      .filter((id): id is string => Boolean(id) && ejectedCallIds.has(id as string));
+    if (dependentResultIds.length === 0) return msg;
+
+    const dependentSet = new Set(dependentResultIds);
+
+    // Case (a): The message carries ONLY tool-results and no other text content,
+    // and ALL of its results are dependent on ejected calls.
+    // Co-eject the whole message — zero budget cost, no stub needed.
+    const hasText = Boolean(msg.textContent && msg.textContent.trim().length > 0);
+    const hasNonDependentResults = msg.toolResults.some(r => !dependentSet.has(r.callId));
+
+    if (!hasText && !hasNonDependentResults) {
+      coEjections++;
+      return null;
+    }
+
+    // Case (b): Message has text or unrelated results — stub only the dependent entries.
+    const stubbedResults = msg.toolResults.map(result => {
+      if (!result.callId || !dependentSet.has(result.callId)) return result;
+      const stubContent = formatToolChainStub({
+        name: result.name || 'tool_result',
+        id: result.callId || 'unknown',
+        status: 'ejected',
+        reason,
+        summary: 'parent tool-use ejected from context window',
+      });
+      stubReplacements++;
+      return { ...result, content: stubContent };
+    });
+
+    return { ...msg, toolResults: stubbedResults };
+  });
+
+  const result = transformed.filter((m): m is T => m !== null);
+  return { messages: result, coEjections, stubReplacements };
 }
 
 /**
@@ -2374,40 +2489,65 @@ export class Compositor {
       .reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
     const prefixHash = computeStablePrefixHash(stablePrefix);
 
-    // ─── Safety Valve: Post-Assembly Budget Check ───────────────────
+    // ─── Safety Valve: Post-Assembly Budget Check (C1-aware) ──────────────
     // Re-estimate total tokens after all slots are assembled. If the
     // composition exceeds tokenBudget * 1.05 (5% tolerance for estimation
     // drift), trim history messages from the oldest until we're under budget.
     // History is the most compressible slot — system/identity are never
     // truncated, and context (facts/recall/episodes) is more valuable per-token.
+    //
+    // C1: When an assistant message with toolCalls is ejected, its dependent
+    // tool-result messages are co-ejected or stubbed via resolveToolChainEjections.
+    // This ensures no orphaned tool-results survive above the stable-prefix
+    // boundary and eliminates the downstream repairToolPairs cleanup cost.
     const estimatedTotal = messages.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
     const hardCeiling = Math.floor(budget * 1.05);
+
+    let c1CoEjections = 0;
+    let c1StubReplacements = 0;
 
     if (estimatedTotal > hardCeiling) {
       const overage = estimatedTotal - budget;
       let trimmed = 0;
       let trimCount = 0;
 
-      // Find history messages (non-system, after system/identity block)
-      // Walk forward from the first non-system message, trimming oldest history first
+      // Collect indices of messages to eject before mutating the array.
+      // Walk forward from the first non-system message, trimming oldest first.
       const firstNonSystemIdx = messages.findIndex(m => m.role !== 'system');
+      const ejectIndices = new Set<number>();
+
       if (firstNonSystemIdx >= 0) {
         let i = firstNonSystemIdx;
         while (i < messages.length && trimmed < overage) {
-          // Don't trim the last user message (current prompt)
+          // Don't trim the last user message (current prompt).
           if (i === messages.length - 1 && messages[i].role === 'user') break;
           const msgTokens = estimateMessageTokens(messages[i]);
-          messages.splice(i, 1);
+          ejectIndices.add(i);
           trimmed += msgTokens;
           trimCount++;
-          // Don't increment i — splice shifts everything down
+          i++;
         }
       }
 
-      if (trimCount > 0) {
+      if (ejectIndices.size > 0) {
+        // C1: centralized ejection — resolves dependent tool-results atomically.
+        const ejectionResult = resolveToolChainEjections(
+          messages,
+          ejectIndices,
+          'eviction_oversize',
+        );
+        // Replace in-place so the rest of the compose path sees the clean array.
+        messages.length = 0;
+        messages.push(...ejectionResult.messages);
+        c1CoEjections = ejectionResult.coEjections;
+        c1StubReplacements = ejectionResult.stubReplacements;
+
         slots.history = Math.max(0, slots.history - trimmed);
         remaining += trimmed;
-        warnings.push(`Safety valve: trimmed ${trimCount} oldest history messages (${trimmed} tokens) to fit budget`);
+        const c1Note = (c1CoEjections + c1StubReplacements > 0)
+          ? ` [C1: ${c1CoEjections} co-ejected, ${c1StubReplacements} stubbed]`
+          : '';
+        warnings.push(`Safety valve: trimmed ${trimCount} oldest history messages (${trimmed} tokens) to fit budget${c1Note}`);
       }
     }
 
@@ -2539,6 +2679,9 @@ export class Compositor {
       trimSoftTarget: TRIM_BUDGET_POLICY.trimSoftTarget,
       trimGrowthThreshold: TRIM_BUDGET_POLICY.trimGrowthThreshold,
       trimHeadroomFraction: TRIM_BUDGET_POLICY.trimHeadroomFraction,
+      // C1: tool-chain ejection telemetry
+      toolChainCoEjections: c1CoEjections > 0 ? c1CoEjections : undefined,
+      toolChainStubReplacements: c1StubReplacements > 0 ? c1StubReplacements : undefined,
     };
 
     if (pressureHigh) {

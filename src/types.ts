@@ -376,6 +376,19 @@ export interface ComposeDiagnostics {
   trimGrowthThreshold?: number;
   /** Canonical headroom fraction used when steady-state trim does fire. */
   trimHeadroomFraction?: number;
+  // ── C1: Tool-chain ejection telemetry ─────────────────────────────────────
+  /**
+   * Number of tool-result messages co-ejected alongside their parent tool-use
+   * during the safety-valve or cluster-drop trim pass.
+   * A co-ejected result is fully removed (zero budget cost).
+   */
+  toolChainCoEjections?: number;
+  /**
+   * Number of tool-result messages stubbed with the canonical ToolChainStub
+   * format because their parent tool-use was ejected but the result message
+   * could not be cleanly removed (e.g. the result message also carries text).
+   */
+  toolChainStubReplacements?: number;
 }
 
 export interface ComposeResult {

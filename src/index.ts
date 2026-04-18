@@ -85,7 +85,7 @@ export type {
   DegradationEvent,
 } from './degradation.js';
 
-export { Compositor, type CompositorDeps, applyToolGradientToWindow, canPersistReshapedHistory, OPENCLAW_BOOTSTRAP_FILES } from './compositor.js';
+export { Compositor, type CompositorDeps, applyToolGradientToWindow, canPersistReshapedHistory, OPENCLAW_BOOTSTRAP_FILES, resolveToolChainEjections, type ToolChainEjectionResult } from './compositor.js';
 
 export {
   type CollectionTrigger,
