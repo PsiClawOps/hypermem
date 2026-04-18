@@ -41,7 +41,18 @@ import type {
   BackgroundIndexer,
   FleetStore,
 } from '@psiclawops/hypermem';
-import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow, OPENCLAW_BOOTSTRAP_FILES, rotateSessionContext } from '@psiclawops/hypermem';
+import {
+  detectTopicShift,
+  stripMessageMetadata,
+  SessionTopicMap,
+  applyToolGradientToWindow,
+  OPENCLAW_BOOTSTRAP_FILES,
+  rotateSessionContext,
+  TRIM_SOFT_TARGET,
+  TRIM_GROWTH_THRESHOLD,
+  TRIM_HEADROOM_FRACTION,
+  resolveTrimBudgets,
+} from '@psiclawops/hypermem';
 import { evictStaleContent } from '@psiclawops/hypermem/image-eviction';
 import { repairToolPairs } from '@psiclawops/hypermem';
 import os from 'os';
@@ -324,9 +335,8 @@ function guardTelemetry(fields: {
 // softTarget (0.65): matches refreshRedisGradient → steady state never trims
 // growthThreshold (0.05): 5% overage buffer before trim fires
 // headroomFraction (0.10): trim target = softTarget * 0.90 → ~58.5% of budget
-const TRIM_SOFT_TARGET = 0.65;
-const TRIM_GROWTH_THRESHOLD = 0.05; // fire trim when window > softTarget * (1 + this)
-const TRIM_HEADROOM_FRACTION = 0.10; // trim to softTarget * (1 - this) for batch headroom
+// Canonical values live in the core package so plugin trim guards and compose
+// paths cannot drift.
 
 // Test-only: expose emitters so the unit test can exercise them directly
 // without standing up a real session. Wrapped in a getter object so the flag
@@ -339,11 +349,12 @@ export const __telemetryForTests = {
   beginTrimOwnerTurn,
   endTrimOwnerTurn,
   claimTrimOwner,
-  // B3: Expose batch-trim constants so tests can assert against the right values
-  // without embedding magic numbers.
+  // B3/C0.1: Expose the canonical policy surface so tests can assert against
+  // the shared source of truth instead of embedding formulas locally.
   TRIM_SOFT_TARGET,
   TRIM_GROWTH_THRESHOLD,
   TRIM_HEADROOM_FRACTION,
+  resolveTrimBudgets,
   reset(): void {
     if (_telemetryStream) {
       try { _telemetryStream.end(); } catch { /* ignore */ }
@@ -2268,11 +2279,11 @@ function createHyperMemEngine(): ContextEngine {
       // per-turn trim churn from minor natural growth (short assistant replies,
       // small tool outputs) while still catching genuine pressure spikes.
       try {
-        const trimSoftBudget = Math.floor(effectiveBudget * TRIM_SOFT_TARGET);
-        // B3: Trim trigger: only fire when window exceeds soft target + growth allowance.
-        const trimTriggerBudget = Math.floor(trimSoftBudget * (1 + TRIM_GROWTH_THRESHOLD));
-        // B3: Trim target: budget minus headroom so multiple turns fit before next trim.
-        const trimTargetBudget = Math.floor(trimSoftBudget * (1 - TRIM_HEADROOM_FRACTION));
+        const {
+          softBudget: trimSoftBudget,
+          triggerBudget: trimTriggerBudget,
+          targetBudget: trimTargetBudget,
+        } = resolveTrimBudgets(effectiveBudget);
         // Always read preTokens so we can make the skip decision and emit telemetry.
         const preTokensNormal = await estimateWindowTokens(hm, agentId, sk).catch(() => 0);
         const normalPath: TrimTelemetryPath = isSubagent ? 'assemble.subagent' : 'assemble.normal';

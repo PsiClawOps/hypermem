@@ -50,6 +50,7 @@ import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderLightFOS, resolveOu
 import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
 import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
+import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
 
 /**
  * Files that OpenClaw's contextInjection injects into the system prompt.
@@ -541,7 +542,7 @@ export function applyToolGradientToWindow(
   totalWindowTokens?: number,
 ): NeutralMessage[] {
   const reshaped = applyToolGradient(messages, { totalWindowTokens });
-  const targetTokens = Math.floor(tokenBudget * 0.65);
+  const { softBudget: targetTokens } = resolveTrimBudgets(tokenBudget);
   const clusters = clusterNeutralMessages(reshaped);
   let totalTokens = clusters.reduce((sum, cluster) => sum + cluster.tokenCost, 0);
   let start = 0;
@@ -2528,6 +2529,9 @@ export class Compositor {
       mecwBlend: b4MecwBlend,
       effectiveHistoryFraction: b4HistoryFraction,
       effectiveMemoryFraction: b4MemoryFraction,
+      trimSoftTarget: TRIM_BUDGET_POLICY.trimSoftTarget,
+      trimGrowthThreshold: TRIM_BUDGET_POLICY.trimGrowthThreshold,
+      trimHeadroomFraction: TRIM_BUDGET_POLICY.trimHeadroomFraction,
     };
 
     if (pressureHigh) {
@@ -2799,10 +2803,10 @@ export class Compositor {
     // on the next turn even in the steady-state path. Aligning the gradient cap to
     // the trim target means the rebuilt window already fits within the assemble
     // envelope by construction.
-    const GRADIENT_ASSEMBLE_TARGET = 0.65; // must match assemble.normal trimBudget fraction
+    const { softBudget: gradientAssembleBudget } = resolveTrimBudgets(tokenBudget ?? 0);
     const transformedHistory = applyToolGradient(rawHistory, {
       totalWindowTokens: tokenBudget && tokenBudget > 0
-        ? Math.floor(tokenBudget * GRADIENT_ASSEMBLE_TARGET)
+        ? gradientAssembleBudget
         : TOOL_PLANNING_BASELINE_WINDOW,
     });
 
@@ -2813,7 +2817,7 @@ export class Compositor {
     // and skip the trim entirely in the steady-state path.
     let historyToWrite: NeutralMessage[] = transformedHistory;
     if (tokenBudget && tokenBudget > 0) {
-      const budgetCap = Math.floor(tokenBudget * GRADIENT_ASSEMBLE_TARGET);
+      const budgetCap = gradientAssembleBudget;
       let runningTokens = 0;
       const clusters = clusterNeutralMessages(transformedHistory);
       const cappedClusters: NeutralMessageCluster<NeutralMessage>[] = [];

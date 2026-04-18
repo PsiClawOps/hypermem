@@ -93,9 +93,7 @@ async function run() {
 
   const { TRIM_SOFT_TARGET, TRIM_GROWTH_THRESHOLD, TRIM_HEADROOM_FRACTION } = T;
   const effectiveBudget = 10000;
-  const softBudget = Math.floor(effectiveBudget * TRIM_SOFT_TARGET);
-  const triggerBudget = Math.floor(softBudget * (1 + TRIM_GROWTH_THRESHOLD));
-  const targetBudget = Math.floor(softBudget * (1 - TRIM_HEADROOM_FRACTION));
+  const { softBudget, triggerBudget, targetBudget } = T.resolveTrimBudgets(effectiveBudget);
 
   // Simulate the B3 assemble.normal decision and telemetry emission.
   // Replicates the runtime logic using the exported helpers directly so we

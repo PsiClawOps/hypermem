@@ -2,7 +2,7 @@
  * HyperMem AfterTurn Stability — Unit/Fixture Test (Phase A Sprint 3)
  *
  * Validates the AfterTurn Rebuild/Trim Loop Fix:
- *   1. refreshRedisGradient() caps the rebuilt window at 0.65× budget
+ *   1. refreshRedisGradient() caps the rebuilt window at the canonical soft-target budget
  *      (same fraction as assemble.normal trimBudget).
  *   2. The next assemble() finds the window already within budget and skips trim.
  *   3. A 10-turn steady-pressure fixture converges: hot window size is stable
@@ -124,12 +124,12 @@ async function run() {
   }
 
   // ── Section 1: Gradient Cap Alignment ────────────────────────────────────
-  console.log('── Section 1: Gradient cap at 0.65 matches assemble trimBudget ──\n');
+  console.log('── Section 1: Gradient cap matches canonical assemble trim budget ──\n');
 
   const BUDGET = 100_000;           // tokens
-  const ASSEMBLE_FRACTION = 0.65;
+  const ASSEMBLE_FRACTION = T.TRIM_SOFT_TARGET;
   const OLD_GRADIENT_FRACTION = 0.80;  // what it used to be (Sprint 2 and before)
-  const NEW_GRADIENT_FRACTION = 0.65;  // Sprint 3 fix
+  const NEW_GRADIENT_FRACTION = T.TRIM_SOFT_TARGET;
 
   // Build 20 turns of history totaling ~90k tokens (90% pressure).
   const history20 = buildSteadyPressureHistory(20, 4500);
@@ -141,7 +141,7 @@ async function run() {
   const trimBudget = Math.floor(BUDGET * ASSEMBLE_FRACTION);
 
   console.log(`  OLD gradient cap (0.80): ${oldCap.tokens} tokens → assemble trimBudget: ${trimBudget}`);
-  console.log(`  NEW gradient cap (0.65): ${newCap.tokens} tokens → assemble trimBudget: ${trimBudget}`);
+  console.log(`  NEW gradient cap (${T.TRIM_SOFT_TARGET}): ${newCap.tokens} tokens → assemble trimBudget: ${trimBudget}`);
 
   assert(
     oldCap.tokens > trimBudget,

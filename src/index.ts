@@ -46,6 +46,14 @@ export type { DesiredStateEntry, ConfigEvent, DriftStatus } from './desired-stat
 export type { ModelState } from './cache.js';
 export { CacheLayer } from './cache.js';
 
+export {
+  TRIM_SOFT_TARGET,
+  TRIM_GROWTH_THRESHOLD,
+  TRIM_HEADROOM_FRACTION,
+  TRIM_BUDGET_POLICY,
+  resolveTrimBudgets,
+} from './budget-policy.js';
+
 export { Compositor, type CompositorDeps, applyToolGradientToWindow, canPersistReshapedHistory, OPENCLAW_BOOTSTRAP_FILES } from './compositor.js';
 
 export {

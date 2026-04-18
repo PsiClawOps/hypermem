@@ -370,6 +370,12 @@ export interface ComposeDiagnostics {
    * Effective memoryFraction used this compose pass (post-B4 blending).
    */
   effectiveMemoryFraction?: number;
+  /** Canonical trim soft-target fraction shared by compose and afterTurn refresh. */
+  trimSoftTarget?: number;
+  /** Canonical growth-allowance fraction before steady-state trim fires. */
+  trimGrowthThreshold?: number;
+  /** Canonical headroom fraction used when steady-state trim does fire. */
+  trimHeadroomFraction?: number;
 }
 
 export interface ComposeResult {
