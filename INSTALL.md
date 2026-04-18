@@ -73,11 +73,11 @@ Pick a style based on your hardware and cost tolerance. All styles support full 
 
 | Style | Embedding | Reranker | Semantic recall | Cost | Hardware |
 |---|---|---|---|---|---|
-| **Lightweight** | None (FTS5 only) | None | Keyword match only | Free | None |
-| **Local** | Ollama nomic-embed-text | Ollama Qwen3-Reranker | Good | Free | ~2GB RAM |
+| **Lightweight** | None (FTS5 only) | None | Keyword match only | Free | Any |
+| **Local** | Ollama nomic-embed-text | None (RRF) or Ollama Qwen3-Reranker (GPU only) | Good | Free | ~1GB RAM + GPU for reranker |
 | **High** | OpenRouter Qwen3-8B | OpenRouter Cohere Rerank 4 | Best (MTEB #1) | ~pennies/day | API key |
 
-The **reranker is optional at every tier.** Without one, results are ordered by RRF fusion score (FTS5 + vector). The reranker re-orders candidates by semantic relevance to the actual query, which measurably improves recall precision — but the system works without it.
+The **reranker is optional at every tier.** Without one, results are ordered by RRF fusion score (FTS5 + vector) — a solid default. The reranker improves precision but requires a GPU for the local option; CPU-only systems should leave it as None.
 
 ---
 
@@ -171,20 +171,22 @@ Fresh installs don't need this.
 
 The reranker re-orders semantic search candidates by relevance before injection. Without it, results are ordered by RRF fusion score (FTS5 + KNN). The reranker is optional — the system degrades gracefully to original order on any failure.
 
-| Provider | Model | Cost | Requires |
-|---|---|---|---|
-| **None** | — | Free | Nothing (default) |
-| **Ollama (local)** | Qwen3-Reranker-0.6B | Free | Ollama + ~600MB RAM |
-| **OpenRouter** | cohere/rerank-4-pro | ~pennies/day | API key |
-| **ZeroEntropy** | zerank-2 | ~pennies/day | API key |
+| Provider | Model | Cost | Hardware | Notes |
+|---|---|---|---|---|
+| **None** | — | Free | Any | Default — RRF fusion ordering |
+| **Ollama (local)** | Qwen3-Reranker-0.6B | Free | GPU recommended | CPU-only: too slow for >5 candidates |
+| **OpenRouter** | cohere/rerank-4-pro | ~pennies/day | Any | Best quality, uses existing key |
+| **ZeroEntropy** | zerank-2 | ~pennies/day | Any | Dedicated reranking service |
+
+**CPU-only systems:** skip the local reranker. Sequential inference makes it 2-10 seconds per document on CPU — unusable at any reasonable candidate depth. RRF fusion (`provider: "none"`) is the right default for CPU-only setups and is meaningfully better than raw vector ordering alone.
 
 ### No reranker (default)
 
-No config needed. RRF fusion of FTS5 + vector results is the default ordering. For most deployments this is sufficient.
+No config needed. RRF fusion of FTS5 + vector results is the default ordering. For most conversational memory workloads, this is sufficient and runs on any hardware.
 
 ### Local — Ollama Qwen3-Reranker-0.6B
 
-Best option for air-gapped or cost-sensitive setups. Slower than hosted (sequential inference per document) but free.
+Best option for air-gapped or GPU-equipped setups. Slower than hosted due to sequential inference (one model call per candidate document) — requires a GPU for practical use.
 
 ```bash
 ollama pull dengcao/Qwen3-Reranker-0.6B:Q5_K_M
