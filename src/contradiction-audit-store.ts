@@ -32,20 +32,33 @@ export class ContradictionAuditStore {
   }
 
   private ensureTable(): void {
+    // Synced with library-schema.ts v19 shape so in-memory test DBs match production.
+    // In real usage, setupLibraryDb() runs first and this CREATE TABLE is a no-op.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS contradiction_audits (
-        id                INTEGER PRIMARY KEY AUTOINCREMENT,
-        agent_id          TEXT NOT NULL,
-        new_content       TEXT NOT NULL,
-        new_domain        TEXT,
-        existing_fact_id  INTEGER NOT NULL,
-        existing_content  TEXT NOT NULL,
-        similarity_score  REAL NOT NULL DEFAULT 0,
-        contradiction_score REAL NOT NULL DEFAULT 0,
-        reason            TEXT NOT NULL,
-        source_ref        TEXT,
-        created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id             TEXT NOT NULL,
+        entity_type          TEXT NOT NULL CHECK(entity_type IN ('fact')),
+        new_content          TEXT NOT NULL,
+        new_domain           TEXT,
+        existing_fact_id     INTEGER NOT NULL,
+        existing_content     TEXT NOT NULL,
+        similarity_score     REAL NOT NULL DEFAULT 0,
+        contradiction_score  REAL NOT NULL DEFAULT 0,
+        reason               TEXT NOT NULL,
+        detector             TEXT NOT NULL DEFAULT 'heuristic_v1',
+        suggested_resolution TEXT NOT NULL DEFAULT 'review',
+        source_ref           TEXT,
+        status               TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending', 'accepted', 'dismissed', 'auto-superseded', 'auto-invalidated')),
+        resolution_notes     TEXT,
+        created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at          TEXT
       );
+      CREATE INDEX IF NOT EXISTS idx_contradiction_audits_agent_status
+        ON contradiction_audits (agent_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_contradiction_audits_existing_fact
+        ON contradiction_audits (existing_fact_id, status);
       CREATE INDEX IF NOT EXISTS idx_contradiction_audits_agent
         ON contradiction_audits (agent_id, created_at DESC);
     `);
@@ -63,13 +76,14 @@ export class ContradictionAuditStore {
     agentId: string,
     newFact: { content: string; domain?: string | null },
     candidate: ContradictionCandidate,
-    opts?: { sourceRef?: string }
+    opts?: { sourceRef?: string; status?: string }
   ): void {
+    const status = opts?.status ?? 'pending';
     this.db.prepare(`
       INSERT INTO contradiction_audits
-        (agent_id, new_content, new_domain, existing_fact_id, existing_content,
-         similarity_score, contradiction_score, reason, source_ref, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        (agent_id, entity_type, new_content, new_domain, existing_fact_id, existing_content,
+         similarity_score, contradiction_score, reason, source_ref, status, created_at)
+      VALUES (?, 'fact', ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `).run(
       agentId,
       newFact.content,
@@ -80,6 +94,7 @@ export class ContradictionAuditStore {
       candidate.contradictionScore,
       candidate.reason,
       opts?.sourceRef ?? null,
+      status,
     );
   }
 

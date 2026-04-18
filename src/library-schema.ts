@@ -21,7 +21,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, renameSync, existsSync } from 'node:fs';
 import { join as pathJoin, dirname } from 'node:path';
 
-export const LIBRARY_SCHEMA_VERSION = 18;
+export const LIBRARY_SCHEMA_VERSION = 19;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -1378,6 +1378,53 @@ export function migrateLibrary(db: DatabaseSync, engineVersion?: string): void {
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_dedup ON topics(agent_id, lower(name))');
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(18, nowIso());
+  }
+
+  if (currentVersion < 19) {
+    // V19: Extend contradiction_audits status CHECK constraint to include
+    // auto-resolution values. SQLite cannot ALTER CHECK constraints — recreate
+    // the table with the new constraint, preserving all existing rows.
+    // Use an explicit column list (not SELECT *) to guard against column drift.
+    db.exec(`
+      CREATE TABLE contradiction_audits_v19 (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id            TEXT NOT NULL,
+        entity_type         TEXT NOT NULL CHECK(entity_type IN ('fact')),
+        new_content         TEXT NOT NULL,
+        new_domain          TEXT,
+        existing_fact_id    INTEGER NOT NULL,
+        existing_content    TEXT NOT NULL,
+        similarity_score    REAL NOT NULL,
+        contradiction_score REAL NOT NULL,
+        reason              TEXT NOT NULL,
+        detector            TEXT NOT NULL DEFAULT 'heuristic_v1',
+        suggested_resolution TEXT NOT NULL DEFAULT 'review',
+        source_ref          TEXT,
+        status              TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending', 'accepted', 'dismissed', 'auto-superseded', 'auto-invalidated')),
+        resolution_notes    TEXT,
+        created_at          TEXT NOT NULL,
+        resolved_at         TEXT
+      );
+      INSERT INTO contradiction_audits_v19
+        (id, agent_id, entity_type, new_content, new_domain, existing_fact_id,
+         existing_content, similarity_score, contradiction_score, reason,
+         detector, suggested_resolution, source_ref, status, resolution_notes,
+         created_at, resolved_at)
+      SELECT
+        id, agent_id, entity_type, new_content, new_domain, existing_fact_id,
+        existing_content, similarity_score, contradiction_score, reason,
+        detector, suggested_resolution, source_ref, status, resolution_notes,
+        created_at, resolved_at
+      FROM contradiction_audits;
+      DROP TABLE contradiction_audits;
+      ALTER TABLE contradiction_audits_v19 RENAME TO contradiction_audits;
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_contradiction_audits_agent_status ON contradiction_audits(agent_id, status, created_at DESC)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_contradiction_audits_existing_fact ON contradiction_audits(existing_fact_id, status)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_contradiction_audits_agent ON contradiction_audits(agent_id, created_at DESC)');
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(19, nowIso());
   }
 
   // Always ensure meta exists before stamping the running engine version.

@@ -31,6 +31,7 @@ import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore } from './temporal-store.js';
 import { ContradictionDetector } from './contradiction-detector.js';
 import { ContradictionAuditStore } from './contradiction-audit-store.js';
+import { DEFAULT_CONTRADICTION_POLICY, type ContradictionResolutionPolicy } from './contradiction-resolution-policy.js';
 import { isSafeForSharedVisibility } from './secret-scanner.js';
 import type { VectorStore } from './vector-store.js';
 
@@ -90,6 +91,10 @@ export interface IndexerStats {
   tombstoned: number;
   /** Number of contradiction audits recorded for review this tick. */
   contradictionAuditsLogged: number;
+  /** Number of old facts auto-superseded via contradiction policy this tick. */
+  contradictionsAutoSuperseded: number;
+  /** Number of old facts auto-invalidated via contradiction policy this tick. */
+  contradictionsAutoInvalidated: number;
   elapsedMs: number;
   /** Number of messages that were post-cursor (unseen by model, high-signal priority). */
   postCursorMessages: number;
@@ -493,6 +498,7 @@ export class BackgroundIndexer {
   private readonly config: IndexerConfig;
   private readonly dreamerConfig: Partial<DreamerConfig>;
   private readonly globalWritePolicy: import('./types.js').GlobalWritePolicy;
+  private readonly contradictionPolicy: ContradictionResolutionPolicy;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private vectorStore: VectorStore | null = null;
@@ -513,6 +519,7 @@ export class BackgroundIndexer {
     private getCursor?: CursorFetcher,
     dreamerConfig?: Partial<DreamerConfig>,
     globalWritePolicy?: import('./types.js').GlobalWritePolicy,
+    contradictionPolicy?: ContradictionResolutionPolicy,
   ) {
     // Initialize synthesizer if libraryDb accessor is available
     if (getLibraryDb) {
@@ -544,6 +551,7 @@ export class BackgroundIndexer {
     };
     this.dreamerConfig = dreamerConfig ?? {};
     this.globalWritePolicy = globalWritePolicy ?? 'deny';
+    this.contradictionPolicy = contradictionPolicy ?? DEFAULT_CONTRADICTION_POLICY;
   }
 
   /**
@@ -932,6 +940,8 @@ export class BackgroundIndexer {
         tombstoned,
         postCursorMessages: 0,
         contradictionAuditsLogged: 0,
+        contradictionsAutoSuperseded: 0,
+        contradictionsAutoInvalidated: 0,
         elapsedMs: Date.now() - start,
       };
     }
@@ -968,6 +978,8 @@ export class BackgroundIndexer {
     let knowledgeUpserted = 0;
     let supersededFacts = 0;
     let contradictionAuditsLogged = 0;
+    let contradictionsAutoSuperseded = 0;
+    let contradictionsAutoInvalidated = 0;
     let maxMessageId = lastProcessedId;
 
     const contradictionDetector = new ContradictionDetector(factStore, this.vectorStore ?? undefined, {
@@ -989,20 +1001,14 @@ export class BackgroundIndexer {
       for (const { content: factContent, confidence: factConfidence } of factCandidates) {
         try {
           const factDomain = domainForAgent(agentId);
+          // 1. Detect contradictions BEFORE addFact (operates on existing facts only)
           const contradictionResult = await contradictionDetector.detectOnIngest(agentId, {
             content: factContent,
             domain: factDomain,
           });
-          for (const candidate of contradictionResult.contradictions.slice(0, 3)) {
-            contradictionAuditStore.recordFactAudit(
-              agentId,
-              { content: factContent, domain: factDomain },
-              candidate,
-              { sourceRef: `msg:${msg.id}` }
-            );
-            contradictionAuditsLogged++;
-          }
+          const topContradictions = contradictionResult.contradictions.slice(0, 3);
 
+          // 2. addFact first — we need fact.id for supersede linkage
           const fact = factStore.addFact(agentId, factContent, {
             scope: 'agent',
             domain: factDomain,
@@ -1012,6 +1018,40 @@ export class BackgroundIndexer {
             sourceRef: `msg:${msg.id}`,
           });
           factsExtracted++;
+
+          // 3. Apply contradiction policy for each candidate (now we have fact.id)
+          for (const candidate of topContradictions) {
+            const score = candidate.contradictionScore;
+            let auditStatus = 'pending';
+
+            if (score >= this.contradictionPolicy.autoSupersedeThreshold) {
+              const didSupersede = factStore.markSuperseded(candidate.existingFactId, fact.id);
+              if (didSupersede) {
+                contradictionsAutoSuperseded++;
+                // Immediately remove stale vector so it cannot surface in KNN recall
+                if (this.vectorStore) {
+                  this.vectorStore.removeItem('facts', candidate.existingFactId);
+                }
+              }
+              auditStatus = 'auto-superseded';
+            } else if (score >= this.contradictionPolicy.autoInvalidateThreshold) {
+              const didInvalidate = factStore.invalidateFact(candidate.existingFactId);
+              if (didInvalidate) {
+                contradictionsAutoInvalidated++;
+              }
+              auditStatus = 'auto-invalidated';
+            }
+
+            if (this.contradictionPolicy.alwaysAudit || auditStatus === 'pending') {
+              contradictionAuditStore.recordFactAudit(
+                agentId,
+                { content: factContent, domain: factDomain },
+                candidate,
+                { sourceRef: `msg:${msg.id}`, status: auditStatus }
+              );
+              contradictionAuditsLogged++;
+            }
+          }
 
           // ── Supersedes detection ─────────────────────────────────
           // Check if the newly extracted fact supersedes an existing one.
@@ -1124,6 +1164,8 @@ export class BackgroundIndexer {
       knowledgeUpserted,
       tombstoned,
       contradictionAuditsLogged,
+      contradictionsAutoSuperseded,
+      contradictionsAutoInvalidated,
       postCursorMessages: postCursor.length,
       elapsedMs: Date.now() - start,
     };
