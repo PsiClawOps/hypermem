@@ -1589,6 +1589,9 @@ export class Compositor {
     let diagCrossTopicKeystones = 0;
     // Sprint 4: hoisted so diagnostics block can read it regardless of includeHistory branch.
     let s4RescueTrimFired = false;
+    // C1: total tool-chain degradation counters across history budget-fit and safety-valve passes.
+    let c1CoEjections = 0;
+    let c1StubReplacements = 0;
     // Hoisted: activeTopicId/name resolved inside history block, used for window dual-write (VS-1) and wiki page injection
     let composedActiveTopicId: string | undefined;
     let composedActiveTopicName: string | undefined;
@@ -1685,8 +1688,22 @@ export class Compositor {
       for (let i = budgetClusters.length - 1; i >= 0; i--) {
         const cluster = budgetClusters[i];
         if (historyTokens + cluster.tokenCost > historyFillCap && includedClusters.length > 0) {
-          const droppedMsgCount = budgetClusters.slice(0, i + 1).reduce((s, c) => s + c.messages.length, 0);
-          warnings.push(`History truncated at cluster ${i + 1}/${budgetClusters.length} (${droppedMsgCount} messages dropped)`);
+          const droppedClusters = budgetClusters.slice(0, i + 1);
+          const droppedMsgCount = droppedClusters.reduce((s, c) => s + c.messages.length, 0);
+          const droppedToolResultCount = droppedClusters.reduce(
+            (sum, c) => sum + c.messages.filter(m => (m.toolResults?.length ?? 0) > 0).length,
+            0,
+          );
+          if (droppedToolResultCount > 0) {
+            c1CoEjections += droppedToolResultCount;
+            console.info(
+              `[hypermem:compositor] tool-chain co-eject reason=budget_cluster_drop count=${droppedToolResultCount} messages dropped`,
+            );
+          }
+          const c1Note = droppedToolResultCount > 0
+            ? ` [C1: ${droppedToolResultCount} co-ejected reason=budget_cluster_drop]`
+            : '';
+          warnings.push(`History truncated at cluster ${i + 1}/${budgetClusters.length} (${droppedMsgCount} messages dropped)${c1Note}`);
           s4RescueTrimFired = true;
           break;
         }
@@ -2503,9 +2520,6 @@ export class Compositor {
     const estimatedTotal = messages.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
     const hardCeiling = Math.floor(budget * 1.05);
 
-    let c1CoEjections = 0;
-    let c1StubReplacements = 0;
-
     if (estimatedTotal > hardCeiling) {
       const overage = estimatedTotal - budget;
       let trimmed = 0;
@@ -2539,13 +2553,13 @@ export class Compositor {
         // Replace in-place so the rest of the compose path sees the clean array.
         messages.length = 0;
         messages.push(...ejectionResult.messages);
-        c1CoEjections = ejectionResult.coEjections;
-        c1StubReplacements = ejectionResult.stubReplacements;
+        c1CoEjections += ejectionResult.coEjections;
+        c1StubReplacements += ejectionResult.stubReplacements;
 
         slots.history = Math.max(0, slots.history - trimmed);
         remaining += trimmed;
-        const c1Note = (c1CoEjections + c1StubReplacements > 0)
-          ? ` [C1: ${c1CoEjections} co-ejected, ${c1StubReplacements} stubbed]`
+        const c1Note = (ejectionResult.coEjections + ejectionResult.stubReplacements > 0)
+          ? ` [C1: ${ejectionResult.coEjections} co-ejected, ${ejectionResult.stubReplacements} stubbed]`
           : '';
         warnings.push(`Safety valve: trimmed ${trimCount} oldest history messages (${trimmed} tokens) to fit budget${c1Note}`);
       }

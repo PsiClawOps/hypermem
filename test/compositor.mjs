@@ -1242,6 +1242,65 @@ ${repeated}`;
       'Budget-pressure: diagnostics present');
   }
 
+  // ── C1: budget_cluster_drop telemetry ──
+  console.log('\n── C1: budget_cluster_drop telemetry ──');
+  {
+    const telemetrySessionKey = 'agent:budget-cluster-drop:webchat:main';
+    msgDb.prepare(`
+      INSERT INTO conversations (session_key, session_id, agent_id, channel_type, status, message_count, token_count_in, token_count_out, created_at, updated_at)
+      VALUES (?, 'sess-budget-drop', ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+    `).run(telemetrySessionKey, agentId);
+
+    const conv = msgDb.prepare('SELECT id FROM conversations WHERE session_key = ?').get(telemetrySessionKey);
+    const convId = conv.id;
+    const insertToolMsg = msgDb.prepare(`
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, message_index, is_heartbeat, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
+    `);
+
+    let msgIdx = 1;
+    for (let i = 0; i < 6; i++) {
+      const callId = `budget-drop-${i}`;
+      insertToolMsg.run(
+        convId,
+        agentId,
+        'assistant',
+        `tool call ${i}`,
+        JSON.stringify([{ id: callId, name: 'read', arguments: JSON.stringify({ path: `/tmp/${i}.md` }) }]),
+        null,
+        msgIdx++,
+      );
+      insertToolMsg.run(
+        convId,
+        agentId,
+        'user',
+        null,
+        null,
+        JSON.stringify([{ callId, name: 'read', content: 'R'.repeat(1200), isError: false }]),
+        msgIdx++,
+      );
+    }
+
+    const clusterDropResult = await compositor.compose({
+      agentId,
+      sessionKey: telemetrySessionKey,
+      tokenBudget: 1800,
+      provider: 'anthropic',
+      model: 'claude-opus-4-6',
+      includeHistory: true,
+      includeFacts: false,
+      includeLibrary: false,
+      includeContext: false,
+    }, msgDb, libDb);
+
+    assert(clusterDropResult.diagnostics.toolChainCoEjections !== undefined && clusterDropResult.diagnostics.toolChainCoEjections > 0,
+      `C1 budget_cluster_drop: co-ejection counter present (got ${clusterDropResult.diagnostics.toolChainCoEjections})`);
+    assert(clusterDropResult.diagnostics.toolChainStubReplacements === undefined,
+      `C1 budget_cluster_drop: no stub replacements expected (got ${clusterDropResult.diagnostics.toolChainStubReplacements})`);
+    assert(clusterDropResult.warnings.some(w => w.includes('budget_cluster_drop')),
+      `C1 budget_cluster_drop: warning includes reason (got [${clusterDropResult.warnings.join(', ')}])`);
+  }
+
   await runCachePrefixStabilitySuite(assert);
 
   // ── Cleanup ──
