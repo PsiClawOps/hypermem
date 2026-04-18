@@ -461,12 +461,15 @@ async function main() {
     process.exit(1);
   }
 
-  // 5. Build
-  console.log('\n[4/7] Building...');
+  // 5. Build all published artifacts
+  console.log('\n[4/7] Building published artifacts...');
   execSync('npm run build', { cwd: REPO_ROOT, stdio: 'inherit' });
+  execSync('npm --prefix plugin run build', { cwd: REPO_ROOT, stdio: 'inherit' });
+  execSync('npm --prefix memory-plugin run build', { cwd: REPO_ROOT, stdio: 'inherit' });
 
-  // 6. Test
-  console.log('\n[5/7] Running test suite...');
+  // 6. Test release path, including plugin runtime artifacts
+  console.log('\n[5/7] Running release-path validation...');
+  execSync('npm run validate:release-path', { cwd: REPO_ROOT, stdio: 'inherit' });
   execSync('npm test', { cwd: REPO_ROOT, stdio: 'inherit' });
 
   // 7. Commit
