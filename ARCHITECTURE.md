@@ -164,7 +164,7 @@ This means:
 `plugin/src/index.ts` — OpenClaw context engine plugin (`hypercompositor`, fills `contextEngine` slot):
 
 ```
-gateway:startup     → Init hypermem, auto-rotate DBs, hydrate fleet cache
+gateway:startup     → Init hypermem, auto-rotate DBs, seed fleet registry from workspace identities, hydrate fleet cache
 agent:bootstrap     → Warm session (history, facts, profile → Redis)
 context:assemble    → Full four-layer prompt assembly within token budget
 agent:afterTurn     → Ingest new messages to SQLite + Redis, trigger background indexer

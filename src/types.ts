@@ -490,6 +490,8 @@ export interface HyperMemConfig {
   dreaming?: import('./dreaming-promoter.js').DreamerConfig;
   /** Optional Obsidian vault integration. Default: disabled. */
   obsidian?: import('./obsidian-watcher.js').ObsidianConfig;
+  /** Startup sweep that seeds fleet_agents from workspace identity files. Default: true. */
+  startupFleetSeeding?: boolean;
   /**
    * Cache replay threshold (ms). When > 0, assemble() returns a cached
    * contextBlock (systemPromptAddition) for sessions active within this

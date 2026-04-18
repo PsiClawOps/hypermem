@@ -33,6 +33,9 @@ node test/compositor.mjs
 # Plugin pipeline (requires plugin build)
 npm run validate:plugin-pipeline
 
+# Startup fleet seeding on cold boot
+node test/fleet-startup-seeding.mjs
+
 # Release path hardening harness (builds core + plugin)
 npm run validate:release-path
 
@@ -52,6 +55,7 @@ node scripts/compose-report.mjs
 | `retrieval-regression.mjs` | Scope isolation, superseded-fact filtering, budget pressure, knowledge retrieval |
 | `compositor.mjs` | Four-layer compose, trigger routing, keystone injection, budget-pressure filtering |
 | `plugin-pipeline.mjs` | Real plugin assemble() path with seeded L4 memory, tight-budget proof |
+| `fleet-startup-seeding.mjs` | Cold-start fleet population from workspace identity files plus idempotent repeat-boot behavior |
 | `release-gateway-path.mjs` | Real plugin release-path proof: tool-chain ejection counters, ArtifactRef, replay marker, and degradation telemetry |
 | `compose-report.mjs` | Operator-readable diagnostics showing layer counts and budget decisions |
 

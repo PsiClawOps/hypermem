@@ -285,6 +285,7 @@ import type {
   MultiContextMiningOptions,
 } from './types.js';
 import { crossAgentQuery, defaultOrgRegistry, buildOrgRegistryFromDb, loadOrgRegistryFromDb, type OrgRegistry } from './cross-agent.js';
+import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -331,6 +332,237 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     batchSize: 100,
   },
 };
+
+export interface StartupFleetSeedOptions {
+  workspaceRoots?: string[];
+  includeMessageDbAgents?: boolean;
+  hydrateCache?: boolean;
+}
+
+export interface StartupFleetSeedResult {
+  discovered: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+  orgsCreated: number;
+  hydratedAgents: number;
+  hydratedSummary: boolean;
+}
+
+type StartupFleetCandidate = {
+  agentId: string;
+  displayName: string;
+  tier: string;
+  orgId: string | null;
+  reportsTo: string | null;
+  reportTargets: string[];
+  metadata: Record<string, unknown> | null;
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeAgentId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function parseIdentityField(markdown: string, label: string): string | null {
+  const pattern = new RegExp(`^\\s*-\\s+\\*\\*${escapeRegExp(label)}:\\*\\*\\s*(.+?)\\s*$`, 'mi');
+  const match = markdown.match(pattern);
+  return match?.[1]?.trim() || null;
+}
+
+function parseSoulName(markdown: string): string | null {
+  const anchor = markdown.match(/You are \*\*([^*]+)\*\*/);
+  if (anchor?.[1]) return anchor[1].trim();
+  const heading = markdown.match(/^#\s+SOUL\.md\s+[—-]\s+([^,\n]+)/m);
+  return heading?.[1]?.trim() || null;
+}
+
+function parseSoulRole(markdown: string): string | null {
+  const anchor = markdown.match(/You are \*\*[^*]+\*\*\s+[—-]\s+([^\.\n]+)/);
+  return anchor?.[1]?.trim() || null;
+}
+
+function inferTierFromRole(role: string | null): string {
+  const lower = (role || '').toLowerCase();
+  if (!lower) return 'unknown';
+  if (lower.includes('council') || lower.includes(' seat')) return 'council';
+  if (lower.includes('director')) return 'director';
+  if (lower.includes('specialist') || lower.includes('aide-de-camp')) return 'specialist';
+  return 'unknown';
+}
+
+function parseReportTargets(raw: string | null): string[] {
+  if (!raw) return [];
+  const stripped = raw.replace(/\([^)]*\)/g, ' ');
+  const parts = stripped
+    .split(/\s*(?:\+|,|\/|&|\band\b)\s*/i)
+    .map(part => normalizeAgentId(part))
+    .filter(Boolean);
+  return [...new Set(parts)];
+}
+
+function mergeStartupCandidate(
+  target: Map<string, StartupFleetCandidate>,
+  partial: Partial<StartupFleetCandidate> & { agentId: string },
+): void {
+  const existing = target.get(partial.agentId);
+  if (!existing) {
+    target.set(partial.agentId, {
+      agentId: partial.agentId,
+      displayName: partial.displayName || partial.agentId,
+      tier: partial.tier || 'unknown',
+      orgId: partial.orgId ?? null,
+      reportsTo: partial.reportsTo ?? null,
+      reportTargets: partial.reportTargets ? [...partial.reportTargets] : [],
+      metadata: partial.metadata ?? null,
+    });
+    return;
+  }
+
+  if (partial.displayName && existing.displayName === existing.agentId) {
+    existing.displayName = partial.displayName;
+  }
+  if (partial.tier && existing.tier === 'unknown') {
+    existing.tier = partial.tier;
+  }
+  if (partial.orgId && !existing.orgId) {
+    existing.orgId = partial.orgId;
+  }
+  if (partial.reportsTo && !existing.reportsTo) {
+    existing.reportsTo = partial.reportsTo;
+  }
+  if (partial.reportTargets?.length) {
+    existing.reportTargets = [...new Set([...existing.reportTargets, ...partial.reportTargets])];
+  }
+  if (partial.metadata) {
+    existing.metadata = { ...(existing.metadata ?? {}), ...partial.metadata };
+  }
+}
+
+function discoverStartupFleetCandidates(
+  dbManager: DatabaseManager,
+  opts: StartupFleetSeedOptions = {},
+): StartupFleetCandidate[] {
+  const homeDir = process.env.HOME || os.homedir();
+  const workspaceRoots = opts.workspaceRoots ?? [
+    path.join(homeDir, '.openclaw', 'workspace-council'),
+    path.join(homeDir, '.openclaw', 'workspace'),
+  ];
+  const candidates = new Map<string, StartupFleetCandidate>();
+
+  for (const root of workspaceRoots) {
+    if (!fs.existsSync(root)) continue;
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const workspacePath = path.join(root, entry.name);
+      const identityPath = path.join(workspacePath, 'IDENTITY.md');
+      const soulPath = path.join(workspacePath, 'SOUL.md');
+      if (!fs.existsSync(identityPath) && !fs.existsSync(soulPath)) continue;
+
+      let identityText = '';
+      let soulText = '';
+      try { if (fs.existsSync(identityPath)) identityText = fs.readFileSync(identityPath, 'utf8'); } catch {}
+      try { if (fs.existsSync(soulPath)) soulText = fs.readFileSync(soulPath, 'utf8'); } catch {}
+
+      const displayName =
+        parseIdentityField(identityText, 'Name') ||
+        parseSoulName(soulText) ||
+        entry.name;
+      const role =
+        parseIdentityField(identityText, 'Role') ||
+        parseSoulRole(soulText) ||
+        null;
+      const reportTargets = parseReportTargets(parseIdentityField(identityText, 'Reports to'));
+      const agentId = normalizeAgentId(entry.name || displayName);
+      if (!agentId) continue;
+
+      mergeStartupCandidate(candidates, {
+        agentId,
+        displayName,
+        tier: inferTierFromRole(role),
+        reportTargets,
+        metadata: {
+          startupSeed: {
+            source: 'workspace-identity',
+            workspacePath,
+            reportsToRaw: reportTargets,
+          },
+        },
+      });
+    }
+  }
+
+  if (opts.includeMessageDbAgents !== false) {
+    for (const agentId of dbManager.listAgents()) {
+      mergeStartupCandidate(candidates, {
+        agentId,
+        displayName: agentId,
+        tier: 'unknown',
+        metadata: {
+          startupSeed: {
+            source: 'message-db',
+          },
+        },
+      });
+    }
+  }
+
+  const resolved = [...candidates.values()];
+  const knownIds = new Set(resolved.map(candidate => candidate.agentId));
+  const councilIds = new Set(
+    resolved
+      .filter(candidate => candidate.tier === 'council')
+      .map(candidate => candidate.agentId),
+  );
+
+  for (const candidate of resolved) {
+    const preferredLead =
+      candidate.reportTargets.find(target => councilIds.has(target)) ||
+      candidate.reportTargets.find(target => knownIds.has(target) && target !== 'ragesaq') ||
+      null;
+
+    if (candidate.tier === 'council' && !candidate.orgId) {
+      candidate.orgId = `${candidate.agentId}-org`;
+    }
+    if (candidate.tier === 'director' && preferredLead) {
+      candidate.reportsTo = preferredLead;
+      if (!candidate.orgId) {
+        candidate.orgId = `${preferredLead}-org`;
+      }
+    }
+    if (!candidate.reportsTo && preferredLead && candidate.tier !== 'director') {
+      candidate.reportsTo = preferredLead;
+    }
+    if (candidate.reportsTo === 'ragesaq') {
+      candidate.reportsTo = null;
+    }
+
+    candidate.metadata = {
+      ...(candidate.metadata ?? {}),
+      startupSeed: {
+        ...(((candidate.metadata ?? {}) as Record<string, unknown>).startupSeed as Record<string, unknown> | undefined),
+        derivedOrgId: candidate.orgId,
+        derivedReportsTo: candidate.reportsTo,
+      },
+    };
+  }
+
+  return resolved.sort((a, b) => a.agentId.localeCompare(b.agentId));
+}
 
 /**
  * hypermem — the main API facade.
@@ -411,6 +643,25 @@ export class HyperMem {
       }
     } catch (err) {
       console.warn('[hypermem] Vector store init failed (non-fatal):', (err as Error).message);
+    }
+
+    const autoStartupFleetSeeding =
+      merged.startupFleetSeeding !== false &&
+      !path.resolve(merged.dataDir).startsWith(path.resolve(os.tmpdir()) + path.sep);
+
+    if (autoStartupFleetSeeding) {
+      try {
+        const startupSeed = await hm.seedFleetAgentsOnStartup();
+        if (startupSeed.discovered > 0) {
+          console.log(
+            `[hypermem] Startup fleet seed: ${startupSeed.inserted} inserted, ` +
+            `${startupSeed.updated} updated, ${startupSeed.skipped} unchanged, ` +
+            `${startupSeed.orgsCreated} orgs, ${startupSeed.hydratedAgents} cached`
+          );
+        }
+      } catch (err) {
+        console.warn('[hypermem] Startup fleet seed failed (non-fatal):', (err as Error).message);
+      }
     }
 
     return hm;
@@ -1558,7 +1809,107 @@ export class HyperMem {
     return store.listSources(opts);
   }
 
-  // ─── Fleet Cache Hydration ──────────────────────────────────
+  // ─── Fleet Startup Seeding + Cache Hydration ────────────────
+
+  /**
+   * Seed fleet agents from known workspace identity files and existing
+   * message-db agent directories, then optionally hydrate the Redis fleet cache.
+   *
+   * The sweep is idempotent: existing rows are only updated when startup-discovered
+   * values differ, so repeated boots do not duplicate or churn fleet rows.
+   */
+  async seedFleetAgentsOnStartup(opts: StartupFleetSeedOptions = {}): Promise<StartupFleetSeedResult> {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    const discovered = discoverStartupFleetCandidates(this.dbManager, opts);
+
+    let inserted = 0;
+    let updated = 0;
+    let skipped = 0;
+    let orgsCreated = 0;
+
+    for (const candidate of discovered) {
+      const existing = store.getAgent(candidate.agentId);
+      const mergedMetadata = {
+        ...(existing?.metadata ?? {}),
+        ...(candidate.metadata ?? {}),
+      };
+
+      if (!existing) {
+        store.upsertAgent(candidate.agentId, {
+          displayName: candidate.displayName,
+          tier: candidate.tier,
+          orgId: candidate.orgId ?? undefined,
+          reportsTo: candidate.reportsTo ?? undefined,
+          status: 'active',
+          metadata: Object.keys(mergedMetadata).length > 0 ? mergedMetadata : undefined,
+        });
+        inserted++;
+        continue;
+      }
+
+      const patch: {
+        displayName?: string;
+        tier?: string;
+        orgId?: string;
+        reportsTo?: string;
+        metadata?: Record<string, unknown>;
+      } = {};
+
+      if (candidate.displayName && candidate.displayName !== existing.displayName) {
+        patch.displayName = candidate.displayName;
+      }
+      if (candidate.tier && candidate.tier !== 'unknown' && candidate.tier !== existing.tier) {
+        patch.tier = candidate.tier;
+      }
+      if (candidate.orgId && candidate.orgId !== existing.orgId) {
+        patch.orgId = candidate.orgId;
+      }
+      if (candidate.reportsTo && candidate.reportsTo !== existing.reportsTo) {
+        patch.reportsTo = candidate.reportsTo;
+      }
+      if (JSON.stringify(mergedMetadata) !== JSON.stringify(existing.metadata ?? {})) {
+        patch.metadata = mergedMetadata;
+      }
+
+      if (Object.keys(patch).length === 0) {
+        skipped++;
+        continue;
+      }
+
+      store.upsertAgent(candidate.agentId, patch);
+      updated++;
+    }
+
+    for (const candidate of discovered) {
+      if (!candidate.orgId) continue;
+      if (store.getOrg(candidate.orgId)) continue;
+      if (candidate.tier !== 'council') continue;
+      store.upsertOrg(candidate.orgId, {
+        name: `${candidate.displayName} Org`,
+        leadAgentId: candidate.agentId,
+      });
+      orgsCreated++;
+    }
+
+    let hydratedAgents = 0;
+    let hydratedSummary = false;
+    if (opts.hydrateCache !== false) {
+      const hydrated = await this.hydrateFleetCache();
+      hydratedAgents = hydrated.agents;
+      hydratedSummary = hydrated.summary;
+    }
+
+    return {
+      discovered: discovered.length,
+      inserted,
+      updated,
+      skipped,
+      orgsCreated,
+      hydratedAgents,
+      hydratedSummary,
+    };
+  }
 
   /**
    * Hydrate the Redis fleet cache from library.db.
