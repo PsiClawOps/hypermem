@@ -325,13 +325,12 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     maxMessagesPerTick: 500,
   },
   embedding: {
-    provider: 'openai',
+    provider: 'ollama',
     ollamaUrl: 'http://localhost:11434',
-    openaiBaseUrl: 'https://openrouter.ai/api/v1',
-    model: 'qwen/qwen3-embedding-8b',
-    dimensions: 4096,
-    timeout: 15000,
-    batchSize: 100,
+    model: 'nomic-embed-text',
+    dimensions: 768,
+    timeout: 10000,
+    batchSize: 32,
   },
 };
 
