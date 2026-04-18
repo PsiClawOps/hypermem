@@ -51,7 +51,8 @@ import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
 import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
 import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
-import { formatToolChainStub, formatArtifactRef, isArtifactRef, type ArtifactRef, type DegradationReason } from './degradation.js';
+import { formatToolChainStub, parseToolChainStub, formatArtifactRef, isArtifactRef, type ArtifactRef, type DegradationReason } from './degradation.js';
+import { ToolArtifactStore } from './tool-artifact-store.js';
 
 /**
  * Files that OpenClaw's contextInjection injects into the system prompt.
@@ -1413,6 +1414,144 @@ export class Compositor {
   }
 
   /**
+   * Sprint 2.1: Hydrate tool-artifact stubs in the active turn.
+   *
+   * The active turn is the contiguous trailing block of tool-bearing messages
+   * at the tail of the assembled window (positional, NOT turn_id-based):
+   *   - Walk backward from the last message
+   *   - Collect tool-bearing messages (toolCalls != null OR toolResults != null)
+   *   - Plus the bounding user message that opened the turn
+   *   - Stop at the first plain message once at least one tool message was found
+   *
+   * For every toolResult stub with an `artifact=<id>` pointer, look up the
+   * full payload in ToolArtifactStore and replace the stub content in-place.
+   * Uses a single batched `WHERE id IN (...)` lookup (no N+1 queries).
+   * Touches `last_used_at` on every hydrated artifact in a single batch.
+   *
+   * Failure mode: if a lookup returns null (artifact missing), leave the stub
+   * unchanged and increment hydrationMisses.
+   *
+   * Returns diagnostics counters.
+   */
+  private hydrateActiveTurnArtifacts(
+    messages: NeutralMessage[],
+    db: DatabaseSync,
+  ): { artifactsHydrated: number; hydrationBytes: number; hydrationMisses: number } {
+    if (messages.length === 0) {
+      return { artifactsHydrated: 0, hydrationBytes: 0, hydrationMisses: 0 };
+    }
+
+    const store = new ToolArtifactStore(db);
+
+    // ── 1. Detect active turn (positional, backward walk) ─────────────────────
+    // Collect indices belonging to the active turn.
+    const activeTurnIndices: number[] = [];
+    let foundToolBearing = false;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      const isToolBearing = msg.toolCalls != null || msg.toolResults != null;
+      if (isToolBearing) {
+        foundToolBearing = true;
+        activeTurnIndices.push(i);
+      } else if (foundToolBearing) {
+        // First plain message after at least one tool-bearing message — this
+        // is the bounding user message that opened the turn. Include it and stop.
+        activeTurnIndices.push(i);
+        break;
+      } else {
+        // Haven't found any tool-bearing messages yet — still in non-tool tail
+        // (e.g., the last message is a plain user message). No active turn.
+        break;
+      }
+    }
+
+    if (activeTurnIndices.length === 0 || !foundToolBearing) {
+      return { artifactsHydrated: 0, hydrationBytes: 0, hydrationMisses: 0 };
+    }
+
+    // ── 2. Collect all artifactIds from stub toolResults in the active turn ───
+    // Map: artifactId -> array of [msgIndex, resultIndex] for in-place replacement
+    const artifactTargets = new Map<string, Array<{ msgIdx: number; resultIdx: number }>>(); 
+    for (const msgIdx of activeTurnIndices) {
+      const msg = messages[msgIdx];
+      if (!msg.toolResults) continue;
+      for (let resultIdx = 0; resultIdx < msg.toolResults.length; resultIdx++) {
+        const result = msg.toolResults[resultIdx];
+        const stub = parseToolChainStub(result.content);
+        if (stub && stub.artifactId) {
+          const existing = artifactTargets.get(stub.artifactId) ?? [];
+          existing.push({ msgIdx, resultIdx });
+          artifactTargets.set(stub.artifactId, existing);
+        }
+      }
+    }
+
+    if (artifactTargets.size === 0) {
+      return { artifactsHydrated: 0, hydrationBytes: 0, hydrationMisses: 0 };
+    }
+
+    // ── 3. Batch lookup ────────────────────────────────────────────────────────
+    const ids = Array.from(artifactTargets.keys());
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = db
+      .prepare(`SELECT * FROM tool_artifacts WHERE id IN (${placeholders})`)
+      .all(...ids) as Array<Record<string, unknown>>;
+
+    // Build id -> payload map
+    const payloadMap = new Map<string, string>();
+    for (const row of rows) {
+      payloadMap.set(row.id as string, row.payload as string);
+    }
+
+    // ── 4. Hydrate in-place ────────────────────────────────────────────────────
+    let artifactsHydrated = 0;
+    let hydrationBytes = 0;
+    let hydrationMisses = 0;
+    const touchIds: string[] = [];
+
+    for (const [artifactId, targets] of artifactTargets) {
+      const payload = payloadMap.get(artifactId);
+      if (payload == null) {
+        // Graceful miss — stub stays as-is
+        hydrationMisses += targets.length;
+        continue;
+      }
+      for (const { msgIdx, resultIdx } of targets) {
+        const msg = messages[msgIdx];
+        // Safety: if content doesn't look like a stub anymore (defensive idempotency check)
+        const existingContent = msg.toolResults![resultIdx].content;
+        if (!parseToolChainStub(existingContent)) {
+          // Already full content — pass through unchanged
+          continue;
+        }
+        // Replace stub with full payload
+        msg.toolResults![resultIdx] = {
+          ...msg.toolResults![resultIdx],
+          content: payload,
+        };
+        artifactsHydrated++;
+        hydrationBytes += Buffer.byteLength(payload, 'utf8');
+      }
+      touchIds.push(artifactId);
+    }
+
+    // ── 5. Batch touch last_used_at ───────────────────────────────────────────
+    if (touchIds.length > 0) {
+      const ts = new Date().toISOString();
+      const touchPlaceholders = touchIds.map(() => '?').join(', ');
+      try {
+        db.prepare(
+          `UPDATE tool_artifacts SET last_used_at = ? WHERE id IN (${touchPlaceholders})`
+        ).run(ts, ...touchIds);
+      } catch {
+        // Touch is best-effort — hydration still succeeded
+      }
+    }
+
+    return { artifactsHydrated, hydrationBytes, hydrationMisses };
+  }
+
+  /**
    * Compose a complete message array for sending to an LLM.
    *
    * Orchestrates all four memory layers:
@@ -1508,6 +1647,8 @@ export class Compositor {
                 context: cachedBundle.meta.slots['context'] ?? 0,
                 library: cachedBundle.meta.slots['library'] ?? 0,
               };
+              // Sprint 2.1: hydrate active-turn artifact stubs before converting.
+              const cachedHydration = this.hydrateActiveTurnArtifacts(cachedBundle.messages, db);
               return {
                 messages: toComposeOutputMessages(cachedBundle.messages),
                 tokenCount: cachedBundle.meta.totalTokens,
@@ -1520,6 +1661,9 @@ export class Compositor {
                   windowCacheHit: true,
                   // Carry forward the stored prefixHash so callers can observe it.
                   prefixHash: cachedBundle.meta.prefixHash ?? cachedBundle.meta.diagnostics.prefixHash,
+                  artifactsHydrated: cachedHydration.artifactsHydrated > 0 ? cachedHydration.artifactsHydrated : undefined,
+                  hydrationBytes: cachedHydration.hydrationBytes > 0 ? cachedHydration.hydrationBytes : undefined,
+                  hydrationMisses: cachedHydration.hydrationMisses > 0 ? cachedHydration.hydrationMisses : undefined,
                 },
               };
             }
@@ -2708,6 +2852,10 @@ export class Compositor {
       }
     }
 
+    // ─── Sprint 2.1: Hydrate active-turn artifact stubs ────────────────────
+    // Must run on NeutralMessages[] BEFORE provider translation.
+    const hydrationResult = this.hydrateActiveTurnArtifacts(messages, db);
+
     // ─── Translate to provider format (unless caller wants neutral) ───
     // When skipProviderTranslation is set, return NeutralMessages directly.
     // The context engine plugin uses this: the OpenClaw runtime handles its
@@ -2842,6 +2990,10 @@ export class Compositor {
       // C2: artifact oversize degradation telemetry
       artifactDegradations: c2ArtifactDegradations > 0 ? c2ArtifactDegradations : undefined,
       artifactOversizeThresholdTokens: c2ArtifactThresholdTokens,
+      // Sprint 2.1: tool artifact hydration telemetry
+      artifactsHydrated: hydrationResult.artifactsHydrated > 0 ? hydrationResult.artifactsHydrated : undefined,
+      hydrationBytes: hydrationResult.hydrationBytes > 0 ? hydrationResult.hydrationBytes : undefined,
+      hydrationMisses: hydrationResult.hydrationMisses > 0 ? hydrationResult.hydrationMisses : undefined,
     };
 
     if (pressureHigh) {

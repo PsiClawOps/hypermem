@@ -201,6 +201,11 @@ export class ToolArtifactStore {
     };
   }
 
+  /** Alias for get(id) — explicit name used by the compositor hydration pass. */
+  getById(id: string): ToolArtifactRecord | null {
+    return this.get(id);
+  }
+
   get(id: string): ToolArtifactRecord | null {
     const row = this.db
       .prepare('SELECT * FROM tool_artifacts WHERE id = ? LIMIT 1')

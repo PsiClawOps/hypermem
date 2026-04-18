@@ -399,6 +399,13 @@ export interface ComposeDiagnostics {
    * Scales with the effective model budget from B4.
    */
   artifactOversizeThresholdTokens?: number;
+  // ── Sprint 2.1: Tool artifact hydration ─────────────────────────────────
+  /** Number of artifact stubs rehydrated from tool_artifacts in the active turn. */
+  artifactsHydrated?: number;
+  /** Total bytes of payload injected by hydration this compose pass. */
+  hydrationBytes?: number;
+  /** Number of stubs whose artifact lookup returned no row (graceful miss). */
+  hydrationMisses?: number;
 }
 
 export interface ComposeResult {
