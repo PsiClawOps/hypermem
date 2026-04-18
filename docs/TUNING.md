@@ -97,6 +97,8 @@ The key lever here is `warmHistoryBudgetFraction`: it controls how much of the b
 
 Estimated context per turn: **30–50k tokens** on a 128k model, lower on turn 1 and growing naturally as history accumulates. Fact recall and keystone injection are active but conservative. Good for: users trying HyperMem for the first time, single-agent setups on smaller models, or any deployment where turn-1 context size is a concern.
 
+**Session continuity still works at light budget.** Cross-session history threads carry over, so returning users don't start from scratch. The semantic recall layer fires against the content of each incoming message — so by turn 2 or 3, as the user starts expressing what they actually want to work on, recall naturally surfaces relevant facts and context for that topic. Turn 1 is lean; the session warms into the right knowledge as the conversation takes shape. Users who are token-conscious will see a modest first turn, then progressively richer context as their topic clarifies — which is exactly when they need it.
+
 ### Full performance setup
 
 For long-running sessions, multi-agent fleets, or any deployment where the agent needs to remember what happened and why. All memory layers active.
