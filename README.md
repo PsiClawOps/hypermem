@@ -440,6 +440,12 @@ If you prefer, hand the install to your OpenClaw agent:
 
 > "Install hypermem following INSTALL.md. I'm running a [solo / multi-agent] setup."
 
+### Operator guides
+
+- **[docs/MEMORY_MD_AUTHORING.md](./docs/MEMORY_MD_AUTHORING.md)**, how to keep `MEMORY.md` compact, durable, and reviewable
+- **[docs/TUNING.md](./docs/TUNING.md)**, context assembly and output shaping profiles
+- **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**, moving data in from existing memory systems
+
 ### Tuning
 
 Two independent surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model writes). Pick a profile first — most deployments adjust one or two settings on top.
