@@ -25,6 +25,122 @@ Resolution order is:
 
 ---
 
+## Token Cost Philosophy
+
+HyperMem is deliberately context-heavy. Before you reach for the light preset, understand the tradeoff you're making.
+
+**The core proposition:** spending more tokens per turn means fewer turns to reach a useful answer.
+
+A standard HyperMem turn injects 40–90k tokens of structured context: recent conversation history, relevant facts, knowledge pages, semantic recall from past sessions, and behavioral directives. That context costs tokens. What it buys you:
+
+- The model starts each turn knowing what it already decided, not re-discovering it
+- Recalled facts prevent drift across long sessions
+- Keystone messages surface relevant older decisions without re-reading history
+- Behavioral directives compress output — the model writes tighter answers, which costs fewer output tokens and less follow-up clarification
+
+**The math most token-counters miss:** a 90k-token context turn that resolves a task in 1 exchange is cheaper than a 20k-token context turn that takes 4 exchanges to converge on the same answer. Input tokens are priced lower than output tokens at most providers; large context is less expensive than it appears in the first-turn sticker shock.
+
+That said, not every deployment needs full context richness. If you're running a single-purpose tool agent, a CI pipeline, or a constrained environment, the light preset is the right starting point.
+
+### Choosing a starting point
+
+| Situation | Preset | Reason |
+|---|---|---|
+| First install, trying it out | `light` | Minimal overhead, easy to reason about |
+| Single conversational agent | `standard` | Richer memory without fleet overhead |
+| Multi-agent fleet, long-running sessions | `full` | Full continuity, keystone recall, cross-session context |
+| CI pipelines, one-shot tasks | Custom light | Disable indexer, keep only history |
+| Cost audit / benchmarking | `light` + `enableFOS: false` | Near-zero memory overhead for baseline comparison |
+
+### What each preset costs per turn
+
+Estimates on a 128k model. Actual cost depends on session length and trigger hits.
+
+| Preset | Context injected | Effective input tokens | What you give up |
+|---|---|---|---|
+| `light` | History + behavior (~100 tok) | 35–50k | Fact recall, wiki, semantic search, keystones, cross-session |
+| `standard` | History + facts + wiki + behavior | 55–75k | Cross-session context, model adaptation |
+| `full` | All layers | 70–95k | Nothing — all layers active |
+| `full` + reduced | Tuned via knobs | 50–70k | Configurable per layer (see below) |
+
+The gap between `light` and `full` is roughly 20–40k tokens per turn. On Claude Sonnet at $3/M input tokens, that's $0.06–$0.12 per turn. At typical usage, cross-session continuity and avoided re-explanation often recover that cost in fewer total turns.
+
+### Light setup
+
+For cost-sensitive or simple deployments. Minimal memory overhead. History only — no fact recall, no semantic search, no cross-session context.
+
+```json
+{
+  "compositor": {
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.30,
+    "maxFacts": 5,
+    "maxHistoryMessages": 80,
+    "maxCrossSessionContext": 0,
+    "keystoneHistoryFraction": 0,
+    "wikiTokenCap": 0,
+    "hyperformProfile": "light"
+  },
+  "indexer": {
+    "factExtractionMode": "off"
+  },
+  "dreaming": {
+    "enabled": false
+  }
+}
+```
+
+Estimated context per turn: **30–45k tokens** on a 128k model. No background indexing, no fact extraction, no memory promotion. Good for: one-shot tools, CI pipelines, short sessions where continuity doesn't matter.
+
+### Full performance setup
+
+For long-running sessions, multi-agent fleets, or any deployment where the agent needs to remember what happened and why. All memory layers active.
+
+```json
+{
+  "compositor": {
+    "budgetFraction": 0.70,
+    "contextWindowReserve": 0.22,
+    "maxFacts": 40,
+    "maxHistoryMessages": 500,
+    "maxCrossSessionContext": 6000,
+    "keystoneHistoryFraction": 0.22,
+    "keystoneMaxMessages": 20,
+    "wikiTokenCap": 600,
+    "hyperformProfile": "full"
+  },
+  "indexer": {
+    "factExtractionMode": "tiered",
+    "periodicInterval": 300000
+  },
+  "dreaming": {
+    "enabled": true,
+    "maxPromotionsPerRun": 5,
+    "tickInterval": 12
+  }
+}
+```
+
+Estimated context per turn: **65–90k tokens** on a 128k model. Full fact recall, semantic search, keystone injection, cross-session context, and behavioral directives. Good for: persistent agents, council seats, agents that work across multiple sessions on the same project.
+
+### Tuning down from full without going to light
+
+You don't have to choose between light and full. The most common middle-ground adjustments:
+
+**Reduce fact injection** (saves 3–10k tokens): `maxFacts: 15`
+
+**Disable cross-session context** (saves 2–6k tokens): `maxCrossSessionContext: 0`
+
+**Reduce keystones** (saves 2–8k tokens): `keystoneHistoryFraction: 0.10`
+
+**Reduce wiki/knowledge** (saves 2–4k tokens): `wikiTokenCap: 300`
+
+**Drop to standard Hyperform** (saves 1–2k tokens): `hyperformProfile: 'standard'`
+
+A targeted combination of the above can bring a full-performance setup from 80k to 55k per turn without losing the core memory continuity that makes HyperMem worth running.
+
+---
+
 ## Quick Start: Pick a Profile
 
 Three pre-built profiles ship with hypermem. Each configures every setting to a coherent default for a common deployment pattern:
