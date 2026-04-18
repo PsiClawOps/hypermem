@@ -52,6 +52,7 @@ export const DEGRADATION_LIMITS = {
   toolId: 64,
   reason: 48,
   toolSummary: 120,
+  toolArtifactId: 64,
   artifactId: 64,
   artifactPath: 160,
   artifactFetchHint: 80,
@@ -85,6 +86,13 @@ export function isDegradationReason(value: string): value is DegradationReason {
  *
  * Prompt-visible format:
  *   [tool:<name> id=<id> status=ejected reason=<reason> summary=<stub>]
+ *
+ * Optional artifact pointer (Phase 1 of tool_artifacts):
+ *   [tool:<name> id=<id> status=ejected reason=<reason> artifact=<artifactId> summary=<stub>]
+ *
+ * The `artifact=` field is backwards-compatible and optional. When present, it
+ * lets the compositor rehydrate the full tool result payload from the
+ * tool_artifacts table without needing to rewrite the transcript.
  */
 export interface ToolChainStub {
   name: string;
@@ -92,24 +100,32 @@ export interface ToolChainStub {
   status: 'ejected';
   reason: DegradationReason;
   summary: string;
+  /** Optional durable pointer into the tool_artifacts table. */
+  artifactId?: string;
 }
 
-const TOOL_CHAIN_RE = /^\[tool:([^\s\]]+) id=([^\s\]]+) status=(ejected) reason=([^\s\]]+) summary=(.*)\]$/s;
+// Matches stubs with or without the optional artifact field.
+const TOOL_CHAIN_RE = /^\[tool:([^\s\]]+) id=([^\s\]]+) status=(ejected) reason=([^\s\]]+)(?: artifact=([^\s\]]+))? summary=(.*)\]$/s;
 
 export function formatToolChainStub(stub: ToolChainStub): string {
   const name = clampInline(stub.name, DEGRADATION_LIMITS.toolName);
   const id = clampInline(stub.id, DEGRADATION_LIMITS.toolId);
   const reason = clampInline(stub.reason, DEGRADATION_LIMITS.reason);
   const summary = clampInline(stub.summary, DEGRADATION_LIMITS.toolSummary);
-  return `[tool:${name} id=${id} status=${stub.status} reason=${reason} summary=${summary}]`;
+  const artifactPart = stub.artifactId
+    ? ` artifact=${clampInline(stub.artifactId, DEGRADATION_LIMITS.toolArtifactId)}`
+    : '';
+  return `[tool:${name} id=${id} status=${stub.status} reason=${reason}${artifactPart} summary=${summary}]`;
 }
 
 export function parseToolChainStub(text: string): ToolChainStub | null {
   const match = text.match(TOOL_CHAIN_RE);
   if (!match) return null;
-  const [, name, id, status, reason, summary] = match;
+  const [, name, id, status, reason, artifactId, summary] = match;
   if (status !== 'ejected' || !isDegradationReason(reason)) return null;
-  return { name, id, status: 'ejected', reason, summary };
+  const out: ToolChainStub = { name, id, status: 'ejected', reason, summary };
+  if (artifactId) out.artifactId = artifactId;
+  return out;
 }
 
 export function isToolChainStub(text: string): boolean {

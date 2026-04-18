@@ -16,6 +16,8 @@ export { DatabaseManager } from './db.js';
 export type { DatabaseManagerConfig } from './db.js';
 
 export { MessageStore } from './message-store.js';
+export { ToolArtifactStore } from './tool-artifact-store.js';
+export type { ToolArtifactRecord, PutToolArtifactInput } from './tool-artifact-store.js';
 export { FactStore } from './fact-store.js';
 export { KnowledgeStore } from './knowledge-store.js';
 export type { LinkType } from './knowledge-store.js';
@@ -772,6 +774,51 @@ export class HyperMem {
     const db = this.dbManager.getMessageDb(request.agentId);
     const libraryDb = this.dbManager.getLibraryDb();
     return this.compositor.compose(request, db, libraryDb);
+  }
+
+  // ─── Tool Artifacts (L2: per-agent, schema v9) ───────────────────
+
+  /**
+   * Persist a full tool result payload and return the durable record.
+   * Used by the plugin wave-guard to capture payloads before stubbing the
+   * transcript. Dedupes by content hash within the (agentId, sessionKey)
+   * scope — identical payloads bump ref_count on the existing row.
+   */
+  async recordToolArtifact(
+    agentId: string,
+    sessionKey: string,
+    input: Omit<import('./tool-artifact-store.js').PutToolArtifactInput, 'agentId' | 'sessionKey'>,
+  ): Promise<import('./tool-artifact-store.js').ToolArtifactRecord> {
+    const db = this.dbManager.getMessageDb(agentId);
+    this.dbManager.ensureAgent(agentId);
+    const { ToolArtifactStore } = await import('./tool-artifact-store.js');
+    const store = new ToolArtifactStore(db);
+    return store.put({ ...input, agentId, sessionKey });
+  }
+
+  /** Fetch a tool artifact by id. Returns null if unknown. */
+  async getToolArtifact(
+    agentId: string,
+    artifactId: string,
+  ): Promise<import('./tool-artifact-store.js').ToolArtifactRecord | null> {
+    const db = this.dbManager.getMessageDb(agentId);
+    const { ToolArtifactStore } = await import('./tool-artifact-store.js');
+    const store = new ToolArtifactStore(db);
+    const record = store.get(artifactId);
+    if (record) store.touch(artifactId);
+    return record;
+  }
+
+  /** List tool artifacts for a specific turn. */
+  async listToolArtifactsByTurn(
+    agentId: string,
+    sessionKey: string,
+    turnId: string,
+  ): Promise<import('./tool-artifact-store.js').ToolArtifactRecord[]> {
+    const db = this.dbManager.getMessageDb(agentId);
+    const { ToolArtifactStore } = await import('./tool-artifact-store.js');
+    const store = new ToolArtifactStore(db);
+    return store.listByTurn(sessionKey, turnId);
   }
 
   // ─── Archived Mining (L2: Messages) ─────────────────────────

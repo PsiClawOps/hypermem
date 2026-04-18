@@ -1867,66 +1867,88 @@ function createHyperMemEngine(): ContextEngine {
         // ── Pre-ingestion wave guard ──────────────────────────────────────────
         // Tool result payloads can be 10k-50k tokens each. When a parallel tool
         // batch (4-6 results) lands while the session is already at 70%+, storing
-        // full payloads pushes Redis past the nuclear path threshold before the
-        // next assemble() can trim. Use Redis current state (appropriate here —
-        // we're deciding what to write TO Redis) as the pressure signal.
-        // Above 70%: truncate toolResult content to a compact stub.
-        // Above 85%: skip recording entirely — assemble() trim is the safety net.
+        // full payloads pushes the hot window past the nuclear path threshold
+        // before the next assemble() can trim. Use current hot-window state as
+        // the pressure signal (appropriate here, we're deciding what to write TO
+        // the window).
+        //
+        // Above 70%: truncate toolResult content in transcript, but keep the
+        // full payload durable in tool_artifacts (schema v9). Stub carries
+        // artifactId so the compositor can hydrate on demand.
+        // Above 85%: full stub replacement in transcript, still with artifactId.
+        // At all levels: the full payload is persisted durably. No data loss.
         const isInboundToolResult = msg.role === 'tool' || msg.role === 'tool_result' || msg.role === 'toolResult';
         if (isInboundToolResult && neutral.toolResults && neutral.toolResults.length > 0) {
-          const redisTokens = await estimateWindowTokens(hm, agentId, sk);
+          const windowTokens = await estimateWindowTokens(hm, agentId, sk);
           const effectiveBudget = computeEffectiveBudget(undefined);
-          const redisPressure = redisTokens / effectiveBudget;
+          const windowPressure = windowTokens / effectiveBudget;
 
-          // Error tool results are always preserved intact — they're small and
+          // Error tool results are always preserved intact: they're small and
           // the model needs the error signal to understand what went wrong.
           const hasErrorResult = neutral.toolResults!.some(tr => tr.isError);
 
-          if (redisPressure > 0.85) {
-            // FIX (Bug 4): Never skip a tool result entirely — that leaves an orphaned
-            // tool_call in Redis history (the assistant message was already recorded).
-            // Anthropic rejects assistant messages with tool_calls that have no matching result.
-            // Instead, record a compact stub that preserves pair integrity in history.
-            const stubbedResults = neutral.toolResults!.map(tr => {
-              if (tr.isError) return tr; // preserve error results intact
-              return {
-                ...tr,
-                content: formatToolChainStub({
-                  name: tr.name || 'tool_result',
-                  id: tr.callId || 'unknown',
-                  status: 'ejected',
-                  reason: 'wave_guard_pressure_high',
-                  summary: `omitted at ${(redisPressure * 100).toFixed(0)}% Redis pressure`,
-                }),
-              };
-            });
-            const stubNeutral = { ...neutral, toolResults: stubbedResults };
-            console.log(`[hypermem] ingest wave-guard: stubbing toolResult (Redis pressure ${(redisPressure * 100).toFixed(0)}% > 85%)${hasErrorResult ? ' — error results preserved' : ''} — preserving pair integrity`);
-            await hm.recordAssistantMessage(agentId, sk, stubNeutral);
-            return { ingested: true };
-          } else if (redisPressure > 0.70) {
-            // Elevated: store truncated stub to preserve tool call pairing in history
+          // Only apply degradation / artifact capture above elevated pressure.
+          if (windowPressure > 0.70) {
             const MAX_TOOL_RESULT_CHARS = 500;
-            neutral = {
-              ...neutral,
-              toolResults: neutral.toolResults.map(tr => {
-                if (tr.isError) return tr; // preserve error results intact
-                const content = typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content);
-                if (content.length <= MAX_TOOL_RESULT_CHARS) return tr;
+            const highPressure = windowPressure > 0.85;
+            const reason: 'wave_guard_pressure_high' | 'wave_guard_pressure_elevated' =
+              highPressure ? 'wave_guard_pressure_high' : 'wave_guard_pressure_elevated';
+
+            // For each non-error tool result, persist the full payload as a
+            // durable artifact first, then rewrite the transcript entry to
+            // either a full stub (high pressure) or a truncated stub with an
+            // artifact pointer (elevated pressure).
+            const rewrittenResults = await Promise.all(
+              neutral.toolResults!.map(async tr => {
+                if (tr.isError) return tr;
+                const content =
+                  typeof tr.content === 'string'
+                    ? tr.content
+                    : JSON.stringify(tr.content);
+
+                // At elevated pressure, small payloads pass through unchanged.
+                if (!highPressure && content.length <= MAX_TOOL_RESULT_CHARS) {
+                  return tr;
+                }
+
+                let artifactId: string | undefined;
+                try {
+                  const record = await hm.recordToolArtifact(agentId, sk, {
+                    toolName: tr.name || 'tool_result',
+                    toolCallId: tr.callId || undefined,
+                    isError: false,
+                    payload: content,
+                    summary: content.slice(0, 160),
+                  });
+                  artifactId = record.id;
+                } catch (artErr) {
+                  console.warn(
+                    '[hypermem-plugin] tool artifact capture failed (non-fatal):',
+                    (artErr as Error).message,
+                  );
+                }
+
+                const summary = highPressure
+                  ? `omitted at ${(windowPressure * 100).toFixed(0)}% window pressure`
+                  : `truncated at ${(windowPressure * 100).toFixed(0)}% pressure: ${Math.ceil(content.length / 4)} tokens`;
+
                 return {
                   ...tr,
                   content: formatToolChainStub({
                     name: tr.name || 'tool_result',
                     id: tr.callId || 'unknown',
                     status: 'ejected',
-                    reason: 'wave_guard_pressure_elevated',
-                    summary: `truncated at ${(redisPressure * 100).toFixed(0)}% pressure: ${Math.ceil(content.length / 4)} tokens`,
+                    reason,
+                    summary,
+                    artifactId,
                   }),
                 };
               }),
-            };
+            );
+
+            neutral = { ...neutral, toolResults: rewrittenResults };
             console.log(
-              `[hypermem] ingest wave-guard: truncated toolResult (Redis pressure ${(redisPressure * 100).toFixed(0)}% > 70%)${hasErrorResult ? ' — error results preserved' : ''}`
+              `[hypermem] ingest wave-guard: ${highPressure ? 'stubbed' : 'truncated'} toolResult (window pressure ${(windowPressure * 100).toFixed(0)}% > ${highPressure ? 85 : 70}%)${hasErrorResult ? ' + error results preserved' : ''} - full payload persisted to tool_artifacts`,
             );
           }
         }
