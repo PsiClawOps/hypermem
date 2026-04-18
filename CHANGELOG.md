@@ -2,6 +2,17 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.8.0 — Phase C correctness, tool-artifact store, tiered contradiction resolution
+
+- **Phase C correctness cluster:** tool result guards (C1), budget cluster drop telemetry, oversized artifact degradation with canonical reference format, unified pressure accounting, replay recovery isolation. Prompt-path verification harness proves Phase C behavior in real gateway flow.
+- **Tool-artifact store:** durable tool result storage for wave-guard (Sprint 2.1 active-turn hydration, Sprint 2.2 retention sweep + sensitive-artifact flag). Tool results survive compaction cycles.
+- **Fleet registry seeding on startup:** fleet agents seeded from known identity files on every gateway start. No cold-start gaps in registry state after deploy.
+- **Tiered contradiction resolution (V19):** auto-supersede at ≥0.80 confidence, `invalidateFact` at 0.60–0.80, log-only below 0.60. Background indexer records contradiction audits. Schema v19.
+- **Dreaming promoter temporal-marker screen:** blocks durable promotion of time-bound facts without `validFrom`/`invalidAt` metadata. Prevents stale temporally-anchored facts from polluting the durable fact store.
+- **MEMORY.md authoring guide:** `docs/MEMORY_MD_AUTHORING.md` documents the static-vs-dynamic fact contract for operators and agents.
+- **B4 model-aware budgeting:** compositor resolves token budget from active model string when the runtime does not pass `tokenBudget` explicitly. Budget recomputes on mid-session model swap.
+- **BLAKE3 content dedup + RRF fusion:** O(1) fingerprint dedup across all retrieval paths. RRF merges FTS5 and KNN results. Zigzag ordering balances recency and relevance in composed output.
+
 ## 0.7.0 — Temporal validity, expertise storage, contradiction detection
 
 - **Temporal validity engine:** facts expire, get superseded, and decay over time. Stale knowledge auto-deprioritized in retrieval.

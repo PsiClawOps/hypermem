@@ -383,7 +383,7 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.5.6.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
+**Current release: hypermem 0.8.0.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
 
 | Requirement | Version | Notes |
 |---|---|---|
@@ -396,11 +396,11 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.5.6'
+  ENGINE_VERSION,        // '0.8.0'
   MIN_NODE_VERSION,      // '22.0.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
-  MAIN_SCHEMA_VERSION,   // 6  (hypermem.db)
-  LIBRARY_SCHEMA_VERSION_EXPORT, // 12 (library.db)
+  MAIN_SCHEMA_VERSION,   // 8  (hypermem.db)
+  LIBRARY_SCHEMA_VERSION_EXPORT, // 19 (library.db)
 } from '@psiclawops/hypermem';
 ```
 
