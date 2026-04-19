@@ -280,12 +280,12 @@ export function detectTopicShift(
     .map(m => m.textContent ?? '')
     .join(' ');
 
-  if (incomingEntities.size > 0 && contextText.length > 0) {
+  if (incomingEntities.size >= 2 && contextText.length > 0) {
     const contextEntities = extractEntities(contextText);
     const similarity = jaccardSimilarity(incomingEntities, contextEntities);
 
     // Low similarity + no continuation marker → likely a new topic
-    if (similarity < 0.1) {
+    if (similarity < 0.15) {
       const name = extractTopicName(text);
       return { topicId: null, isNewTopic: true, confidence: 0.6, topicName: name };
     }

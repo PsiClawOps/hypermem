@@ -12,6 +12,7 @@
  */
 
 import type { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import type {
   ComposeRequest,
   ComposeResult,
@@ -49,6 +50,9 @@ import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderLightFOS, resolveOu
 import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
 import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
+import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
+import { formatToolChainStub, parseToolChainStub, formatArtifactRef, isArtifactRef, type ArtifactRef, type DegradationReason } from './degradation.js';
+import { ToolArtifactStore } from './tool-artifact-store.js';
 
 /**
  * Files that OpenClaw's contextInjection injects into the system prompt.
@@ -59,6 +63,8 @@ export const OPENCLAW_BOOTSTRAP_FILES = new Set([
   'SOUL.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md',
   'AGENTS.md', 'HEARTBEAT.md', 'MEMORY.md', 'BOOTSTRAP.md',
 ]);
+
+const CACHE_PREFIX_BOUNDARY_SLOT = 'cache-prefix-boundary';
 
 /**
  * Model context window sizes by provider/model string (or partial match).
@@ -94,6 +100,128 @@ const MODEL_CONTEXT_WINDOWS: Array<{ pattern: string; tokens: number }> = [
   { pattern: 'deepseek-v3',      tokens: 131_072 },
   { pattern: 'deepseek',         tokens: 131_072 },
 ];
+
+// ─── B4: Model-Aware Lane Budgets ────────────────────────────────────────────
+
+/**
+ * MECW = Minimum Effective Context Window (empirically observed trustable budget).
+ *
+ * Even when a model advertises a large context window, the practical effective
+ * context for reasoning degrades past a threshold — the model starts to drop
+ * facts, lose track of earlier content, or produce lower-quality output.
+ *
+ * The MECW tuple:
+ *   - mecwFloor:   token floor below which the model always works correctly
+ *   - mecwCeiling: token ceiling above which trustability degrades; lane
+ *                  budgets are scaled to stay within this ceiling
+ *
+ * When totalBudget <= mecwFloor: use fixed fractions (all budget is safe)
+ * When totalBudget > mecwFloor and <= mecwCeiling: scale lane budgets linearly
+ * When totalBudget > mecwCeiling: clamp history+memory fractions so their
+ *   combined token allocation stays at or below mecwCeiling.
+ *
+ * Observation sources:
+ *   - Anthropic Claude 200k: effective retrieval degrades above ~140k input tokens (empirical)
+ *   - OpenAI 128k: reliable through 128k (no observed degradation)
+ *   - Gemini 1M: MECW ceiling empirically around 180k for reliable recall
+ *   - Small windows (GLM, Qwen, DeepSeek 131k): small enough to use full window
+ */
+interface ModelMECW {
+  /** Pattern matched against lowercased model string (same format as MODEL_CONTEXT_WINDOWS) */
+  pattern: string;
+  /** Tokens up to which the model reliably handles all injected content */
+  mecwFloor: number;
+  /** Tokens above which injected content starts to drop / degrade quality */
+  mecwCeiling: number;
+  /**
+   * Preferred historyFraction when the model is under MECW ceiling pressure.
+   * When budget > mecwFloor, history fraction is blended toward this value
+   * so history doesn't crowd out memory when the model can't see all of it.
+   */
+  preferredHistoryFraction: number;
+  /**
+   * Preferred memoryFraction when the model is under MECW ceiling pressure.
+   * History + memory combined should leave ~5-10% for fixed overhead.
+   */
+  preferredMemoryFraction: number;
+}
+
+const MODEL_MECW: ModelMECW[] = [
+  // Claude 200k: effective recall degrades above ~140k; clamp composite budget
+  { pattern: 'claude',    mecwFloor: 80_000,   mecwCeiling: 140_000, preferredHistoryFraction: 0.35, preferredMemoryFraction: 0.45 },
+  // Gemini 1M: reliable up to ~180k for grounded retrieval; less for recall
+  { pattern: 'gemini',   mecwFloor: 100_000,  mecwCeiling: 180_000, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.45 },
+  // OpenAI 128k: full window is trustable; use standard fractions
+  { pattern: 'gpt',      mecwFloor: 128_000,  mecwCeiling: 128_000, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+  { pattern: 'o3',       mecwFloor: 128_000,  mecwCeiling: 128_000, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+  { pattern: 'o4',       mecwFloor: 128_000,  mecwCeiling: 128_000, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+  // Smaller windows: full window is trustable
+  { pattern: 'qwen3',    mecwFloor: 262_144,  mecwCeiling: 262_144, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+  { pattern: 'qwen',     mecwFloor: 131_072,  mecwCeiling: 131_072, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+  { pattern: 'glm',      mecwFloor: 131_072,  mecwCeiling: 131_072, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+  { pattern: 'deepseek', mecwFloor: 131_072,  mecwCeiling: 131_072, preferredHistoryFraction: 0.40, preferredMemoryFraction: 0.40 },
+];
+
+/**
+ * B4: Compute model-aware lane budget fractions.
+ *
+ * Resolves the effective historyFraction and memoryFraction for a compose pass
+ * given the model and its effective budget. Uses the MECW catalog to blend
+ * away from fixed fractions when the budget approaches the MECW ceiling,
+ * so the compositor allocates proportionally for what the model can actually use.
+ *
+ * Returns:
+ *   historyFraction — fraction of effective budget to give history
+ *   memoryFraction  — fraction of effective budget to give memory pool
+ *   mecwProfile     — which MECW entry matched (undefined = no match / full window)
+ *   mecwApplied     — true when MECW adjustment changed the fractions
+ *   mecwBlend       — 0..1 blend factor (0 = below floor, 1 = at/above ceiling)
+ */
+export function resolveModelLaneBudgets(
+  model: string | undefined,
+  effectiveBudget: number,
+  configHistoryFraction: number,
+  configMemoryFraction: number,
+): {
+  historyFraction: number;
+  memoryFraction: number;
+  mecwProfile: string | undefined;
+  mecwApplied: boolean;
+  mecwBlend: number;
+} {
+  if (!model) {
+    return { historyFraction: configHistoryFraction, memoryFraction: configMemoryFraction, mecwProfile: undefined, mecwApplied: false, mecwBlend: 0 };
+  }
+  const normalized = model.toLowerCase();
+  for (const entry of MODEL_MECW) {
+    if (!normalized.includes(entry.pattern)) continue;
+
+    // Budget is at or below the floor — full window is safe, use config fractions
+    if (effectiveBudget <= entry.mecwFloor) {
+      return { historyFraction: configHistoryFraction, memoryFraction: configMemoryFraction, mecwProfile: entry.pattern, mecwApplied: false, mecwBlend: 0 };
+    }
+
+    // Budget is at or above the ceiling — use preferred fractions fully
+    if (effectiveBudget >= entry.mecwCeiling) {
+      return { historyFraction: entry.preferredHistoryFraction, memoryFraction: entry.preferredMemoryFraction, mecwProfile: entry.pattern, mecwApplied: true, mecwBlend: 1 };
+    }
+
+    // Budget is between floor and ceiling — linear blend
+    const blend = (effectiveBudget - entry.mecwFloor) / (entry.mecwCeiling - entry.mecwFloor);
+    const historyFraction = configHistoryFraction + blend * (entry.preferredHistoryFraction - configHistoryFraction);
+    const memoryFraction = configMemoryFraction + blend * (entry.preferredMemoryFraction - configMemoryFraction);
+    return {
+      historyFraction: Math.round(historyFraction * 1000) / 1000,
+      memoryFraction: Math.round(memoryFraction * 1000) / 1000,
+      mecwProfile: entry.pattern,
+      mecwApplied: true,
+      mecwBlend: Math.round(blend * 1000) / 1000,
+    };
+  }
+
+  // No MECW entry matched — use config fractions unchanged
+  return { historyFraction: configHistoryFraction, memoryFraction: configMemoryFraction, mecwProfile: undefined, mecwApplied: false, mecwBlend: 0 };
+}
 
 /**
  * Resolve effective token budget from model string.
@@ -210,6 +338,85 @@ function computeDynamicReserve(
   return { reserve: dynamicFrac, avgTurnCost, dynamic: true, pressureHigh: false };
 }
 
+// ─── Sprint 4: Pre-Compose History Depth Tightening ───────────────────────
+
+/** Session classification labels — used for adaptive depth selection. */
+export type SessionType = 'plain-chat' | 'tool-heavy';
+
+/**
+ * Classify a session based on the ratio of tool messages in the recent sample.
+ * 'tool-heavy': >= 20% of sampled messages carry tool calls or tool results.
+ * 'plain-chat': below that threshold (text-only or occasional tool use).
+ *
+ * The 20% threshold is intentionally conservative: most tool-heavy agents
+ * have tool messages on every assistant turn, so the ratio quickly exceeds
+ * the threshold without false-positive risk for light tool users.
+ */
+export function classifySessionType(messages: NeutralMessage[]): SessionType {
+  if (messages.length === 0) return 'plain-chat';
+  const toolCount = messages.filter(m => hasToolContent(m)).length;
+  return toolCount / messages.length >= 0.20 ? 'tool-heavy' : 'plain-chat';
+}
+
+/**
+ * Estimate the average token cost per message from a recent message sample.
+ * Uses the same estimateMessageTokens heuristic as the compositor budget walk
+ * so the returned depth is directly comparable to the historyFillCap check.
+ *
+ * Returns a conservative floor (100 tokens) when the sample is empty to avoid
+ * returning Infinity when historyBudget is divided by density.
+ */
+export function estimateObservedMsgDensity(messages: NeutralMessage[]): number {
+  if (messages.length === 0) return 100;
+  const total = messages.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
+  return Math.max(1, Math.ceil(total / messages.length));
+}
+
+/**
+ * Compute an adaptive history depth that pre-fits the session type.
+ *
+ * For plain-chat sessions: divides historyBudget by observed density to get a
+ * depth that fills the budget without overflow, bounded by the default maximum.
+ * Recall quality is preserved because the density estimate is honest for
+ * text-only turns.
+ *
+ * For tool-heavy sessions: applies a post-gradient compression factor
+ * (TOOL_GRADIENT_DENSITY_FACTOR = 0.30) to the observed pre-gradient density.
+ * This accounts for the gradient transform collapsing large tool payloads to
+ * prose stubs before the budget-fit walk runs. A tighter depth is chosen so
+ * the gradient-compressed messages fit inside historyFillCap without triggering
+ * a rescue trim.
+ *
+ * A 0.85 safety margin is applied to both paths so estimates that are
+ * slightly off don't cause immediate overflow on the first warm compose.
+ *
+ * Min/max bounds ensure the compositor always sees a meaningful window:
+ *   - plain-chat min: 20 messages (enough for short recent context)
+ *   - tool-heavy min: 15 messages (recent tool context + a few prior turns)
+ *   - shared max: config.maxHistoryMessages (never exceed the DB fetch ceiling)
+ */
+export function computeAdaptiveHistoryDepth(
+  sessionType: SessionType,
+  observedDensity: number,
+  historyBudgetTokens: number,
+  maxHistoryMessages: number,
+): number {
+  const SAFETY_MARGIN = 0.85;
+  if (sessionType === 'tool-heavy') {
+    // Tool-heavy: post-gradient density is much lower than pre-gradient.
+    // Gradient tiers collapse T2/T3 payloads to compact stubs (15-30% of original).
+    // Use a blended factor of 0.30 as the expected post-gradient density ratio.
+    const TOOL_GRADIENT_DENSITY_FACTOR = 0.30;
+    const postGradientDensity = Math.max(50, Math.floor(observedDensity * TOOL_GRADIENT_DENSITY_FACTOR));
+    const depth = Math.floor((historyBudgetTokens * SAFETY_MARGIN) / postGradientDensity);
+    return Math.min(maxHistoryMessages, Math.max(15, depth));
+  }
+  // Plain-chat: pre-gradient and post-gradient density are the same.
+  // historyBudget / avgMsgCost gives the message count that fills the budget.
+  const depth = Math.floor((historyBudgetTokens * SAFETY_MARGIN) / observedDensity);
+  return Math.min(maxHistoryMessages, Math.max(20, depth));
+}
+
 const DEFAULT_CONFIG: CompositorConfig = {
   // Primary budget controls
   budgetFraction: 0.703,
@@ -272,6 +479,7 @@ export { CollectionTrigger, DEFAULT_TRIGGERS, matchTriggers } from './trigger-re
 // ─── Test-only exports (not part of public API) ───────────────────────────
 // These are exported solely for unit testing. Do not use in production code.
 export { getTurnAge, applyToolGradient, appendToolSummary, truncateWithHeadTail, applyTierPayloadCap, evictLargeToolResults };
+// resolveToolChainEjections is a first-class export (C1); defined below evictLargeToolResults.
 
 
 interface NeutralMessageCluster<T extends NeutralMessage> {
@@ -337,7 +545,7 @@ export function applyToolGradientToWindow(
   totalWindowTokens?: number,
 ): NeutralMessage[] {
   const reshaped = applyToolGradient(messages, { totalWindowTokens });
-  const targetTokens = Math.floor(tokenBudget * 0.65);
+  const { softBudget: targetTokens } = resolveTrimBudgets(tokenBudget);
   const clusters = clusterNeutralMessages(reshaped);
   let totalTokens = clusters.reduce((sum, cluster) => sum + cluster.tokenCost, 0);
   let start = 0;
@@ -390,6 +598,31 @@ function estimateMessageTokens(msg: NeutralMessage): number {
   // Overhead per message (role, formatting)
   tokens += 4;
   return tokens;
+}
+
+
+function isDynamicBoundaryMessage(msg: NeutralMessage): boolean {
+  return Boolean((msg.metadata as Record<string, unknown> | undefined)?.dynamicBoundary);
+}
+
+function getStablePrefixMessages(messages: NeutralMessage[]): NeutralMessage[] {
+  const prefix: NeutralMessage[] = [];
+  for (const msg of messages) {
+    if (msg.role !== 'system') break;
+    if (isDynamicBoundaryMessage(msg)) break;
+    prefix.push(msg);
+  }
+  return prefix;
+}
+
+function computeStablePrefixHash(messages: NeutralMessage[]): string | undefined {
+  if (messages.length === 0) return undefined;
+  const hash = createHash('sha256');
+  for (const msg of messages) {
+    hash.update(msg.textContent ?? '');
+    hash.update('\n␞\n');
+  }
+  return hash.digest('hex');
 }
 
 function parseToolArgs(argumentsJson: string): Record<string, unknown> {
@@ -814,11 +1047,247 @@ function evictLargeToolResults<T extends NeutralMessage>(messages: T[]): T[] {
       const approxKTokens = Math.round(content.length / 4 / 1000);
       return {
         ...result,
-        content: `[tool result evicted: ~${approxKTokens}k tokens \u2014 use memory_search or re-run if needed]`,
+        content: formatToolChainStub({
+          name: result.name || 'tool_result',
+          id: result.callId || 'unknown',
+          status: 'ejected',
+          reason: 'eviction_oversize',
+          summary: `~${approxKTokens}k tokens, use memory_search or re-run if needed`,
+        }),
       };
     });
     return { ...msg, toolResults: evicted };
   }) as T[];
+}
+
+// ─── C2: Oversized artifact handling ────────────────────────────────────────
+
+/**
+ * C2: Resolve the artifact oversize threshold (in tokens) for the current compose pass.
+ *
+ * The threshold scales with the effective model budget from B4 so:
+ *   - Small-window models (16k–32k effective) get a proportionally tighter threshold
+ *     (threshold = budget × ARTIFACT_OVERSIZE_FRACTION, floor 500, ceiling 8000).
+ *   - Large-window models (200k+) get a higher ceiling but it still stays bounded
+ *     so artifacts never fill the lane unconditionally.
+ *
+ * ARTIFACT_BUDGET_FRACTION: fraction of the soft budget above which a single
+ * retrieved artifact/chunk is considered oversized. Default 0.10 (10%).
+ *
+ * Headroom preservation comes from replacing the oversized artifact with a cheap
+ * reference, not from shrinking the threshold itself.
+ */
+const ARTIFACT_BUDGET_FRACTION = 0.10;    // 10% of soft budget is the raw threshold
+const ARTIFACT_THRESHOLD_FLOOR = 500;     // never below 500 tokens (~2k chars)
+const ARTIFACT_THRESHOLD_CEILING = 8_000; // never above 8k tokens (~32k chars)
+
+export function resolveArtifactOversizeThreshold(effectiveBudget: number): number {
+  const { softBudget } = resolveTrimBudgets(effectiveBudget);
+  const raw = Math.floor(softBudget * ARTIFACT_BUDGET_FRACTION);
+  return Math.min(ARTIFACT_THRESHOLD_CEILING, Math.max(ARTIFACT_THRESHOLD_FLOOR, raw));
+}
+
+/**
+ * C2: Degrade an oversized doc chunk to a canonical ArtifactRef string.
+ *
+ * When a retrieved chunk's content exceeds the oversize threshold (in tokens),
+ * replace it with a fetchable canonical reference instead of injecting raw content.
+ * This preserves headroom in the lane instead of filling it with a large payload.
+ *
+ * Returns:
+ *   - `null`  → content is within the threshold; caller should inject as-is.
+ *   - `string` → canonical artifact reference; caller should inject this instead of raw content.
+ *
+ * The sizeTokens reported in the reference is the ACTUAL estimated size so downstream
+ * tooling can make informed decisions about whether to fetch.
+ */
+export function degradeOversizedDocChunk(
+  chunkId: string,
+  sourcePath: string,
+  content: string,
+  thresholdTokens: number,
+): string | null {
+  const contentTokens = estimateTokens(content);
+  if (contentTokens <= thresholdTokens) return null;
+
+  const ref: ArtifactRef = {
+    id: chunkId,
+    path: sourcePath,
+    sizeTokens: contentTokens,
+    status: 'degraded',
+    reason: 'artifact_oversize',
+    fetchHint: 'memory_search or re-read source file',
+  };
+  return formatArtifactRef(ref);
+}
+
+/**
+ * C2: Resolve oversized artifacts in a history message array.
+ *
+ * Scans the message array and replaces user/assistant messages whose text content
+ * exceeds the model-aware artifact oversize threshold with canonical ArtifactRef
+ * strings. System messages, tool-call messages, and tool-result messages are always
+ * passed through unchanged.
+ *
+ * @param messages — neutral message array (already-assembled history window)
+ * @param effectiveBudget — effective model budget from B4 (drives the threshold)
+ * @returns { messages, refCount, tokensSaved }
+ */
+export function resolveOversizedArtifacts<T extends NeutralMessage>(
+  messages: T[],
+  effectiveBudget: number,
+): { messages: T[]; refCount: number; tokensSaved: number } {
+  const thresholdTokens = resolveArtifactOversizeThreshold(effectiveBudget);
+  let refCount = 0;
+  let tokensSaved = 0;
+
+  const out = messages.map(msg => {
+    // System messages are never degraded (they are in the stable prefix).
+    if (msg.role === 'system') return msg;
+    // Tool content (calls/results) is C1's domain — never touch here.
+    if (msg.toolResults || msg.toolCalls) return msg;
+    const text = msg.textContent ?? '';
+    // Already a ref — idempotent; don't re-degrade.
+    if (isArtifactRef(text)) return msg;
+    const contentTokens = estimateTokens(text);
+    if (contentTokens <= thresholdTokens) return msg;
+
+    // Oversized — replace with canonical artifact reference.
+    const meta = msg as unknown as Record<string, unknown>;
+    const id = (typeof meta['_artifactId'] === 'string' ? meta['_artifactId'] : null)
+      ?? `msg-${createHash('sha1').update(`${msg.role}:${text}`).digest('hex').slice(0, 12)}`;
+    const path = (typeof meta['_artifactPath'] === 'string' ? meta['_artifactPath'] : null)
+      ?? '/unknown/artifact';
+    const ref: ArtifactRef = {
+      id,
+      path,
+      sizeTokens: contentTokens,
+      status: 'degraded',
+      reason: 'artifact_oversize',
+      fetchHint: 'memory_search',
+    };
+    const refText = formatArtifactRef(ref);
+    const refTokens = estimateTokens(refText);
+    tokensSaved += contentTokens - refTokens;
+    refCount++;
+    return { ...msg, textContent: refText };
+  });
+
+  return { messages: out, refCount, tokensSaved };
+}
+
+// ─── C1: Tool-chain dependency ejection ──────────────────────────────────────
+
+/**
+ * Result of a single tool-chain ejection pass.
+ * Returned by resolveToolChainEjections so callers can accumulate telemetry.
+ */
+export interface ToolChainEjectionResult<T extends NeutralMessage> {
+  /** The transformed message array (may contain stubs in place of results). */
+  messages: T[];
+  /** Number of tool-result messages fully co-ejected (removed from the array). */
+  coEjections: number;
+  /** Number of tool-result payloads replaced with a canonical stub string. */
+  stubReplacements: number;
+}
+
+/**
+ * C1: Centralized tool-chain dependency ejection.
+ *
+ * Given a set of tool-use message indices that are being ejected from the
+ * context window, this function ensures that no orphaned tool-results survive:
+ *
+ *   - For each ejected assistant message carrying toolCalls, collect the set
+ *     of call IDs being removed.
+ *   - Walk the remaining messages: if a message's toolResults reference any
+ *     of those ejected IDs:
+ *       a) If the message carries ONLY tool-results and no other text, co-eject
+ *          it (remove it entirely). This is the zero-cost path.
+ *       b) If the message also carries text content, replace only the dependent
+ *          toolResults entries with canonical ToolChainStub strings so the
+ *          message is not silently mutilated.
+ *
+ * The caller is responsible for removing the ejected messages by index BEFORE
+ * or AFTER calling this function; this function operates on the full array and
+ * marks the ejected indices for removal, returning the cleaned result.
+ *
+ * @param messages       Full message array (order preserved)
+ * @param ejectIndices   Set of indices into `messages` that are being ejected
+ *                       (these are the tool-use / assistant messages being removed).
+ * @param reason         DegradationReason to embed in any canonical stubs.
+ * @returns              Cleaned message array + telemetry counters.
+ */
+export function resolveToolChainEjections<T extends NeutralMessage>(
+  messages: T[],
+  ejectIndices: Set<number>,
+  reason: DegradationReason = 'eviction_oversize',
+): ToolChainEjectionResult<T> {
+  // Collect all tool-call IDs that are being ejected.
+  const ejectedCallIds = new Set<string>();
+  for (const idx of ejectIndices) {
+    const msg = messages[idx];
+    if (!msg) continue;
+    if (msg.toolCalls) {
+      for (const tc of msg.toolCalls) {
+        if (tc.id) ejectedCallIds.add(tc.id);
+      }
+    }
+  }
+
+  let coEjections = 0;
+  let stubReplacements = 0;
+
+  // If no call IDs were ejected, nothing to do beyond dropping the ejected messages.
+  if (ejectedCallIds.size === 0) {
+    const result = messages.filter((_, idx) => !ejectIndices.has(idx)) as T[];
+    return { messages: result, coEjections, stubReplacements };
+  }
+
+  // Walk all messages and handle dependent tool-results.
+  const transformed = messages.map((msg, idx): T | null => {
+    // Already being ejected — remove.
+    if (ejectIndices.has(idx)) return null;
+
+    if (!msg.toolResults || msg.toolResults.length === 0) return msg;
+
+    // Determine which results in this message depend on ejected calls.
+    const dependentResultIds = msg.toolResults
+      .map(r => r.callId)
+      .filter((id): id is string => Boolean(id) && ejectedCallIds.has(id as string));
+    if (dependentResultIds.length === 0) return msg;
+
+    const dependentSet = new Set(dependentResultIds);
+
+    // Case (a): The message carries ONLY tool-results and no other text content,
+    // and ALL of its results are dependent on ejected calls.
+    // Co-eject the whole message — zero budget cost, no stub needed.
+    const hasText = Boolean(msg.textContent && msg.textContent.trim().length > 0);
+    const hasNonDependentResults = msg.toolResults.some(r => !dependentSet.has(r.callId));
+
+    if (!hasText && !hasNonDependentResults) {
+      coEjections++;
+      return null;
+    }
+
+    // Case (b): Message has text or unrelated results — stub only the dependent entries.
+    const stubbedResults = msg.toolResults.map(result => {
+      if (!result.callId || !dependentSet.has(result.callId)) return result;
+      const stubContent = formatToolChainStub({
+        name: result.name || 'tool_result',
+        id: result.callId || 'unknown',
+        status: 'ejected',
+        reason,
+        summary: 'parent tool-use ejected from context window',
+      });
+      stubReplacements++;
+      return { ...result, content: stubContent };
+    });
+
+    return { ...msg, toolResults: stubbedResults };
+  });
+
+  const result = transformed.filter((m): m is T => m !== null);
+  return { messages: result, coEjections, stubReplacements };
 }
 
 /**
@@ -945,6 +1414,144 @@ export class Compositor {
   }
 
   /**
+   * Sprint 2.1: Hydrate tool-artifact stubs in the active turn.
+   *
+   * The active turn is the contiguous trailing block of tool-bearing messages
+   * at the tail of the assembled window (positional, NOT turn_id-based):
+   *   - Walk backward from the last message
+   *   - Collect tool-bearing messages (toolCalls != null OR toolResults != null)
+   *   - Plus the bounding user message that opened the turn
+   *   - Stop at the first plain message once at least one tool message was found
+   *
+   * For every toolResult stub with an `artifact=<id>` pointer, look up the
+   * full payload in ToolArtifactStore and replace the stub content in-place.
+   * Uses a single batched `WHERE id IN (...)` lookup (no N+1 queries).
+   * Touches `last_used_at` on every hydrated artifact in a single batch.
+   *
+   * Failure mode: if a lookup returns null (artifact missing), leave the stub
+   * unchanged and increment hydrationMisses.
+   *
+   * Returns diagnostics counters.
+   */
+  private hydrateActiveTurnArtifacts(
+    messages: NeutralMessage[],
+    db: DatabaseSync,
+  ): { artifactsHydrated: number; hydrationBytes: number; hydrationMisses: number } {
+    if (messages.length === 0) {
+      return { artifactsHydrated: 0, hydrationBytes: 0, hydrationMisses: 0 };
+    }
+
+    const store = new ToolArtifactStore(db);
+
+    // ── 1. Detect active turn (positional, backward walk) ─────────────────────
+    // Collect indices belonging to the active turn.
+    const activeTurnIndices: number[] = [];
+    let foundToolBearing = false;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      const isToolBearing = msg.toolCalls != null || msg.toolResults != null;
+      if (isToolBearing) {
+        foundToolBearing = true;
+        activeTurnIndices.push(i);
+      } else if (foundToolBearing) {
+        // First plain message after at least one tool-bearing message — this
+        // is the bounding user message that opened the turn. Include it and stop.
+        activeTurnIndices.push(i);
+        break;
+      } else {
+        // Haven't found any tool-bearing messages yet — still in non-tool tail
+        // (e.g., the last message is a plain user message). No active turn.
+        break;
+      }
+    }
+
+    if (activeTurnIndices.length === 0 || !foundToolBearing) {
+      return { artifactsHydrated: 0, hydrationBytes: 0, hydrationMisses: 0 };
+    }
+
+    // ── 2. Collect all artifactIds from stub toolResults in the active turn ───
+    // Map: artifactId -> array of [msgIndex, resultIndex] for in-place replacement
+    const artifactTargets = new Map<string, Array<{ msgIdx: number; resultIdx: number }>>(); 
+    for (const msgIdx of activeTurnIndices) {
+      const msg = messages[msgIdx];
+      if (!msg.toolResults) continue;
+      for (let resultIdx = 0; resultIdx < msg.toolResults.length; resultIdx++) {
+        const result = msg.toolResults[resultIdx];
+        const stub = parseToolChainStub(result.content);
+        if (stub && stub.artifactId) {
+          const existing = artifactTargets.get(stub.artifactId) ?? [];
+          existing.push({ msgIdx, resultIdx });
+          artifactTargets.set(stub.artifactId, existing);
+        }
+      }
+    }
+
+    if (artifactTargets.size === 0) {
+      return { artifactsHydrated: 0, hydrationBytes: 0, hydrationMisses: 0 };
+    }
+
+    // ── 3. Batch lookup ────────────────────────────────────────────────────────
+    const ids = Array.from(artifactTargets.keys());
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = db
+      .prepare(`SELECT * FROM tool_artifacts WHERE id IN (${placeholders})`)
+      .all(...ids) as Array<Record<string, unknown>>;
+
+    // Build id -> payload map
+    const payloadMap = new Map<string, string>();
+    for (const row of rows) {
+      payloadMap.set(row.id as string, row.payload as string);
+    }
+
+    // ── 4. Hydrate in-place ────────────────────────────────────────────────────
+    let artifactsHydrated = 0;
+    let hydrationBytes = 0;
+    let hydrationMisses = 0;
+    const touchIds: string[] = [];
+
+    for (const [artifactId, targets] of artifactTargets) {
+      const payload = payloadMap.get(artifactId);
+      if (payload == null) {
+        // Graceful miss — stub stays as-is
+        hydrationMisses += targets.length;
+        continue;
+      }
+      for (const { msgIdx, resultIdx } of targets) {
+        const msg = messages[msgIdx];
+        // Safety: if content doesn't look like a stub anymore (defensive idempotency check)
+        const existingContent = msg.toolResults![resultIdx].content;
+        if (!parseToolChainStub(existingContent)) {
+          // Already full content — pass through unchanged
+          continue;
+        }
+        // Replace stub with full payload
+        msg.toolResults![resultIdx] = {
+          ...msg.toolResults![resultIdx],
+          content: payload,
+        };
+        artifactsHydrated++;
+        hydrationBytes += Buffer.byteLength(payload, 'utf8');
+      }
+      touchIds.push(artifactId);
+    }
+
+    // ── 5. Batch touch last_used_at ───────────────────────────────────────────
+    if (touchIds.length > 0) {
+      const ts = new Date().toISOString();
+      const touchPlaceholders = touchIds.map(() => '?').join(', ');
+      try {
+        db.prepare(
+          `UPDATE tool_artifacts SET last_used_at = ? WHERE id IN (${touchPlaceholders})`
+        ).run(ts, ...touchIds);
+      } catch {
+        // Touch is best-effort — hydration still succeeded
+      }
+    }
+
+    return { artifactsHydrated, hydrationBytes, hydrationMisses };
+  }
+
+  /**
    * Compose a complete message array for sending to an LLM.
    *
    * Orchestrates all four memory layers:
@@ -975,6 +1582,11 @@ export class Compositor {
     // Particularly effective for low-frequency sessions (heartbeat agents, council
     // seats between rounds). TTL on the cache write remains 120s — this is a
     // conservative early-exit before the TTL expires, not a TTL extension.
+    //
+    // B2: prevPrefixHash is set when a cached bundle is found but bypassed due to
+    // prefix-input mutation. It is surfaced in the full-compose diagnostics so
+    // callers can confirm the bypass fired correctly.
+    let _prevPrefixHashFromBypass: string | undefined;
     if (request.includeHistory !== false && request.skipWindowCache !== true) {
       try {
         const newestRow = db.prepare(
@@ -1004,7 +1616,29 @@ export class Compositor {
             // we can't slice a cached bundle safely, so skip cache.
             const depthOk = !request.historyDepth;
 
-            if (budgetOk && factsOk && libraryOk && contextOk && depthOk) {
+            // B2: Stable-prefix hash check.
+            // If the system/identity slots changed since this cache entry was
+            // written, the stable prefix is stale even if cursor freshness
+            // passes. Compute a cheap input hash from slot contents and compare
+            // against the one stored in the cache meta. If no stored hash exists
+            // (pre-B2 cache entries), fall through to prefix check on the
+            // cached message content itself.
+            let prefixInputOk = true;
+            const _cachedPrefixInputHash = cachedBundle.meta.prefixInputHash;
+            if (_cachedPrefixInputHash) {
+              const _sysSlot = await this.cache.getSlot(request.agentId, request.sessionKey, 'system');
+              const _idSlot = await this.cache.getSlot(request.agentId, request.sessionKey, 'identity');
+              const _incomingInputHash = createHash('sha256')
+                .update(_sysSlot ?? '')
+                .update('\n␞\n')
+                .update(_idSlot ?? '')
+                .digest('hex');
+              if (_incomingInputHash !== _cachedPrefixInputHash) {
+                prefixInputOk = false;
+              }
+            }
+
+            if (budgetOk && factsOk && libraryOk && contextOk && depthOk && prefixInputOk) {
               const cachedSlots: SlotTokenCounts = {
                 system: cachedBundle.meta.slots['system'] ?? 0,
                 identity: cachedBundle.meta.slots['identity'] ?? 0,
@@ -1013,6 +1647,8 @@ export class Compositor {
                 context: cachedBundle.meta.slots['context'] ?? 0,
                 library: cachedBundle.meta.slots['library'] ?? 0,
               };
+              // Sprint 2.1: hydrate active-turn artifact stubs before converting.
+              const cachedHydration = this.hydrateActiveTurnArtifacts(cachedBundle.messages, db);
               return {
                 messages: toComposeOutputMessages(cachedBundle.messages),
                 tokenCount: cachedBundle.meta.totalTokens,
@@ -1023,10 +1659,17 @@ export class Compositor {
                 diagnostics: {
                   ...cachedBundle.meta.diagnostics,
                   windowCacheHit: true,
+                  // Carry forward the stored prefixHash so callers can observe it.
+                  prefixHash: cachedBundle.meta.prefixHash ?? cachedBundle.meta.diagnostics.prefixHash,
+                  artifactsHydrated: cachedHydration.artifactsHydrated > 0 ? cachedHydration.artifactsHydrated : undefined,
+                  hydrationBytes: cachedHydration.hydrationBytes > 0 ? cachedHydration.hydrationBytes : undefined,
+                  hydrationMisses: cachedHydration.hydrationMisses > 0 ? cachedHydration.hydrationMisses : undefined,
                 },
               };
             }
-            // Incompatible request — fall through to full compose
+            // Incompatible request — fall through to full compose.
+            // Surface prevPrefixHash so the full compose diagnostics can report it.
+            _prevPrefixHashFromBypass = cachedBundle.meta.prefixHash ?? cachedBundle.meta.diagnostics.prefixHash;
           }
         }
       } catch {
@@ -1046,6 +1689,49 @@ export class Compositor {
     const { reserve: dynamicReserve, avgTurnCost, dynamic: isDynamic, pressureHigh } =
       computeDynamicReserve(sampleMessages, totalWindow, this.config);
     const budget = request.tokenBudget || resolveModelBudget(request.model, this.config.defaultTokenBudget, dynamicReserve, this.config.budgetFraction);
+
+    // B4: Model-aware lane budgets.
+    // Resolve historyFraction and memoryFraction by blending config values toward
+    // model-preferred fractions when the effective budget approaches the MECW ceiling.
+    // This ensures the compositor doesn't allocate more history than the model can
+    // reliably reason over, and adjusts the memory pool proportionally.
+    const _b4ConfigHistoryFraction = this.config.historyFraction ?? 0.40;
+    const _b4ConfigMemoryFraction = this.config.memoryFraction ?? 0.40;
+    const {
+      historyFraction: b4HistoryFraction,
+      memoryFraction: b4MemoryFraction,
+      mecwProfile: b4MecwProfile,
+      mecwApplied: b4MecwApplied,
+      mecwBlend: b4MecwBlend,
+    } = resolveModelLaneBudgets(request.model, budget, _b4ConfigHistoryFraction, _b4ConfigMemoryFraction);
+
+    // C2: Compute the artifact oversize threshold once per compose pass from the
+    // effective model budget (from B4). Chunk injection paths consult this threshold
+    // to degrade retrieved payloads that would fill the lane instead of injecting them.
+    const c2ArtifactThresholdTokens = resolveArtifactOversizeThreshold(budget);
+    let c2ArtifactDegradations = 0;
+    // Sprint 4: Pre-compose history depth tightening.
+    // Classify the session and compute an adaptive depth from observed message
+    // density. This replaces the old fixed maxHistoryMessages ceiling that over-
+    // fed the compositor for tool-heavy sessions.
+    //
+    // If the caller already passed historyDepth (plugin assemble path), honour it
+    // as an explicit cap — the adaptive depth still applies as a lower bound so
+    // we never request more than the budget can absorb.
+    const s4SessionType: SessionType = classifySessionType(sampleMessages);
+    const s4ObservedDensity: number = estimateObservedMsgDensity(sampleMessages);
+    const s4HistoryBudget: number = Math.floor(budget * b4HistoryFraction);
+    const s4AdaptiveDepth: number = computeAdaptiveHistoryDepth(
+      s4SessionType,
+      s4ObservedDensity,
+      s4HistoryBudget,
+      this.config.maxHistoryMessages,
+    );
+    // Effective depth: caller-provided historyDepth overrides adaptive when it is
+    // the tighter constraint; otherwise use the adaptive depth.
+    const s4EffectiveDepth: number = request.historyDepth
+      ? Math.min(request.historyDepth, s4AdaptiveDepth)
+      : s4AdaptiveDepth;
     let remaining = budget;
 
     // Phase 0 fence enforcement: resolve the compaction fence for this conversation.
@@ -1166,6 +1852,11 @@ export class Compositor {
 
     // ─── Conversation History ──────────────────────────────────
     let diagCrossTopicKeystones = 0;
+    // Sprint 4: hoisted so diagnostics block can read it regardless of includeHistory branch.
+    let s4RescueTrimFired = false;
+    // C1: total tool-chain degradation counters across history budget-fit and safety-valve passes.
+    let c1CoEjections = 0;
+    let c1StubReplacements = 0;
     // Hoisted: activeTopicId/name resolved inside history block, used for window dual-write (VS-1) and wiki page injection
     let composedActiveTopicId: string | undefined;
     let composedActiveTopicName: string | undefined;
@@ -1210,7 +1901,7 @@ export class Compositor {
       const rawHistoryMessages = await this.getHistory(
         request.agentId,
         request.sessionKey,
-        request.historyDepth || this.config.maxHistoryMessages,
+        s4EffectiveDepth,   // Sprint 4: adaptive depth (replaces fixed maxHistoryMessages)
         store,
         activeTopicId,
         fenceMessageId,
@@ -1241,29 +1932,46 @@ export class Compositor {
       // Replace oversized stale results with stubs so they don't burn budget.
       // Current-turn results (turn age 0) are never evicted.
       const evictedHistory = evictLargeToolResults(transformedHistory);
+      const c2ResolvedHistory = resolveOversizedArtifacts(evictedHistory, budget);
+      c2ArtifactDegradations += c2ResolvedHistory.refCount;
 
       // ── Budget-fit: walk newest→oldest, drop whole clusters ─────────────
       // Group tool_use + tool_result messages into clusters so they are kept
       // or dropped as a unit. Breaking mid-cluster creates orphaned tool
       // pairs that repairToolPairs has to strip downstream — wasting budget
       // and leaving gaps in conversation continuity.
-      const budgetClusters = clusterNeutralMessages(evictedHistory);
+      const budgetClusters = clusterNeutralMessages(c2ResolvedHistory.messages);
       let historyTokens = 0;
       const includedClusters: NeutralMessageCluster<NeutralMessage>[] = [];
 
       // Pre-allocate history budget. historyFraction is a fraction of the
       // effective token budget (post-reserve). Falls back to unbounded fill
       // (remaining) when historyFraction is not set.
-      const historyBudget = this.config.historyFraction != null
-        ? Math.floor(budget * this.config.historyFraction)
-        : remaining;
+      // B4: uses b4HistoryFraction (model-aware, blended from MECW catalog) instead
+      // of raw config.historyFraction so history doesn't overflow MECW ceiling.
+      const historyBudget = Math.floor(budget * b4HistoryFraction);
       const historyFillCap = Math.min(historyBudget, remaining);
 
       for (let i = budgetClusters.length - 1; i >= 0; i--) {
         const cluster = budgetClusters[i];
         if (historyTokens + cluster.tokenCost > historyFillCap && includedClusters.length > 0) {
-          const droppedMsgCount = budgetClusters.slice(0, i + 1).reduce((s, c) => s + c.messages.length, 0);
-          warnings.push(`History truncated at cluster ${i + 1}/${budgetClusters.length} (${droppedMsgCount} messages dropped)`);
+          const droppedClusters = budgetClusters.slice(0, i + 1);
+          const droppedMsgCount = droppedClusters.reduce((s, c) => s + c.messages.length, 0);
+          const droppedToolResultCount = droppedClusters.reduce(
+            (sum, c) => sum + c.messages.filter(m => (m.toolResults?.length ?? 0) > 0).length,
+            0,
+          );
+          if (droppedToolResultCount > 0) {
+            c1CoEjections += droppedToolResultCount;
+            console.info(
+              `[hypermem:compositor] tool-chain co-eject reason=budget_cluster_drop count=${droppedToolResultCount} messages dropped`,
+            );
+          }
+          const c1Note = droppedToolResultCount > 0
+            ? ` [C1: ${droppedToolResultCount} co-ejected reason=budget_cluster_drop]`
+            : '';
+          warnings.push(`History truncated at cluster ${i + 1}/${budgetClusters.length} (${droppedMsgCount} messages dropped)${c1Note}`);
+          s4RescueTrimFired = true;
           break;
         }
         includedClusters.unshift(cluster);
@@ -1400,17 +2108,12 @@ export class Compositor {
 
       // Memory budget pool: facts, wiki, semantic recall, cross-session, and
       // trigger-fired doc chunks all draw from this shared pool via `remaining`.
-      // memoryFraction is a fraction of the effective token budget (post-reserve).
-      // Falls back to targetBudgetFraction cap behavior when memoryFraction is not set.
+      // B4: uses b4MemoryFraction (model-aware, blended from MECW catalog) instead
+      // of raw config.memoryFraction so the memory pool scales with what the model
+      // can effectively attend to within its MECW ceiling.
       let memoryBudget: number;
-      if (this.config.memoryFraction != null) {
-        memoryBudget = Math.floor(budget * this.config.memoryFraction);
-        if (remaining > memoryBudget) {
-          remaining = memoryBudget;
-        }
-      } else {
-        const targetFraction = this.config.targetBudgetFraction ?? 0.65;
-        memoryBudget = Math.floor(budget * targetFraction);
+      {
+        memoryBudget = Math.floor(budget * b4MemoryFraction);
         if (remaining > memoryBudget) {
           remaining = memoryBudget;
         }
@@ -1444,11 +2147,12 @@ export class Compositor {
       }
     }
 
-    // ─── Injected Context Block ────────────────────────────────
-    // Facts, knowledge, preferences, semantic recall, and cross-session
-    // context are assembled into a single system message injected before
-    // conversation history (after system/identity).
-    const contextParts: string[] = [];
+    // ─── Cache-ordered context assembly ─────────────────────────
+    // Stable, reusable material is lifted above the cache boundary as its
+    // own system messages. Session-volatile material stays in the dynamic
+    // context block below that boundary.
+    const stablePrefixMessages: NeutralMessage[] = [];
+    const volatileContextParts: string[] = [];
     let contextTokens = 0;
 
     // ── C1: Content fingerprint dedup set ────────────────────
@@ -1501,14 +2205,14 @@ export class Compositor {
       if (wikiContent) {
         const tokens = estimateTokens(wikiContent);
         if (tokens <= remaining) {
-          contextParts.push(wikiContent);
+          volatileContextParts.push(wikiContent);
           contextTokens += tokens;
           remaining -= tokens;
           slots.library += tokens;
         } else if (remaining > 200) {
           const truncated = this.truncateToTokens(wikiContent, remaining);
           const truncTokens = estimateTokens(truncated);
-          contextParts.push(truncated);
+          volatileContextParts.push(truncated);
           contextTokens += truncTokens;
           remaining -= truncTokens;
           slots.library += truncTokens;
@@ -1520,33 +2224,65 @@ export class Compositor {
     // scope: agent — filtered by agentId via filterByScope after fetch
     // Draws from the shared memory budget pool (remaining is pre-capped by memoryBudget).
     if (request.includeFacts !== false && remaining > 500) {
-      const factsContent = this.buildFactsFromDb(request.agentId, request.sessionKey, libDb || db);
-      if (factsContent !== null) {
-        const [content, factCount, scopeFiltered] = factsContent;
-        diagFactsIncluded += factCount;
-        diagScopeFiltered += scopeFiltered;
-        if (content) {
-          const tokens = estimateTokens(content);
+      const factSections = this.buildFactSectionsFromDb(request.agentId, request.sessionKey, libDb || db);
+      if (factSections !== null) {
+        const { stableContent, stableCount, volatileContent, volatileCount, filteredCount } = factSections;
+        diagFactsIncluded += stableCount + volatileCount;
+        diagScopeFiltered += filteredCount;
+
+        if (stableContent) {
+          const stableFactsBlock = `## Stable Facts\n${stableContent}`;
+          const tokens = estimateTokens(stableFactsBlock);
           if (tokens <= remaining) {
-            contextParts.push(`## Active Facts\n${content}`);
+            stablePrefixMessages.push({
+              role: 'system',
+              textContent: stableFactsBlock,
+              toolCalls: null,
+              toolResults: null,
+            });
             contextTokens += tokens;
             remaining -= tokens;
-            slots.facts = tokens;
+            slots.facts += tokens;
           } else if (remaining > 200) {
-            const truncated = this.truncateToTokens(content, remaining);
+            const truncated = this.truncateToTokens(stableFactsBlock, remaining);
             const truncTokens = estimateTokens(truncated);
-            contextParts.push(`## Active Facts (truncated)\n${truncated}`);
+            stablePrefixMessages.push({
+              role: 'system',
+              textContent: truncated,
+              toolCalls: null,
+              toolResults: null,
+            });
             contextTokens += truncTokens;
             remaining -= truncTokens;
-            slots.facts = truncTokens;
-            warnings.push('Facts truncated to fit memory budget');
+            slots.facts += truncTokens;
+            warnings.push('Stable facts truncated to fit memory budget');
           }
-          // C1: Fingerprint each fact line so downstream dedup paths can skip duplicates
-          const factLines = content.split('\n');
-          for (const line of factLines) {
-            if (line.startsWith('- [')) {
-              addFingerprint(line);
-            }
+
+          for (const line of stableContent.split('\n')) {
+            if (line.startsWith('- [')) addFingerprint(line);
+          }
+        }
+
+        if (volatileContent) {
+          const volatileFactsBlock = `## Active Facts\n${volatileContent}`;
+          const tokens = estimateTokens(volatileFactsBlock);
+          if (tokens <= remaining) {
+            volatileContextParts.push(volatileFactsBlock);
+            contextTokens += tokens;
+            remaining -= tokens;
+            slots.facts += tokens;
+          } else if (remaining > 200) {
+            const truncated = this.truncateToTokens(volatileFactsBlock, remaining);
+            const truncTokens = estimateTokens(truncated);
+            volatileContextParts.push(truncated);
+            contextTokens += truncTokens;
+            remaining -= truncTokens;
+            slots.facts += truncTokens;
+            warnings.push('Active facts truncated to fit memory budget');
+          }
+
+          for (const line of volatileContent.split('\n')) {
+            if (line.startsWith('- [')) addFingerprint(line);
           }
         }
       }
@@ -1567,7 +2303,6 @@ export class Compositor {
           });
 
           if (temporalFacts.length > 0) {
-            // C1: Use fingerprint dedup instead of fragile substring match
             const beforeCount = temporalFacts.length;
             const novel = temporalFacts.filter(f => !isDuplicate(f.content));
             diagFingerprintDedups += beforeCount - novel.length;
@@ -1584,17 +2319,17 @@ export class Compositor {
 
               const temporalSection = `## Temporal Context\n${temporalBlock}`;
               const tempTokens = estimateTokens(temporalSection);
-              const tempBudget = Math.floor(remaining * 0.20); // Cap at 20% of remaining
+              const tempBudget = Math.floor(remaining * 0.20);
 
               if (tempTokens <= tempBudget) {
-                contextParts.push(temporalSection);
+                volatileContextParts.push(temporalSection);
                 contextTokens += tempTokens;
                 remaining -= tempTokens;
                 slots.facts = (slots.facts ?? 0) + tempTokens;
               } else {
                 const truncated = this.truncateToTokens(temporalSection, tempBudget);
                 const truncTokens = estimateTokens(truncated);
-                contextParts.push(truncated);
+                volatileContextParts.push(truncated);
                 contextTokens += truncTokens;
                 remaining -= truncTokens;
                 slots.facts = (slots.facts ?? 0) + truncTokens;
@@ -1613,8 +2348,6 @@ export class Compositor {
       // questions. Primary fix for LoCoMo open-domain F1 gap (0.133 baseline).
       if (request.includeSemanticRecall !== false && queryText && isOpenDomainQuery(queryText) && db && remaining > 300) {
         try {
-          // searchOpenDomain still does intra-result dedup. Existing-context dedup
-          // now happens here via fingerprints so we keep one dedup path.
           const rawOdResults = searchOpenDomain(db, queryText, '', 10);
           const beforeOd = rawOdResults.length;
           const odResults = rawOdResults.filter(r => !isDuplicate(r.content));
@@ -1637,17 +2370,17 @@ export class Compositor {
 
             const odSection = `## Open Domain Context\n${odBlock}`;
             const odTokens = estimateTokens(odSection);
-            const odBudget = Math.floor(remaining * 0.20); // Cap at 20% of remaining
+            const odBudget = Math.floor(remaining * 0.20);
 
             if (odTokens <= odBudget) {
-              contextParts.push(odSection);
+              volatileContextParts.push(odSection);
               contextTokens += odTokens;
               remaining -= odTokens;
               slots.facts = (slots.facts ?? 0) + odTokens;
             } else {
               const truncated = this.truncateToTokens(odSection, odBudget);
               const truncTokens = estimateTokens(truncated);
-              contextParts.push(truncated);
+              volatileContextParts.push(truncated);
               contextTokens += truncTokens;
               remaining -= truncTokens;
               slots.facts = (slots.facts ?? 0) + truncTokens;
@@ -1664,16 +2397,27 @@ export class Compositor {
     if (request.includeLibrary !== false && remaining > 500 && libDb) {
       const knowledgeContent = this.buildKnowledgeFromDb(request.agentId, libDb);
       if (knowledgeContent) {
-        const tokens = estimateTokens(knowledgeContent);
-        if (tokens <= remaining * 0.2) { // Cap knowledge at 20% of remaining
-          contextParts.push(`## Knowledge\n${knowledgeContent}`);
+        const stableKnowledgeBlock = `## Knowledge\n${knowledgeContent}`;
+        const tokens = estimateTokens(stableKnowledgeBlock);
+        if (tokens <= remaining * 0.2) {
+          stablePrefixMessages.push({
+            role: 'system',
+            textContent: stableKnowledgeBlock,
+            toolCalls: null,
+            toolResults: null,
+          });
           contextTokens += tokens;
           remaining -= tokens;
           slots.library += tokens;
         } else {
-          const truncated = this.truncateToTokens(knowledgeContent, Math.floor(remaining * 0.2));
+          const truncated = this.truncateToTokens(stableKnowledgeBlock, Math.floor(remaining * 0.2));
           const truncTokens = estimateTokens(truncated);
-          contextParts.push(`## Knowledge (truncated)\n${truncated}`);
+          stablePrefixMessages.push({
+            role: 'system',
+            textContent: truncated,
+            toolCalls: null,
+            toolResults: null,
+          });
           contextTokens += truncTokens;
           remaining -= truncTokens;
           slots.library += truncTokens;
@@ -1687,9 +2431,15 @@ export class Compositor {
     if (request.includeLibrary !== false && remaining > 300 && libDb) {
       const prefsContent = this.buildPreferencesFromDb(request.agentId, libDb);
       if (prefsContent) {
-        const tokens = estimateTokens(prefsContent);
-        if (tokens <= remaining * 0.1) { // Cap preferences at 10% of remaining
-          contextParts.push(`## User Preferences\n${prefsContent}`);
+        const stablePrefsBlock = `## User Preferences\n${prefsContent}`;
+        const tokens = estimateTokens(stablePrefsBlock);
+        if (tokens <= remaining * 0.1) {
+          stablePrefixMessages.push({
+            role: 'system',
+            textContent: stablePrefsBlock,
+            toolCalls: null,
+            toolResults: null,
+          });
           contextTokens += tokens;
           remaining -= tokens;
           slots.library += tokens;
@@ -1729,7 +2479,7 @@ export class Compositor {
           );
           if (semanticContent) {
             const tokens = estimateTokens(semanticContent);
-            contextParts.push(`## Related Memory\n${semanticContent}`);
+            volatileContextParts.push(`## Related Memory\n${semanticContent}`);
             contextTokens += tokens;
             remaining -= tokens;
             // Semantic recall draws from multiple sources, attribute to context
@@ -1849,12 +2599,24 @@ export class Compositor {
             let chunkTokens = 0;
 
             for (const chunk of chunks) {
-              if (chunkTokens + chunk.tokenEstimate > maxTokens) break;
               // Skip chunks from files OpenClaw already injects into the system prompt
               const chunkBasename = chunk.sourcePath.split('/').pop() || '';
               if (OPENCLAW_BOOTSTRAP_FILES.has(chunkBasename)) continue;
-              chunkLines.push(`### ${chunk.sectionPath}\n${chunk.content}`);
-              chunkTokens += chunk.tokenEstimate;
+
+              // C2: degrade oversized chunks to canonical artifact references before
+              // enforcing the per-collection budget gate. Otherwise an oversized raw
+              // chunk gets dropped before the tiny degraded ref ever has a chance to fit.
+              const c2ChunkRef = degradeOversizedDocChunk(chunk.id, chunk.sourcePath, chunk.content, c2ArtifactThresholdTokens);
+              const renderedChunk = c2ChunkRef !== null
+                ? `### ${chunk.sectionPath}\n${c2ChunkRef}`
+                : `### ${chunk.sectionPath}\n${chunk.content}`;
+              const renderedTokens = estimateTokens(renderedChunk);
+
+              if (chunkTokens + renderedTokens > maxTokens) break;
+
+              chunkLines.push(renderedChunk);
+              chunkTokens += renderedTokens;
+              if (c2ChunkRef !== null) c2ArtifactDegradations++;
             }
 
             if (chunkLines.length > 0) {
@@ -1872,7 +2634,7 @@ export class Compositor {
         }
 
         if (docParts.length > 0) {
-          contextParts.push(docParts.join('\n\n'));
+          volatileContextParts.push(docParts.join('\n\n'));
         }
       } else if (remaining > 400 && (this.vectorStore || libDb)) {
         // Trigger-miss fallback: no trigger fired — attempt bounded semantic retrieval
@@ -1894,7 +2656,7 @@ export class Compositor {
             ),
           ]);
           if (fallbackContent) {
-            contextParts.push(`## Related Memory\n${fallbackContent}`);
+            volatileContextParts.push(`## Related Memory\n${fallbackContent}`);
             const fallbackTokens = estimateTokens(fallbackContent);
             contextTokens += fallbackTokens;
             remaining -= fallbackTokens;
@@ -1926,12 +2688,20 @@ export class Compositor {
           let spawnTokens = 0;
           const maxSpawnTokens = Math.floor(remaining * 0.15);
           for (const chunk of spawnChunks) {
-            if (spawnTokens + chunk.tokenEstimate > maxSpawnTokens) break;
-            spawnLines.push(chunk.content);
-            spawnTokens += chunk.tokenEstimate;
+            // C2: degrade oversized spawn chunks before enforcing the lane budget,
+            // so a bounded reference can fit even when the raw chunk cannot.
+            const c2SpawnRef = degradeOversizedDocChunk(chunk.id, chunk.sourcePath, chunk.content, c2ArtifactThresholdTokens);
+            const renderedChunk = c2SpawnRef ?? chunk.content;
+            const renderedTokens = estimateTokens(renderedChunk);
+
+            if (spawnTokens + renderedTokens > maxSpawnTokens) break;
+
+            spawnLines.push(renderedChunk);
+            spawnTokens += renderedTokens;
+            if (c2SpawnRef !== null) c2ArtifactDegradations++;
           }
           if (spawnLines.length > 0) {
-            contextParts.push(`## Spawn Context Documents\n${spawnLines.join('\n\n')}`);
+            volatileContextParts.push(`## Spawn Context Documents\n${spawnLines.join('\n\n')}`);
             contextTokens += spawnTokens;
             remaining -= spawnTokens;
             slots.library += spawnTokens;
@@ -1960,14 +2730,14 @@ export class Compositor {
         );
 
         if (tokens <= maxContextTokens) {
-          contextParts.push(`## Other Active Sessions\n${crossSessionContent}`);
+          volatileContextParts.push(`## Other Active Sessions\n${crossSessionContent}`);
           contextTokens += tokens;
           remaining -= tokens;
           slots.context += tokens;
         } else {
           const truncated = this.truncateToTokens(crossSessionContent, maxContextTokens);
           const truncTokens = estimateTokens(truncated);
-          contextParts.push(`## Other Active Sessions (truncated)\n${truncated}`);
+          volatileContextParts.push(`## Other Active Sessions (truncated)\n${truncated}`);
           contextTokens += truncTokens;
           remaining -= truncTokens;
           slots.context += truncTokens;
@@ -1984,7 +2754,7 @@ export class Compositor {
       if (actionSummary) {
         const actionTokens = Math.ceil(actionSummary.length / 4);
         if (actionTokens <= remaining) {
-          contextParts.push(actionSummary);
+          volatileContextParts.push(actionSummary);
           contextTokens += actionTokens;
           remaining -= actionTokens;
           slots.context += actionTokens;
@@ -1992,8 +2762,15 @@ export class Compositor {
       }
     }
 
+    const firstNonSystem = messages.findIndex(m => m.role !== 'system');
+    const stableInsertIdx = firstNonSystem === -1 ? messages.length : firstNonSystem;
+
+    if (stablePrefixMessages.length > 0) {
+      messages.splice(stableInsertIdx, 0, ...stablePrefixMessages);
+    }
+
     // ── Inject assembled context block ──────────────────────
-    const assembledContextBlock = contextParts.length > 0 ? contextParts.join('\n\n') : undefined;
+    const assembledContextBlock = volatileContextParts.length > 0 ? volatileContextParts.join('\n\n') : undefined;
 
     if (assembledContextBlock) {
       const contextMsg: NeutralMessage = {
@@ -2001,26 +2778,32 @@ export class Compositor {
         textContent: assembledContextBlock,
         toolCalls: null,
         toolResults: null,
-        // DYNAMIC_BOUNDARY: this slot is session-specific (facts, recall, episodes).
-        // It must NOT be included in any prompt caching boundary that spans static content.
-        // The provider translator will insert a cache_control ephemeral marker BEFORE
-        // this message so providers can cache everything up to identity/system as static context.
-        metadata: { dynamicBoundary: true },
+        // CACHE_PREFIX_BOUNDARY_SLOT: this message starts the volatile side of the
+        // prompt. Everything above it is stable-prefix material eligible for reuse;
+        // everything at or below it is per-session / per-turn context.
+        metadata: { dynamicBoundary: true, cacheBoundarySlot: CACHE_PREFIX_BOUNDARY_SLOT },
       };
-      // Insert after system/identity, before history
-      // Insert context after all system/identity messages, before conversation history.
-      // findIndex returns -1 when all messages are system-role — handle explicitly.
-      const firstNonSystem = messages.findIndex(m => m.role !== 'system');
-      const insertIdx = firstNonSystem === -1 ? messages.length : firstNonSystem;
-      messages.splice(insertIdx, 0, contextMsg);
+      messages.splice(stableInsertIdx + stablePrefixMessages.length, 0, contextMsg);
     }
 
-    // ─── Safety Valve: Post-Assembly Budget Check ───────────────────
+    const stablePrefix = getStablePrefixMessages(messages);
+    const prefixSegmentCount = stablePrefix.length;
+    const prefixTokens = stablePrefix.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
+    const volatileHistoryTokens = messages.slice(prefixSegmentCount)
+      .reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
+    const prefixHash = computeStablePrefixHash(stablePrefix);
+
+    // ─── Safety Valve: Post-Assembly Budget Check (C1-aware) ──────────────
     // Re-estimate total tokens after all slots are assembled. If the
     // composition exceeds tokenBudget * 1.05 (5% tolerance for estimation
     // drift), trim history messages from the oldest until we're under budget.
     // History is the most compressible slot — system/identity are never
     // truncated, and context (facts/recall/episodes) is more valuable per-token.
+    //
+    // C1: When an assistant message with toolCalls is ejected, its dependent
+    // tool-result messages are co-ejected or stubbed via resolveToolChainEjections.
+    // This ensures no orphaned tool-results survive above the stable-prefix
+    // boundary and eliminates the downstream repairToolPairs cleanup cost.
     const estimatedTotal = messages.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
     const hardCeiling = Math.floor(budget * 1.05);
 
@@ -2029,28 +2812,49 @@ export class Compositor {
       let trimmed = 0;
       let trimCount = 0;
 
-      // Find history messages (non-system, after system/identity block)
-      // Walk forward from the first non-system message, trimming oldest history first
+      // Collect indices of messages to eject before mutating the array.
+      // Walk forward from the first non-system message, trimming oldest first.
       const firstNonSystemIdx = messages.findIndex(m => m.role !== 'system');
+      const ejectIndices = new Set<number>();
+
       if (firstNonSystemIdx >= 0) {
         let i = firstNonSystemIdx;
         while (i < messages.length && trimmed < overage) {
-          // Don't trim the last user message (current prompt)
+          // Don't trim the last user message (current prompt).
           if (i === messages.length - 1 && messages[i].role === 'user') break;
           const msgTokens = estimateMessageTokens(messages[i]);
-          messages.splice(i, 1);
+          ejectIndices.add(i);
           trimmed += msgTokens;
           trimCount++;
-          // Don't increment i — splice shifts everything down
+          i++;
         }
       }
 
-      if (trimCount > 0) {
+      if (ejectIndices.size > 0) {
+        // C1: centralized ejection — resolves dependent tool-results atomically.
+        const ejectionResult = resolveToolChainEjections(
+          messages,
+          ejectIndices,
+          'eviction_oversize',
+        );
+        // Replace in-place so the rest of the compose path sees the clean array.
+        messages.length = 0;
+        messages.push(...ejectionResult.messages);
+        c1CoEjections += ejectionResult.coEjections;
+        c1StubReplacements += ejectionResult.stubReplacements;
+
         slots.history = Math.max(0, slots.history - trimmed);
         remaining += trimmed;
-        warnings.push(`Safety valve: trimmed ${trimCount} oldest history messages (${trimmed} tokens) to fit budget`);
+        const c1Note = (ejectionResult.coEjections + ejectionResult.stubReplacements > 0)
+          ? ` [C1: ${ejectionResult.coEjections} co-ejected, ${ejectionResult.stubReplacements} stubbed]`
+          : '';
+        warnings.push(`Safety valve: trimmed ${trimCount} oldest history messages (${trimmed} tokens) to fit budget${c1Note}`);
       }
     }
+
+    // ─── Sprint 2.1: Hydrate active-turn artifact stubs ────────────────────
+    // Must run on NeutralMessages[] BEFORE provider translation.
+    const hydrationResult = this.hydrateActiveTurnArtifacts(messages, db);
 
     // ─── Translate to provider format (unless caller wants neutral) ───
     // When skipProviderTranslation is set, return NeutralMessages directly.
@@ -2126,7 +2930,7 @@ export class Compositor {
 
     // W3: Build compose diagnostics
     let zeroResultReason: import('./types.js').ComposeDiagnostics['zeroResultReason'];
-    if (contextParts.length === 0) {
+    if (volatileContextParts.length === 0 && stablePrefixMessages.length === 0) {
       if (diagScopeFiltered > 0 && diagFactsIncluded === 0 && diagSemanticResults === 0) {
         zeroResultReason = 'scope_filtered_all';
       } else if (remaining <= 0) {
@@ -2159,6 +2963,37 @@ export class Compositor {
       fingerprintDedups: diagFingerprintDedups,
       fingerprintCollisions: diagFingerprintCollisions,
       windowCacheHit: false,
+      prefixSegmentCount,
+      prefixTokens,
+      prefixHash,
+      // B2: Surface the previous cached prefixHash when this full compose was
+      // triggered by a cache bypass (stable-prefix mutation detected).
+      prevPrefixHash: _prevPrefixHashFromBypass,
+      volatileHistoryTokens,
+      // Sprint 4 fields
+      sessionType: s4SessionType,
+      historyDepthChosen: s4EffectiveDepth,
+      estimatedMsgDensityTokens: s4ObservedDensity,
+      rescueTrimFired: s4RescueTrimFired,
+      // B4: model-aware lane budget diagnostics
+      mecwProfile: b4MecwProfile,
+      mecwApplied: b4MecwApplied,
+      mecwBlend: b4MecwBlend,
+      effectiveHistoryFraction: b4HistoryFraction,
+      effectiveMemoryFraction: b4MemoryFraction,
+      trimSoftTarget: TRIM_BUDGET_POLICY.trimSoftTarget,
+      trimGrowthThreshold: TRIM_BUDGET_POLICY.trimGrowthThreshold,
+      trimHeadroomFraction: TRIM_BUDGET_POLICY.trimHeadroomFraction,
+      // C1: tool-chain ejection telemetry
+      toolChainCoEjections: c1CoEjections > 0 ? c1CoEjections : undefined,
+      toolChainStubReplacements: c1StubReplacements > 0 ? c1StubReplacements : undefined,
+      // C2: artifact oversize degradation telemetry
+      artifactDegradations: c2ArtifactDegradations > 0 ? c2ArtifactDegradations : undefined,
+      artifactOversizeThresholdTokens: c2ArtifactThresholdTokens,
+      // Sprint 2.1: tool artifact hydration telemetry
+      artifactsHydrated: hydrationResult.artifactsHydrated > 0 ? hydrationResult.artifactsHydrated : undefined,
+      hydrationBytes: hydrationResult.hydrationBytes > 0 ? hydrationResult.hydrationBytes : undefined,
+      hydrationMisses: hydrationResult.hydrationMisses > 0 ? hydrationResult.hydrationMisses : undefined,
     };
 
     if (pressureHigh) {
@@ -2177,6 +3012,14 @@ export class Compositor {
     // VS-1: Dual-write, session-scoped key for backwards compat;
     // topic-scoped key for per-topic window retrieval when activeTopicId is set.
     try {
+      // B2: Compute a cheap prefix input hash from the system + identity slot
+      // contents that fed the stable prefix. Stored in WindowCacheMeta so the
+      // C4 fast-exit can detect prefix mutations without re-running full compose.
+      const _prefixInputHash = createHash('sha256')
+        .update(systemContent ?? '')
+        .update('\n␞\n')
+        .update(identityContent ?? '')
+        .digest('hex');
       await this.cache.setWindow(request.agentId, request.sessionKey, messages, 120);
       await this.cache.setWindowMeta(request.agentId, request.sessionKey, {
         slots: slots as unknown as Record<string, number>,
@@ -2184,6 +3027,8 @@ export class Compositor {
         warnings,
         diagnostics,
         composedAt,
+        prefixHash,
+        prefixInputHash: _prefixInputHash,
       }, 120);
     } catch {
       // Window cache write is best-effort
@@ -2242,7 +3087,7 @@ export class Compositor {
       }
     }
 
-    console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode} crossTopicKeystones=${diagCrossTopicKeystones}`);
+    console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode} crossTopicKeystones=${diagCrossTopicKeystones} c2_degradations=${c2ArtifactDegradations} c2_threshold=${c2ArtifactThresholdTokens}`);
     return {
       messages: outputMessages,
       tokenCount: totalTokens,
@@ -2374,6 +3219,7 @@ export class Compositor {
     sessionKey: string,
     db: DatabaseSync,
     tokenBudget?: number,
+    historyDepth?: number,
   ): Promise<void> {
     const store = new MessageStore(db);
     const conversation = store.getConversation(sessionKey);
@@ -2398,28 +3244,42 @@ export class Compositor {
     }
 
     // Phase 3: prefer DAG walk from context head
+    const refreshHistoryLimit = Math.min(
+      this.config.maxHistoryMessages,
+      Math.max(1, historyDepth ?? this.config.maxHistoryMessages),
+    );
+
     let rawHistory: StoredMessage[];
     if (activeContext?.headMessageId) {
-      rawHistory = store.getHistoryByDAGWalk(activeContext.headMessageId, this.config.maxHistoryMessages);
+      rawHistory = store.getHistoryByDAGWalk(activeContext.headMessageId, refreshHistoryLimit);
       if (rawHistory.length === 0) {
-        rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages, gradientFenceMessageId);
+        rawHistory = store.getRecentMessages(conversation.id, refreshHistoryLimit, gradientFenceMessageId);
       }
     } else {
-      rawHistory = store.getRecentMessages(conversation.id, this.config.maxHistoryMessages, gradientFenceMessageId);
+      rawHistory = store.getRecentMessages(conversation.id, refreshHistoryLimit, gradientFenceMessageId);
     }
+    // Sprint 3 (AfterTurn Rebuild/Trim Loop Fix): cap gradient total-window tokens
+    // at the same 65% target that assemble.normal trims to. Previously this was
+    // tokenBudget/0.80 (≈1.25×budget), which made applyToolGradient preserve more
+    // content than the trim target allowed — causing assemble.normal to always trim
+    // on the next turn even in the steady-state path. Aligning the gradient cap to
+    // the trim target means the rebuilt window already fits within the assemble
+    // envelope by construction.
+    const { softBudget: gradientAssembleBudget } = resolveTrimBudgets(tokenBudget ?? 0);
     const transformedHistory = applyToolGradient(rawHistory, {
       totalWindowTokens: tokenBudget && tokenBudget > 0
-        ? Math.max(tokenBudget, Math.floor(tokenBudget / 0.80))
+        ? gradientAssembleBudget
         : TOOL_PLANNING_BASELINE_WINDOW,
     });
 
     // If a token budget is provided, trim the gradient-compressed window to fit
-    // before writing to Redis. Without this, up to maxHistoryMessages messages
-    // land in Redis regardless of size, and trimHistoryToTokenBudget fires
-    // on every subsequent assemble() causing per-turn churn.
+    // before writing to Redis. The cap uses the same GRADIENT_ASSEMBLE_TARGET
+    // (0.65) so the window written to Redis sits inside the assemble.normal trim
+    // envelope. The next assemble() will find the window already within budget
+    // and skip the trim entirely in the steady-state path.
     let historyToWrite: NeutralMessage[] = transformedHistory;
     if (tokenBudget && tokenBudget > 0) {
-      const budgetCap = Math.floor(tokenBudget * 0.8);
+      const budgetCap = gradientAssembleBudget;
       let runningTokens = 0;
       const clusters = clusterNeutralMessages(transformedHistory);
       const cappedClusters: NeutralMessageCluster<NeutralMessage>[] = [];
@@ -2440,7 +3300,7 @@ export class Compositor {
       }
     }
 
-    await this.cache.replaceHistory(agentId, sessionKey, historyToWrite, this.config.maxHistoryMessages);
+    await this.cache.replaceHistory(agentId, sessionKey, historyToWrite, refreshHistoryLimit);
   }
 
   // ─── Slot Content Resolution ─────────────────────────────────
@@ -2527,6 +3387,31 @@ export class Compositor {
     sessionKey: string,
     db: DatabaseSync | null,
   ): [string | null, number, number] | null {
+    const sections = this.buildFactSectionsFromDb(agentId, sessionKey, db);
+    if (!sections) return null;
+
+    const combined = [sections.stableContent, sections.volatileContent]
+      .filter((value): value is string => Boolean(value))
+      .join('\n');
+
+    return [
+      combined || null,
+      sections.stableCount + sections.volatileCount,
+      sections.filteredCount,
+    ];
+  }
+
+  private buildFactSectionsFromDb(
+    agentId: string,
+    sessionKey: string,
+    db: DatabaseSync | null,
+  ): {
+    stableContent: string | null;
+    stableCount: number;
+    volatileContent: string | null;
+    volatileCount: number;
+    filteredCount: number;
+  } | null {
     if (!db) return null;
 
     const tableExists = db.prepare(
@@ -2553,9 +3438,16 @@ export class Compositor {
       scope: string | null;
     }>;
 
-    if (rawRows.length === 0) return [null, 0, 0];
+    if (rawRows.length === 0) {
+      return {
+        stableContent: null,
+        stableCount: 0,
+        volatileContent: null,
+        volatileCount: 0,
+        filteredCount: 0,
+      };
+    }
 
-    // W1: Apply scope filter — enforce retrieval access control
     const ctx = { agentId, sessionKey };
     const { allowed, filteredCount } = filterByScope(
       rawRows.map(r => ({
@@ -2566,22 +3458,41 @@ export class Compositor {
       ctx,
     );
 
-    if (allowed.length === 0) return [null, 0, filteredCount];
+    if (allowed.length === 0) {
+      return {
+        stableContent: null,
+        stableCount: 0,
+        volatileContent: null,
+        volatileCount: 0,
+        filteredCount,
+      };
+    }
 
-    const content = allowed
-      .map(r => {
-        // Session attribution: label facts from a different session so the model
-        // can distinguish current-session context from cross-session facts.
-        // Shows last 8 chars of session key as a stable short identifier.
-        const fromOtherSession = r.sessionKey && r.sessionKey !== sessionKey;
-        const sessionSuffix = fromOtherSession
-          ? `, session:${r.sessionKey!.slice(-8)}`
-          : '';
-        return `- [${r.domain || 'general'}${sessionSuffix}] ${r.content}`;
-      })
-      .join('\n');
+    const formatRows = (rows: typeof allowed): string | null => {
+      if (rows.length === 0) return null;
+      return rows
+        .map(r => {
+          const fromOtherSession = r.sessionKey && r.sessionKey !== sessionKey;
+          const sessionSuffix = fromOtherSession
+            ? `, session:${r.sessionKey!.slice(-8)}`
+            : '';
+          return `- [${r.domain || 'general'}${sessionSuffix}] ${r.content}`;
+        })
+        .join('\n');
+    };
 
-    return [content, allowed.length, filteredCount];
+    const stableRows = allowed.filter(r =>
+      r.scope !== 'session' && (!r.sessionKey || r.sessionKey !== sessionKey)
+    );
+    const volatileRows = allowed.filter(r => !stableRows.includes(r));
+
+    return {
+      stableContent: formatRows(stableRows),
+      stableCount: stableRows.length,
+      volatileContent: formatRows(volatileRows),
+      volatileCount: volatileRows.length,
+      filteredCount,
+    };
   }
 
   /**

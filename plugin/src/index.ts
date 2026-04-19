@@ -4,7 +4,7 @@
  * Implements OpenClaw's ContextEngine interface backed by hypermem's
  * four-layer memory architecture:
  *
- *   L1 Redis    — hot session working memory
+ *   L1 Cache    — SQLite `:memory:` hot session working memory
  *   L2 Messages — per-agent conversation history (SQLite)
  *   L3 Vectors  — semantic + keyword search (KNN + FTS5)
  *   L4 Library  — facts, knowledge, episodes, preferences
@@ -14,7 +14,7 @@
  *   assemble()   → compositor builds context from all four layers
  *   compact()    → delegate to runtime (ownsCompaction: false)
  *   afterTurn()  → trigger background indexer (fire-and-forget)
- *   bootstrap()  → warm Redis session, register agent in fleet
+ *   bootstrap()  → warm hot-cache session, register agent in fleet
  *   dispose()    → close hypermem connections
  *
  * Session key format expected: "agent:<agentId>:<channel>:<name>"
@@ -41,17 +41,366 @@ import type {
   BackgroundIndexer,
   FleetStore,
 } from '@psiclawops/hypermem';
-import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow, canPersistReshapedHistory, OPENCLAW_BOOTSTRAP_FILES } from '@psiclawops/hypermem';
+import {
+  detectTopicShift,
+  stripMessageMetadata,
+  SessionTopicMap,
+  applyToolGradientToWindow,
+  OPENCLAW_BOOTSTRAP_FILES,
+  rotateSessionContext,
+  TRIM_SOFT_TARGET,
+  TRIM_GROWTH_THRESHOLD,
+  TRIM_HEADROOM_FRACTION,
+  resolveTrimBudgets,
+  formatToolChainStub,
+  decideReplayRecovery,
+  isReplayState,
+} from '@psiclawops/hypermem';
 import { evictStaleContent } from '@psiclawops/hypermem/image-eviction';
 import { repairToolPairs } from '@psiclawops/hypermem';
 import os from 'os';
 import path from 'path';
 import fs from 'fs/promises';
-import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
+import fsSync from 'fs';
 
 // Re-export core types for consumers (eliminates local shim drift)
 export type { NeutralMessage, NeutralToolCall, NeutralToolResult, ComposeRequest, ComposeResult };
+
+// ─── Telemetry (Phase A Sprint 1) ─────────────────────────────────────
+//
+// Structured logging around every trimHistoryToTokenBudget() call site and
+// every assemble() entry. Zero-cost when HYPERMEM_TELEMETRY !== '1'. When on,
+// appends JSONL to process.env.HYPERMEM_TELEMETRY_PATH (default
+// './hypermem-telemetry.jsonl'). Intentionally NOT using console.log so the
+// telemetry stream does not mingle with plugin diagnostic output.
+//
+// Telemetry is behavior-neutral: emit sites never throw, never block the hot
+// path, and the flag check is a plain env read (no allocations when off).
+type TrimTelemetryPath =
+  | 'assemble.normal'
+  | 'assemble.toolLoop'
+  | 'assemble.subagent'
+  | 'reshape'
+  | 'compact.nuclear'
+  | 'compact.history'
+  | 'compact.history2'
+  | 'afterTurn.secondary'
+  | 'warmstart';
+
+type DegradationTelemetryPath = 'compose' | 'toolLoop';
+
+interface DegradationTelemetryFields {
+  agentId: string;
+  sessionKey: string;
+  turnId: string;
+  path: DegradationTelemetryPath;
+  toolChainCoEjections?: number;
+  toolChainStubReplacements?: number;
+  artifactDegradations?: number;
+  artifactOversizeThresholdTokens?: number;
+  replayState?: 'entering' | 'stabilizing' | 'exited';
+  replayReason?: string;
+}
+
+let _telemetryStream: fsSync.WriteStream | null = null;
+let _telemetryStreamFailed = false;
+let _telemetryTurnCounter = 0;
+
+function telemetryEnabled(): boolean {
+  return process.env.HYPERMEM_TELEMETRY === '1';
+}
+
+function getTelemetryStream(): fsSync.WriteStream | null {
+  if (_telemetryStream || _telemetryStreamFailed) return _telemetryStream;
+  try {
+    const p = process.env.HYPERMEM_TELEMETRY_PATH || './hypermem-telemetry.jsonl';
+    _telemetryStream = fsSync.createWriteStream(p, { flags: 'a' });
+    _telemetryStream.on('error', () => {
+      _telemetryStreamFailed = true;
+      _telemetryStream = null;
+    });
+  } catch {
+    _telemetryStreamFailed = true;
+    _telemetryStream = null;
+  }
+  return _telemetryStream;
+}
+
+function trimTelemetry(fields: {
+  path: TrimTelemetryPath;
+  agentId: string;
+  sessionKey: string;
+  preTokens: number;
+  postTokens: number;
+  removed: number;
+  cacheInvalidated: boolean;
+  reason: string;
+}): void {
+  if (!telemetryEnabled()) return;
+  const stream = getTelemetryStream();
+  if (!stream) return;
+  try {
+    const record = {
+      event: 'trim',
+      ts: new Date().toISOString(),
+      ...fields,
+    };
+    stream.write(JSON.stringify(record) + '\n');
+  } catch {
+    // Telemetry must never throw
+  }
+}
+
+function assembleTrace(fields: {
+  agentId: string;
+  sessionKey: string;
+  turnId: string;
+  path: 'cold' | 'replay' | 'subagent';
+  toolLoop: boolean;
+  msgCount: number;
+}): void {
+  if (!telemetryEnabled()) return;
+  const stream = getTelemetryStream();
+  if (!stream) return;
+  try {
+    const record = {
+      event: 'assemble',
+      ts: new Date().toISOString(),
+      ...fields,
+    };
+    stream.write(JSON.stringify(record) + '\n');
+  } catch {
+    // Telemetry must never throw
+  }
+}
+
+function degradationTelemetry(fields: DegradationTelemetryFields): void {
+  if (!telemetryEnabled()) return;
+  const stream = getTelemetryStream();
+  if (!stream) return;
+  try {
+    const record = {
+      event: 'degradation',
+      ts: new Date().toISOString(),
+      ...fields,
+    };
+    stream.write(JSON.stringify(record) + '\n');
+  } catch {
+    // Telemetry must never throw
+  }
+}
+
+function nextTurnId(): string {
+  _telemetryTurnCounter = (_telemetryTurnCounter + 1) >>> 0;
+  return `${Date.now().toString(36)}-${_telemetryTurnCounter.toString(36)}`;
+}
+
+// ─── Trim Ownership (Phase A Sprint 2) ───────────────────────────
+//
+// Sprint 2 consolidates trim ownership: the assemble-owned family
+// (assemble.normal, assemble.subagent, assemble.toolLoop) is the single
+// steady-state trim owner. Compact paths (compact.nuclear, compact.history,
+// compact.history2) are exempted — they're exception-only. warmstart,
+// reshape, and afterTurn.secondary are demoted in sub-tasks 2.2 and 2.3.
+//
+// This block adds:
+//   1. A per-session turn context (beginTrimOwnerTurn/endTrimOwnerTurn) scoped
+//      by the main assemble() flow.
+//   2. A single shared trimOwner claim helper that lets exactly one **real**
+//      steady-state trim claim ownership per turn and throws loudly in
+//      development (NODE_ENV='development') when a second real steady-state
+//      trim path attempts to claim the same turn.
+//   3. A non-counting guard/noop telemetry helper (same JSONL channel) that
+//      demoted paths can emit to preserve visibility of warm-start/reshape
+//      without consuming a steady-state owner slot.
+//
+// Sub-task 2.1 only adds the scaffolding + invariant; no existing trim call
+// is removed here. Demotions of warm-start/reshape/afterTurn.secondary land
+// in 2.2 and 2.3.
+
+const STEADY_STATE_TRIM_PATHS = new Set<TrimTelemetryPath>([
+  'assemble.normal',
+  'assemble.subagent',
+  'assemble.toolLoop',
+]);
+
+const COMPACT_TRIM_PATHS = new Set<TrimTelemetryPath>([
+  'compact.nuclear',
+  'compact.history',
+  'compact.history2',
+]);
+
+// ─── Guard-telemetry reason enum (Phase A Sprint 2.2a) ──────────────────
+// Plugin-local, constant-backed union of allowed `reason` values on
+// `event: 'trim-guard'` records. Keeping this bounded prevents ad-hoc
+// numeric/user strings from leaking into the telemetry JSONL channel and
+// makes downstream reporting stable. Do NOT widen this to arbitrary
+// strings — add a new member here first, then reference it at call sites.
+//
+// Scope note: this union is plugin-local (per planner 2.2 §C). It is not
+// re-exported via `src/types.ts` because the shared public types surface
+// must not gain a telemetry-reason enum as part of this sprint.
+const GUARD_TELEMETRY_REASONS = [
+  'warmstart-pressure-demoted',
+  'reshape-downshift-demoted',
+  'duplicate-claim-suppressed',
+  'afterturn-secondary-demoted',
+  'window-within-budget-skip',
+  'pressure-accounting-anomaly',
+] as const;
+type GuardTelemetryReason = typeof GUARD_TELEMETRY_REASONS[number];
+
+interface TrimOwnerTurnContext {
+  turnId: string;
+  claimedPath?: TrimTelemetryPath;
+}
+
+// Turn-scoped ownership map (Phase A Sprint 2.2a).
+//
+// Previously keyed by `sessionKey` alone, which clobbered overlapping same-
+// session assemble() flows (Sprint 2.1 security eval, medium finding #1).
+// Now keyed by the composite `sessionKey|turnId` so two concurrent turns on
+// the same session key remain isolated: each `beginTrimOwnerTurn` gets its
+// own slot, `claimTrimOwner` checks the exact turn's slot, and
+// `endTrimOwnerTurn` removes only that turn's slot.
+const _trimOwnerTurns = new Map<string, TrimOwnerTurnContext>();
+
+function _trimOwnerKey(sessionKey: string, turnId: string): string {
+  return `${sessionKey}|${turnId}`;
+}
+
+function beginTrimOwnerTurn(sessionKey: string, turnId: string): void {
+  _trimOwnerTurns.set(_trimOwnerKey(sessionKey, turnId), { turnId });
+}
+
+function endTrimOwnerTurn(sessionKey: string, turnId: string): void {
+  _trimOwnerTurns.delete(_trimOwnerKey(sessionKey, turnId));
+}
+
+/**
+ * Claim the steady-state trim owner slot for the current turn.
+ *
+ * Behavior:
+ *   - compact.* paths are exception-only and pass through without claiming.
+ *   - Non-steady paths (warmstart, reshape, afterTurn.secondary) also pass
+ *     through without claiming. Demoted/no-op sites should normally emit
+ *     via guardTelemetry() instead so they stay visible without contending
+ *     for ownership (sub-tasks 2.2 and 2.3 wire this in).
+ *   - Steady-state paths (assemble.normal, assemble.subagent,
+ *     assemble.toolLoop) claim the single owner slot for the current turn.
+ *     The first such claim succeeds. A second steady-state claim against the
+ *     same turn is a duplicate-turn violation: it throws loudly under
+ *     NODE_ENV='development' and warns in other environments (returning
+ *     false so non-dev runtimes keep working).
+ *
+ * Callers should invoke this immediately before the real
+ * trimHistoryToTokenBudget() call. Guard telemetry does NOT route through
+ * this helper — it is explicitly excluded from the steady-state invariant.
+ *
+ * Returns true when the claim succeeds (or is exempt); false on a swallowed
+ * duplicate claim in non-development. In development the duplicate throws
+ * before returning.
+ */
+function claimTrimOwner(sessionKey: string, turnId: string, path: TrimTelemetryPath): boolean {
+  // Compact paths: exempt — they represent an exceptional pressure path and
+  // never contend for the steady-state slot.
+  if (COMPACT_TRIM_PATHS.has(path)) return true;
+  // Non-steady paths: pass through (warmstart/reshape/afterTurn.secondary).
+  // Warmstart + reshape are demoted to guardTelemetry in 2.2a.
+  if (!STEADY_STATE_TRIM_PATHS.has(path)) return true;
+  const ctx = _trimOwnerTurns.get(_trimOwnerKey(sessionKey, turnId));
+  if (!ctx) return true; // No active assemble-turn scope — nothing to enforce here.
+  if (ctx.claimedPath) {
+    const msg =
+      `[hypermem-plugin] trimOwner: duplicate steady-state trim claim in turn ` +
+      `${ctx.turnId} (sessionKey=${sessionKey}): first=${ctx.claimedPath} second=${path}`;
+    if (process.env.NODE_ENV === 'development') {
+      throw new Error(msg);
+    }
+    // Non-development: do not throw, but leave a loud trail so telemetry
+    // surfaces the violation. Callers MUST honor the false return and skip
+    // the second real trim (Sprint 2.2a enforcement).
+    console.warn(msg);
+    return false;
+  }
+  ctx.claimedPath = path;
+  return true;
+}
+
+/**
+ * Non-counting guard / noop telemetry.
+ *
+ * Emits a `trim-guard` record on the same JSONL channel as trimTelemetry()
+ * but with a distinct event name so per-turn reporting (scripts/trim-report.mjs,
+ * future ownership dashboards) can keep it out of `trimCount`. Used by
+ * demoted/no-op call sites in 2.2 and 2.3 so their path labels stay visible
+ * in telemetry without consuming a steady-state owner slot.
+ *
+ * Zero-cost when telemetry is off. Never throws.
+ */
+function guardTelemetry(fields: {
+  path: TrimTelemetryPath;
+  agentId: string;
+  sessionKey: string;
+  reason: GuardTelemetryReason;
+}): void {
+  if (!telemetryEnabled()) return;
+  const stream = getTelemetryStream();
+  if (!stream) return;
+  try {
+    const record = {
+      event: 'trim-guard',
+      ts: new Date().toISOString(),
+      ...fields,
+    };
+    stream.write(JSON.stringify(record) + '\n');
+  } catch {
+    // Telemetry must never throw
+  }
+}
+
+// ─── B3: Batch trim with growth allowance ────────────────────────────────
+// Trim fires only when window usage exceeds the soft target by this fraction.
+// Small natural growth (e.g. a short assistant reply) never triggers a trim;
+// only genuine spikes (model switch, cold-start, multi-tool overrun) do.
+// When trim fires, the target is (softTarget * (1 - headroomFraction)) so the
+// window has room to grow for several turns before the next trim fires.
+//
+// softTarget (0.65): matches refreshRedisGradient → steady state never trims
+// growthThreshold (0.05): 5% overage buffer before trim fires
+// headroomFraction (0.10): trim target = softTarget * 0.90 → ~58.5% of budget
+// Canonical values live in the core package so plugin trim guards and compose
+// paths cannot drift.
+
+// Test-only: expose emitters so the unit test can exercise them directly
+// without standing up a real session. Wrapped in a getter object so the flag
+// guard still runs (zero-cost when off).
+export const __telemetryForTests = {
+  trimTelemetry,
+  assembleTrace,
+  degradationTelemetry,
+  guardTelemetry,
+  nextTurnId,
+  beginTrimOwnerTurn,
+  endTrimOwnerTurn,
+  claimTrimOwner,
+  // B3/C0.1: Expose the canonical policy surface so tests can assert against
+  // the shared source of truth instead of embedding formulas locally.
+  TRIM_SOFT_TARGET,
+  TRIM_GROWTH_THRESHOLD,
+  TRIM_HEADROOM_FRACTION,
+  resolveTrimBudgets,
+  reset(): void {
+    if (_telemetryStream) {
+      try { _telemetryStream.end(); } catch { /* ignore */ }
+    }
+    _telemetryStream = null;
+    _telemetryStreamFailed = false;
+    _telemetryTurnCounter = 0;
+    _trimOwnerTurns.clear();
+  },
+};
 
 // ─── hypermem singleton ────────────────────────────────────────
 
@@ -59,9 +408,8 @@ export type { NeutralMessage, NeutralToolCall, NeutralToolResult, ComposeRequest
 // not installed via npm). Types come from the core package devDependency.
 // This pattern keeps the runtime path stable while TypeScript resolves types
 // from the canonical source — no more local shim drift.
-// Resolved at init time: pluginConfig.hyperMemPath > require.resolve('@psiclawops/hypermem') > dev fallback
+// Resolved at init time: pluginConfig.hyperMemPath > import.meta.resolve('@psiclawops/hypermem') > dev fallback
 let HYPERMEM_PATH = '';
-const require = createRequire(import.meta.url);
 
 // hypermemInstance is the resolved return type of hypermem.create().
 // hypermem has a private constructor (factory pattern), so we can't use
@@ -117,6 +465,113 @@ let _evictionConfig: {
 let _contextWindowSize: number = 128_000;
 let _contextWindowReserve: number = 0.25;
 let _deferToolPruning: boolean = false;
+let _verboseLogging: boolean = false;
+let _contextWindowOverrides: Record<string, { contextTokens?: number; contextWindow?: number }> = {};
+const _budgetFallbackWarnings = new Set<string>();
+
+export const CONTEXT_WINDOW_OVERRIDE_KEY_REGEX = /^[^/\s]+\/[^/\s]+$/;
+export type ContextWindowOverride = { contextTokens?: number; contextWindow?: number };
+
+const contextWindowOverrideSchema = z.object({
+  contextTokens: z.number().int().positive().optional(),
+  contextWindow: z.number().int().positive().optional(),
+}).superRefine((value, ctx) => {
+  if (value.contextTokens == null && value.contextWindow == null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'override must declare contextTokens, contextWindow, or both',
+    });
+  }
+  if (
+    value.contextTokens != null &&
+    value.contextWindow != null &&
+    value.contextTokens > value.contextWindow
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'contextTokens must be less than or equal to contextWindow',
+    });
+  }
+});
+
+export function sanitizeContextWindowOverrides(raw: unknown): {
+  value: Record<string, ContextWindowOverride>;
+  warnings: string[];
+} {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { value: {}, warnings: [] };
+  }
+
+  const value: Record<string, ContextWindowOverride> = {};
+  const warnings: string[] = [];
+
+  for (const [key, candidate] of Object.entries(raw as Record<string, unknown>)) {
+    const normalizedKey = key.trim().toLowerCase();
+    if (!CONTEXT_WINDOW_OVERRIDE_KEY_REGEX.test(normalizedKey)) {
+      warnings.push(`ignoring contextWindowOverrides[${JSON.stringify(key)}]: key must be "provider/model"`);
+      continue;
+    }
+
+    const parsed = contextWindowOverrideSchema.safeParse(candidate);
+    if (!parsed.success) {
+      warnings.push(
+        `ignoring contextWindowOverrides[${JSON.stringify(key)}]: ` +
+        parsed.error.issues.map(issue => issue.message).join('; ')
+      );
+      continue;
+    }
+
+    value[normalizedKey] = parsed.data;
+  }
+
+  return { value, warnings };
+}
+
+export function resolveEffectiveBudget(args: {
+  tokenBudget?: number;
+  model?: string;
+  contextWindowSize: number;
+  contextWindowReserve: number;
+  contextWindowOverrides?: Record<string, ContextWindowOverride>;
+}): { budget: number; source: string } {
+  const { tokenBudget, model, contextWindowSize, contextWindowReserve } = args;
+  if (tokenBudget) {
+    return { budget: tokenBudget, source: 'runtime tokenBudget' };
+  }
+
+  const key = normalizeModelKey(model);
+  const override = key ? args.contextWindowOverrides?.[key] : undefined;
+  const configuredWindow = override?.contextTokens ?? override?.contextWindow;
+  if (configuredWindow) {
+    return {
+      budget: Math.floor(configuredWindow * (1 - contextWindowReserve)),
+      source: `contextWindowOverrides[${key}]`,
+    };
+  }
+
+  return {
+    budget: Math.floor(contextWindowSize * (1 - contextWindowReserve)),
+    source: 'fallback contextWindowSize',
+  };
+}
+
+function normalizeModelKey(model?: string): string | null {
+  if (!model) return null;
+  const key = model.trim().toLowerCase();
+  return key.length > 0 ? key : null;
+}
+
+function verboseLog(message: string): void {
+  if (_verboseLogging) console.log(message);
+}
+
+function resolveConfiguredWindow(model?: string): number | null {
+  const key = normalizeModelKey(model);
+  if (!key) return null;
+  const override = _contextWindowOverrides[key];
+  if (!override) return null;
+  return override.contextTokens ?? override.contextWindow ?? null;
+}
 // Subagent warming mode: 'full' | 'light' | 'off'. Default: 'light'.
 // Controls how much HyperMem context is injected into subagent sessions.
 let _subagentWarming: 'full' | 'light' | 'off' = 'light';
@@ -161,10 +616,43 @@ function getOverheadFallback(tier?: string): number {
  * total context (history + system) exceeds the model window before trim
  * completes, causing result stripping.
  */
-function computeEffectiveBudget(tokenBudget?: number): number {
-  if (tokenBudget) return tokenBudget;
-  // Derived from window config: floor to avoid fractional tokens
-  return Math.floor(_contextWindowSize * (1 - _contextWindowReserve));
+function computeEffectiveBudget(tokenBudget?: number, model?: string): number {
+  const resolved = resolveEffectiveBudget({
+    tokenBudget,
+    model,
+    contextWindowSize: _contextWindowSize,
+    contextWindowReserve: _contextWindowReserve,
+    contextWindowOverrides: _contextWindowOverrides,
+  });
+
+  if (resolved.source === 'runtime tokenBudget') {
+    verboseLog(`[hypermem-plugin] budget source: runtime tokenBudget=${tokenBudget}${model ? ` model=${model}` : ''}`);
+    return resolved.budget;
+  }
+
+  const configuredWindow = resolveConfiguredWindow(model);
+  if (configuredWindow) {
+    verboseLog(
+      `[hypermem-plugin] budget source: contextWindowOverrides[${normalizeModelKey(model)}]=${configuredWindow}, ` +
+      `reserve=${_contextWindowReserve}, effective=${resolved.budget}`
+    );
+    return resolved.budget;
+  }
+
+  verboseLog(
+    `[hypermem-plugin] budget source: fallback contextWindowSize=${_contextWindowSize}, ` +
+    `reserve=${_contextWindowReserve}, effective=${resolved.budget}${model ? ` model=${model}` : ''}`
+  );
+  const warningKey = normalizeModelKey(model) ?? '(unknown-model)';
+  if (!_budgetFallbackWarnings.has(warningKey)) {
+    _budgetFallbackWarnings.add(warningKey);
+    console.warn(
+      `[hypermem-plugin] No runtime tokenBudget${model ? ` for model ${model}` : ''}; ` +
+      `falling back to contextWindowSize=${_contextWindowSize}. ` +
+      `Add contextWindowOverrides["provider/model"] to config.json or openclaw.json if detection is wrong.`
+    );
+  }
+  return resolved.budget;
 }
 
 // ─── Plugin config cache ───────────────────────────────────────
@@ -179,16 +667,34 @@ let _pluginConfig: HypercompositorConfig = {};
  */
 async function loadUserConfig(): Promise<{
   compositor?: Partial<{
+    budgetFraction: number;
+    reserveFraction: number;
+    historyFraction: number;
+    memoryFraction: number;
     defaultTokenBudget: number;
     maxHistoryMessages: number;
     maxFacts: number;
+    maxExpertisePatterns: number;
     maxCrossSessionContext: number;
+    maxTotalTriggerTokens: number;
     maxRecentToolPairs: number;
     maxProseToolPairs: number;
     warmHistoryBudgetFraction: number;
+    contextWindowReserve: number;
+    dynamicReserveTurnHorizon: number;
+    dynamicReserveMax: number;
+    dynamicReserveEnabled: boolean;
     keystoneHistoryFraction: number;
     keystoneMaxMessages: number;
     keystoneMinSignificance: number;
+    targetBudgetFraction: number;
+    enableFOS: boolean;
+    enableMOD: boolean;
+    hyperformProfile: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
+    outputProfile: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
+    outputStandard: 'light' | 'standard' | 'full' | 'starter' | 'fleet';
+    wikiTokenCap: number;
+    zigzagOrdering: boolean;
   }>;
   eviction?: Partial<{
     /** Turns before images are evicted. Default: 2 */
@@ -245,6 +751,18 @@ async function loadUserConfig(): Promise<{
    * Set this when agents.defaults.contextPruning.mode is enabled.
    */
   deferToolPruning?: boolean;
+  /** Enable detailed budget / trim decision logs. Default: false. */
+  verboseLogging?: boolean;
+  /**
+   * Manual context window overrides by fully-qualified model id.
+   * Used only when OpenClaw does not pass tokenBudget.
+   */
+  contextWindowOverrides?: Record<string, {
+    contextTokens?: number;
+    contextWindow?: number;
+  }>;
+  /** Threshold for cache replay fallback path. Default: 120000ms. */
+  warmCacheReplayThresholdMs?: number;
   /**
    * Controls how much HyperMem context is injected into subagent sessions.
    * - 'full'  — same compositor pipeline as parent sessions (all layers)
@@ -274,6 +792,9 @@ async function loadUserConfig(): Promise<{
   if (_pluginConfig.contextWindowSize != null) merged.contextWindowSize = _pluginConfig.contextWindowSize;
   if (_pluginConfig.contextWindowReserve != null) merged.contextWindowReserve = _pluginConfig.contextWindowReserve;
   if (_pluginConfig.deferToolPruning != null) merged.deferToolPruning = _pluginConfig.deferToolPruning;
+  if (_pluginConfig.verboseLogging != null) merged.verboseLogging = _pluginConfig.verboseLogging;
+  if (_pluginConfig.contextWindowOverrides != null) merged.contextWindowOverrides = { ...merged.contextWindowOverrides, ..._pluginConfig.contextWindowOverrides };
+  if (_pluginConfig.warmCacheReplayThresholdMs != null) merged.warmCacheReplayThresholdMs = _pluginConfig.warmCacheReplayThresholdMs;
   if (_pluginConfig.subagentWarming != null) merged.subagentWarming = _pluginConfig.subagentWarming;
   if (_pluginConfig.compositor) merged.compositor = { ...merged.compositor, ..._pluginConfig.compositor };
   if (_pluginConfig.eviction) merged.eviction = { ...merged.eviction, ..._pluginConfig.eviction };
@@ -349,9 +870,15 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         userConfig.contextWindowReserve >= 0 && userConfig.contextWindowReserve <= 0.5) {
       _contextWindowReserve = userConfig.contextWindowReserve;
     }
-    if (userConfig.deferToolPruning === true) {
-      _deferToolPruning = true;
+    _deferToolPruning = userConfig.deferToolPruning === true;
+    if (_deferToolPruning) {
       console.log('[hypermem-plugin] deferToolPruning: true — tool gradient deferred to host contextPruning');
+    }
+    _verboseLogging = userConfig.verboseLogging === true;
+    const sanitizedOverrides = sanitizeContextWindowOverrides(userConfig.contextWindowOverrides);
+    _contextWindowOverrides = sanitizedOverrides.value;
+    for (const warning of sanitizedOverrides.warnings) {
+      console.warn(`[hypermem-plugin] ${warning}`);
     }
     const warmingVal = (userConfig as { subagentWarming?: string }).subagentWarming;
     if (warmingVal === 'full' || warmingVal === 'light' || warmingVal === 'off') {
@@ -367,6 +894,8 @@ async function getHyperMem(): Promise<HyperMemInstance> {
       `${Math.round(_contextWindowReserve * 100)}% reserved (${reservedTokens} tokens), ` +
       `effective history budget: ${_contextWindowSize - reservedTokens} tokens`
     );
+    verboseLog(`[hypermem-plugin] warmCacheReplayThresholdMs=${_cacheReplayThresholdMs}`);
+    verboseLog(`[hypermem-plugin] contextWindowOverrides keys=${Object.keys(_contextWindowOverrides).join(', ') || '(none)'}`);
 
     const instance = await HyperMem.create({
       dataDir: _pluginConfig.dataDir ?? path.join(os.homedir(), '.openclaw/hypermem'),
@@ -388,10 +917,11 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         getMessageDb: (agentId: string) => any,
         getLibraryDb: () => any,
         listAgents: () => string[],
-        config?: Partial<{ enabled: boolean; periodicInterval: number }>,
+        config?: Partial<{ enabled: boolean; periodicInterval: number; maxActiveConversations?: number; recentConversationCooldownMs?: number; maxCandidatesPerPass?: number }>,
         getCursor?: (agentId: string, sessionKey: string) => Promise<unknown>,
         vectorStore?: any,
-        dreamerConfig?: Record<string, unknown>
+        dreamerConfig?: Record<string, unknown>,
+        globalWritePolicy?: string,
       ) => BackgroundIndexer;
     };
     const libraryDb = instance.dbManager.getLibraryDb();
@@ -415,17 +945,34 @@ async function getHyperMem(): Promise<HyperMemInstance> {
             return [];
           }
         },
-        { enabled: true, periodicInterval: 300000 },  // 5-minute interval
-        // Cursor fetcher: reads from Redis → SQLite fallback
+        {
+          enabled: true,
+          periodicInterval: (userConfig as any)?.maintenance?.periodicInterval ?? 300000,
+          maxActiveConversations: (userConfig as any)?.maintenance?.maxActiveConversations ?? 5,
+          recentConversationCooldownMs: (userConfig as any)?.maintenance?.recentConversationCooldownMs ?? 30000,
+          maxCandidatesPerPass: (userConfig as any)?.maintenance?.maxCandidatesPerPass ?? 200,
+        },
+        // Cursor fetcher: reads the SQLite-backed session cursor
         async (agentId: string, sessionKey: string) => {
           return instance.getSessionCursor(agentId, sessionKey);
         },
         // Pass vector store so new facts/episodes are embedded at index time
         instance.getVectorStore() ?? undefined,
         // Dreaming config — passed from hypermem user config if set
-        (userConfig as { dreaming?: Record<string, unknown> })?.dreaming ?? {}
+        (userConfig as { dreaming?: Record<string, unknown> })?.dreaming ?? {},
+        // KL-01: global write policy — passed from hypermem user config
+        ((userConfig as { globalWritePolicy?: string })?.globalWritePolicy as any) ?? 'deny',
       );
       _indexer.start();
+      if (_verboseLogging) {
+        const mc = (userConfig as any)?.maintenance ?? {};
+        console.log(
+          `[hypermem-plugin] maintenance settings: periodicInterval=${mc.periodicInterval ?? 300000}ms ` +
+          `maxActiveConversations=${mc.maxActiveConversations ?? 5} ` +
+          `cooldown=${mc.recentConversationCooldownMs ?? 30000}ms ` +
+          `maxCandidatesPerPass=${mc.maxCandidatesPerPass ?? 200}`
+        );
+      }
     } catch {
       // Non-fatal — indexer wiring can fail without breaking context assembly
     }
@@ -719,6 +1266,100 @@ function estimateTokens(text: string | null | undefined): number {
   return Math.ceil(text.length / 4);
 }
 
+function estimateMessagePartTokens(part: Record<string, unknown>): number {
+  if (part.type === 'image' || part.type === 'image_url') {
+    const src = (part.source as Record<string, unknown> | undefined)?.data;
+    const url = (part.image_url as Record<string, unknown> | undefined)?.url as string | undefined;
+    const dataStr = typeof src === 'string' ? src : (typeof url === 'string' ? url : '');
+    return Math.ceil(dataStr.length / 3);
+  }
+  if (part.type === 'toolCall' || part.type === 'tool_use') {
+    return Math.ceil(JSON.stringify(part).length / 2);
+  }
+  const textVal = typeof part.text === 'string' ? part.text
+    : typeof part.content === 'string' ? part.content
+    : part.content != null ? JSON.stringify(part.content) : null;
+  return estimateTokens(textVal);
+}
+
+function estimateMessageTokens(msg: Record<string, unknown>): number {
+  let total = estimateTokens(typeof msg.textContent === 'string' ? msg.textContent : null);
+  if (typeof msg.content === 'string' && typeof msg.textContent !== 'string') {
+    total += estimateTokens(msg.content);
+  }
+  if (msg.toolCalls) total += Math.ceil(JSON.stringify(msg.toolCalls).length / 2);
+  if (msg.toolResults) total += Math.ceil(JSON.stringify(msg.toolResults).length / 2);
+  if (Array.isArray(msg.content)) {
+    total += (msg.content as Array<Record<string, unknown>>).reduce(
+      (sum, part) => sum + estimateMessagePartTokens(part),
+      0,
+    );
+  }
+  return total;
+}
+
+function estimateMessageArrayTokens(messages: unknown[]): number {
+  return messages.reduce(
+    (sum: number, msg: unknown) => sum + estimateMessageTokens(msg as Record<string, unknown>),
+    0,
+  );
+}
+
+function maybeLogPressureAccountingAnomaly(fields: {
+  path: TrimTelemetryPath;
+  agentId: string;
+  sessionKey: string;
+  runtimeTokens: number;
+  redisTokens: number;
+  composedTokens: number;
+  budget: number;
+}): void {
+  const threshold = Math.max(500, Math.floor(fields.budget * 0.05));
+  const deltas = {
+    runtimeVsComposed: Math.abs(fields.runtimeTokens - fields.composedTokens),
+    redisVsComposed: Math.abs(fields.redisTokens - fields.composedTokens),
+    runtimeVsRedis: Math.abs(fields.runtimeTokens - fields.redisTokens),
+  };
+  if (
+    deltas.runtimeVsComposed < threshold &&
+    deltas.redisVsComposed < threshold &&
+    deltas.runtimeVsRedis < threshold
+  ) {
+    return;
+  }
+
+  console.warn(
+    `[hypermem-plugin] pressure-accounting anomaly: path=${fields.path} ` +
+    `runtime=${fields.runtimeTokens} redis=${fields.redisTokens} composed=${fields.composedTokens} ` +
+    `budget=${fields.budget} threshold=${threshold}`
+  );
+
+  guardTelemetry({
+    path: fields.path,
+    agentId: fields.agentId,
+    sessionKey: fields.sessionKey,
+    reason: 'pressure-accounting-anomaly',
+  });
+}
+
+function normalizeReplayRecoveryState(value: string | null | undefined): '' | 'entering' | 'stabilizing' | 'exited' | null {
+  if (value == null) return null;
+  if (value === '') return '';
+  return isReplayState(value) ? value : null;
+}
+
+async function persistReplayRecoveryState(
+  hm: HyperMemInstance,
+  agentId: string,
+  sessionKey: string,
+  nextState: string | null,
+): Promise<void> {
+  try {
+    await hm.cache.setSlot(agentId, sessionKey, 'replayRecoveryState', nextState ?? '');
+  } catch {
+    // Non-fatal
+  }
+}
 
 function hasStructuredToolCallMessage(msg: Record<string, unknown>): boolean {
   if (Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0) return true;
@@ -814,13 +1455,7 @@ async function estimateWindowTokens(hm: HyperMemInstance, agentId: string, sessi
     const window = await hm.cache.getWindow(agentId, sessionKey)
       ?? await hm.cache.getHistory(agentId, sessionKey);
     if (!window || window.length === 0) return 0;
-    return window.reduce((sum: number, msg: any) => {
-      let t = estimateTokens(msg.textContent);
-      // Tool payloads are dense JSON — use /2 not /4 to avoid systematic undercount
-      if (msg.toolCalls) t += Math.ceil(JSON.stringify(msg.toolCalls).length / 2);
-      if (msg.toolResults) t += Math.ceil(JSON.stringify(msg.toolResults).length / 2);
-      return sum + t;
-    }, 0);
+    return estimateMessageArrayTokens(window as unknown[]);
   } catch {
     return 0;
   }
@@ -924,7 +1559,7 @@ async function truncateJsonlIfNeeded(
 function createHyperMemEngine(): ContextEngine {
   return {
     info: {
-      id: 'hypermem',
+      id: 'hypercompositor',
       name: 'hypermem context engine',
       version: '0.6.3',
       // We own compaction — assemble() trims to budget via the compositor safety
@@ -953,6 +1588,58 @@ function createHyperMemEngine(): ContextEngine {
         const agentId = extractAgentId(sk);
 
         // EC1 JSONL truncation moved to maintain() — bootstrap stays fast.
+
+        // B2: Session-restart detection — rotateSessionContext hook.
+        // When the runtime starts a new session (new sessionId) for an existing
+        // sessionKey, archive the old context head and create a fresh active
+        // context so the new conversation starts clean. This prevents the new
+        // session from inheriting a stale context head pointer from the prior run.
+        //
+        // Detection: if a conversation row exists for this sessionKey AND the
+        // stored session_id differs from the incoming sessionId (runtime-assigned),
+        // treat this as a session restart.
+        //
+        // Non-fatal: context rotation is best-effort and never blocks bootstrap.
+        if (sessionId) {
+          try {
+            const _msgDb = hm.dbManager.getMessageDb(agentId);
+            if (_msgDb) {
+              const _existingConv = _msgDb.prepare(
+                'SELECT id, session_id FROM conversations WHERE session_key = ? LIMIT 1'
+              ).get(sk) as { id: number; session_id: string | null } | undefined;
+              if (
+                _existingConv &&
+                _existingConv.session_id !== null &&
+                _existingConv.session_id !== sessionId
+              ) {
+                // Distinct sessionId — this is a session restart for an existing sessionKey.
+                rotateSessionContext(_msgDb, agentId, sk, _existingConv.id);
+                // Update the stored session_id to the new one.
+                try {
+                  _msgDb.prepare('UPDATE conversations SET session_id = ? WHERE id = ?')
+                    .run(sessionId, _existingConv.id);
+                } catch {
+                  // Best-effort — column may not exist in older schemas
+                }
+                console.log(
+                  `[hypermem-plugin] bootstrap: session restart detected for ${agentId}/${sk} ` +
+                  `(prev session_id=${_existingConv.session_id}, new=${sessionId}) — context rotated`
+                );
+              } else if (_existingConv && _existingConv.session_id === null && sessionId) {
+                // Conversation exists but session_id was never recorded — stamp it now.
+                try {
+                  _msgDb.prepare('UPDATE conversations SET session_id = ? WHERE id = ?')
+                    .run(sessionId, _existingConv.id);
+                } catch {
+                  // Best-effort
+                }
+              }
+            }
+          } catch (rotateErr) {
+            // Non-fatal — never block bootstrap on context rotation
+            console.warn('[hypermem-plugin] bootstrap: rotateSessionContext failed (non-fatal):', (rotateErr as Error).message);
+          }
+        }
 
         // Fast path: if session already has history in Redis, skip warm entirely.
         // sessionExists() is a single EXISTS call — sub-millisecond cost.
@@ -1054,17 +1741,20 @@ function createHyperMemEngine(): ContextEngine {
           const warmBudget = 90_000;
           const warmPressure = postWarmTokens / warmBudget;
           if (warmPressure > 0.80) {
-            const warmTrimTarget = warmPressure > 0.90 ? 0.40 : 0.55;
-            const warmTrimBudget = Math.floor(warmBudget * warmTrimTarget);
-            const warmTrimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, warmTrimBudget);
-            if (warmTrimmed > 0) {
-              await hm.cache.invalidateWindow(agentId, sk);
-              console.log(
-                `[hypermem-plugin] bootstrap: high-pressure startup ` +
-                `(${(warmPressure * 100).toFixed(1)}%), pre-trimmed Redis to ` +
-                `~${warmTrimTarget * 100}% (${warmTrimmed} msgs dropped)`
-              );
-            }
+            // Sprint 2.2a: demote warmstart to guard telemetry.
+            //
+            // Previously this path performed a real trim + invalidateWindow
+            // and emitted `event:'trim'` with path='warmstart'. Assemble
+            // (tool-loop + normal/subagent) is the steady-state owner now,
+            // so the first turn's assemble.* trim absorbs any remaining
+            // post-warm pressure. Keeping the pressure check + threshold
+            // branch here preserves observability via `event:'trim-guard'`
+            // without mutating Redis history or the window cache.
+            guardTelemetry({
+              path: 'warmstart',
+              agentId, sessionKey: sk,
+              reason: 'warmstart-pressure-demoted',
+            });
           }
         } catch {
           // Non-fatal — first turn's tool-loop trim is the fallback
@@ -1177,54 +1867,88 @@ function createHyperMemEngine(): ContextEngine {
         // ── Pre-ingestion wave guard ──────────────────────────────────────────
         // Tool result payloads can be 10k-50k tokens each. When a parallel tool
         // batch (4-6 results) lands while the session is already at 70%+, storing
-        // full payloads pushes Redis past the nuclear path threshold before the
-        // next assemble() can trim. Use Redis current state (appropriate here —
-        // we're deciding what to write TO Redis) as the pressure signal.
-        // Above 70%: truncate toolResult content to a compact stub.
-        // Above 85%: skip recording entirely — assemble() trim is the safety net.
+        // full payloads pushes the hot window past the nuclear path threshold
+        // before the next assemble() can trim. Use current hot-window state as
+        // the pressure signal (appropriate here, we're deciding what to write TO
+        // the window).
+        //
+        // Above 70%: truncate toolResult content in transcript, but keep the
+        // full payload durable in tool_artifacts (schema v9). Stub carries
+        // artifactId so the compositor can hydrate on demand.
+        // Above 85%: full stub replacement in transcript, still with artifactId.
+        // At all levels: the full payload is persisted durably. No data loss.
         const isInboundToolResult = msg.role === 'tool' || msg.role === 'tool_result' || msg.role === 'toolResult';
         if (isInboundToolResult && neutral.toolResults && neutral.toolResults.length > 0) {
-          const redisTokens = await estimateWindowTokens(hm, agentId, sk);
+          const windowTokens = await estimateWindowTokens(hm, agentId, sk);
           const effectiveBudget = computeEffectiveBudget(undefined);
-          const redisPressure = redisTokens / effectiveBudget;
+          const windowPressure = windowTokens / effectiveBudget;
 
-          // Error tool results are always preserved intact — they're small and
+          // Error tool results are always preserved intact: they're small and
           // the model needs the error signal to understand what went wrong.
           const hasErrorResult = neutral.toolResults!.some(tr => tr.isError);
 
-          if (redisPressure > 0.85) {
-            // FIX (Bug 4): Never skip a tool result entirely — that leaves an orphaned
-            // tool_call in Redis history (the assistant message was already recorded).
-            // Anthropic rejects assistant messages with tool_calls that have no matching result.
-            // Instead, record a compact stub that preserves pair integrity in history.
-            const stubbedResults = neutral.toolResults!.map(tr => {
-              if (tr.isError) return tr; // preserve error results intact
-              return {
-                ...tr,
-                content: `[tool result omitted by wave-guard at ${(redisPressure * 100).toFixed(0)}% Redis pressure]`,
-              };
-            });
-            const stubNeutral = { ...neutral, toolResults: stubbedResults };
-            console.log(`[hypermem] ingest wave-guard: stubbing toolResult (Redis pressure ${(redisPressure * 100).toFixed(0)}% > 85%)${hasErrorResult ? ' — error results preserved' : ''} — preserving pair integrity`);
-            await hm.recordAssistantMessage(agentId, sk, stubNeutral);
-            return { ingested: true };
-          } else if (redisPressure > 0.70) {
-            // Elevated: store truncated stub to preserve tool call pairing in history
+          // Only apply degradation / artifact capture above elevated pressure.
+          if (windowPressure > 0.70) {
             const MAX_TOOL_RESULT_CHARS = 500;
-            neutral = {
-              ...neutral,
-              toolResults: neutral.toolResults.map(tr => {
-                if (tr.isError) return tr; // preserve error results intact
-                const content = typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content);
-                if (content.length <= MAX_TOOL_RESULT_CHARS) return tr;
+            const highPressure = windowPressure > 0.85;
+            const reason: 'wave_guard_pressure_high' | 'wave_guard_pressure_elevated' =
+              highPressure ? 'wave_guard_pressure_high' : 'wave_guard_pressure_elevated';
+
+            // For each non-error tool result, persist the full payload as a
+            // durable artifact first, then rewrite the transcript entry to
+            // either a full stub (high pressure) or a truncated stub with an
+            // artifact pointer (elevated pressure).
+            const rewrittenResults = await Promise.all(
+              neutral.toolResults!.map(async tr => {
+                if (tr.isError) return tr;
+                const content =
+                  typeof tr.content === 'string'
+                    ? tr.content
+                    : JSON.stringify(tr.content);
+
+                // At elevated pressure, small payloads pass through unchanged.
+                if (!highPressure && content.length <= MAX_TOOL_RESULT_CHARS) {
+                  return tr;
+                }
+
+                let artifactId: string | undefined;
+                try {
+                  const record = await hm.recordToolArtifact(agentId, sk, {
+                    toolName: tr.name || 'tool_result',
+                    toolCallId: tr.callId || undefined,
+                    isError: false,
+                    payload: content,
+                    summary: content.slice(0, 160),
+                  });
+                  artifactId = record.id;
+                } catch (artErr) {
+                  console.warn(
+                    '[hypermem-plugin] tool artifact capture failed (non-fatal):',
+                    (artErr as Error).message,
+                  );
+                }
+
+                const summary = highPressure
+                  ? `omitted at ${(windowPressure * 100).toFixed(0)}% window pressure`
+                  : `truncated at ${(windowPressure * 100).toFixed(0)}% pressure: ${Math.ceil(content.length / 4)} tokens`;
+
                 return {
                   ...tr,
-                  content: `[truncated by wave-guard at ${(redisPressure * 100).toFixed(0)}% pressure: ${Math.ceil(content.length / 4)} tokens]`,
+                  content: formatToolChainStub({
+                    name: tr.name || 'tool_result',
+                    id: tr.callId || 'unknown',
+                    status: 'ejected',
+                    reason,
+                    summary,
+                    artifactId,
+                  }),
                 };
               }),
-            };
+            );
+
+            neutral = { ...neutral, toolResults: rewrittenResults };
             console.log(
-              `[hypermem] ingest wave-guard: truncated toolResult (Redis pressure ${(redisPressure * 100).toFixed(0)}% > 70%)${hasErrorResult ? ' — error results preserved' : ''}`
+              `[hypermem] ingest wave-guard: ${highPressure ? 'stubbed' : 'truncated'} toolResult (window pressure ${(windowPressure * 100).toFixed(0)}% > ${highPressure ? 85 : 70}%)${hasErrorResult ? ' + error results preserved' : ''} - full payload persisted to tool_artifacts`,
             );
           }
         }
@@ -1299,6 +2023,40 @@ function createHyperMemEngine(): ContextEngine {
       // pass-through that never re-injects context on tool-loop calls.
       const lastMsg = messages[messages.length - 1] as unknown as InboundMessage | undefined;
       const isToolLoop = lastMsg?.role === 'toolResult' || lastMsg?.role === 'tool';
+
+      // Telemetry: emit one assembleTrace at entry. Path taxonomy:
+      //   'subagent' - session key matches the subagent pattern
+      //   'cold'     - normal full-assembly or tool-loop entry (a separate
+      //                'replay' trace is emitted if the cache replay fast
+      //                path is taken below)
+      // Zero-cost when HYPERMEM_TELEMETRY !== '1'.
+      //
+      // Trim-ownership turn context (Sprint 2): the turnId is also used to
+      // scope the shared trim-owner claim helper so duplicate steady-state
+      // trims in a single assemble() turn can be detected and (under
+      // NODE_ENV='development') throw loudly. We always allocate the turnId
+      // and open the scope — the map write is cheap and keeps enforcement
+      // active even when telemetry is off. The scope is closed in the
+      // finally block wrapping the full assemble body below.
+      const _asmSk = resolveSessionKey(sessionId, sessionKey);
+      const _asmTurnId = nextTurnId();
+      beginTrimOwnerTurn(_asmSk, _asmTurnId);
+      if (telemetryEnabled()) {
+        const _agentId = extractAgentId(_asmSk);
+        const _entryPath: 'cold' | 'replay' | 'subagent' = _asmSk.includes('subagent:')
+          ? 'subagent'
+          : 'cold';
+        assembleTrace({
+          agentId: _agentId,
+          sessionKey: _asmSk,
+          turnId: _asmTurnId,
+          path: _entryPath,
+          toolLoop: isToolLoop,
+          msgCount: messages.length,
+        });
+      }
+
+      try {
       if (isToolLoop) {
         // Tool-loop turns: pass messages through unchanged but still:
         //   1. Run the trim guardrail — tool loops accumulate history as fast
@@ -1312,7 +2070,7 @@ function createHyperMemEngine(): ContextEngine {
         // a fixed 80% trim only frees 11% headroom — the wave overflows anyway
         // and results strip silently. Tier the trim target based on pre-trim
         // pressure so high-pressure sessions get real headroom before results land.
-        const effectiveBudget = computeEffectiveBudget(tokenBudget);
+        const effectiveBudget = computeEffectiveBudget(tokenBudget, model);
         try {
           const hm = await getHyperMem();
           const sk = resolveSessionKey(sessionId, sessionKey);
@@ -1342,62 +2100,27 @@ function createHyperMemEngine(): ContextEngine {
             }
           }
 
-          // Measure pressure BEFORE trim to pick the right tier.
-          // Critical: use the runtime-provided messages array, NOT estimateWindowTokens()
-          // which reads Redis. After a gateway restart Redis is empty — estimateWindowTokens
-          // returns ~0, pressure reads as 0%, and the trim tiers never fire even though
-          // the session is at 98% from JSONL loaded at runtime. The messages param is
-          // always authoritative — it's what the runtime actually sent to the model.
-          const runtimeTokens = messages.reduce((sum: number, m: unknown) => {
-            const msg = m as Record<string, unknown>;
-            const textCost = estimateTokens(typeof msg.textContent === 'string' ? msg.textContent : null);
-            const toolCallCost = msg.toolCalls ? Math.ceil(JSON.stringify(msg.toolCalls).length / 2) : 0;
-            const toolResultCost = msg.toolResults ? Math.ceil(JSON.stringify(msg.toolResults).length / 2) : 0;
-            // FIX (Bug 2): count content arrays in OpenClaw native format.
-            // Native tool result messages store content as c.content (not c.text).
-            // Old code always read c.text, returning 0 for native format — severe undercount.
-            const contentCost = Array.isArray(msg.content)
-              ? (msg.content as unknown[]).reduce((s: number, c: unknown) => {
-                  const part = c as Record<string, unknown>;
-                  const textVal = typeof part.text === 'string' ? part.text
-                    : typeof part.content === 'string' ? part.content
-                    : part.content != null ? JSON.stringify(part.content) : null;
-                  return s + estimateTokens(textVal);
-                }, 0)
-              : 0;
-            // Count image parts — base64 images are large and invisible to the text estimator
-            const imageCost = Array.isArray(msg.content)
-              ? (msg.content as unknown[]).reduce((s: number, c: unknown) => {
-                  const part = c as Record<string, unknown>;
-                  if (part.type === 'image' || part.type === 'image_url') {
-                    const src = (part.source as Record<string, unknown> | undefined)?.data;
-                    const url = (part.image_url as Record<string, unknown> | undefined)?.url as string | undefined;
-                    const dataStr = typeof src === 'string' ? src : (typeof url === 'string' ? url : '');
-                    return s + Math.ceil(dataStr.length / 3); // base64 ~1.33x bytes, ~1 token/4 bytes
-                  }
-                  return s;
-                }, 0)
-              : 0;
-            return sum + textCost + toolCallCost + toolResultCost + contentCost + imageCost;
-          }, 0);
-          // Redis window is a useful cross-check; use whichever is higher so we never
-          // underestimate when Redis is ahead of the runtime snapshot.
+          // Measure pressure from the in-memory message array we are actually about
+          // to shape and return. Redis remains a cross-check only.
+          const runtimeTokens = estimateMessageArrayTokens(workingMessages as unknown[]);
           const redisTokens = await estimateWindowTokens(hm, agentId, sk);
-          const preTrimTokens = Math.max(runtimeTokens, redisTokens);
+          const replayRecovery = decideReplayRecovery({
+            currentState: normalizeReplayRecoveryState(await hm.cache.getSlot(agentId, sk, 'replayRecoveryState').catch(() => '')),
+            runtimeTokens,
+            redisTokens,
+            effectiveBudget,
+          });
+          const replayMarkerText = replayRecovery.emittedText;
+          const preTrimTokens = runtimeTokens;
           const pressure = preTrimTokens / effectiveBudget;
 
-          // Pressure-tiered trim targets:
-          //   JSONL-replay (EC1): runtimeTokens >> redisTokens means session
-          //   loaded from a large JSONL but Redis is cold (post-restart). Trim
-          //   aggressively to 30% so system prompt + this turn's tool results fit.
-          //   >85% (critical) → trim to 50%: blast headroom for incoming wave
-          //   >80% (high)     → trim to 60%: 40% headroom
-          //   >75% (elevated) → trim to 65%: 35% headroom
-          //   ≤75% (normal)   → trim to 80%: existing behaviour
-          const isJsonlReplay = runtimeTokens > effectiveBudget * 0.80 && redisTokens < runtimeTokens * 0.20;
+          // Pressure-tiered trim targets use a single authority: the working
+          // message array. Redis drift is logged as an anomaly, never used as
+          // a trim trigger. Replay recovery gets its own explicit bounded mode
+          // instead of sharing the steady-state pressure heuristics.
           let trimTarget: number;
-          if (isJsonlReplay) {
-            trimTarget = 0.20; // EC1: cold Redis + hot JSONL = post-restart replay, need max headroom
+          if (typeof replayRecovery.trimTargetOverride === 'number') {
+            trimTarget = replayRecovery.trimTargetOverride;
           } else if (pressure > 0.85) {
             trimTarget = 0.40; // critical: 60% headroom for incoming wave
           } else if (pressure > 0.80) {
@@ -1405,13 +2128,47 @@ function createHyperMemEngine(): ContextEngine {
           } else if (pressure > 0.75) {
             trimTarget = 0.55; // elevated: 45% headroom
           } else {
-            trimTarget = 0.65; // normal: 35% headroom (was 0.80 — too tight)
+            trimTarget = 0.65; // normal: 35% headroom
           }
 
           const trimBudget = Math.floor(effectiveBudget * trimTarget);
-          const trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
-          if (trimmed > 0) {
-            await hm.cache.invalidateWindow(agentId, sk);
+          // Steady-state trim owner claim (Sprint 2.2a): route through the
+          // shared helper keyed by (sessionKey, turnId). In development a
+          // duplicate steady-state trim in the same assemble() turn throws.
+          // In non-development a duplicate returns false; the real trim +
+          // its `event:'trim'` emission are gated on the successful claim so
+          // a duplicate claim is actually suppressed, not just warned.
+          // Compact.* paths are exempt; this path is assemble-owned.
+          const toolLoopClaimed = claimTrimOwner(sk, _asmTurnId, 'assemble.toolLoop');
+          let trimmed = 0;
+          let toolLoopCacheInvalidated = false;
+          if (toolLoopClaimed) {
+            trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
+            if (trimmed > 0) {
+              await hm.cache.invalidateWindow(agentId, sk);
+              toolLoopCacheInvalidated = true;
+            }
+            if (telemetryEnabled()) {
+              const postTrimTokens = await estimateWindowTokens(hm, agentId, sk).catch(() => 0);
+              trimTelemetry({
+                path: 'assemble.toolLoop',
+                agentId, sessionKey: sk,
+                preTokens: preTrimTokens,
+                postTokens: postTrimTokens,
+                removed: trimmed,
+                cacheInvalidated: toolLoopCacheInvalidated,
+                reason: `pressure=${(pressure * 100).toFixed(1)}%`,
+              });
+            }
+          } else if (telemetryEnabled()) {
+            // Surface the suppressed-duplicate as a bounded guard record so
+            // downstream reporting can see how often the gate fires. No
+            // history or window mutation here.
+            guardTelemetry({
+              path: 'assemble.toolLoop',
+              agentId, sessionKey: sk,
+              reason: 'duplicate-claim-suppressed',
+            });
           }
 
           // Also trim the messages array itself to match the budget.
@@ -1476,31 +2233,12 @@ function createHyperMemEngine(): ContextEngine {
             });
             // Fill from the back within budget
             let budget = trimBudget;
-            // Reserve tokens for system messages
+            // Reserve tokens for system messages using the same accounting
+            // function as the final composed-array estimate.
             for (const sm of systemMsgs) {
-              const t = estimateTokens(typeof sm.textContent === 'string' ? sm.textContent : null)
-                + (Array.isArray(sm.content) ? (sm.content as Array<Record<string,unknown>>).reduce(
-                    (s: number, c: Record<string,unknown>) => {
-                      const textVal = typeof c.text === 'string' ? c.text
-                        : typeof c.content === 'string' ? c.content : null;
-                      return s + estimateTokens(textVal);
-                    }, 0) : 0);
-              budget -= t;
+              budget -= estimateMessageTokens(sm);
             }
-            const msgCost = (m: Record<string, unknown>): number =>
-              estimateTokens(typeof m.textContent === 'string' ? m.textContent : null)
-              + (m.toolCalls ? Math.ceil(JSON.stringify(m.toolCalls).length / 2) : 0)
-              + (m.toolResults ? Math.ceil(JSON.stringify(m.toolResults).length / 2) : 0)
-              + (Array.isArray(m.content) ? (m.content as Array<Record<string,unknown>>).reduce(
-                  (s: number, c: Record<string,unknown>) => {
-                    if (c.type === 'toolCall' || c.type === 'tool_use') {
-                      return s + Math.ceil(JSON.stringify(c).length / 2);
-                    }
-                    const textVal = typeof c.text === 'string' ? c.text
-                      : typeof c.content === 'string' ? c.content
-                      : c.content != null ? JSON.stringify(c.content) : null;
-                    return s + estimateTokens(textVal);
-                  }, 0) : 0);
+            const msgCost = (m: Record<string, unknown>): number => estimateMessageTokens(m);
 
             const clusters = clusterTranscriptMessages(processedConvMsgs as Array<Record<string, unknown>>);
             const keptClusters: Array<Array<Record<string, unknown>>> = [];
@@ -1523,7 +2261,7 @@ function createHyperMemEngine(): ContextEngine {
             const keptCount = processedConvMsgs.length - kept.length;
             if (keptCount > 0) {
               console.log(
-                `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}%${isJsonlReplay ? ' [jsonl-replay]' : ''} → ` +
+                `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}% → ` +
                 `target=${(trimTarget * 100).toFixed(0)}% (redis=${trimmed} msgs, messages=${keptCount} dropped)`
               );
               trimmedMessages = [...systemMsgs, ...kept] as unknown as typeof messages;
@@ -1563,16 +2301,38 @@ function createHyperMemEngine(): ContextEngine {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           trimmedMessages = repairToolPairs(trimmedMessages as unknown as any[]) as unknown as typeof trimmedMessages;
 
-          const windowTokens = await estimateWindowTokens(hm, agentId, sk);
+          const composedTokens = estimateMessageArrayTokens(trimmedMessages as unknown[]);
+          maybeLogPressureAccountingAnomaly({
+            path: 'assemble.toolLoop',
+            agentId,
+            sessionKey: sk,
+            runtimeTokens: preTrimTokens,
+            redisTokens,
+            composedTokens,
+            budget: effectiveBudget,
+          });
+          await persistReplayRecoveryState(hm, agentId, sk, replayRecovery.nextState);
+          degradationTelemetry({
+            agentId,
+            sessionKey: sk,
+            turnId: _asmTurnId,
+            path: 'toolLoop',
+            toolChainCoEjections: 0,
+            toolChainStubReplacements: 0,
+            artifactDegradations: 0,
+            replayState: replayRecovery.emittedMarker?.state,
+            replayReason: replayRecovery.emittedMarker?.reason,
+          });
           const overhead = _overheadCache.get(sk) ?? getOverheadFallback();
           return {
-            messages: trimmedMessages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
-            estimatedTokens: windowTokens + overhead,
+            messages: trimmedMessages as any,
+            estimatedTokens: composedTokens + overhead,
+            systemPromptAddition: replayMarkerText || undefined,
           };
         } catch {
           // Non-fatal: return conservative estimate so guard doesn't go blind
           return {
-            messages: messages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
+            messages: messages as any,
             estimatedTokens: Math.floor(effectiveBudget * 0.8),
           };
         }
@@ -1592,11 +2352,8 @@ function createHyperMemEngine(): ContextEngine {
       if (isSubagent && _subagentWarming === 'off') {
         console.log(`[hypermem-plugin] assemble: subagent warming=off, passthrough (sk: ${sk})`);
         return {
-          messages: messages as unknown as import('@mariozechner/pi-agent-core').AgentMessage[],
-          estimatedTokens: messages.reduce((sum: number, m: unknown) => {
-            const msg = m as Record<string, unknown>;
-            return sum + Math.ceil((typeof msg.textContent === 'string' ? msg.textContent.length : 0) / 4);
-          }, 0),
+          messages: messages as any,
+          estimatedTokens: estimateMessageArrayTokens(messages as unknown[]),
         };
       }
       if (isSubagent) {
@@ -1618,21 +2375,102 @@ function createHyperMemEngine(): ContextEngine {
       // This is a preventive guard — the compositor's safety valve still trims
       // by token count post-assembly, but limiting depth up front avoids
       // feeding the compactor a window it can't reduce.
-      const effectiveBudget = computeEffectiveBudget(tokenBudget);
+      const effectiveBudget = computeEffectiveBudget(tokenBudget, model);
       const historyDepth = Math.min(250, Math.max(50, Math.floor((effectiveBudget * 0.65) / 500)));
+      const runtimeEntryTokens = estimateMessageArrayTokens(messages as unknown[]);
+      const redisEntryTokens = await estimateWindowTokens(hm, agentId, sk);
+      const replayRecovery = decideReplayRecovery({
+        currentState: normalizeReplayRecoveryState(await hm.cache.getSlot(agentId, sk, 'replayRecoveryState').catch(() => '')),
+        runtimeTokens: runtimeEntryTokens,
+        redisTokens: redisEntryTokens,
+        effectiveBudget,
+      });
+      const replayHistoryDepth = replayRecovery.active && replayRecovery.historyDepthCap
+        ? Math.min(historyDepth, replayRecovery.historyDepthCap)
+        : historyDepth;
 
       // ── Redis guardrail: trim history to token budget ────────────────────
       // Prevents model-switch bloat: if an agent previously ran on a larger
       // context window, Redis history may exceed the current model's budget.
       // Trimming here (before compose) ensures the compositor never sees a
-      // history window it can't fit. Uses 80% of budget as the trim ceiling
-      // to leave room for system prompt, facts, and identity slots.
+      // history window it can't fit.
+      //
+      // Sprint 3 (AfterTurn Rebuild/Trim Loop Fix): the assemble.normal trim now
+      // first checks whether the window is already within trimBudget. When
+      // afterTurn's refreshRedisGradient caps the rebuilt window at the same
+      // 0.65 fraction (Sprint 3 compositor fix), the steady-state path will
+      // find preTokens <= trimBudget and skip the trim entirely. The trim only
+      // fires when real excess exists (pressure spikes, model switch, cold start),
+      // breaking the unconditional afterTurn→assemble trim churn loop.
+      //
+      // B3: Batch trim with growth allowance.
+      // Trim only fires when the window has grown past the soft target by more
+      // than TRIM_GROWTH_THRESHOLD (5%). When it does fire, trim to
+      // softTarget * (1 - TRIM_HEADROOM_FRACTION) so the window has room to
+      // grow for several turns before the next trim fires. This eliminates
+      // per-turn trim churn from minor natural growth (short assistant replies,
+      // small tool outputs) while still catching genuine pressure spikes.
       try {
-        const trimBudget = Math.floor(effectiveBudget * 0.65);
-        const trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimBudget);
-        if (trimmed > 0) {
-          // Invalidate window cache since history changed
-          await hm.cache.invalidateWindow(agentId, sk);
+        const {
+          softBudget: trimSoftBudget,
+          triggerBudget: trimTriggerBudget,
+          targetBudget: trimTargetBudget,
+        } = resolveTrimBudgets(effectiveBudget);
+        // Always read preTokens so we can make the skip decision and emit telemetry.
+        const preTokensNormal = await estimateWindowTokens(hm, agentId, sk).catch(() => 0);
+        const normalPath: TrimTelemetryPath = isSubagent ? 'assemble.subagent' : 'assemble.normal';
+
+        // B3: Skip trim when window is within the growth-allowance envelope.
+        // This replaces the Sprint 3 `windowAlreadyFits` check (which only
+        // skipped at exactly ≤ softTarget). The growth allowance lets the
+        // window float up to +5% before triggering, avoiding trim on every
+        // turn that ends a few tokens above 65%.
+        const withinGrowthEnvelope = preTokensNormal > 0 && preTokensNormal <= trimTriggerBudget;
+        if (withinGrowthEnvelope) {
+          if (telemetryEnabled()) {
+            guardTelemetry({
+              path: normalPath,
+              agentId, sessionKey: sk,
+              reason: 'window-within-budget-skip',
+            });
+          }
+        } else {
+          // Steady-state trim owner claim (Sprint 2.2a): route assemble.normal
+          // and assemble.subagent through the shared helper keyed by
+          // (sessionKey, _asmTurnId). The real trim + its `event:'trim'`
+          // emission are gated on the claim so a duplicate steady-state claim
+          // in the same turn is actually suppressed in production, not just
+          // warned. In development the duplicate throws.
+          const normalClaimed = claimTrimOwner(sk, _asmTurnId, normalPath);
+          if (normalClaimed) {
+            // B3: trim to the headroom target (below soft target) so the
+            // window has room to grow before the next trim fires.
+            const trimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, trimTargetBudget);
+            let normalCacheInvalidated = false;
+            if (trimmed > 0) {
+              // Invalidate window cache since history changed
+              await hm.cache.invalidateWindow(agentId, sk);
+              normalCacheInvalidated = true;
+            }
+            if (telemetryEnabled()) {
+              const postTokensNormal = await estimateWindowTokens(hm, agentId, sk).catch(() => 0);
+              trimTelemetry({
+                path: normalPath,
+                agentId, sessionKey: sk,
+                preTokens: preTokensNormal,
+                postTokens: postTokensNormal,
+                removed: trimmed,
+                cacheInvalidated: normalCacheInvalidated,
+                reason: `b3:trigger=${trimTriggerBudget},target=${trimTargetBudget}`,
+              });
+            }
+          } else if (telemetryEnabled()) {
+            guardTelemetry({
+              path: normalPath,
+              agentId, sessionKey: sk,
+              reason: 'duplicate-claim-suppressed',
+            });
+          }
         }
       } catch (trimErr) {
         // Non-fatal — compositor's budget-fit walk is the second line of defense
@@ -1651,48 +2489,33 @@ function createHyperMemEngine(): ContextEngine {
       // (afterTurn invalidates it every turn). Also fixed: was doing setWindow()
       // then invalidateWindow() which is a write-then-delete no-op. Now reads
       // from history list and writes back via replaceHistory().
+      let lastState: Awaited<ReturnType<typeof hm.cache.getModelState>> | null = null;
       try {
-        const lastState = await hm.cache.getModelState(agentId, sk);
+        lastState = await hm.cache.getModelState(agentId, sk);
         const DOWNSHIFT_THRESHOLD = 0.10;
         const isDownshift = lastState &&
           (lastState.tokenBudget - effectiveBudget) / lastState.tokenBudget > DOWNSHIFT_THRESHOLD;
 
         if (isDownshift && !_deferToolPruning) {
-          // Read from history list — window cache is always null here because
-          // afterTurn() calls invalidateWindow() on every turn.
-          const currentHistory = await hm.cache.getHistory(agentId, sk);
-          if (currentHistory && currentHistory.length > 0) {
-            const reshaped = applyToolGradientToWindow(currentHistory, effectiveBudget);
-            if (reshaped.length < currentHistory.length) {
-              const reshapedAt = new Date().toISOString();
-              if (canPersistReshapedHistory(currentHistory)) {
-                // No structured tool turns in canonical history, safe to persist
-                // the reshaped window back to cache/history.
-                await hm.cache.replaceHistory(agentId, sk, reshaped);
-                await hm.cache.invalidateWindow(agentId, sk);
-                console.log(
-                  `[hypermem-plugin] budget-downshift: ${agentId}/${sk} ` +
-                  `${lastState.tokenBudget}→${effectiveBudget} tokens, ` +
-                  `reshaped ${currentHistory.length}→${reshaped.length} messages`
-                );
-              } else {
-                // Tool-bearing history must remain canonical. Use the reshaped
-                // window only as a compose-time view and leave hot history lossless.
-                console.log(
-                  `[hypermem-plugin] budget-downshift: ${agentId}/${sk} ` +
-                  `${lastState.tokenBudget}→${effectiveBudget} tokens, ` +
-                  `view-only reshape ${currentHistory.length}→${reshaped.length} messages (structured tool history preserved)`
-                );
-              }
-              await hm.cache.setModelState(agentId, sk, {
-                model: model ?? 'unknown',
-                tokenBudget: effectiveBudget,
-                composedAt: new Date().toISOString(),
-                historyDepth,
-                reshapedAt,
-              });
-            }
-          }
+          // Sprint 2.2a: demote reshape to guard telemetry.
+          //
+          // Previously this branch re-ran applyToolGradientToWindow, wrote
+          // back via replaceHistory, invalidated the window cache, and
+          // stamped `reshapedAt` on model state. Assemble.* is the
+          // steady-state owner, so the subsequent assemble.normal /
+          // assemble.subagent trim (gated by claimTrimOwner) handles any
+          // real downshift pressure. Keeping the detection branch preserves
+          // observability; guardTelemetry records the would-be-reshape
+          // without mutating history, the window, or model state.
+          //
+          // CRITICAL: do NOT call setModelState({ reshapedAt, … }) here.
+          // compact() skips when reshapedAt is recent, which would cause it
+          // to skip on the strength of a reshape that never ran.
+          guardTelemetry({
+            path: 'reshape',
+            agentId, sessionKey: sk,
+            reason: 'reshape-downshift-demoted',
+          });
         }
       } catch (reshapeErr) {
         // Non-fatal — compositor safety valve is still the last defense
@@ -1707,13 +2530,23 @@ function createHyperMemEngine(): ContextEngine {
       // (contextBlock) is cached, since that's what determines prefix identity.
       const cacheReplayThresholdMs = _cacheReplayThresholdMs;
       let cachedContextBlock: string | null = null;
-      if (cacheReplayThresholdMs > 0) {
+      if (cacheReplayThresholdMs > 0 && !replayRecovery.shouldSkipCacheReplay) {
         try {
           const cachedAt = await hm.cache.getSlot(agentId, sk, 'assemblyContextAt');
           if (cachedAt && Date.now() - parseInt(cachedAt) < cacheReplayThresholdMs) {
             cachedContextBlock = await hm.cache.getSlot(agentId, sk, 'assemblyContextBlock');
             if (cachedContextBlock) {
               console.log(`[hypermem-plugin] assemble: cache replay hit for ${agentId} (${Math.round((Date.now() - parseInt(cachedAt)) / 1000)}s old)`);
+              if (telemetryEnabled()) {
+                assembleTrace({
+                  agentId,
+                  sessionKey: sk,
+                  turnId: _asmTurnId,
+                  path: 'replay',
+                  toolLoop: isToolLoop,
+                  msgCount: messages.length,
+                });
+              }
             }
           }
         } catch {
@@ -1729,7 +2562,9 @@ function createHyperMemEngine(): ContextEngine {
         agentId,
         sessionKey: sk,
         tokenBudget: effectiveBudget,
-        historyDepth,
+        historyDepth: lastState?.historyDepth && lastState.historyDepth < replayHistoryDepth
+          ? lastState.historyDepth
+          : replayHistoryDepth,
         tier,
         model,          // pass model for provider detection
         includeDocChunks: subagentLight ? false : !cachedContextBlock,  // skip doc retrieval on cache hit or subagent light
@@ -1742,11 +2577,24 @@ function createHyperMemEngine(): ContextEngine {
 
       const result: ComposeResult = await hm.compose(request);
 
+      degradationTelemetry({
+        agentId,
+        sessionKey: sk,
+        turnId: _asmTurnId,
+        path: 'compose',
+        toolChainCoEjections: result.diagnostics?.toolChainCoEjections ?? 0,
+        toolChainStubReplacements: result.diagnostics?.toolChainStubReplacements ?? 0,
+        artifactDegradations: result.diagnostics?.artifactDegradations ?? 0,
+        artifactOversizeThresholdTokens: result.diagnostics?.artifactOversizeThresholdTokens,
+        replayState: replayRecovery.emittedMarker?.state,
+        replayReason: replayRecovery.emittedMarker?.reason,
+      });
+
       // Use cached contextBlock if available (cache replay), otherwise use fresh result.
       // After a full compose, write the new contextBlock to cache for the next turn.
       if (cachedContextBlock) {
         result.contextBlock = cachedContextBlock;
-      } else if (result.contextBlock && cacheReplayThresholdMs > 0) {
+      } else if (result.contextBlock && cacheReplayThresholdMs > 0 && !replayRecovery.shouldSkipCacheReplay && !replayRecovery.emittedText) {
         // Write cache async — never block the assemble() return on this
         const blockToCache = result.contextBlock;
         const nowStr = Date.now().toString();
@@ -1758,6 +2606,13 @@ function createHyperMemEngine(): ContextEngine {
           // Extend TTL on the cached keys to 2× the threshold
           // setSlot uses the sessionTTL from RedisLayer config — acceptable fallback
         }).catch(() => { /* Non-fatal */ });
+      }
+
+      if (replayRecovery.emittedText) {
+        result.contextBlock = result.contextBlock
+          ? `${result.contextBlock}
+${replayRecovery.emittedText}`
+          : replayRecovery.emittedText;
       }
 
       // Convert NeutralMessage[] → AgentMessage[] for the OpenClaw runtime.
@@ -1816,6 +2671,8 @@ function createHyperMemEngine(): ContextEngine {
       const runtimeSystemTokens = getOverheadFallback(tier);
       _overheadCache.set(sk, contextBlockTokens + runtimeSystemTokens);
 
+      await persistReplayRecoveryState(hm, agentId, sk, replayRecovery.nextState);
+
       // Update model state for downshift detection on next turn
       try {
         await hm.cache.setModelState(agentId, sk, {
@@ -1838,6 +2695,15 @@ function createHyperMemEngine(): ContextEngine {
       } catch (err) {
         console.error('[hypermem-plugin] assemble error (stack):', (err as Error).stack ?? err);
         throw err; // Re-throw so the runtime falls back to legacy pipeline
+      }
+      } finally {
+        // End the trim-owner turn scope opened at assemble entry. Paired
+        // with beginTrimOwnerTurn(_asmSk, _asmTurnId) above; runs on every
+        // exit path (normal return, tool-loop return, replay return, error
+        // re-throw). Turn-scoped keying (Sprint 2.2a) means this only
+        // removes THIS turn's slot, so concurrent same-session turns remain
+        // isolated instead of clobbering each other.
+        endTrimOwnerTurn(_asmSk, _asmTurnId);
       }
     },
 
@@ -1865,14 +2731,16 @@ function createHyperMemEngine(): ContextEngine {
         // Skip if a reshape pass just ran (within last 30s) — avoid double-processing
         // Cache modelState here for reuse in density-aware JSONL truncation below.
         let cachedModelState: Awaited<ReturnType<typeof hm.cache.getModelState>> | null = null;
+        let model: string | undefined;
         try {
           cachedModelState = await hm.cache.getModelState(agentId, sk);
+          model = cachedModelState?.model;
           if (cachedModelState?.reshapedAt) {
             const reshapeAge = Date.now() - new Date(cachedModelState.reshapedAt).getTime();
             // Only skip if session is NOT critically full — nuclear path must bypass this guard.
             // If currentTokenCount > 85% budget, fall through to nuclear compaction below.
             const isCriticallyFull = currentTokenCount != null &&
-              currentTokenCount > (computeEffectiveBudget(tokenBudget) * 0.85);
+              currentTokenCount > (computeEffectiveBudget(tokenBudget, model) * 0.85);
             if (reshapeAge < 30_000 && !isCriticallyFull) {
               console.log(`[hypermem-plugin] compact: skipping — reshape pass ran ${reshapeAge}ms ago`);
               return { ok: true, compacted: false, reason: 'reshape-recently-ran' };
@@ -1887,7 +2755,7 @@ function createHyperMemEngine(): ContextEngine {
         // and system prompt — our estimate only covers the history window. When they
         // diverge significantly upward, the difference is "inbound overhead" consuming
         // budget the history is competing for. We trim history to make room.
-        const effectiveBudget = computeEffectiveBudget(tokenBudget);
+        const effectiveBudget = computeEffectiveBudget(tokenBudget, model);
         const tokensBefore = await estimateWindowTokens(hm, agentId, sk);
 
         // Target depth for both Redis trimming and JSONL truncation.
@@ -1910,10 +2778,21 @@ function createHyperMemEngine(): ContextEngine {
           // Keeps very recent context, clears the long tool-heavy tail.
           const nuclearDepth = Math.max(10, Math.floor(targetDepth * 0.20));
           const nuclearBudget = Math.floor(effectiveBudget * 0.25);
-          await hm.cache.trimHistoryToTokenBudget(agentId, sk, nuclearBudget);
+          const nuclearRemoved = await hm.cache.trimHistoryToTokenBudget(agentId, sk, nuclearBudget);
           await hm.cache.invalidateWindow(agentId, sk).catch(() => {});
           await truncateJsonlIfNeeded(sessionFile, nuclearDepth, true);
           const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
+          if (telemetryEnabled()) {
+            trimTelemetry({
+              path: 'compact.nuclear',
+              agentId, sessionKey: sk,
+              preTokens: tokensBefore,
+              postTokens: tokensAfter,
+              removed: nuclearRemoved,
+              cacheInvalidated: true,
+              reason: `currentTokenCount=${currentTokenCount}/${effectiveBudget}`,
+            });
+          }
           console.log(
             `[hypermem-plugin] compact: NUCLEAR — session at ${currentTokenCount}/${effectiveBudget} tokens ` +
             `(${Math.round((currentTokenCount / effectiveBudget) * 100)}% full), ` +
@@ -1937,6 +2816,17 @@ function createHyperMemEngine(): ContextEngine {
               await hm.cache.invalidateWindow(agentId, sk).catch(() => {});
               const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
               await truncateJsonlIfNeeded(sessionFile, targetDepth);
+              if (telemetryEnabled()) {
+                trimTelemetry({
+                  path: 'compact.history',
+                  agentId, sessionKey: sk,
+                  preTokens: tokensBefore,
+                  postTokens: tokensAfter,
+                  removed: historyTrimmed,
+                  cacheInvalidated: true,
+                  reason: `inbound-overhead=${inboundOverhead}`,
+                });
+              }
               console.log(
                 `[hypermem-plugin] compact: large-inbound-content (gap=${inboundOverhead} tokens), ` +
                 `trimmed history ${tokensBefore}→${tokensAfter} (budget-for-history=${budgetForHistory}, trimmed=${historyTrimmed} messages)`
@@ -1993,6 +2883,17 @@ function createHyperMemEngine(): ContextEngine {
         await hm.cache.invalidateWindow(agentId, sk).catch(() => {});
 
         const tokensAfter = await estimateWindowTokens(hm, agentId, sk);
+        if (telemetryEnabled()) {
+          trimTelemetry({
+            path: 'compact.history2',
+            agentId, sessionKey: sk,
+            preTokens: tokensBefore,
+            postTokens: tokensAfter,
+            removed: historyTrimmed,
+            cacheInvalidated: true,
+            reason: `over-budget tokensBefore=${tokensBefore}/${effectiveBudget}`,
+          });
+        }
         console.log(`[hypermem-plugin] compact: trimmed ${tokensBefore} → ${tokensAfter} tokens (budget: ${effectiveBudget})`);
 
         // Density-aware JSONL truncation: derive target depth from actual avg tokens/message
@@ -2136,7 +3037,8 @@ function createHyperMemEngine(): ContextEngine {
           try {
             const modelState = await hm.cache.getModelState(agentId, sk);
             const gradientBudget = modelState?.tokenBudget;
-            await hm.refreshRedisGradient(agentId, sk, gradientBudget);
+            const gradientDepth = modelState?.historyDepth;
+            await hm.refreshRedisGradient(agentId, sk, gradientBudget, gradientDepth);
           } catch (refreshErr) {
             console.warn('[hypermem-plugin] afterTurn: refreshRedisGradient failed (non-fatal):', (refreshErr as Error).message);
           }
@@ -2161,43 +3063,43 @@ function createHyperMemEngine(): ContextEngine {
         try {
           const modelState = await hm.cache.getModelState(agentId, sk);
           if (modelState?.tokenBudget) {
-            // Use the same dual-source pressure estimate as the tool-loop trim:
-            // max(runtime messages, Redis) so a post-restart empty-Redis session
-            // still fires correctly.
-            const runtimePostTokens = messages.reduce((sum: number, m: unknown) => {
-              const msg = m as Record<string, unknown>;
-              const textCost = estimateTokens(typeof msg.textContent === 'string' ? msg.textContent : null);
-              const toolCallCost = msg.toolCalls ? Math.ceil(JSON.stringify(msg.toolCalls).length / 2) : 0;
-              const toolResultCost = msg.toolResults ? Math.ceil(JSON.stringify(msg.toolResults).length / 2) : 0;
-              const contentCost = Array.isArray(msg.content)
-                ? (msg.content as unknown[]).reduce((s: number, c: unknown) => {
-                    const part = c as Record<string, unknown>;
-                    // FIX (Bug 2 — afterTurn estimator): read c.content for native format
-                    const textVal = typeof part.text === 'string' ? part.text
-                      : typeof part.content === 'string' ? part.content
-                      : part.content != null ? JSON.stringify(part.content) : null;
-                    return s + estimateTokens(textVal);
-                  }, 0)
-                : 0;
-              return sum + textCost + toolCallCost + toolResultCost + contentCost;
-            }, 0);
+            // Use the runtime message array as the only trim-pressure source.
+            // Redis remains a drift signal for anomaly logging.
+            const runtimePostTokens = estimateMessageArrayTokens(messages as unknown[]);
             const redisPostTokens = await estimateWindowTokens(hm, agentId, sk);
-            const postTurnTokens = Math.max(runtimePostTokens, redisPostTokens);
+            const postTurnTokens = runtimePostTokens;
+            maybeLogPressureAccountingAnomaly({
+              path: 'afterTurn.secondary',
+              agentId,
+              sessionKey: sk,
+              runtimeTokens: runtimePostTokens,
+              redisTokens: redisPostTokens,
+              composedTokens: postTurnTokens,
+              budget: modelState.tokenBudget,
+            });
             const postTurnPressure = postTurnTokens / modelState.tokenBudget;
-            // Two-tier afterTurn trim (EC3 fix, 2026-04-05):
-            //   >90% → trim to 45%: deep saturation recovery — 70% target leaves only ~8k
-            //           after system prompt (20-30k), which is not enough for any real tool work.
-            //   >80% → trim to 70%: mild pressure, preserve more history.
-            const afterTurnTrimTarget = postTurnPressure > 0.90 ? 0.45 : 0.70;
+            // Sprint 2.2b: demote afterTurn.secondary to guard-only no-op.
+            //
+            // Previously this path was a two-tier real trim that fired after
+            // every turn ending at >80% pressure, calling
+            // trimHistoryToTokenBudget() and emitting `event:'trim'` with
+            // path='afterTurn.secondary'. Sprint 2 consolidates steady-state
+            // trim ownership in assemble.* (tool-loop + normal/subagent),
+            // with compact.* as the only exception family. The afterTurn
+            // post-turn pressure path is now redundant: the next turn's
+            // assemble.* trim absorbs any residual pressure.
+            //
+            // Pattern matches the warmstart/reshape demotion from 2.2a:
+            // keep the pressure predicate + threshold branch so observability
+            // via `event:'trim-guard'` is preserved, but emit NO real trim,
+            // NO invalidateWindow, NO mutation. The compact skip-gate stays
+            // correct because this path never stamped any model state.
             if (postTurnPressure > 0.80) {
-              const headroomBudget = Math.floor(modelState.tokenBudget * afterTurnTrimTarget);
-              const secondaryTrimmed = await hm.cache.trimHistoryToTokenBudget(agentId, sk, headroomBudget);
-              if (secondaryTrimmed > 0) {
-                console.log(
-                  `[hypermem-plugin] afterTurn: pre-emptive trim — session exiting at ` +
-                  `${(postTurnPressure * 100).toFixed(1)}%, trimmed ${secondaryTrimmed} msgs to create headroom`
-                );
-              }
+              guardTelemetry({
+                path: 'afterTurn.secondary',
+                agentId, sessionKey: sk,
+                reason: 'afterturn-secondary-demoted',
+              });
             }
           }
         } catch {
@@ -2536,20 +3438,44 @@ const hypercompositorConfigSchema = z.object({
   contextWindowReserve: z.number().min(0).max(0.5).optional(),
   /** Defer tool pruning to OpenClaw's contextPruning. Default: false */
   deferToolPruning: z.boolean().optional(),
+  /** Emit detailed budget-source and trim-decision logs. Default: false */
+  verboseLogging: z.boolean().optional(),
+  /** Manual per-model context window fallback table used when runtime tokenBudget is missing. */
+  contextWindowOverrides: z.record(z.string().regex(CONTEXT_WINDOW_OVERRIDE_KEY_REGEX, 'key must be "provider/model"'), contextWindowOverrideSchema).optional(),
+  /** Treat cache replay snapshots older than this as stale. Default: 120000ms */
+  warmCacheReplayThresholdMs: z.number().int().positive().optional(),
   /** Subagent context injection: 'full' | 'light' | 'off'. Default: 'light' */
   subagentWarming: z.enum(['full', 'light', 'off']).optional(),
   /** Compositor tuning overrides */
   compositor: z.object({
+    budgetFraction: z.number().min(0).max(1).optional(),
+    reserveFraction: z.number().min(0).max(1).optional(),
+    historyFraction: z.number().min(0).max(1).optional(),
+    memoryFraction: z.number().min(0).max(1).optional(),
     defaultTokenBudget: z.number().int().positive().optional(),
     maxHistoryMessages: z.number().int().positive().optional(),
     maxFacts: z.number().int().positive().optional(),
+    maxExpertisePatterns: z.number().int().positive().optional(),
     maxCrossSessionContext: z.number().int().nonnegative().optional(),
+    maxTotalTriggerTokens: z.number().int().nonnegative().optional(),
     maxRecentToolPairs: z.number().int().nonnegative().optional(),
     maxProseToolPairs: z.number().int().nonnegative().optional(),
     warmHistoryBudgetFraction: z.number().min(0).max(1).optional(),
+    contextWindowReserve: z.number().min(0).max(1).optional(),
+    dynamicReserveTurnHorizon: z.number().int().positive().optional(),
+    dynamicReserveMax: z.number().min(0).max(1).optional(),
+    dynamicReserveEnabled: z.boolean().optional(),
     keystoneHistoryFraction: z.number().min(0).max(1).optional(),
     keystoneMaxMessages: z.number().int().nonnegative().optional(),
     keystoneMinSignificance: z.number().min(0).max(1).optional(),
+    targetBudgetFraction: z.number().min(0).max(1).optional(),
+    enableFOS: z.boolean().optional(),
+    enableMOD: z.boolean().optional(),
+    hyperformProfile: z.enum(['light', 'standard', 'full', 'starter', 'fleet']).optional(),
+    outputProfile: z.enum(['light', 'standard', 'full', 'starter', 'fleet']).optional(),
+    outputStandard: z.enum(['light', 'standard', 'full', 'starter', 'fleet']).optional(),
+    wikiTokenCap: z.number().int().positive().optional(),
+    zigzagOrdering: z.boolean().optional(),
   }).optional(),
   /** Image/tool eviction settings */
   eviction: z.object({
@@ -2584,7 +3510,7 @@ const engine = createHyperMemEngine();
 export default definePluginEntry({
   id: 'hypercompositor',
   name: 'HyperCompositor — context engine',
-  description: 'Four-layer memory architecture for OpenClaw agents: Redis hot cache, message history, vector search, and structured library.',
+  description: 'Four-layer memory architecture for OpenClaw agents: SQLite hot cache, message history, vector search, and structured library.',
   kind: 'context-engine',
   configSchema: buildPluginConfigSchema(hypercompositorConfigSchema),
   register(api) {
@@ -2592,14 +3518,14 @@ export default definePluginEntry({
     const pluginCfg = (api.pluginConfig ?? {}) as HypercompositorConfig;
     _pluginConfig = pluginCfg;
 
-    // ── Resolve HYPERMEM_PATH: pluginConfig > npm resolve > dev fallback ──
+    // ── Resolve HYPERMEM_PATH: pluginConfig > ESM package resolve > dev fallback ──
     if (pluginCfg.hyperMemPath) {
       HYPERMEM_PATH = pluginCfg.hyperMemPath;
       console.log(`[hypermem-plugin] Using configured hyperMemPath: ${HYPERMEM_PATH}`);
     } else {
       try {
-        HYPERMEM_PATH = require.resolve('@psiclawops/hypermem');
-        console.log(`[hypermem-plugin] Resolved @psiclawops/hypermem from node_modules: ${HYPERMEM_PATH}`);
+        const resolvedUrl = import.meta.resolve('@psiclawops/hypermem');
+        HYPERMEM_PATH = resolvedUrl.startsWith('file:') ? fileURLToPath(resolvedUrl) : resolvedUrl;
       } catch {
         // Dev fallback: resolve relative to plugin directory
         const __pluginDir = path.dirname(fileURLToPath(import.meta.url));
@@ -2609,6 +3535,56 @@ export default definePluginEntry({
     }
 
     api.registerContextEngine('hypercompositor', () => engine);
+
+    // ── HyperForm config dir init ──
+    // Copy defaults and guide to ~/.openclaw/hypermem/config/ on every load.
+    // Defaults are overwritten on plugin update. Active config files are never touched.
+    void (async () => {
+      try {
+        const dataDir = _pluginConfig.dataDir ?? path.join(os.homedir(), '.openclaw/hypermem');
+        const configDir = path.join(dataDir, 'config');
+        await fs.mkdir(configDir, { recursive: true });
+
+        const __pluginDir = path.dirname(fileURLToPath(import.meta.url));
+        const defaultsSrc = path.resolve(__pluginDir, '../../../config-defaults');
+
+        const defaultFiles = [
+          'hyperform-fos-defaults.json',
+          'hyperform-mod-defaults.json',
+          'HYPERFORM-GUIDE.md',
+        ];
+
+        for (const fname of defaultFiles) {
+          const src = path.join(defaultsSrc, fname);
+          const dest = path.join(configDir, fname);
+          try {
+            await fs.copyFile(src, dest);
+          } catch {
+            // defaults may not exist in dev builds — non-fatal
+          }
+        }
+
+        // On first install, copy defaults as active config if active files don't exist
+        for (const [src, dest] of [
+          ['hyperform-fos-defaults.json', 'hyperform-fos.json'],
+          ['hyperform-mod-defaults.json', 'hyperform-mod.json'],
+        ]) {
+          const destPath = path.join(configDir, dest);
+          try {
+            await fs.access(destPath);
+          } catch {
+            // Active config doesn't exist — copy defaults as starting point
+            try {
+              await fs.copyFile(path.join(configDir, src), destPath);
+            } catch {
+              // non-fatal
+            }
+          }
+        }
+      } catch {
+        // non-fatal — HyperForm config init is best-effort
+      }
+    })();
 
     // P1.7: Bind TaskFlow runtime for task visibility — best-effort.
     // Guard: api.runtime.taskFlow may not exist on older OpenClaw versions.

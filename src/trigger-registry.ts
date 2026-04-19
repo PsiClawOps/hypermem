@@ -49,7 +49,7 @@ export const TRIGGER_REGISTRY_VERSION = '1.0.0';
 
 /**
  * Default trigger registry for standard ACA collections.
- * Covers the core ACA offload use case from carol's spec.
+ * Covers the core ACA offload use case from agent6's spec.
  */
 export const TRIGGER_REGISTRY: CollectionTrigger[] = [
   {
@@ -97,7 +97,7 @@ export const TRIGGER_REGISTRY: CollectionTrigger[] = [
     ],
     maxTokens: 800,
     maxChunks: 2,
-    owner: 'alice',
+    owner: 'agent1',
     category: 'operations',
     description: 'Agent operational procedures: boot sequence, heartbeat, work queue, session startup',
   },
@@ -134,7 +134,7 @@ export const TRIGGER_REGISTRY: CollectionTrigger[] = [
     ],
     maxTokens: 1500,
     maxChunks: 4,
-    owner: 'alice',
+    owner: 'agent1',
     category: 'memory',
     description: 'Decision history: past choices, previously agreed approaches, recalled context',
   },
@@ -160,7 +160,7 @@ export const TRIGGER_REGISTRY: CollectionTrigger[] = [
     ],
     maxTokens: 1200,
     maxChunks: 3,
-    owner: 'alice',
+    owner: 'agent1',
     category: 'operations',
     description: 'Agent tooling reference: CLI commands, config paths, deployment procedures, quick reference',
   },

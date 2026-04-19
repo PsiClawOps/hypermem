@@ -86,9 +86,9 @@ No titles, no honorifics, no compound names. This applies to all agents.
 
 ### Single-Name Rule
 
-Council: carol, bob, agent4, dave, alice, oscar
-Directors: Eve, Frank, Grace, Hank, Irene, Jack, Kate, Leo
-Specialists: Mike, Nancy
+Council: agent6, agent2, agent4, agent3, agent1, agent5
+Directors: Helm, Chisel, Facet, Pylon, Plane, Vigil, Gauge, Bastion
+Specialists: Crucible, Relay
 
 ## §2 Escalation
 
@@ -179,7 +179,7 @@ console.log('\n─── Policy Document Chunking ───');
   const namingChunk = chunks.find(c => c.sectionPath.includes('§1 Naming Rules'));
   assert(namingChunk !== undefined, '§1 Naming Rules chunk found');
   assert(namingChunk.content.includes('Single-Name Rule'), 'Single-Name Rule grouped into §1');
-  assert(namingChunk.content.includes('carol, bob'), 'Council list included in §1 chunk');
+  assert(namingChunk.content.includes('agent6, agent2'), 'Council list included in §1 chunk');
 
   // §2 Escalation should include both trigger subsections
   const escalationChunk = chunks.find(c => c.sectionPath.includes('§2 Escalation'));
@@ -399,7 +399,7 @@ console.log('\n─── DocChunkStore: Cross-Source Isolation ───');
 console.log('\n─── DocChunkStore: FTS Relevance Over Sort Order ───');
 
 {
-  // Hank's repro: alphabetically-first sections should NOT beat the actually-relevant one
+  // Pylon's repro: alphabetically-first sections should NOT beat the actually-relevant one
   const db = makeDb();
   const store = new DocChunkStore(db);
 
@@ -509,7 +509,7 @@ console.log('\n─── WorkspaceSeeder: Seed Workspace ───');
     writeFileSync(path.join(tmpDir, 'POLICY.md'), POLICY_LIKE);
     writeFileSync(path.join(tmpDir, 'AGENTS.md'), SIMPLE_MARKDOWN);
 
-    const result = await seeder.seedWorkspace(tmpDir, { agentId: 'alice', tier: 'council' });
+    const result = await seeder.seedWorkspace(tmpDir, { agentId: 'agent1', tier: 'council' });
 
     assert(result.totalInserted > 0, `Seeded ${result.totalInserted} chunks`);
     assert(result.errors.length === 0, 'No errors during seeding');
@@ -530,11 +530,11 @@ console.log('\n─── WorkspaceSeeder: Idempotency ───');
   try {
     writeFileSync(path.join(tmpDir, 'POLICY.md'), POLICY_LIKE);
 
-    const r1 = await seeder.seedWorkspace(tmpDir, { agentId: 'alice' });
+    const r1 = await seeder.seedWorkspace(tmpDir, { agentId: 'agent1' });
     assert(r1.totalInserted > 0, 'First seed inserts chunks');
     assert(r1.skipped === 0, 'Nothing skipped on first seed');
 
-    const r2 = await seeder.seedWorkspace(tmpDir, { agentId: 'alice' });
+    const r2 = await seeder.seedWorkspace(tmpDir, { agentId: 'agent1' });
     assert(r2.totalInserted === 0, 'Second seed inserts nothing (unchanged)');
     assert(r2.skipped === 1, 'Unchanged file skipped on second seed');
   } finally {
@@ -552,10 +552,10 @@ console.log('\n─── WorkspaceSeeder: Force Re-index ───');
   try {
     writeFileSync(path.join(tmpDir, 'POLICY.md'), POLICY_LIKE);
 
-    const r1 = await seeder.seedWorkspace(tmpDir, { agentId: 'alice' });
+    const r1 = await seeder.seedWorkspace(tmpDir, { agentId: 'agent1' });
     assert(r1.totalInserted > 0, 'First seed inserts chunks');
 
-    const r2 = await seeder.seedWorkspace(tmpDir, { agentId: 'alice', force: true });
+    const r2 = await seeder.seedWorkspace(tmpDir, { agentId: 'agent1', force: true });
     assert(r2.totalInserted > 0, 'Force re-index inserts chunks even if unchanged');
     assert(r2.reindexed === 0, 'Force re-index deletes source before insert (treated as first-time)');
   } finally {
@@ -577,7 +577,7 @@ console.log('\n─── WorkspaceSeeder: Daily Memory Files ───');
     writeFileSync(path.join(memDir, '2026-03-30.md'), `## Yesterday's Work\n\nImplemented the token-bucket rate limiter for embedding API calls. The key bug was that unref() on the interval timer prevented Promise resolution in top-level await contexts.\n\n## Key Decisions\n\nFixed unref() bug and added priority queue with reserved tokens for high-priority recall operations.\n`);
 
     const result = await seeder.seedWorkspace(tmpDir, {
-      agentId: 'alice',
+      agentId: 'agent1',
       includeDailyMemory: true,
       dailyMemoryLimit: 5,
     });
@@ -600,7 +600,7 @@ console.log('\n─── WorkspaceSeeder: Query After Seed ───');
   try {
     writeFileSync(path.join(tmpDir, 'POLICY.md'), POLICY_LIKE);
 
-    await seeder.seedWorkspace(tmpDir, { agentId: 'alice', tier: 'council' });
+    await seeder.seedWorkspace(tmpDir, { agentId: 'agent1', tier: 'council' });
 
     const chunks = seeder.queryChunks('governance/policy', { limit: 10 });
     assert(chunks.length > 0, 'Can query chunks after seeding');
@@ -621,7 +621,7 @@ console.log('\n─── WorkspaceSeeder: Index Stats ───');
     writeFileSync(path.join(tmpDir, 'POLICY.md'), POLICY_LIKE);
     writeFileSync(path.join(tmpDir, 'COMMS.md'), SIMPLE_MARKDOWN);
 
-    await seeder.seedWorkspace(tmpDir, { agentId: 'alice' });
+    await seeder.seedWorkspace(tmpDir, { agentId: 'agent1' });
 
     const stats = seeder.getIndexStats();
     assert(stats.length >= 2, `Stats shows ${stats.length} collections (≥ 2)`);

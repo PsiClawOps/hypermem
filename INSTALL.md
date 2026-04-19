@@ -2,39 +2,73 @@
 
 ## Quick Start
 
+> **Disk space:** plugin installs pull OpenClaw as a dev dependency. Allow at least 2 GB free before starting.
+>
+> **Production runtime path:** install the built runtime payload into `~/.openclaw/plugins/hypermem`. Do not point production at `/tmp` or at your development repo clone.
+>
+> **Config merge warning:** if you already have values in `plugins.load.paths` or `plugins.allow`, merge them instead of overwriting them blindly.
+
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git
 cd hypermem
 npm install && npm run build
-npm --prefix plugin install && npm --prefix plugin run build
+npm --prefix plugin install && npm --prefix plugin run build   # ~1 min on a clean machine
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
+npm run install:runtime
+mkdir -p ~/.openclaw/hypermem
+cat > ~/.openclaw/hypermem/config.json <<'JSON'
+{
+  "embedding": {
+    "provider": "none"
+  }
+}
+JSON
 ```
 
 Wire both plugins into OpenClaw:
 
 ```bash
-openclaw config set plugins.load.paths '["<path-to-hypermem>/plugin","<path-to-hypermem>/memory-plugin"]' --strict-json
+openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
 openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
 openclaw gateway restart
 ```
 
-Replace `<path-to-hypermem>` with the absolute path where you cloned the repo.
+The repo clone is for build and release work. OpenClaw should load the installed runtime payload from `~/.openclaw/plugins/hypermem/`.
+
+### Verification checkpoints
+
+1. **Build verified**
+   - root build succeeds
+   - `plugin` build succeeds
+   - `memory-plugin` build succeeds
+
+2. **Wiring verified**
+   - OpenClaw accepts `plugins.load.paths`
+   - slots are set to `hypercompositor` and `hypermem`
+   - gateway restart succeeds
+
+3. **Runtime verified active**
 
 Send a message to any agent, then verify:
 
 ```bash
-openclaw logs --limit 50 | grep hypermem
+openclaw logs --limit 100 | grep -E 'hypermem|context-engine'
 ```
 
-You should see `[hypermem] hypermem initialized` and `[hypermem:compose]` lines. Done.
+Expected lightweight-mode lines:
+- `[hypermem] hypermem initialized`
+- `[hypermem] Embedding provider: none — semantic search disabled, using FTS5 fallback`
+- `[hypermem:compose]`
+
+If you see a fallback like `falling back to default engine "legacy"`, the install is **not** fully active yet even if the build and wiring steps succeeded.
 
 ---
 
 ## What hypermem Does
 
-hypermem replaces OpenClaw's default context assembly with a four-layer memory system. Every turn, it queries all layers in parallel and composes context within a fixed token budget. No transcript accumulates. No lossy summarization. Content that doesn't fit this turn stays in storage instead of being destroyed.
+hypermem replaces OpenClaw's default context assembly with a four-layer SQLite-backed memory system. Every turn, it queries all layers in parallel and composes context within a fixed token budget. No transcript accumulates. No lossy summarization. Content that doesn't fit this turn stays in storage instead of being destroyed.
 
 | Layer | Storage | What it holds | Speed |
 |---|---|---|---|
@@ -43,7 +77,7 @@ hypermem replaces OpenClaw's default context assembly with a four-layer memory s
 | **L3** | Per-agent SQLite + sqlite-vec | Semantic search via embeddings | 0.29ms |
 | **L4** | Shared SQLite | Structured knowledge: facts, episodes, preferences, fleet registry | 0.09ms |
 
-Everything runs in-process. No external database services required.
+Everything runs in-process on SQLite memory databases. No external database services required.
 
 ---
 
@@ -59,7 +93,23 @@ Everything runs in-process. No external database services required.
 
 `sqlite-vec` is the only native dependency and installs automatically via npm.
 
-The **embedding layer** (L3 semantic search) requires a configured provider. Without one, hypermem falls back to FTS5 keyword matching. This is functional but degrades recall quality. See [Embedding Providers](#embedding-providers) below.
+> **Package versions:** the root package (`hypermem`) and the two plugins (`hypercompositor`, `hypermem-memory`) are versioned independently. Plugin versions trail the core by one minor version when no plugin-facing API changes ship in a release — this is expected.
+
+The **embedding layer** (L3 semantic search) requires a configured provider. Without one, hypermem falls back to FTS5 keyword matching. This is functional but degrades recall quality. See [Setup Styles](#setup-styles) below.
+
+---
+
+## Setup Styles
+
+Pick a style based on your hardware and cost tolerance. All styles support full history, fact recall, and session continuity — the differences are in semantic search quality and local resource requirements.
+
+| Style | Embedding | Reranker | Semantic recall | Cost | Hardware |
+|---|---|---|---|---|---|
+| **Lightweight** | None (FTS5 only) | None | Keyword match only | Free | Any |
+| **Local** | Ollama nomic-embed-text | None (RRF) or Ollama Qwen3-Reranker (GPU only) | Good | Free | ~1GB RAM + GPU for reranker |
+| **High** | OpenRouter Qwen3-8B | OpenRouter Cohere Rerank 4 | Best (MTEB #1) | ~pennies/day | API key |
+
+The **reranker is optional at every tier.** Without one, results are ordered by RRF fusion score (FTS5 + vector) — a solid default. The reranker improves precision but requires a GPU for the local option; CPU-only systems should leave it as None.
 
 ---
 
@@ -76,14 +126,47 @@ Pick a tier based on your hardware:
 
 ### Minimal (no embedder)
 
-No config needed. hypermem detects the missing provider at startup and falls back to FTS5. You lose semantic recall ("find facts about X even if X isn't mentioned literally") but history, facts, and fleet registry all work.
+No Ollama, no API key. This config must exist **before gateway restart and runtime verification** so the clean install validates the intended lightweight behavior. Set `provider: 'none'` explicitly in `~/.openclaw/hypermem/config.json` to disable embedding entirely:
+
+```json
+{
+  "embedding": {
+    "provider": "none"
+  }
+}
+```
+
+Without a config file, the default provider is `ollama` — if Ollama isn't running, the vector store initialization fails non-fatally and hypermem falls back to FTS5. Using `provider: 'none'` makes the intent explicit and avoids the init attempt.
 
 You'll see in the logs:
 ```
-[hypermem] No embedding provider configured — semantic search disabled, using FTS5 fallback
+[hypermem] Embedding provider: none — semantic search disabled, using FTS5 fallback
 ```
 
 Upgrade to a higher tier later without losing stored data.
+
+### Troubleshooting clean installs
+
+**Symptom:** `Context engine "hypercompositor" ... falling back to default engine "legacy"`
+- The plugin was found, but the context engine did not activate correctly.
+- Treat the install as failed at runtime, not successful.
+- Check for release artifact mismatch, stale plugin build output, or config collisions with existing plugin paths.
+
+**Symptom:** HyperMem logs never appear after restart
+- Re-check `plugins.load.paths` for exact absolute paths.
+- Confirm the clone directory still exists and was not created in a temp location.
+- Confirm existing `plugins.allow` and `plugins.load.paths` values were merged correctly instead of overwritten incorrectly.
+
+**Symptom:** build succeeds, but behavior is not lightweight mode
+- Confirm `~/.openclaw/hypermem/config.json` existed before restart.
+- Confirm it contains:
+  ```json
+  {
+    "embedding": {
+      "provider": "none"
+    }
+  }
+  ```
 
 ### Local — Ollama + nomic-embed-text
 
@@ -149,6 +232,95 @@ Fresh installs don't need this.
 
 ---
 
+## Reranker (Optional)
+
+The reranker re-orders semantic search candidates by relevance before injection. Without it, results are ordered by RRF fusion score (FTS5 + KNN). The reranker is optional — the system degrades gracefully to original order on any failure.
+
+| Provider | Model | Cost | Hardware | Notes |
+|---|---|---|---|---|
+| **None** | — | Free | Any | Default — RRF fusion ordering |
+| **Ollama (local)** | Qwen3-Reranker-0.6B | Free | GPU recommended | CPU-only: too slow for >5 candidates |
+| **OpenRouter** | cohere/rerank-4-pro | ~pennies/day | Any | Best quality, uses existing key |
+| **ZeroEntropy** | zerank-2 | ~pennies/day | Any | Dedicated reranking service |
+
+**CPU-only systems:** skip the local reranker. Sequential inference makes it 2-10 seconds per document on CPU — unusable at any reasonable candidate depth. RRF fusion (`provider: "none"`) is the right default for CPU-only setups and is meaningfully better than raw vector ordering alone.
+
+### No reranker (default)
+
+No config needed. RRF fusion of FTS5 + vector results is the default ordering. For most conversational memory workloads, this is sufficient and runs on any hardware.
+
+### Local — Ollama Qwen3-Reranker-0.6B
+
+Best option for air-gapped or GPU-equipped setups. Slower than hosted due to sequential inference (one model call per candidate document) — requires a GPU for practical use.
+
+```bash
+ollama pull dengcao/Qwen3-Reranker-0.6B:Q5_K_M
+```
+
+Add to `~/.openclaw/hypermem/config.json`:
+
+```json
+{
+  "reranker": {
+    "provider": "local",
+    "ollamaUrl": "http://localhost:11434",
+    "ollamaModel": "dengcao/Qwen3-Reranker-0.6B:Q5_K_M",
+    "topK": 10,
+    "minCandidates": 5
+  }
+}
+```
+
+### Hosted — OpenRouter (Cohere Rerank 4)
+
+Fastest, highest quality. Uses the same OpenRouter key as hosted embeddings if you already have one.
+
+Put the key in your environment, not the config file:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-YOUR_OPENROUTER_KEY"
+```
+
+Then in `~/.openclaw/hypermem/config.json`:
+
+```json
+{
+  "reranker": {
+    "provider": "openrouter",
+    "openrouterModel": "cohere/rerank-4-pro",
+    "topK": 10,
+    "minCandidates": 5
+  }
+}
+```
+
+`openrouterApiKey` in the config file is still honored as a fallback for compatibility, but env-var-first keeps credentials out of any config-under-version-control.
+
+### Hosted — ZeroEntropy (zerank-2)
+
+Alternative hosted option, specialized reranking service.
+
+```bash
+export ZEROENTROPY_API_KEY="YOUR_ZEROENTROPY_KEY"
+```
+
+Then:
+
+```json
+{
+  "reranker": {
+    "provider": "zeroentropy",
+    "zeroEntropyModel": "zerank-2",
+    "topK": 10,
+    "minCandidates": 5
+  }
+}
+```
+
+`zeroEntropyApiKey` in the config file is still honored as a fallback. Get a key at [zeroentropy.dev](https://zeroentropy.dev).
+
+---
+
 ## Installation Steps
 
 ### Step 1 — Clone and build
@@ -160,27 +332,29 @@ npm install
 npm run build
 ```
 
-Build both plugins:
+Build both plugins, then install the runtime payload into OpenClaw's durable plugin directory:
 
 ```bash
 npm --prefix plugin install && npm --prefix plugin run build
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
+npm run install:runtime
 ```
 
 Verify:
 
 ```bash
 npm test
-# Should print: ALL N TESTS PASSED ✅
 ```
+
+The full suite takes 30–60 seconds. When complete, output ends with `ALL N TESTS PASSED ✅`. If you see `ENOSPC`, free up disk space and retry.
 
 ### Step 2 — Wire the plugins
 
 Use the OpenClaw CLI. **Do not edit `openclaw.json` directly.**
 
 ```bash
-# Add plugin load paths (use absolute paths)
-openclaw config set plugins.load.paths '["<path-to-hypermem>/plugin","<path-to-hypermem>/memory-plugin"]' --strict-json
+# Add plugin load paths
+openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
 
 # Set the context engine slot
 openclaw config set plugins.slots.contextEngine hypercompositor
@@ -199,9 +373,9 @@ openclaw config get plugins.allow
 openclaw config get plugins.load.paths
 ```
 
-### Step 3 — Choose embedding tier
+### Step 3 — Choose setup style
 
-See [Embedding Providers](#embedding-providers) above. For Minimal, skip this step. For Local, pull the model. For Hosted or Gemini, create `~/.openclaw/hypermem/config.json` with the appropriate config block.
+See [Setup Styles](#setup-styles) above. For Lightweight, skip this step. For Local, pull the Ollama models. For High, create `~/.openclaw/hypermem/config.json` with the embedding and optional reranker config blocks.
 
 ### Step 4 — Restart and verify
 
@@ -238,7 +412,7 @@ openclaw status                                     # look for hypermem in plugi
 
 ### Step 5 — Configure your fleet
 
-hypermem works out of the box for both single-agent and multi-agent installs. The source ships with generic placeholder agent names (`alice`, `bob`, `director1`, etc.) in two files that define fleet topology:
+hypermem works out of the box for both single-agent and multi-agent installs. The source ships with generic placeholder agent names (`agent1`, `agent2`, `director1`, etc.) in two files that define fleet topology:
 
 | File | What it defines |
 |---|---|
@@ -265,7 +439,7 @@ Facts, episodes, and topics are all scoped to your agent ID automatically. Cross
 
 #### Multi-agent installs
 
-hypermem ships with generic placeholder agent names (`alice`, `bob`, `director1`, etc.) in the two fleet topology files listed above.
+hypermem ships with generic placeholder agent names (`agent1`, `agent2`, `director1`, etc.) in the two fleet topology files listed above.
 
 Replace the placeholder names with your fleet:
 
@@ -273,7 +447,7 @@ Replace the placeholder names with your fleet:
 
 ```typescript
 // Before (placeholder):
-alice: { agentId: 'alice', tier: 'council' },
+agent1: { agentId: 'agent1', tier: 'council' },
 
 // After (your fleet):
 architect: { agentId: 'architect', tier: 'council' },
@@ -283,7 +457,7 @@ architect: { agentId: 'architect', tier: 'council' },
 
 ```typescript
 // Before (placeholder):
-alice: 'infrastructure',
+agent1: 'infrastructure',
 
 // After (your fleet):
 architect: 'infrastructure',
@@ -314,6 +488,12 @@ npm --prefix plugin install && npm --prefix plugin run build
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
 openclaw gateway restart
 ```
+
+What changed on the path from 0.5.x to current:
+- **0.6.0**: SQLite `:memory:` became the only hot layer. Redis was fully removed and the runtime no longer depends on any external cache service.
+- **0.7.0**: Temporal validity, expertise storage, contradiction detection, and maintenance APIs landed.
+- **0.8.0**: Phase C correctness guards, tool-artifact store, schema v10/v19, BLAKE3 dedup, RRF fusion, and fleet registry seeding shipped.
+- **Upgrade impact**: current releases use `messages.db` schema v10 and `library.db` schema v19. If you are upgrading from older 0.5.x installs, expect both schema and runtime-behavior changes.
 
 What changed in 0.5.x releases:
 - **0.5.5**: Plugin config schema, tuning knobs moved into `openclaw.json`. Manual `config.json` edits for compositor settings may be superseded by the plugin schema.
@@ -378,51 +558,123 @@ Solo installs can skip this.
 
 ## Token Budget Tuning
 
-These settings live in `~/.openclaw/hypermem/config.json` under the `compositor` key. All fields are optional. Gateway restart required after changes.
+These settings live in `~/.openclaw/hypermem/config.json` under the `compositor` key. All fields are optional — omit any knob to get the code-level default. Gateway restart required after changes.
+
+The recommended starting config for a standard single-agent deployment is intentionally lean on turn-1 warming. Semantic recall and fact triggers fire against each incoming message, so topic-relevant context surfaces as the conversation takes shape. This produces a steadier pressure profile than aggressive pre-loading and avoids the warm→trim→compact cycling you see when every session starts near the top of the budget.
 
 ```json
 {
   "compositor": {
-    "defaultTokenBudget": 90000,
-    "maxHistoryMessages": 250,
-    "maxFacts": 28,
-    "maxCrossSessionContext": 6000,
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.25,
+    "targetBudgetFraction": 0.50,
+    "warmHistoryBudgetFraction": 0.27,
+    "maxFacts": 25,
+    "maxHistoryMessages": 500,
+    "maxCrossSessionContext": 4000,
     "maxRecentToolPairs": 3,
     "maxProseToolPairs": 10,
-    "warmHistoryBudgetFraction": 0.4,
-    "keystoneHistoryFraction": 0.2,
-    "keystoneMaxMessages": 15
+    "keystoneHistoryFraction": 0.15,
+    "keystoneMaxMessages": 12,
+    "wikiTokenCap": 500
   }
 }
 ```
 
-| Knob | Default | What it controls | Safe reduction |
+| Knob | Recommended | What it controls | Notes |
 |---|---|---|---|
-| `defaultTokenBudget` | 90000 | Total token ceiling per turn. Don't go below 40000. | 60000 |
-| `maxHistoryMessages` | 250 | Messages pulled before budget trimming | 100 |
-| `maxFacts` | 28 | Structured facts injected (50-150 tokens each) | 10–15 |
-| `maxCrossSessionContext` | 6000 | Cross-session context tokens. Solo agents: set to 0. | 2000 |
-| `maxRecentToolPairs` | 3 | Verbatim tool call/result pairs kept | 2 |
-| `maxProseToolPairs` | 10 | Compressed tool pairs before full drop | 5 |
-| `warmHistoryBudgetFraction` | 0.4 | History's share of total budget. Below 0.3 hurts. | 0.35 |
-| `keystoneHistoryFraction` | 0.2 | Older significant turns recalled for continuity | 0.1 |
+| `budgetFraction` | 0.55 | Fraction of the detected context window used as input budget | Raise to 0.65 for agents that aggressively tool-use. Autodetect only handles known model families — see *Context window overrides* below for custom/local/finetuned models |
+| `contextWindowReserve` | 0.25 | Reserve left for output and tool results | Below 0.20 on large-context models invites late-turn overflow |
+| `targetBudgetFraction` | 0.50 | Split between context assembly and history | Higher = richer facts/wiki; lower = more conversation headroom |
+| `warmHistoryBudgetFraction` | 0.27 | History's share of first-turn warming | The key lever against tight trim cycles; don't push below 0.20 |
+| `maxFacts` | 25 | Structured facts injected per turn | Recall surfaces more as topics emerge; 35 is fine for long-memory seats |
+| `maxHistoryMessages` | 500 | Candidate pool for history ranking | Pool size, not load size. 300 is fine for short-session agents |
+| `maxCrossSessionContext` | 4000 | Cross-session context tokens | Solo agents with one session: set to 0 |
+| `maxRecentToolPairs` | 3 | Verbatim tool pairs kept | Raise to 5 for code agents with heavy tool output |
+| `maxProseToolPairs` | 10 | Compressed tool pairs before stubbing | |
+| `keystoneHistoryFraction` | 0.15 | Older significant turns reserved within history slot | |
+| `keystoneMaxMessages` | 12 | Max keystone candidates per turn | Raise to 18 if the agent loses track of older decisions |
+| `wikiTokenCap` | 500 | Cap on wiki/knowledge injection | Raise if your agent uses heavy doc content |
 
-**Lean profile** (~35-45% fewer tokens per turn):
+**Lean profile** (~35–45% fewer tokens per turn) — for constrained hosts, small models, or cost-sensitive deployments:
 
 ```json
 {
   "compositor": {
-    "defaultTokenBudget": 60000,
-    "maxHistoryMessages": 100,
-    "maxFacts": 15,
-    "maxCrossSessionContext": 2000,
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.30,
+    "warmHistoryBudgetFraction": 0.20,
+    "maxFacts": 10,
+    "maxHistoryMessages": 150,
+    "maxCrossSessionContext": 0,
     "maxRecentToolPairs": 2,
     "maxProseToolPairs": 6,
-    "warmHistoryBudgetFraction": 0.35,
-    "keystoneHistoryFraction": 0.1
+    "keystoneHistoryFraction": 0.10,
+    "keystoneMaxMessages": 5,
+    "wikiTokenCap": 300,
+    "hyperformProfile": "light"
   }
 }
 ```
+
+---
+
+### Context window overrides (custom, local, or finetuned models)
+
+HyperMem sizes the token budget from the model string using an internal pattern table covering known families (Claude, GPT, Gemini, GLM, Qwen, DeepSeek). If your model string doesn't match a known pattern, resolution silently falls through to `defaultTokenBudget` (90k), and **every downstream dial in this section becomes wrong**, because they're all fractions of the context window:
+
+- `budgetFraction` × *wrong window* → wrong input budget
+- `warmHistoryBudgetFraction` × *wrong budget* → wrong warm load on first turn
+- Trim tiers and compaction thresholds fire against the wrong ceiling
+
+The two symptoms that indicate window-detection failure:
+
+1. **Undersized window detected** (you have a 200k model, HyperMem thinks it's 90k): every turn warms near the top of the misdetected budget, trim fires constantly, semantic recall and facts get starved. You see continuous `warm→trim→compact` cycling even on short sessions.
+2. **Oversized window detected** (you have a 32k local model, HyperMem thinks it's larger): warm loads overshoot the real context window, turns land mid-response with truncated output or provider-side 400s on token overflow.
+
+**Check what HyperMem is using.** Enable `verboseLogging: true` in the compositor config and look for the `budget source:` log line on each turn:
+
+```
+[hypermem-plugin] budget source: runtime tokenBudget=163840 model=provider/my-model
+[hypermem-plugin] budget source: contextWindowOverrides[provider/my-model]=131072, reserve=0.25, effective=98304
+[hypermem-plugin] budget source: fallback contextWindowSize=90000, reserve=0.25, effective=67500 model=provider/my-model
+```
+
+If you see `fallback contextWindowSize` for your model, detection failed and you need an override.
+
+**Apply an override.** Add a `contextWindowOverrides` block to `~/.openclaw/hypermem/config.json`. The key is `"provider/model"` as it appears in your agent's model string (lowercase, exact match):
+
+```json
+{
+  "compositor": {
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.25,
+    "warmHistoryBudgetFraction": 0.27,
+    "contextWindowOverrides": {
+      "ollama/llama-3.3-70b":      { "contextTokens": 131072 },
+      "copilot-local/custom-sft":  { "contextTokens": 32768 },
+      "vllm/qwen3-coder-ft":       { "contextTokens": 262144 }
+    }
+  }
+}
+```
+
+Resolution order, highest-to-lowest priority:
+
+1. Runtime `tokenBudget` passed by OpenClaw (always wins if present)
+2. `contextWindowOverrides["provider/model"]` from this config
+3. Internal pattern-table match against the model string
+4. `defaultTokenBudget` fallback (90k) — **you do not want to end up here**
+
+Gateway restart required after editing overrides. Invalid override entries (malformed keys, impossible ranges, empty values) are dropped on load with a warning; the sanitizer will not let a bad override poison the resolver.
+
+**Interaction with warming and trimming.** Once the correct window is in place:
+
+- First-turn warm load = `detectedWindow × budgetFraction × (1 - contextWindowReserve) × warmHistoryBudgetFraction`
+- Trim pressure zones are computed from the same `detectedWindow × budgetFraction × (1 - reserve)` effective budget, so trim fires at the right proportions of the real window, not a wrong one
+- Compaction thresholds (85% nuclear, 80% afterTurn trim) are also against the effective budget, not the raw window
+
+TL;DR for operators running custom/local/finetuned models: **set `contextWindowOverrides` before tuning anything else in this section**. Every other knob here assumes the detected window is right.
 
 ---
 
@@ -464,18 +716,22 @@ Expected on fresh installs. Facts and episodes accumulate over real conversation
 
 **Plugin not found**
 
-Confirm the build artifacts exist:
+Confirm the installed runtime artifacts exist:
 
 ```bash
-ls <path-to-hypermem>/plugin/dist/index.js
-ls <path-to-hypermem>/memory-plugin/dist/index.js
+ls ~/.openclaw/plugins/hypermem/plugin/dist/index.js
+ls ~/.openclaw/plugins/hypermem/memory-plugin/dist/index.js
+ls ~/.openclaw/plugins/hypermem/dist/index.js
 ```
 
-If missing, rebuild:
+If missing, rebuild and reinstall the runtime payload:
 
 ```bash
-npm --prefix <path-to-hypermem>/plugin run build
-npm --prefix <path-to-hypermem>/memory-plugin run build
+cd <path-to-hypermem>
+npm run build
+npm --prefix plugin run build
+npm --prefix memory-plugin run build
+npm run install:runtime
 ```
 
 Then restart the gateway.

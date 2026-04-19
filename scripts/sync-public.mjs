@@ -26,6 +26,8 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const REPO_ROOT = join(__dirname, '..');
+const PUBLIC_REMOTE_URL = 'github-psiclawops:PsiClawOps/hypermem.git';
+const PUBLIC_REMOTE = 'public';
 
 // ─── CLI ─────────────────────────────────────────────────────────
 
@@ -94,6 +96,14 @@ const PATH_MAP = [
   { from: /process\.env\.HOME \|\| '\/home\/user'/g,           to: "process.env.HOME || os.homedir()" },
   // Internal workspace repo paths (in comments/examples only — caught by word boundary rules above)
   { from: /~\/\.openclaw\/workspace-council\//g,               to: '~/.openclaw/workspace/' },
+  // Bare home path (with trailing slash)
+  { from: /\/home\/lumadmin\//g, to: '~/' },
+  // Quoted home path (in path.join fallbacks like '/home/lumadmin')
+  { from: /'\/home\/lumadmin'/g, to: "os.homedir()" },
+  // Bare string in path.join() calls
+  { from: /workspace-council/g, to: 'workspace' },
+  // Internal repo URL → public repo URL
+  { from: /hypermem-internal/g, to: 'hypermem' },
 ];
 
 // Operator name substitutions (in code patterns, not user-facing docs)
@@ -107,7 +117,8 @@ const OPERATOR_MAP = [
 // Internal product names → generic public descriptions.
 // Applied as whole-word replacements, case-preserved.
 const PRODUCT_NAME_MAP = [
-  { from: 'ClawText',     to: 'memory system' },
+  // ClawText is the real predecessor product name — kept as-is in migration docs
+  // { from: 'ClawText',     to: 'memory system' },
   { from: 'ClawDash',     to: 'dashboard' },
   { from: 'ClawCanvas',   to: 'canvas' },
   { from: 'ClawCouncil',  to: 'council' },
@@ -126,9 +137,10 @@ const OPERATOR_BROAD_MAP = [
 // Post-sanitization scan. If any of these survive in the output,
 // the sync fails. Case-insensitive matching.
 const LEAK_TERMS = [
-  'operator',
   'lumadmin',
-  'ClawText',
+  'ragesaq',
+  // ClawText is a legitimate public product name (predecessor to HyperMem)
+  // 'ClawText',
   'ClawDash',
   'ClawCanvas',
   'ClawCouncil',
@@ -147,6 +159,9 @@ const EXCLUDE_FILES = [
   'scripts/flush-agent-session.sh',     // Internal fleet ops only
   'scripts/migrate-clawtext.mjs',       // Internal migration tool, ClawText refs
   'scripts/sync-public.mjs',            // The sync script itself
+  'docs/ROADMAP.md',                    // Internal future work — not for public release
+  'docs/PHASE1-VALIDATION.md',          // Internal validation artifact
+  'docs/RELEASE_0.8.0_VALIDATION.md',   // Internal release checklist
 ];
 
 // ─── Text file extensions to sanitize ───────────────────────────
@@ -156,7 +171,7 @@ const SANITIZE_EXTENSIONS = new Set([
 ]);
 
 // ─── Directories to sync ─────────────────────────────────────────
-const SYNC_DIRS = ['src', 'test', 'scripts', 'docs'];
+const SYNC_DIRS = ['src', 'test', 'scripts', 'docs', '.github', 'plugin', 'memory-plugin'];
 const SYNC_ROOT_FILES = [
   'package.json', 'tsconfig.json',
   'README.md', 'CHANGELOG.md', 'INSTALL.md',
@@ -228,6 +243,8 @@ function escapeRegex(str) {
 // ─── File Operations ─────────────────────────────────────────────
 
 function shouldExclude(relativePath) {
+  if (relativePath.includes('node_modules')) return true;
+  if (relativePath.endsWith('package-lock.json') && relativePath !== 'package-lock.json') return true;
   return EXCLUDE_FILES.some(ex => relativePath === ex || relativePath.endsWith('/' + ex));
 }
 
@@ -309,10 +326,17 @@ async function main() {
   const internalHead = gitOut('rev-parse --short HEAD');
   console.log(`Internal main HEAD: ${internalHead}`);
 
-  // 2. Switch to public branch
-  console.log('\n[1/6] Switching to public branch...');
+  // 2. Add ephemeral public remote
+  console.log('\n[1/6] Adding public remote (ephemeral)...');
+  try { git(`remote remove ${PUBLIC_REMOTE}`, { silent: true }); } catch { /* didn't exist */ }
+  git(`remote add ${PUBLIC_REMOTE} ${PUBLIC_REMOTE_URL}`);
+  git(`fetch ${PUBLIC_REMOTE}`);
+  console.log(`  Added ${PUBLIC_REMOTE} → ${PUBLIC_REMOTE_URL}`);
+
+  // 3. Switch to public branch
+  console.log('\n[2/6] Switching to public branch...');
   if (!DRY_RUN) {
-    git('checkout -B public-sync public/main');
+    git(`checkout -B public-sync ${PUBLIC_REMOTE}/main`);
   } else {
     console.log('  DRY RUN: would checkout public-sync from public/main');
   }
@@ -440,12 +464,15 @@ async function main() {
     process.exit(1);
   }
 
-  // 5. Build
-  console.log('\n[4/7] Building...');
+  // 5. Build all published artifacts
+  console.log('\n[4/7] Building published artifacts...');
   execSync('npm run build', { cwd: REPO_ROOT, stdio: 'inherit' });
+  execSync('npm --prefix plugin run build', { cwd: REPO_ROOT, stdio: 'inherit' });
+  execSync('npm --prefix memory-plugin run build', { cwd: REPO_ROOT, stdio: 'inherit' });
 
-  // 6. Test
-  console.log('\n[5/7] Running test suite...');
+  // 6. Test release path, including plugin runtime artifacts
+  console.log('\n[5/7] Running release-path validation...');
+  execSync('npm run validate:release-path', { cwd: REPO_ROOT, stdio: 'inherit' });
   execSync('npm test', { cwd: REPO_ROOT, stdio: 'inherit' });
 
   // 7. Commit
@@ -463,23 +490,100 @@ async function main() {
   // 8. Push
   if (!NO_PUSH) {
     console.log('\n[7/7] Pushing to public remote...');
-    git('push public HEAD:main');
+    git(`push ${PUBLIC_REMOTE} HEAD:main`);
     console.log('  ✅ Pushed to public/main');
   } else {
     console.log('\n[7/7] Skipped push (--no-push)');
-    console.log('  To push manually: git push public HEAD:main');
+    console.log('  To push manually: re-run without --no-push');
   }
 
-  // 8. Return to main
+  // 9. Return to main, remove ephemeral remote
+  const publicCommit = NO_PUSH ? '(not pushed)' : gitOut(`rev-parse --short ${PUBLIC_REMOTE}/main`);
   git('checkout main');
+  try { git(`remote remove ${PUBLIC_REMOTE}`); } catch { /* best effort */ }
   console.log('\n✅ Sync complete.');
   console.log(`   Internal: ${internalHead}`);
-  console.log(`   Public commit: ${gitOut('rev-parse --short public/main')}`);
+  console.log(`   Public commit: ${publicCommit}`);
+  console.log(`   Public remote removed (ephemeral).`);
+
+  // 10. Wait for CI (optional — requires GH_TOKEN or GITHUB_TOKEN)
+  if (!NO_PUSH) {
+    await waitForCI(publicCommit);
+  }
+}
+
+// ─── CI Status Checker ───────────────────────────────────────────
+
+const CI_OWNER = 'PsiClawOps';
+const CI_REPO  = 'hypermem';
+const CI_POLL_INTERVAL_MS = 15_000;  // 15 seconds
+const CI_TIMEOUT_MS = 300_000;       // 5 minutes
+
+async function waitForCI(commitSha) {
+  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_PSICLAWOPS_TOKEN;
+  if (!token) {
+    console.log('\n⏭️  Skipping CI check (no GH_TOKEN/GITHUB_TOKEN set).');
+    console.log('   Check manually: https://github.com/PsiClawOps/hypermem/actions');
+    return;
+  }
+
+  console.log(`\n[CI] Waiting for GitHub Actions on ${commitSha}...`);
+  const apiBase = `https://api.github.com/repos/${CI_OWNER}/${CI_REPO}`;
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'hypermem-sync-public',
+  };
+
+  const start = Date.now();
+  while (Date.now() - start < CI_TIMEOUT_MS) {
+    await new Promise(r => setTimeout(r, CI_POLL_INTERVAL_MS));
+
+    try {
+      const res = await fetch(`${apiBase}/actions/runs?per_page=5`, { headers });
+      if (!res.ok) {
+        console.log(`   ⚠️  GitHub API ${res.status}: ${res.statusText}`);
+        continue;
+      }
+      const data = await res.json();
+      // Find a run that matches our commit (short sha prefix match)
+      const run = data.workflow_runs?.find(r =>
+        r.head_sha?.startsWith(commitSha) || commitSha.startsWith(r.head_sha?.slice(0, 7))
+      );
+
+      if (!run) {
+        const elapsed = Math.round((Date.now() - start) / 1000);
+        process.stdout.write(`   ⏳ No run found yet (${elapsed}s)\r`);
+        continue;
+      }
+
+      if (run.status === 'completed') {
+        if (run.conclusion === 'success') {
+          console.log(`   ✅ CI passed: ${run.html_url}`);
+          return;
+        } else {
+          console.error(`   ❌ CI failed (${run.conclusion}): ${run.html_url}`);
+          process.exitCode = 1;
+          return;
+        }
+      }
+
+      const elapsed = Math.round((Date.now() - start) / 1000);
+      process.stdout.write(`   ⏳ CI ${run.status} (${elapsed}s)\r`);
+    } catch (err) {
+      console.log(`   ⚠️  CI check error: ${err.message}`);
+    }
+  }
+
+  console.log(`\n   ⚠️  CI check timed out after ${CI_TIMEOUT_MS / 1000}s.`);
+  console.log(`   Check manually: https://github.com/${CI_OWNER}/${CI_REPO}/actions`);
 }
 
 main().catch(err => {
   console.error('\n❌ Sync failed:', err.message);
-  // Try to return to main on failure
+  // Try to return to main and clean up ephemeral remote on failure
   try { execSync(`git -C "${REPO_ROOT}" checkout main`, { stdio: 'pipe' }); } catch {}
+  try { execSync(`git -C "${REPO_ROOT}" remote remove ${PUBLIC_REMOTE}`, { stdio: 'pipe' }); } catch {}
   process.exit(1);
 });

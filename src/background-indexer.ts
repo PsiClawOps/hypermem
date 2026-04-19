@@ -18,7 +18,7 @@
  */
 
 import type { DatabaseSync } from 'node:sqlite';
-import type { StoredMessage, IndexerConfig, EpisodeType, SessionCursor } from './types.js';
+import type { StoredMessage, IndexerConfig, EpisodeType, SessionCursor, MaintenanceTickDiagnostics } from './types.js';
 import { lintKnowledge } from './knowledge-lint.js';
 import { MessageStore } from './message-store.js';
 import { runNoiseSweep, runToolDecay } from './proactive-pass.js';
@@ -29,6 +29,9 @@ import { EpisodeStore } from './episode-store.js';
 import { TopicStore } from './topic-store.js';
 import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore } from './temporal-store.js';
+import { ContradictionDetector } from './contradiction-detector.js';
+import { ContradictionAuditStore } from './contradiction-audit-store.js';
+import { DEFAULT_CONTRADICTION_POLICY, type ContradictionResolutionPolicy } from './contradiction-resolution-policy.js';
 import { isSafeForSharedVisibility } from './secret-scanner.js';
 import type { VectorStore } from './vector-store.js';
 
@@ -39,27 +42,27 @@ import type { VectorStore } from './vector-store.js';
 // returns results. New agents default to 'general'.
 //
 // ── EXAMPLE DATA ──────────────────────────────────────────────────
-// The agent names below (alice, director1, etc.) are PLACEHOLDERS.
+// The agent names below (agent1, director1, etc.) are PLACEHOLDERS.
 // Replace them with your own agent IDs and domain labels to match
 // your fleet. Single-agent installs don't need to edit this:
 // unknown agents fall through to 'general' automatically.
 // See INSTALL.md § "Configure your fleet" for details.
 // ─────────────────────────────────────────────────────────────────
 const AGENT_DOMAIN_MAP: Record<string, string> = {
-  alice:        'infrastructure',
+  agent1:        'infrastructure',
   director2:        'infrastructure',
   director1:        'infrastructure',
   director3:        'infrastructure',
-  bob:      'product',
+  agent2:      'product',
   director4:         'product',
   director5:       'product',
   director6:        'product',
-  dave:     'security',
+  agent3:     'security',
   director7:      'security',
   director8:        'security',
   agent4:      'ux',
-  carol:        'governance',
-  oscar:     'strategy',
+  agent6:        'governance',
+  agent5:     'strategy',
   specialist1:     'development',
   specialist2:        'communications',
   main:         'general',
@@ -86,6 +89,12 @@ export interface IndexerStats {
   knowledgeUpserted: number;
   /** Number of superseded fact vectors tombstoned from the vector index this tick. */
   tombstoned: number;
+  /** Number of contradiction audits recorded for review this tick. */
+  contradictionAuditsLogged: number;
+  /** Number of old facts auto-superseded via contradiction policy this tick. */
+  contradictionsAutoSuperseded: number;
+  /** Number of old facts auto-invalidated via contradiction policy this tick. */
+  contradictionsAutoInvalidated: number;
   elapsedMs: number;
   /** Number of messages that were post-cursor (unseen by model, high-signal priority). */
   postCursorMessages: number;
@@ -144,7 +153,7 @@ function extractFactCandidates(content: string): FactCandidate[] {
   // Preference patterns — medium confidence (0.60)
   const preferencePatterns = [
     /(?:prefer|always use|never use|don't use|avoid) (.{10,150})/gi,
-    /(?:operator) (?:wants|prefers|likes|hates|dislikes) (.{10,150})/gi,
+    /(?:operator|operator) (?:wants|prefers|likes|hates|dislikes) (.{10,150})/gi,
   ];
 
   // Operational patterns: deployments, incidents, fixes — high confidence (0.70)
@@ -202,7 +211,7 @@ const OPERATIONAL_BOILERPLATE: RegExp[] = [
   /still\s*waiting/i,
   /will\s*pick\s*(it\s*)?up\s*(on\s*(next|the))?/i,
   /message\s*is\s*in\s*(his|her|their|the)\s*queue/i,
-  /sent\s+to\s+(carol|bob|agent4|dave|oscar|alice)/i,
+  /sent\s+to\s+(agent6|agent2|agent4|agent3|agent5|agent1)/i,
   /dispatched\s+(it\s+)?to/i,
   /timed\s*out\s*after/i,
   /\bNO_REPLY\b/,
@@ -466,7 +475,7 @@ function detectTopic(content: string): string | null {
 
   // Product/project name detection
   const productMatch = content.match(
-    /\b(HyperMem|ClawText|dashboard|canvas|council|automation|OpenClaw|dispatch)\b/i
+    /\b(HyperMem|ClawText|ClawDash|ClawCanvas|ClawCouncil|ClawTomation|OpenClaw|ClawDispatch)\b/i
   );
   if (productMatch) return productMatch[1];
 
@@ -488,6 +497,8 @@ function detectTopic(content: string): string | null {
 export class BackgroundIndexer {
   private readonly config: IndexerConfig;
   private readonly dreamerConfig: Partial<DreamerConfig>;
+  private readonly globalWritePolicy: import('./types.js').GlobalWritePolicy;
+  private readonly contradictionPolicy: ContradictionResolutionPolicy;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private vectorStore: VectorStore | null = null;
@@ -497,6 +508,8 @@ export class BackgroundIndexer {
   private consecutiveFailures: number = 0;
   /** True when the indexer is running in backoff mode due to repeated failures. */
   private inBackoff: boolean = false;
+  private readonly _conversationLastProcessed = new Map<number, number>();
+  lastMaintenanceDiagnostics: MaintenanceTickDiagnostics | null = null;
 
   constructor(
     config?: Partial<IndexerConfig>,
@@ -504,7 +517,9 @@ export class BackgroundIndexer {
     private getLibraryDb?: () => DatabaseSync,
     private listAgents?: () => string[],
     private getCursor?: CursorFetcher,
-    dreamerConfig?: Partial<DreamerConfig>
+    dreamerConfig?: Partial<DreamerConfig>,
+    globalWritePolicy?: import('./types.js').GlobalWritePolicy,
+    contradictionPolicy?: ContradictionResolutionPolicy,
   ) {
     // Initialize synthesizer if libraryDb accessor is available
     if (getLibraryDb) {
@@ -530,8 +545,13 @@ export class BackgroundIndexer {
       periodicInterval: config?.periodicInterval ?? 60000,  // 1 minute
       batchSize: config?.batchSize ?? 128,
       maxMessagesPerTick: config?.maxMessagesPerTick ?? 500,
+      maxActiveConversations: config?.maxActiveConversations ?? 5,
+      recentConversationCooldownMs: config?.recentConversationCooldownMs ?? 30000,
+      maxCandidatesPerPass: config?.maxCandidatesPerPass ?? 200,
     };
     this.dreamerConfig = dreamerConfig ?? {};
+    this.globalWritePolicy = globalWritePolicy ?? 'deny';
+    this.contradictionPolicy = contradictionPolicy ?? DEFAULT_CONTRADICTION_POLICY;
   }
 
   /**
@@ -788,31 +808,80 @@ export class BackgroundIndexer {
       }
 
       // Run proactive passes on each agent's message DB
+      const maintStart = Date.now();
+      let maintConsidered = 0;
+      let maintSkipped = 0;
+      let maintScanned = 0;
+      let maintMutated = 0;
+      let maintExitReason: MaintenanceTickDiagnostics['exitReason'] = 'complete';
+      const maxConvs = this.config.maxActiveConversations ?? 5;
+      const cooldownMs = this.config.recentConversationCooldownMs ?? 30000;
+      const maxCandidates = this.config.maxCandidatesPerPass ?? 200;
+      const now = Date.now();
+
       for (const agentId of agents) {
         const messageDb = this.getMessageDb!(agentId);
         if (!messageDb) continue;
 
-        // Get active conversations for this agent
         let convRows: Array<{ id: number }>;
         try {
           convRows = messageDb.prepare(
-            `SELECT id FROM conversations WHERE agent_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 10`
-          ).all(agentId) as Array<{ id: number }>;
+            `SELECT id FROM conversations WHERE agent_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT ?`
+          ).all(agentId, maxConvs) as Array<{ id: number }>;
         } catch {
           continue;
         }
 
+        if (convRows.length === 0) {
+          if (maintExitReason === 'complete') maintExitReason = 'no-conversations';
+          continue;
+        }
+
         for (const conv of convRows) {
-          const noiseSweepResult = runNoiseSweep(messageDb, conv.id);
-          const toolDecayResult = runToolDecay(messageDb, conv.id);
-          // Log only if something changed
-          if (noiseSweepResult.messagesDeleted > 0 || toolDecayResult.messagesUpdated > 0) {
+          maintConsidered++;
+          const lastProcessed = this._conversationLastProcessed.get(conv.id) ?? 0;
+          if (now - lastProcessed < cooldownMs) {
+            maintSkipped++;
+            continue;
+          }
+
+          maintScanned++;
+          // Any successful scan means we're in a real working state —
+          // clear any stale 'no-conversations' marker from an earlier agent.
+          if (maintExitReason === 'no-conversations') maintExitReason = 'complete';
+          const noiseSweepResult = runNoiseSweep(messageDb, conv.id, 20, maxCandidates);
+          const toolDecayResult = runToolDecay(messageDb, conv.id, 40, maxCandidates);
+          const changed = noiseSweepResult.messagesDeleted + toolDecayResult.messagesUpdated;
+          if (changed > 0) {
+            maintMutated += changed;
             console.log(
               `[indexer] Proactive pass (conv ${conv.id}): swept ${noiseSweepResult.messagesDeleted} noise msgs, ` +
               `decayed ${toolDecayResult.messagesUpdated} tool results (${toolDecayResult.bytesFreed} bytes freed)`
             );
           }
+          this._conversationLastProcessed.set(conv.id, now);
+
+          if (maintMutated >= maxCandidates) {
+            maintExitReason = 'cap-reached';
+            break;
+          }
         }
+        if (maintExitReason === 'cap-reached') break;
+      }
+
+      this.lastMaintenanceDiagnostics = {
+        considered: maintConsidered,
+        skipped: maintSkipped,
+        scanned: maintScanned,
+        mutated: maintMutated,
+        durationMs: Date.now() - maintStart,
+        exitReason: maintExitReason,
+      };
+      if (maintScanned > 0) {
+        console.log(
+          `[indexer] Maintenance: considered=${maintConsidered} skipped=${maintSkipped} scanned=${maintScanned} mutated=${maintMutated} ` +
+          `duration=${this.lastMaintenanceDiagnostics.durationMs}ms exit=${maintExitReason}`
+        );
       }
 
       // If we reach here, the tick completed without throwing.
@@ -870,6 +939,9 @@ export class BackgroundIndexer {
         knowledgeUpserted: 0,
         tombstoned,
         postCursorMessages: 0,
+        contradictionAuditsLogged: 0,
+        contradictionsAutoSuperseded: 0,
+        contradictionsAutoInvalidated: 0,
         elapsedMs: Date.now() - start,
       };
     }
@@ -905,7 +977,17 @@ export class BackgroundIndexer {
     let topicsUpdated = 0;
     let knowledgeUpserted = 0;
     let supersededFacts = 0;
+    let contradictionAuditsLogged = 0;
+    let contradictionsAutoSuperseded = 0;
+    let contradictionsAutoInvalidated = 0;
     let maxMessageId = lastProcessedId;
+
+    const contradictionDetector = new ContradictionDetector(factStore, this.vectorStore ?? undefined, {
+      autoResolve: false,
+      maxCandidates: 6,
+      minSimilarity: 0.45,
+    });
+    const contradictionAuditStore = new ContradictionAuditStore(libraryDb);
 
     for (const msg of ordered) {
       const content = msg.textContent || '';
@@ -918,15 +1000,58 @@ export class BackgroundIndexer {
       const factCandidates = extractFactCandidates(content);
       for (const { content: factContent, confidence: factConfidence } of factCandidates) {
         try {
+          const factDomain = domainForAgent(agentId);
+          // 1. Detect contradictions BEFORE addFact (operates on existing facts only)
+          const contradictionResult = await contradictionDetector.detectOnIngest(agentId, {
+            content: factContent,
+            domain: factDomain,
+          });
+          const topContradictions = contradictionResult.contradictions.slice(0, 3);
+
+          // 2. addFact first — we need fact.id for supersede linkage
           const fact = factStore.addFact(agentId, factContent, {
             scope: 'agent',
-            domain: domainForAgent(agentId),
+            domain: factDomain,
             confidence: factConfidence,
             sourceType: 'indexer',
             sourceSessionKey: this.getSessionKeyForMessage(messageDb, msg.conversationId),
             sourceRef: `msg:${msg.id}`,
           });
           factsExtracted++;
+
+          // 3. Apply contradiction policy for each candidate (now we have fact.id)
+          for (const candidate of topContradictions) {
+            const score = candidate.contradictionScore;
+            let auditStatus = 'pending';
+
+            if (score >= this.contradictionPolicy.autoSupersedeThreshold) {
+              const didSupersede = factStore.markSuperseded(candidate.existingFactId, fact.id);
+              if (didSupersede) {
+                contradictionsAutoSuperseded++;
+                // Immediately remove stale vector so it cannot surface in KNN recall
+                if (this.vectorStore) {
+                  this.vectorStore.removeItem('facts', candidate.existingFactId);
+                }
+              }
+              auditStatus = 'auto-superseded';
+            } else if (score >= this.contradictionPolicy.autoInvalidateThreshold) {
+              const didInvalidate = factStore.invalidateFact(candidate.existingFactId);
+              if (didInvalidate) {
+                contradictionsAutoInvalidated++;
+              }
+              auditStatus = 'auto-invalidated';
+            }
+
+            if (this.contradictionPolicy.alwaysAudit || auditStatus === 'pending') {
+              contradictionAuditStore.recordFactAudit(
+                agentId,
+                { content: factContent, domain: factDomain },
+                candidate,
+                { sourceRef: `msg:${msg.id}`, status: auditStatus }
+              );
+              contradictionAuditsLogged++;
+            }
+          }
 
           // ── Supersedes detection ─────────────────────────────────
           // Check if the newly extracted fact supersedes an existing one.
@@ -986,19 +1111,22 @@ export class BackgroundIndexer {
 
       // 3. Detect and update topics
       const topicName = detectTopic(content);
-      if (topicName) {
+      if (topicName && topicName.trim().length >= 3) {
         try {
-          const existingTopics = topicStore.getActive(agentId, 100);
-          const existingTopic = existingTopics.find(
-            (t) => (t as { name: string }).name.toLowerCase() === topicName.toLowerCase()
+          const msgSessionKey =
+            this.getSessionKeyForMessage(messageDb, msg.conversationId) || '';
+          // findOrCreate handles case-insensitive dedup at the schema level;
+          // always touch afterward so message_count reflects real activity
+          // rather than sitting at 0 forever (which made every topic an orphan).
+          const topic = topicStore.findOrCreate(
+            agentId,
+            topicName,
+            `Auto-detected from conversation`
           );
-
-          if (!existingTopic) {
-            topicStore.create(agentId, topicName, `Auto-detected from conversation`);
-            topicsUpdated++;
-          }
+          topicStore.touch(topic.id, msgSessionKey, 1);
+          topicsUpdated++;
         } catch {
-          // Skip topic creation errors
+          // Skip topic creation/touch errors
         }
       }
 
@@ -1035,6 +1163,9 @@ export class BackgroundIndexer {
       topicsUpdated,
       knowledgeUpserted,
       tombstoned,
+      contradictionAuditsLogged,
+      contradictionsAutoSuperseded,
+      contradictionsAutoInvalidated,
       postCursorMessages: postCursor.length,
       elapsedMs: Date.now() - start,
     };
@@ -1308,9 +1439,10 @@ export function createIndexer(
   config?: Partial<IndexerConfig>,
   getCursor?: CursorFetcher,
   vectorStore?: VectorStore,
-  dreamerConfig?: Partial<DreamerConfig>
+  dreamerConfig?: Partial<DreamerConfig>,
+  globalWritePolicy?: import('./types.js').GlobalWritePolicy,
 ): BackgroundIndexer {
-  const indexer = new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor, dreamerConfig);
+  const indexer = new BackgroundIndexer(config, getMessageDb, getLibraryDb, listAgents, getCursor, dreamerConfig, globalWritePolicy);
   if (vectorStore) indexer.setVectorStore(vectorStore);
   return indexer;
 }

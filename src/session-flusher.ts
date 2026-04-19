@@ -1,7 +1,7 @@
 /**
  * session-flusher.ts
  *
- * Provides a clean, operator-safe way to flush a session's hot cache from Redis
+ * Provides a clean, operator-safe way to flush a session's hot cache
  * without touching long-term memory (facts, vectors, episodes, knowledge graph).
  *
  * Used to implement the /fresh slash command — lets users start a new unwarmed
@@ -14,7 +14,7 @@
 import type { CacheLayer } from './cache.js';
 
 export interface FlushSessionOptions {
-  /** If true, also clears topic-level Redis keys for this session */
+  /** If true, also clears topic-level hot-cache entries for this session */
   includeTopics?: boolean;
 }
 
@@ -37,8 +37,8 @@ export interface FlushSessionResult {
  * from those stores naturally.
  *
  * @param cache   Connected CacheLayer instance
- * @param agentId Agent identifier (e.g. "alice")
- * @param sessionKey  Full session key (e.g. "agent:alice:webchat:scratchpad")
+ * @param agentId Agent identifier (e.g. "agent1")
+ * @param sessionKey  Full session key (e.g. "agent:agent1:webchat:scratchpad")
  * @param opts    Optional flags
  */
 export async function flushSession(

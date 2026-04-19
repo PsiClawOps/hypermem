@@ -6,7 +6,7 @@
  *
  * Usage:
  *   const seeder = new WorkspaceSeeder(hypermem);
- *   const result = await seeder.seedWorkspace('/path/to/workspace', { agentId: 'alice' });
+ *   const result = await seeder.seedWorkspace('/path/to/workspace', { agentId: 'agent1' });
  *
  * Idempotent: skips files whose source hash hasn't changed since last index.
  * Atomic: each file's chunks are swapped in a single transaction.

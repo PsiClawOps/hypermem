@@ -36,7 +36,7 @@ function warn(check, detail) {
 
 // ---------------------------------------------------------------------------
 // 1. Dependency claims vs package.json
-//    WHY: 0.6.0 shipped INSTALL.md requiring Redis. Redis was removed in 0.5.0.
+//    WHY: older docs shipped INSTALL.md requiring Redis. Redis was fully removed in 0.6.0.
 // ---------------------------------------------------------------------------
 
 const pkg = JSON.parse(read('package.json'));
@@ -108,7 +108,7 @@ if (install) {
 //    Public users can't clone it.
 // ---------------------------------------------------------------------------
 
-const INTERNAL_REPO_PATTERNS = [/hypermem-internal/i];
+const INTERNAL_REPO_PATTERNS = [new RegExp('hypermem' + '-internal', 'i')];
 
 for (const doc of [install, readme].filter(Boolean)) {
   for (const pat of INTERNAL_REPO_PATTERNS) {
@@ -120,8 +120,8 @@ for (const doc of [install, readme].filter(Boolean)) {
 
 // ---------------------------------------------------------------------------
 // 4. Architecture layer descriptions match code reality
-//    WHY: 0.6.0 described L1 as "Redis hot cache" — actual L1 is SQLite
-//    in-memory since 0.5.0. Users installed Redis for nothing.
+//    WHY: docs described L1 as "Redis hot cache" after the runtime had moved
+//    to SQLite `:memory:`. User-facing docs must lead with SQLite, not Redis.
 // ---------------------------------------------------------------------------
 
 const cacheTs = read('src/cache.ts');

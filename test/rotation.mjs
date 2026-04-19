@@ -137,8 +137,8 @@ async function run() {
   console.log('\n── Auto-Rotate ──');
 
   // Create a second agent with data
-  const bob = 'test-agent-2';
-  await hm.recordUserMessage(bob, 'agent:test-agent-2:webchat:main', 'Hello from agent 2', {
+  const agent2 = 'test-agent-2';
+  await hm.recordUserMessage(agent2, 'agent:test-agent-2:webchat:main', 'Hello from agent 2', {
     channelType: 'webchat',
   });
 
@@ -152,18 +152,18 @@ async function run() {
   console.log('\n── WAL/SHM Cleanup ──');
 
   // Create a new agent and write to it to generate WAL
-  const dave = 'test-agent-3';
+  const agent3 = 'test-agent-3';
   for (let i = 0; i < 10; i++) {
-    await hm.recordUserMessage(dave, 'agent:test-agent-3:webchat:main', `Msg ${i}`, {
+    await hm.recordUserMessage(agent3, 'agent:test-agent-3:webchat:main', `Msg ${i}`, {
       channelType: 'webchat',
     });
   }
 
-  const agentDir = path.join(tmpDir, 'agents', dave);
+  const agentDir = path.join(tmpDir, 'agents', agent3);
   const walExists = fs.existsSync(path.join(agentDir, 'messages.db-wal'));
   // WAL may or may not exist depending on checkpoint behavior — that's fine
 
-  hm.rotateMessageDb(dave);
+  hm.rotateMessageDb(agent3);
   const walAfter = fs.existsSync(path.join(agentDir, 'messages.db-wal'));
   const shmAfter = fs.existsSync(path.join(agentDir, 'messages.db-shm'));
   assert(!walAfter, 'WAL file cleaned up after rotation');

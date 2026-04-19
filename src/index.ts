@@ -4,7 +4,7 @@
  * @module @psiclawops/hypermem
  *
  * Architecture:
- *   L1: Redis       — hot session working memory
+ *   L1: CacheLayer  — SQLite `:memory:` hot session working memory
  *   L2: messages.db — per-agent conversation log (rotatable)
  *   L3: vectors.db  — per-agent semantic search index (reconstructable)
  *   L4: library.db  — fleet-wide structured knowledge (crown jewel)
@@ -16,6 +16,8 @@ export { DatabaseManager } from './db.js';
 export type { DatabaseManagerConfig } from './db.js';
 
 export { MessageStore } from './message-store.js';
+export { ToolArtifactStore } from './tool-artifact-store.js';
+export type { ToolArtifactRecord, PutToolArtifactInput } from './tool-artifact-store.js';
 export { FactStore } from './fact-store.js';
 export { KnowledgeStore } from './knowledge-store.js';
 export type { LinkType } from './knowledge-store.js';
@@ -28,7 +30,7 @@ export type { FleetAgent, FleetOrg, AgentCapability } from './fleet-store.js';
 export { SystemStore } from './system-store.js';
 export type { SystemState, SystemEvent } from './system-store.js';
 export { WorkStore } from './work-store.js';
-export { ensureContextSchema, getActiveContext, getOrCreateActiveContext, updateContextHead, archiveContext, rotateSessionContext } from './context-store.js';
+export { ensureContextSchema, getActiveContext, getOrCreateActiveContext, updateContextHead, archiveContext, rotateSessionContext, getContextById, getArchivedContexts, getArchivedContext, getContextLineage, getForkChildren } from './context-store.js';
 export type { Context } from './context-store.js';
 export type { WorkItem, WorkEvent, WorkStatus } from './work-store.js';
 export { DesiredStateStore } from './desired-state-store.js';
@@ -46,7 +48,54 @@ export type { DesiredStateEntry, ConfigEvent, DriftStatus } from './desired-stat
 export type { ModelState } from './cache.js';
 export { CacheLayer } from './cache.js';
 
-export { Compositor, type CompositorDeps, applyToolGradientToWindow, canPersistReshapedHistory, OPENCLAW_BOOTSTRAP_FILES } from './compositor.js';
+export {
+  TRIM_SOFT_TARGET,
+  TRIM_GROWTH_THRESHOLD,
+  TRIM_HEADROOM_FRACTION,
+  TRIM_BUDGET_POLICY,
+  resolveTrimBudgets,
+} from './budget-policy.js';
+
+// ── Phase C0.2: Canonical degradation contracts ───────────────────────────────
+export {
+  // Reason enum + all values
+  DEGRADATION_REASONS,
+  DEGRADATION_LIMITS,
+  isDegradationReason,
+  isReplayState,
+  // Tool-chain stub
+  formatToolChainStub,
+  parseToolChainStub,
+  isToolChainStub,
+  // Artifact reference
+  formatArtifactRef,
+  parseArtifactRef,
+  isArtifactRef,
+  // Replay marker
+  formatReplayMarker,
+  parseReplayMarker,
+  isReplayMarker,
+  // Generic detector
+  isDegradedContent,
+} from './degradation.js';
+export type {
+  DegradationReason,
+  ToolChainStub,
+  ArtifactRef,
+  ReplayMarker,
+  ReplayState,
+  DegradationEvent,
+} from './degradation.js';
+
+export {
+  REPLAY_RECOVERY_POLICY,
+  decideReplayRecovery,
+  isColdRedisReplay,
+  isReplayRecovered,
+} from './replay-recovery.js';
+export type { ReplayRecoveryInputs, ReplayRecoveryDecision } from './replay-recovery.js';
+
+export { Compositor, type CompositorDeps, applyToolGradientToWindow, canPersistReshapedHistory, OPENCLAW_BOOTSTRAP_FILES, resolveToolChainEjections, type ToolChainEjectionResult } from './compositor.js';
 
 export {
   type CollectionTrigger,
@@ -173,6 +222,9 @@ export type {
   RecentTurn,
   ExpertiseSourceType,
   EvidenceRelationship,
+  ArchivedMiningQuery,
+  ArchivedMiningResult,
+  MultiContextMiningOptions,
 } from './types.js';
 
 export type { ProviderType } from './provider-translator.js';
@@ -215,6 +267,7 @@ import { KnowledgeGraph, type EntityType, type KnowledgeLink, type GraphNode, ty
 import { DesiredStateStore, type DesiredStateEntry, type DriftStatus } from './desired-state-store.js';
 import { CacheLayer } from './cache.js';
 import { Compositor } from './compositor.js';
+import { getArchivedContexts, type Context } from './context-store.js';
 import { VectorStore, type VectorSearchResult, type VectorIndexStats } from './vector-store.js';
 import { userMessageToNeutral, fromProviderFormat } from './provider-translator.js';
 import { stripMessageMetadata } from './topic-detector.js';
@@ -229,8 +282,12 @@ import type {
   StoredMessage,
   Conversation,
   ChannelType,
+  ArchivedMiningQuery,
+  ArchivedMiningResult,
+  MultiContextMiningOptions,
 } from './types.js';
 import { crossAgentQuery, defaultOrgRegistry, buildOrgRegistryFromDb, loadOrgRegistryFromDb, type OrgRegistry } from './cross-agent.js';
+import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -240,7 +297,7 @@ const DEFAULT_CONFIG: HyperMemConfig = {
   cache: {
     keyPrefix: 'hm:',
     sessionTTL: 14400,      // 4 hours — system/identity/meta slots
-    historyTTL: 604800,     // 7 days — extended for canvas display
+    historyTTL: 604800,     // 7 days — extended for ClawCanvas display
   },
   compositor: {
     // TUNE-010 (2026-04-02): Raised from 65000 → 90000.
@@ -268,23 +325,254 @@ const DEFAULT_CONFIG: HyperMemConfig = {
     maxMessagesPerTick: 500,
   },
   embedding: {
-    provider: 'openai',
+    provider: 'ollama',
     ollamaUrl: 'http://localhost:11434',
-    openaiBaseUrl: 'https://openrouter.ai/api/v1',
-    model: 'qwen/qwen3-embedding-8b',
-    dimensions: 4096,
-    timeout: 15000,
-    batchSize: 100,
+    model: 'nomic-embed-text',
+    dimensions: 768,
+    timeout: 10000,
+    batchSize: 32,
   },
 };
+
+export interface StartupFleetSeedOptions {
+  workspaceRoots?: string[];
+  includeMessageDbAgents?: boolean;
+  hydrateCache?: boolean;
+}
+
+export interface StartupFleetSeedResult {
+  discovered: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+  orgsCreated: number;
+  hydratedAgents: number;
+  hydratedSummary: boolean;
+}
+
+type StartupFleetCandidate = {
+  agentId: string;
+  displayName: string;
+  tier: string;
+  orgId: string | null;
+  reportsTo: string | null;
+  reportTargets: string[];
+  metadata: Record<string, unknown> | null;
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeAgentId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function parseIdentityField(markdown: string, label: string): string | null {
+  const pattern = new RegExp(`^\\s*-\\s+\\*\\*${escapeRegExp(label)}:\\*\\*\\s*(.+?)\\s*$`, 'mi');
+  const match = markdown.match(pattern);
+  return match?.[1]?.trim() || null;
+}
+
+function parseSoulName(markdown: string): string | null {
+  const anchor = markdown.match(/You are \*\*([^*]+)\*\*/);
+  if (anchor?.[1]) return anchor[1].trim();
+  const heading = markdown.match(/^#\s+SOUL\.md\s+[—-]\s+([^,\n]+)/m);
+  return heading?.[1]?.trim() || null;
+}
+
+function parseSoulRole(markdown: string): string | null {
+  const anchor = markdown.match(/You are \*\*[^*]+\*\*\s+[—-]\s+([^\.\n]+)/);
+  return anchor?.[1]?.trim() || null;
+}
+
+function inferTierFromRole(role: string | null): string {
+  const lower = (role || '').toLowerCase();
+  if (!lower) return 'unknown';
+  if (lower.includes('council') || lower.includes(' seat')) return 'council';
+  if (lower.includes('director')) return 'director';
+  if (lower.includes('specialist') || lower.includes('aide-de-camp')) return 'specialist';
+  return 'unknown';
+}
+
+function parseReportTargets(raw: string | null): string[] {
+  if (!raw) return [];
+  const stripped = raw.replace(/\([^)]*\)/g, ' ');
+  const parts = stripped
+    .split(/\s*(?:\+|,|\/|&|\band\b)\s*/i)
+    .map(part => normalizeAgentId(part))
+    .filter(Boolean);
+  return [...new Set(parts)];
+}
+
+function mergeStartupCandidate(
+  target: Map<string, StartupFleetCandidate>,
+  partial: Partial<StartupFleetCandidate> & { agentId: string },
+): void {
+  const existing = target.get(partial.agentId);
+  if (!existing) {
+    target.set(partial.agentId, {
+      agentId: partial.agentId,
+      displayName: partial.displayName || partial.agentId,
+      tier: partial.tier || 'unknown',
+      orgId: partial.orgId ?? null,
+      reportsTo: partial.reportsTo ?? null,
+      reportTargets: partial.reportTargets ? [...partial.reportTargets] : [],
+      metadata: partial.metadata ?? null,
+    });
+    return;
+  }
+
+  if (partial.displayName && existing.displayName === existing.agentId) {
+    existing.displayName = partial.displayName;
+  }
+  if (partial.tier && existing.tier === 'unknown') {
+    existing.tier = partial.tier;
+  }
+  if (partial.orgId && !existing.orgId) {
+    existing.orgId = partial.orgId;
+  }
+  if (partial.reportsTo && !existing.reportsTo) {
+    existing.reportsTo = partial.reportsTo;
+  }
+  if (partial.reportTargets?.length) {
+    existing.reportTargets = [...new Set([...existing.reportTargets, ...partial.reportTargets])];
+  }
+  if (partial.metadata) {
+    existing.metadata = { ...(existing.metadata ?? {}), ...partial.metadata };
+  }
+}
+
+function discoverStartupFleetCandidates(
+  dbManager: DatabaseManager,
+  opts: StartupFleetSeedOptions = {},
+): StartupFleetCandidate[] {
+  const homeDir = process.env.HOME || os.homedir();
+  const workspaceRoots = opts.workspaceRoots ?? [
+    path.join(homeDir, '.openclaw', 'workspace-council'),
+    path.join(homeDir, '.openclaw', 'workspace'),
+  ];
+  const candidates = new Map<string, StartupFleetCandidate>();
+
+  for (const root of workspaceRoots) {
+    if (!fs.existsSync(root)) continue;
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const workspacePath = path.join(root, entry.name);
+      const identityPath = path.join(workspacePath, 'IDENTITY.md');
+      const soulPath = path.join(workspacePath, 'SOUL.md');
+      if (!fs.existsSync(identityPath) && !fs.existsSync(soulPath)) continue;
+
+      let identityText = '';
+      let soulText = '';
+      try { if (fs.existsSync(identityPath)) identityText = fs.readFileSync(identityPath, 'utf8'); } catch {}
+      try { if (fs.existsSync(soulPath)) soulText = fs.readFileSync(soulPath, 'utf8'); } catch {}
+
+      const displayName =
+        parseIdentityField(identityText, 'Name') ||
+        parseSoulName(soulText) ||
+        entry.name;
+      const role =
+        parseIdentityField(identityText, 'Role') ||
+        parseSoulRole(soulText) ||
+        null;
+      const reportTargets = parseReportTargets(parseIdentityField(identityText, 'Reports to'));
+      const agentId = normalizeAgentId(entry.name || displayName);
+      if (!agentId) continue;
+
+      mergeStartupCandidate(candidates, {
+        agentId,
+        displayName,
+        tier: inferTierFromRole(role),
+        reportTargets,
+        metadata: {
+          startupSeed: {
+            source: 'workspace-identity',
+            workspacePath,
+            reportsToRaw: reportTargets,
+          },
+        },
+      });
+    }
+  }
+
+  if (opts.includeMessageDbAgents !== false) {
+    for (const agentId of dbManager.listAgents()) {
+      mergeStartupCandidate(candidates, {
+        agentId,
+        displayName: agentId,
+        tier: 'unknown',
+        metadata: {
+          startupSeed: {
+            source: 'message-db',
+          },
+        },
+      });
+    }
+  }
+
+  const resolved = [...candidates.values()];
+  const knownIds = new Set(resolved.map(candidate => candidate.agentId));
+  const councilIds = new Set(
+    resolved
+      .filter(candidate => candidate.tier === 'council')
+      .map(candidate => candidate.agentId),
+  );
+
+  for (const candidate of resolved) {
+    const preferredLead =
+      candidate.reportTargets.find(target => councilIds.has(target)) ||
+      candidate.reportTargets.find(target => knownIds.has(target)) ||
+      null;
+
+    if (candidate.tier === 'council' && !candidate.orgId) {
+      candidate.orgId = `${candidate.agentId}-org`;
+    }
+    if (candidate.tier === 'director' && preferredLead) {
+      candidate.reportsTo = preferredLead;
+      if (!candidate.orgId) {
+        candidate.orgId = `${preferredLead}-org`;
+      }
+    }
+    if (!candidate.reportsTo && preferredLead && candidate.tier !== 'director') {
+      candidate.reportsTo = preferredLead;
+    }
+    // Null out reportsTo if it points outside the known fleet (e.g. a human operator ID)
+    if (candidate.reportsTo && !knownIds.has(candidate.reportsTo)) {
+      candidate.reportsTo = null;
+    }
+
+    candidate.metadata = {
+      ...(candidate.metadata ?? {}),
+      startupSeed: {
+        ...(((candidate.metadata ?? {}) as Record<string, unknown>).startupSeed as Record<string, unknown> | undefined),
+        derivedOrgId: candidate.orgId,
+        derivedReportsTo: candidate.reportsTo,
+      },
+    };
+  }
+
+  return resolved.sort((a, b) => a.agentId.localeCompare(b.agentId));
+}
 
 /**
  * hypermem — the main API facade.
  *
  * Usage:
  *   const hm = await hypermem.create({ dataDir: '~/.openclaw/hypermem' });
- *   await hm.record('alice', 'agent:alice:webchat:main', userMsg);
- *   const result = await hm.compose({ agentId: 'alice', sessionKey: '...', ... });
+ *   await hm.record('agent1', 'agent:agent1:webchat:main', userMsg);
+ *   const result = await hm.compose({ agentId: 'agent1', sessionKey: '...', ... });
  */
 export class HyperMem {
   readonly dbManager: DatabaseManager;
@@ -342,21 +630,44 @@ export class HyperMem {
     // hybridSearch() continues in FTS5-only mode.
     // The vector store is shared (not per-agent) — facts/episodes from all agents
     // are indexed together, keyed by (source_table, source_id).
-    try {
-      const vectorDb = hm.dbManager.getSharedVectorDb();
-      if (vectorDb) {
-        const vs = new VectorStore(vectorDb, merged.embedding, hm.dbManager.getLibraryDb());
-        vs.ensureTables();
-        hm.compositor.setVectorStore(vs);
-        const embeddingDesc = merged.embedding.provider === 'openai'
-          ? `${merged.embedding.openaiBaseUrl?.includes('openrouter') ? 'openrouter' : 'openai'}/${merged.embedding.model ?? 'text-embedding-3-small'}`
-          : `ollama/${merged.embedding.model ?? 'nomic-embed-text'}`;
-        console.log(`[hypermem] Vector store initialized (sqlite-vec + ${embeddingDesc})`);
-      } else {
-        console.warn('[hypermem] sqlite-vec unavailable — semantic recall in FTS5-only mode');
+    if (merged.embedding.provider === 'none') {
+      console.log('[hypermem] Embedding provider: none — semantic search disabled, using FTS5 fallback');
+    } else {
+      try {
+        const vectorDb = hm.dbManager.getSharedVectorDb();
+        if (vectorDb) {
+          const vs = new VectorStore(vectorDb, merged.embedding, hm.dbManager.getLibraryDb());
+          vs.ensureTables();
+          hm.compositor.setVectorStore(vs);
+          const embeddingDesc = merged.embedding.provider === 'openai'
+            ? `${merged.embedding.openaiBaseUrl?.includes('openrouter') ? 'openrouter' : 'openai'}/${merged.embedding.model ?? 'text-embedding-3-small'}`
+            : `ollama/${merged.embedding.model ?? 'nomic-embed-text'}`;
+          console.log(`[hypermem] Vector store initialized (sqlite-vec + ${embeddingDesc})`);
+        } else {
+          console.warn('[hypermem] sqlite-vec unavailable — semantic recall in FTS5-only mode');
+        }
+      } catch (err) {
+        console.warn('[hypermem] Vector store init failed (non-fatal):', (err as Error).message);
       }
-    } catch (err) {
-      console.warn('[hypermem] Vector store init failed (non-fatal):', (err as Error).message);
+    }
+
+    const autoStartupFleetSeeding =
+      merged.startupFleetSeeding !== false &&
+      !path.resolve(merged.dataDir).startsWith(path.resolve(os.tmpdir()) + path.sep);
+
+    if (autoStartupFleetSeeding) {
+      try {
+        const startupSeed = await hm.seedFleetAgentsOnStartup();
+        if (startupSeed.discovered > 0) {
+          console.log(
+            `[hypermem] Startup fleet seed: ${startupSeed.inserted} inserted, ` +
+            `${startupSeed.updated} updated, ${startupSeed.skipped} unchanged, ` +
+            `${startupSeed.orgsCreated} orgs, ${startupSeed.hydratedAgents} cached`
+          );
+        }
+      } catch (err) {
+        console.warn('[hypermem] Startup fleet seed failed (non-fatal):', (err as Error).message);
+      }
     }
 
     return hm;
@@ -469,6 +780,98 @@ export class HyperMem {
     return this.compositor.compose(request, db, libraryDb);
   }
 
+  // ─── Tool Artifacts (L2: per-agent, schema v9) ───────────────────
+
+  /**
+   * Persist a full tool result payload and return the durable record.
+   * Used by the plugin wave-guard to capture payloads before stubbing the
+   * transcript. Dedupes by content hash within the (agentId, sessionKey)
+   * scope — identical payloads bump ref_count on the existing row.
+   */
+  async recordToolArtifact(
+    agentId: string,
+    sessionKey: string,
+    input: Omit<import('./tool-artifact-store.js').PutToolArtifactInput, 'agentId' | 'sessionKey'>,
+  ): Promise<import('./tool-artifact-store.js').ToolArtifactRecord> {
+    const db = this.dbManager.getMessageDb(agentId);
+    this.dbManager.ensureAgent(agentId);
+    const { ToolArtifactStore } = await import('./tool-artifact-store.js');
+    const store = new ToolArtifactStore(db);
+    return store.put({ ...input, agentId, sessionKey });
+  }
+
+  /** Fetch a tool artifact by id. Returns null if unknown. */
+  async getToolArtifact(
+    agentId: string,
+    artifactId: string,
+  ): Promise<import('./tool-artifact-store.js').ToolArtifactRecord | null> {
+    const db = this.dbManager.getMessageDb(agentId);
+    const { ToolArtifactStore } = await import('./tool-artifact-store.js');
+    const store = new ToolArtifactStore(db);
+    const record = store.get(artifactId);
+    if (record) store.touch(artifactId);
+    return record;
+  }
+
+  /** List tool artifacts for a specific turn. */
+  async listToolArtifactsByTurn(
+    agentId: string,
+    sessionKey: string,
+    turnId: string,
+  ): Promise<import('./tool-artifact-store.js').ToolArtifactRecord[]> {
+    const db = this.dbManager.getMessageDb(agentId);
+    const { ToolArtifactStore } = await import('./tool-artifact-store.js');
+    const store = new ToolArtifactStore(db);
+    return store.listByTurn(sessionKey, turnId);
+  }
+
+  // ─── Archived Mining (L2: Messages) ─────────────────────────
+
+  /**
+   * List archived or forked contexts for an agent.
+   *
+   * Operator-safe enumeration path. This is the approved archived-context
+   * listing surface. Active composition remains separate.
+   */
+  listArchivedContexts(
+    agentId: string,
+    opts?: {
+      sessionKey?: string;
+      limit?: number;
+    }
+  ): Context[] {
+    const db = this.dbManager.getMessageDb(agentId);
+    return getArchivedContexts(db, agentId, opts);
+  }
+
+  /**
+   * Mine a single archived or forked context through the archived-mining
+   * surface. This does not widen active composition.
+   */
+  mineArchivedContext(
+    agentId: string,
+    query: ArchivedMiningQuery,
+  ): ArchivedMiningResult<StoredMessage[]> {
+    const db = this.dbManager.getMessageDb(agentId);
+    const store = new MessageStore(db);
+    return store.mineArchivedContext(query);
+  }
+
+  /**
+   * Mine multiple archived or forked contexts through the capped archived-
+   * mining surface. This does not expose raw DAG helpers and does not widen
+   * active composition.
+   */
+  mineArchivedContexts(
+    agentId: string,
+    contextIds: number[],
+    opts?: MultiContextMiningOptions,
+  ): ArchivedMiningResult<StoredMessage[]>[] {
+    const db = this.dbManager.getMessageDb(agentId);
+    const store = new MessageStore(db);
+    return store.mineArchivedContexts(contextIds, opts);
+  }
+
   /**
    * Warm a session from SQLite into Redis.
    */
@@ -485,9 +888,9 @@ export class HyperMem {
   /**
    * Recompute the Redis hot history view from SQLite and re-apply tool gradient.
    */
-  async refreshRedisGradient(agentId: string, sessionKey: string, tokenBudget?: number): Promise<void> {
+  async refreshRedisGradient(agentId: string, sessionKey: string, tokenBudget?: number, historyDepth?: number): Promise<void> {
     const db = this.dbManager.getMessageDb(agentId);
-    await this.compositor.refreshRedisGradient(agentId, sessionKey, db, tokenBudget);
+    await this.compositor.refreshRedisGradient(agentId, sessionKey, db, tokenBudget, historyDepth);
   }
 
   /**
@@ -1457,7 +1860,107 @@ export class HyperMem {
     return store.listSources(opts);
   }
 
-  // ─── Fleet Cache Hydration ──────────────────────────────────
+  // ─── Fleet Startup Seeding + Cache Hydration ────────────────
+
+  /**
+   * Seed fleet agents from known workspace identity files and existing
+   * message-db agent directories, then optionally hydrate the Redis fleet cache.
+   *
+   * The sweep is idempotent: existing rows are only updated when startup-discovered
+   * values differ, so repeated boots do not duplicate or churn fleet rows.
+   */
+  async seedFleetAgentsOnStartup(opts: StartupFleetSeedOptions = {}): Promise<StartupFleetSeedResult> {
+    const db = this.dbManager.getLibraryDb();
+    const store = new FleetStore(db);
+    const discovered = discoverStartupFleetCandidates(this.dbManager, opts);
+
+    let inserted = 0;
+    let updated = 0;
+    let skipped = 0;
+    let orgsCreated = 0;
+
+    for (const candidate of discovered) {
+      const existing = store.getAgent(candidate.agentId);
+      const mergedMetadata = {
+        ...(existing?.metadata ?? {}),
+        ...(candidate.metadata ?? {}),
+      };
+
+      if (!existing) {
+        store.upsertAgent(candidate.agentId, {
+          displayName: candidate.displayName,
+          tier: candidate.tier,
+          orgId: candidate.orgId ?? undefined,
+          reportsTo: candidate.reportsTo ?? undefined,
+          status: 'active',
+          metadata: Object.keys(mergedMetadata).length > 0 ? mergedMetadata : undefined,
+        });
+        inserted++;
+        continue;
+      }
+
+      const patch: {
+        displayName?: string;
+        tier?: string;
+        orgId?: string;
+        reportsTo?: string;
+        metadata?: Record<string, unknown>;
+      } = {};
+
+      if (candidate.displayName && candidate.displayName !== existing.displayName) {
+        patch.displayName = candidate.displayName;
+      }
+      if (candidate.tier && candidate.tier !== 'unknown' && candidate.tier !== existing.tier) {
+        patch.tier = candidate.tier;
+      }
+      if (candidate.orgId && candidate.orgId !== existing.orgId) {
+        patch.orgId = candidate.orgId;
+      }
+      if (candidate.reportsTo && candidate.reportsTo !== existing.reportsTo) {
+        patch.reportsTo = candidate.reportsTo;
+      }
+      if (JSON.stringify(mergedMetadata) !== JSON.stringify(existing.metadata ?? {})) {
+        patch.metadata = mergedMetadata;
+      }
+
+      if (Object.keys(patch).length === 0) {
+        skipped++;
+        continue;
+      }
+
+      store.upsertAgent(candidate.agentId, patch);
+      updated++;
+    }
+
+    for (const candidate of discovered) {
+      if (!candidate.orgId) continue;
+      if (store.getOrg(candidate.orgId)) continue;
+      if (candidate.tier !== 'council') continue;
+      store.upsertOrg(candidate.orgId, {
+        name: `${candidate.displayName} Org`,
+        leadAgentId: candidate.agentId,
+      });
+      orgsCreated++;
+    }
+
+    let hydratedAgents = 0;
+    let hydratedSummary = false;
+    if (opts.hydrateCache !== false) {
+      const hydrated = await this.hydrateFleetCache();
+      hydratedAgents = hydrated.agents;
+      hydratedSummary = hydrated.summary;
+    }
+
+    return {
+      discovered: discovered.length,
+      inserted,
+      updated,
+      skipped,
+      orgsCreated,
+      hydratedAgents,
+      hydratedSummary,
+    };
+  }
 
   /**
    * Hydrate the Redis fleet cache from library.db.

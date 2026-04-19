@@ -1,6 +1,6 @@
 # hypermem Tuning Guide
 
-Configuration reference for operators and agents. All settings are optional — hypermem ships with production-tested defaults.
+Configuration reference for operators and agents. All settings are optional, but the installer now writes a fully-expanded `config.json` so operators can see every default in one place.
 
 Config lives in `~/.openclaw/hypermem/config.json` (takes effect on gateway restart) or is passed programmatically via `HyperMem.create()`:
 
@@ -9,6 +9,170 @@ const hm = await HyperMem.create({
   compositor: { budgetFraction: 0.70, hyperformProfile: 'standard' },
 });
 ```
+
+Lookup paths for operators and agents:
+
+```bash
+cat ~/.openclaw/hypermem/config.json
+openclaw config get plugins.entries.hypercompositor.config
+openclaw config get plugins.slots.contextEngine
+```
+
+Resolution order is:
+1. `plugins.entries.hypercompositor.config` in `openclaw.json`
+2. `~/.openclaw/hypermem/config.json`
+3. code defaults
+
+---
+
+## Token Cost Philosophy
+
+HyperMem is deliberately context-heavy. Before you reach for the light preset, understand the tradeoff you're making.
+
+**The core proposition:** spending more tokens per turn means fewer turns to reach a useful answer.
+
+A standard HyperMem turn injects 40–90k tokens of structured context: recent conversation history, relevant facts, knowledge pages, semantic recall from past sessions, and behavioral directives. That context costs tokens. What it buys you:
+
+- The model starts each turn knowing what it already decided, not re-discovering it
+- Recalled facts prevent drift across long sessions
+- Keystone messages surface relevant older decisions without re-reading history
+- Behavioral directives compress output — the model writes tighter answers, which costs fewer output tokens and less follow-up clarification
+
+**The math most token-counters miss:** a 90k-token context turn that resolves a task in 1 exchange is cheaper than a 20k-token context turn that takes 4 exchanges to converge on the same answer. Input tokens are priced lower than output tokens at most providers; large context is less expensive than it appears in the first-turn sticker shock.
+
+That said, not every deployment needs full context richness. If you're running a single-purpose tool agent, a CI pipeline, or a constrained environment, the light preset is the right starting point.
+
+### Choosing a starting point
+
+| Situation | Preset | Reason |
+|---|---|---|
+| First install, trying it out | `light` | Minimal overhead, easy to reason about |
+| Single conversational agent | `standard` | Richer memory without fleet overhead |
+| Multi-agent fleet, long-running sessions | `full` | Full continuity, keystone recall, cross-session context |
+| CI pipelines, one-shot tasks | Custom light | Disable indexer, keep only history |
+| Cost audit / benchmarking | `light` + `enableFOS: false` | Near-zero memory overhead for baseline comparison |
+
+### What each preset costs per turn
+
+Estimates on a 200k model (Claude Sonnet). Scale proportionally for smaller windows — on a 128k model expect roughly 60% of these figures. Actual cost depends on session length and indexer trigger hits.
+
+| Preset | Turn 1 (warm) | Turn 5+ (established) | Layers active |
+|---|---|---|---|
+| `light` | **12–18k** | 25–35k | History, facts (10 cap), keystones (5 cap), behavior |
+| `standard` (default) | **35–50k** | 55–80k | All layers, default caps |
+| `full` | **40–55k** | 60–85k | All layers, raised caps, cross-session on |
+
+Standard turn 1 is lower than full because `warmHistoryBudgetFraction` is the same, but full enables cross-session context which adds tokens immediately; by turn 5 full overtakes standard as more layers accumulate history.
+
+**Turn 1 is where token-conscious users will react.** Light vs full on turn 1 is roughly 25–40k tokens — the number that shows up in provider dashboards. By turn 5 the gap is still real, but the value case is easier to make because the user has already experienced continuity.
+
+**At Claude Sonnet input pricing ($3/M tokens):** the turn-1 delta between light and standard is roughly $0.06–$0.11 per turn. The question is whether you recover that in fewer follow-up turns. For agents doing multi-session work, the answer is almost always yes.
+
+### Light setup
+
+For cost-sensitive deployments or users who want a gentler start. The light philosophy is not "turn it off" — it's **lower first-turn warming and less aggressive fact loading**. Every memory layer still runs; it just loads less on turn 1 and scales up as the session accumulates history.
+
+The key lever here is `warmHistoryBudgetFraction`: it controls how much of the budget is used for history on the first warm session turn. Lowering it reduces the turn-1 context sticker shock without disabling recall for the rest of the session.
+
+```json
+{
+  "compositor": {
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.30,
+    "warmHistoryBudgetFraction": 0.20,
+    "maxFacts": 10,
+    "maxHistoryMessages": 150,
+    "maxCrossSessionContext": 0,
+    "keystoneHistoryFraction": 0.10,
+    "keystoneMaxMessages": 5,
+    "wikiTokenCap": 200,
+    "hyperformProfile": "light"
+  },
+  "indexer": {
+    "factExtractionMode": "pattern",
+    "periodicInterval": 600000
+  },
+  "dreaming": {
+    "enabled": false
+  }
+}
+```
+
+Estimated context per turn: **12–35k tokens** on a 200k model (lower on smaller models), rising from turn 1 as history accumulates. Fact recall and keystone injection are active but conservative. Good for: users trying HyperMem for the first time, single-agent setups on smaller models, or any deployment where turn-1 context size is a concern.
+
+**Session continuity still works at light budget.** Cross-session history threads carry over, so returning users don't start from scratch. The semantic recall layer fires against the content of each incoming message — so by turn 2 or 3, as the user starts expressing what they actually want to work on, recall naturally surfaces relevant facts and context for that topic. Turn 1 is lean; the session warms into the right knowledge as the conversation takes shape. Users who are token-conscious will see a modest first turn, then progressively richer context as their topic clarifies — which is exactly when they need it.
+
+### Standard setup
+
+The default out-of-the-box configuration. All memory layers active with balanced caps. Good for most single-agent deployments.
+
+```json
+{
+  "compositor": {
+    "budgetFraction": 0.703,
+    "contextWindowReserve": 0.25,
+    "maxFacts": 28,
+    "maxHistoryMessages": 250,
+    "maxCrossSessionContext": 0,
+    "keystoneHistoryFraction": 0.20,
+    "keystoneMaxMessages": 15,
+    "hyperformProfile": "standard"
+  },
+  "indexer": {
+    "factExtractionMode": "tiered",
+    "periodicInterval": 300000
+  }
+}
+```
+
+Estimated context per turn: **35–80k tokens** on a 200k model. This is what ships if you don't touch the config.
+
+### Full performance setup
+
+For long-running sessions, multi-agent fleets, or any deployment where the agent needs to remember what happened and why. All memory layers active, caps raised.
+
+```json
+{
+  "compositor": {
+    "budgetFraction": 0.70,
+    "contextWindowReserve": 0.22,
+    "maxFacts": 40,
+    "maxHistoryMessages": 500,
+    "maxCrossSessionContext": 6000,
+    "keystoneHistoryFraction": 0.22,
+    "keystoneMaxMessages": 20,
+    "wikiTokenCap": 600,
+    "hyperformProfile": "full"
+  },
+  "indexer": {
+    "factExtractionMode": "tiered",
+    "periodicInterval": 300000
+  },
+  "dreaming": {
+    "enabled": true,
+    "maxPromotionsPerRun": 5,
+    "tickInterval": 12
+  }
+}
+```
+
+Estimated context per turn: **40–85k tokens** on a 200k model. Full fact recall, semantic search, keystone injection, cross-session context, and behavioral directives all active. Good for: persistent agents, council seats, agents that work across multiple sessions on the same project.
+
+### Tuning down from full without going to light
+
+You don't have to choose between light and full. The most common middle-ground adjustments:
+
+**Reduce fact injection** (saves 3–10k tokens): `maxFacts: 15`
+
+**Disable cross-session context** (saves 2–6k tokens): `maxCrossSessionContext: 0`
+
+**Reduce keystones** (saves 2–8k tokens): `keystoneHistoryFraction: 0.10`
+
+**Reduce wiki/knowledge** (saves 2–4k tokens): `wikiTokenCap: 300`
+
+**Drop to standard Hyperform** (saves 1–2k tokens): `hyperformProfile: 'standard'`
+
+A targeted combination of the above can bring a full-performance setup from 80k to 55k per turn without losing the core memory continuity that makes HyperMem worth running.
 
 ---
 
@@ -190,7 +354,12 @@ The hypercompositor queries all four storage layers on every turn and composes c
 
 ### How the budget is calculated
 
-Three knobs control the top-level budget:
+The plugin uses this order when deciding the budget source:
+1. runtime `tokenBudget` supplied by OpenClaw
+2. `contextWindowOverrides["provider/model"]` from config, if present
+3. `contextWindowSize` fallback from config
+
+Three knobs then control the top-level budget:
 
 ```
 detected context window × budgetFraction × (1 - contextWindowReserve) = effective budget
@@ -218,7 +387,36 @@ effective budget × (1 - targetBudgetFraction) = history budget
 67,488 × 0.35 = 23,621 (history budget)
 ```
 
-**Model swap resilience:** The budget is computed from the model's actual context window at compose time. If you swap models mid-session (e.g., from a 128k model to a 200k model), the budget automatically recomputes on the next turn. No manual intervention needed. Structured tool history is guarded from being overwritten during a budget downshift — the compositor computes the new allocation but doesn't persist a lower-context snapshot to disk, preserving the full history for when the larger model returns.
+**Model swap resilience:** The budget is computed from the model's actual context window at compose time when OpenClaw passes `tokenBudget`. If runtime metadata is missing, HyperMem falls back to `contextWindowOverrides` and then `contextWindowSize`. Structured tool history is guarded from being overwritten during a budget downshift — the compositor computes the new allocation but doesn't persist a lower-context snapshot to disk, preserving the full history for when the larger model returns.
+
+### Custom, local, or finetuned models (window-detection override)
+
+The autodetect pattern table in step 2 covers known model families (`claude-*`, `gpt-*`, `gemini-*`, `glm-*`, `qwen-*`, `deepseek-*`). If your model string doesn't match any pattern — custom finetunes, local models behind unusual provider prefixes, experimental Ollama/vLLM/LM Studio names — resolution silently falls through to `defaultTokenBudget` (90k). **Every dial in this section is a fraction of the detected window, so wrong detection propagates everywhere**: `budgetFraction`, `warmHistoryBudgetFraction`, trim tier thresholds (50% / 65% / 85%), and compaction gates (80% afterTurn, 85% nuclear) all end up sized against the wrong ceiling.
+
+Two failure signatures:
+
+- **Undersized detection** (real 200k model detected as 90k): continuous warm→trim→compact cycling, starved facts/wiki slots, tight first-turn budgets. The agent feels "boxed in" even in short sessions.
+- **Oversized detection** (real 32k local model detected as larger): first-turn warm load exceeds the real window, turns hit provider-side truncation or 400 errors on input overflow.
+
+Verify what's being used by enabling `verboseLogging: true` and watching for the `budget source:` log line each turn. `runtime tokenBudget=...` or `contextWindowOverrides[...]` means HyperMem has the right number. `fallback contextWindowSize=...` with your model in the tail means detection failed.
+
+Fix by adding `contextWindowOverrides` in the `compositor` block of `~/.openclaw/hypermem/config.json`:
+
+```json
+{
+  "compositor": {
+    "contextWindowOverrides": {
+      "ollama/llama-3.3-70b":     { "contextTokens": 131072 },
+      "copilot-local/custom-sft": { "contextTokens": 32768 },
+      "vllm/qwen3-coder-ft":      { "contextTokens": 262144 }
+    }
+  }
+}
+```
+
+Key format: `"provider/model"`, lowercase, exact match against the model identifier your agent runs on. Values accept either `contextTokens` or `contextWindow` (same effect). Malformed keys, impossible ranges, and empty entries are dropped by the sanitizer on load with a warning; the override system is designed to be safe to edit without risking the resolver.
+
+Gateway restart required after changes. Overrides interact with warming and trimming exactly as the autodetect path does — once the correct window is in place, every other knob here behaves as documented. Set `contextWindowOverrides` **before** tuning `budgetFraction`, `warmHistoryBudgetFraction`, or any trim-zone dials, otherwise you're tuning against the wrong window and the numbers won't behave.
 
 ### How the budget fills
 
@@ -318,16 +516,18 @@ Small windows need aggressive reserve (tool results can easily consume 10k+ toke
 ```json
 {
   "compositor": {
-    "budgetFraction": 0.65,
-    "contextWindowReserve": 0.15,
-    "maxFacts": 60,
-    "maxHistoryMessages": 1000,
-    "keystoneHistoryFraction": 0.25
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.25,
+    "warmHistoryBudgetFraction": 0.27,
+    "maxFacts": 25,
+    "maxHistoryMessages": 500,
+    "keystoneHistoryFraction": 0.15,
+    "keystoneMaxMessages": 12
   }
 }
 ```
 
-Large windows can afford tighter reserves and richer context. The compositor naturally uses more of the window.
+Large windows tempt you to warm speculatively — don't. Keep warming lean, let semantic recall surface topic-relevant facts responsively, and reserve the extra window for tool-heavy turns and active conversation growth. The compositor naturally uses more of the window as the session accumulates real content.
 
 ### Dynamic reserve
 
@@ -375,7 +575,9 @@ Large T0 results (>40k chars) at high context pressure (>80%) get head-and-tail 
 | `maxRecentToolPairs` | 3 | Tool pairs kept at full fidelity (T0) |
 | `maxProseToolPairs` | 10 | Tool pairs converted to prose summary before stubbing |
 
-**When `deferToolPruning: true`** (default for Anthropic installs): hypermem skips its own gradient when OpenClaw's native `contextPruning` is active. The native pruner handles tool result trimming on those providers. The gradient remains active as fallback for other providers.
+**When `deferToolPruning: true`**: hypermem skips its own gradient when OpenClaw's native `contextPruning` is active. The native pruner handles tool result trimming on those providers. The gradient remains active as fallback for other providers.
+
+**When `verboseLogging: true`**: HyperMem emits budget-source and trim-decision logs so you can see whether a turn used runtime `tokenBudget`, a manual `contextWindowOverrides` entry, or the `contextWindowSize` fallback.
 
 ---
 
@@ -536,29 +738,44 @@ All files pass through `secret-scanner` before ingest. Notes containing API keys
 
 ### Full Fleet (200k+, council)
 
+The recommended starting config for long-running multi-agent deployments. These values target a steady turn-over-turn pressure profile: warm lean enough that trim/compact cycles don't fire constantly, rely on semantic recall to surface topic-relevant facts responsively, leave meaningful headroom for tool-heavy turns.
+
 ```json
 {
   "compositor": {
-    "budgetFraction": 0.588,
-    "contextWindowReserve": 0.20,
-    "targetBudgetFraction": 0.55,
-    "maxFacts": 60,
-    "maxHistoryMessages": 1000,
-    "maxCrossSessionContext": 12000,
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.25,
+    "targetBudgetFraction": 0.50,
+    "warmHistoryBudgetFraction": 0.27,
+    "maxFacts": 25,
+    "maxHistoryMessages": 500,
+    "maxCrossSessionContext": 4000,
     "hyperformProfile": "full",
-    "keystoneHistoryFraction": 0.25,
-    "keystoneMaxMessages": 30,
-    "wikiTokenCap": 800,
-    "maxTotalTriggerTokens": 10000
+    "keystoneHistoryFraction": 0.15,
+    "keystoneMaxMessages": 12,
+    "wikiTokenCap": 500,
+    "maxTotalTriggerTokens": 10000,
+    "maxRecentToolPairs": 3,
+    "maxProseToolPairs": 10
+  },
+  "eviction": {
+    "enabled": true,
+    "imageAgeTurns": 1,
+    "toolResultAgeTurns": 4,
+    "minTokensToEvict": 600,
+    "keepPreviewChars": 240
   },
   "dreaming": {
     "enabled": true,
     "maxPromotionsPerRun": 8,
     "tickInterval": 6,
     "minScore": 0.65
-  }
+  },
+  "deferToolPruning": true
 }
 ```
+
+**Why these values differ from the `full` profile defaults.** The code-level `full` preset was tuned for maximum richness on first contact. In practice on 200k+ fleets, that turn-1 richness pushed sessions into warm→trim→compact cycling within 3–4 turns. Lowering `warmHistoryBudgetFraction` to 0.27 and trimming the fact/keystone caps leaves room for tool output and active conversation to grow without triggering eviction every turn. Semantic recall still fires against each incoming message, so topic-relevant facts surface when the conversation reaches them — the knowledge is still there, it just loads responsively instead of speculatively. If your fleet is idle for long stretches between sessions and amnesia is a bigger problem than pressure, raise `maxFacts` to 35 and `keystoneMaxMessages` to 18 as a gentler first step before touching `warmHistoryBudgetFraction`.
 
 ### Code Agent (128k, high tool output)
 
@@ -632,3 +849,16 @@ Higher `contextWindowReserve` (0.30) gives more headroom for large tool results.
 | `hyperformProfile` | `'light'` \| `'standard'` \| `'full'` | `'full'` | Output shaping tier. |
 | `enableFOS` | boolean | `true` | Suppress behavior directives when `false`. |
 | `enableMOD` | boolean | `true` | Suppress model adaptation when `false`. |
+
+### Background Maintenance
+
+Controls for the proactive maintenance passes (noise sweep, tool decay) that run alongside the background indexer. These settings live under the `maintenance` key in config.json.
+
+| Knob | Type | Default | What it controls |
+|---|---|---|---|
+| `maintenance.periodicInterval` | ms | `300000` | Interval between background indexer ticks (5 min default). |
+| `maintenance.maxActiveConversations` | number | `5` | Max active conversations processed per agent per tick. Limits fanout. |
+| `maintenance.recentConversationCooldownMs` | ms | `30000` | Skip conversations processed within this window. Prevents redundant sweeps. |
+| `maintenance.maxCandidatesPerPass` | number | `200` | Cap on total mutations (deletes + truncations) per maintenance tick. |
+
+Per-tick diagnostics are logged when `verboseLogging` is enabled, showing `considered`, `skipped`, `scanned`, `mutated`, `duration`, and `exitReason` fields. These help operators confirm maintenance is running and identify conversations that are generating the most noise.

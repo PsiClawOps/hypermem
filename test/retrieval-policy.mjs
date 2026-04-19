@@ -24,26 +24,26 @@ console.log('══════════════════════�
 console.log('  Retrieval Policy Tests (W1)');
 console.log('═══════════════════════════════════════════════════\n');
 
-const ctx = { agentId: 'alice', sessionKey: 'agent:alice:webchat:main' };
+const ctx = { agentId: 'agent1', sessionKey: 'agent:agent1:webchat:main' };
 
 // ── Test 1: checkScope — agent scope allowed (matching agentId) ──
 console.log('── checkScope: agent scope ──');
 {
-  const result = checkScope('agent', 'alice', null, ctx);
+  const result = checkScope('agent', 'agent1', null, ctx);
   assert(result.allowed === true, 'Test 1: agent scope allowed when agentId matches');
   assert(result.reason === 'allowed', 'Test 1: reason is "allowed"');
 }
 
 // ── Test 2: checkScope — agent scope denied (mismatched agentId) ──
 {
-  const result = checkScope('agent', 'bob', null, ctx);
+  const result = checkScope('agent', 'agent2', null, ctx);
   assert(result.allowed === false, 'Test 2: agent scope denied when agentId mismatches');
   assert(result.reason === 'scope_filtered', 'Test 2: reason is "scope_filtered"');
 }
 
 // ── Test 2b: checkScope — null/undefined scope defaults to agent behavior ──
 {
-  const result1 = checkScope(null, 'alice', null, ctx);
+  const result1 = checkScope(null, 'agent1', null, ctx);
   assert(result1.allowed === true, 'Test 2b: null scope defaults to agent (matching agentId)');
 
   const result2 = checkScope(undefined, 'other-agent', null, ctx);
@@ -59,28 +59,28 @@ console.log('── checkScope: agent scope ──');
 // ── Test 3: checkScope — session scope allowed (both match) ──
 console.log('\n── checkScope: session scope ──');
 {
-  const result = checkScope('session', 'alice', 'agent:alice:webchat:main', ctx);
+  const result = checkScope('session', 'agent1', 'agent:agent1:webchat:main', ctx);
   assert(result.allowed === true, 'Test 3: session scope allowed when both agentId and sessionKey match');
   assert(result.reason === 'allowed', 'Test 3: reason is "allowed"');
 }
 
 // ── Test 4: checkScope — session scope denied (sessionKey differs) ──
 {
-  const result = checkScope('session', 'alice', 'agent:alice:webchat:other', ctx);
+  const result = checkScope('session', 'agent1', 'agent:agent1:webchat:other', ctx);
   assert(result.allowed === false, 'Test 4: session scope denied when sessionKey differs');
   assert(result.reason === 'scope_filtered', 'Test 4: reason is "scope_filtered"');
 }
 
 // ── Test 4b: checkScope — session scope denied (agentId differs) ──
 {
-  const result = checkScope('session', 'bob', 'agent:alice:webchat:main', ctx);
+  const result = checkScope('session', 'agent2', 'agent:agent1:webchat:main', ctx);
   assert(result.allowed === false, 'Test 4b: session scope denied when agentId differs');
 }
 
 // ── Test 5: checkScope — global scope always allowed ──
 console.log('\n── checkScope: global scope ──');
 {
-  const result1 = checkScope('global', 'bob', 'agent:bob:webchat:other', ctx);
+  const result1 = checkScope('global', 'agent2', 'agent:agent2:webchat:other', ctx);
   assert(result1.allowed === true, 'Test 5a: global scope allowed regardless of agentId');
 
   const result2 = checkScope('global', null, null, ctx);
@@ -93,17 +93,17 @@ console.log('\n── checkScope: global scope ──');
 // ── Test 5d: checkScope — user scope ──
 console.log('\n── checkScope: user scope ──');
 {
-  const result1 = checkScope('user', 'alice', null, ctx);
+  const result1 = checkScope('user', 'agent1', null, ctx);
   assert(result1.allowed === true, 'Test 5d: user scope allowed when agentId matches');
 
-  const result2 = checkScope('user', 'bob', null, ctx);
+  const result2 = checkScope('user', 'agent2', null, ctx);
   assert(result2.allowed === false, 'Test 5d: user scope denied when agentId mismatches');
 }
 
 // ── Test 6: checkScope — unknown scope → ambiguous_scope denied ──
 console.log('\n── checkScope: unknown/ambiguous scope ──');
 {
-  const result1 = checkScope('fleet', 'alice', null, ctx);
+  const result1 = checkScope('fleet', 'agent1', null, ctx);
   assert(result1.allowed === false, 'Test 6a: unknown scope "fleet" → denied');
   assert(result1.reason === 'ambiguous_scope', 'Test 6a: reason is "ambiguous_scope"');
 
@@ -117,19 +117,19 @@ console.log('\n── filterByScope: mixed array ──');
 {
   const items = [
     // Should be allowed: agent scope, matching agentId
-    { agentId: 'alice', sessionKey: null, scope: 'agent', content: 'fact-1' },
+    { agentId: 'agent1', sessionKey: null, scope: 'agent', content: 'fact-1' },
     // Should be allowed: global scope
-    { agentId: 'bob', sessionKey: null, scope: 'global', content: 'fact-2' },
+    { agentId: 'agent2', sessionKey: null, scope: 'global', content: 'fact-2' },
     // Should be allowed: null scope (defaults to agent), matching agentId
-    { agentId: 'alice', sessionKey: null, scope: null, content: 'fact-3' },
+    { agentId: 'agent1', sessionKey: null, scope: null, content: 'fact-3' },
     // Should be allowed: null agentId (global fact)
     { agentId: null, sessionKey: null, scope: 'agent', content: 'fact-4' },
     // Should be filtered: agent scope, wrong agentId
-    { agentId: 'bob', sessionKey: null, scope: 'agent', content: 'fact-5' },
+    { agentId: 'agent2', sessionKey: null, scope: 'agent', content: 'fact-5' },
     // Should be filtered: session scope, wrong session
-    { agentId: 'alice', sessionKey: 'agent:alice:webchat:other', scope: 'session', content: 'fact-6' },
+    { agentId: 'agent1', sessionKey: 'agent:agent1:webchat:other', scope: 'session', content: 'fact-6' },
     // Should be filtered: ambiguous scope
-    { agentId: 'alice', sessionKey: null, scope: 'org', content: 'fact-7' },
+    { agentId: 'agent1', sessionKey: null, scope: 'org', content: 'fact-7' },
   ];
 
   const { allowed, filteredCount } = filterByScope(items, ctx);

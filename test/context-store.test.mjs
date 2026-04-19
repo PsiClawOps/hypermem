@@ -107,12 +107,12 @@ describe('getOrCreateActiveContext', () => {
   it('creates a new context', () => {
     const db = createTestDb();
     ensureContextSchema(db);
-    const convId = insertConversation(db, 'alice', 'agent:alice:webchat:main');
+    const convId = insertConversation(db, 'agent1', 'agent:agent1:webchat:main');
 
-    const ctx = getOrCreateActiveContext(db, 'alice', 'agent:alice:webchat:main', convId);
+    const ctx = getOrCreateActiveContext(db, 'agent1', 'agent:agent1:webchat:main', convId);
     assert.ok(ctx.id > 0, 'context has a valid id');
-    assert.equal(ctx.agentId, 'alice');
-    assert.equal(ctx.sessionKey, 'agent:alice:webchat:main');
+    assert.equal(ctx.agentId, 'agent1');
+    assert.equal(ctx.sessionKey, 'agent:agent1:webchat:main');
     assert.equal(ctx.conversationId, convId);
     assert.equal(ctx.headMessageId, null);
     assert.equal(ctx.status, 'active');
@@ -121,16 +121,16 @@ describe('getOrCreateActiveContext', () => {
   it('returns the same context on second call (idempotent)', () => {
     const db = createTestDb();
     ensureContextSchema(db);
-    const convId = insertConversation(db, 'alice', 'agent:alice:webchat:main');
+    const convId = insertConversation(db, 'agent1', 'agent:agent1:webchat:main');
 
-    const ctx1 = getOrCreateActiveContext(db, 'alice', 'agent:alice:webchat:main', convId);
-    const ctx2 = getOrCreateActiveContext(db, 'alice', 'agent:alice:webchat:main', convId);
+    const ctx1 = getOrCreateActiveContext(db, 'agent1', 'agent:agent1:webchat:main', convId);
+    const ctx2 = getOrCreateActiveContext(db, 'agent1', 'agent:agent1:webchat:main', convId);
 
     assert.equal(ctx1.id, ctx2.id, 'same context id on second call');
 
     // Only one active context should exist
     const rows = db.prepare(
-      "SELECT count(*) as cnt FROM contexts WHERE agent_id = 'alice' AND status = 'active'"
+      "SELECT count(*) as cnt FROM contexts WHERE agent_id = 'agent1' AND status = 'active'"
     ).get();
     assert.equal(rows.cnt, 1, 'exactly one active context');
   });
@@ -142,38 +142,38 @@ describe('updateContextHead', () => {
   it('advances the head pointer', () => {
     const db = createTestDb();
     ensureContextSchema(db);
-    const convId = insertConversation(db, 'alice', 'agent:alice:webchat:main');
-    const msgIds = insertMessages(db, convId, 'alice', 5);
+    const convId = insertConversation(db, 'agent1', 'agent:agent1:webchat:main');
+    const msgIds = insertMessages(db, convId, 'agent1', 5);
 
-    const ctx = getOrCreateActiveContext(db, 'alice', 'agent:alice:webchat:main', convId);
+    const ctx = getOrCreateActiveContext(db, 'agent1', 'agent:agent1:webchat:main', convId);
     assert.equal(ctx.headMessageId, null, 'head starts at null');
 
     updateContextHead(db, ctx.id, msgIds[2]);
-    const updated = getActiveContext(db, 'alice', 'agent:alice:webchat:main');
+    const updated = getActiveContext(db, 'agent1', 'agent:agent1:webchat:main');
     assert.equal(updated.headMessageId, msgIds[2], 'head advanced to message 3');
   });
 
   it('respects monotone-forward — does not go backward', () => {
     const db = createTestDb();
     ensureContextSchema(db);
-    const convId = insertConversation(db, 'alice', 'agent:alice:webchat:main');
-    const msgIds = insertMessages(db, convId, 'alice', 10);
+    const convId = insertConversation(db, 'agent1', 'agent:agent1:webchat:main');
+    const msgIds = insertMessages(db, convId, 'agent1', 10);
 
-    const ctx = getOrCreateActiveContext(db, 'alice', 'agent:alice:webchat:main', convId);
+    const ctx = getOrCreateActiveContext(db, 'agent1', 'agent:agent1:webchat:main', convId);
 
     // Advance to message 7
     updateContextHead(db, ctx.id, msgIds[6]);
-    let current = getActiveContext(db, 'alice', 'agent:alice:webchat:main');
+    let current = getActiveContext(db, 'agent1', 'agent:agent1:webchat:main');
     assert.equal(current.headMessageId, msgIds[6], 'head at message 7');
 
     // Try to go backward to message 3 — should be ignored
     updateContextHead(db, ctx.id, msgIds[2]);
-    current = getActiveContext(db, 'alice', 'agent:alice:webchat:main');
+    current = getActiveContext(db, 'agent1', 'agent:agent1:webchat:main');
     assert.equal(current.headMessageId, msgIds[6], 'head still at message 7 (monotone)');
 
     // Move forward to message 9 — should succeed
     updateContextHead(db, ctx.id, msgIds[8]);
-    current = getActiveContext(db, 'alice', 'agent:alice:webchat:main');
+    current = getActiveContext(db, 'agent1', 'agent:agent1:webchat:main');
     assert.equal(current.headMessageId, msgIds[8], 'head advanced to message 9');
   });
 });
@@ -184,15 +184,15 @@ describe('archiveContext', () => {
   it('sets status to archived', () => {
     const db = createTestDb();
     ensureContextSchema(db);
-    const convId = insertConversation(db, 'alice', 'agent:alice:webchat:main');
+    const convId = insertConversation(db, 'agent1', 'agent:agent1:webchat:main');
 
-    const ctx = getOrCreateActiveContext(db, 'alice', 'agent:alice:webchat:main', convId);
+    const ctx = getOrCreateActiveContext(db, 'agent1', 'agent:agent1:webchat:main', convId);
     assert.equal(ctx.status, 'active');
 
     archiveContext(db, ctx.id);
 
     // getActiveContext should now return null (it's archived, not active)
-    const active = getActiveContext(db, 'alice', 'agent:alice:webchat:main');
+    const active = getActiveContext(db, 'agent1', 'agent:agent1:webchat:main');
     assert.equal(active, null, 'no active context after archiving');
 
     // Verify directly that the status is archived
@@ -203,9 +203,9 @@ describe('archiveContext', () => {
   it('is idempotent — archiving twice does not error', () => {
     const db = createTestDb();
     ensureContextSchema(db);
-    const convId = insertConversation(db, 'alice', 'agent:alice:webchat:main');
+    const convId = insertConversation(db, 'agent1', 'agent:agent1:webchat:main');
 
-    const ctx = getOrCreateActiveContext(db, 'alice', 'agent:alice:webchat:main', convId);
+    const ctx = getOrCreateActiveContext(db, 'agent1', 'agent:agent1:webchat:main', convId);
     archiveContext(db, ctx.id);
     archiveContext(db, ctx.id); // second call — should not throw
 
@@ -222,11 +222,11 @@ describe('backfillContexts', () => {
     ensureContextSchema(db);
 
     // Create 3 conversations with messages
-    const conv1 = insertConversation(db, 'alice', 'session-1');
-    const conv2 = insertConversation(db, 'alice', 'session-2');
+    const conv1 = insertConversation(db, 'agent1', 'session-1');
+    const conv2 = insertConversation(db, 'agent1', 'session-2');
     const conv3 = insertConversation(db, 'hal', 'session-3');
-    insertMessages(db, conv1, 'alice', 5);
-    insertMessages(db, conv2, 'alice', 3);
+    insertMessages(db, conv1, 'agent1', 5);
+    insertMessages(db, conv2, 'agent1', 3);
     insertMessages(db, conv3, 'hal', 8);
 
     const result = backfillContexts(db);
@@ -234,11 +234,11 @@ describe('backfillContexts', () => {
     assert.equal(result.skipped, 0, 'skipped 0');
 
     // Each conversation should have an active context
-    const ctx1 = getActiveContext(db, 'alice', 'session-1');
+    const ctx1 = getActiveContext(db, 'agent1', 'session-1');
     assert.ok(ctx1, 'session-1 has an active context');
     assert.ok(ctx1.headMessageId !== null, 'session-1 head is set');
 
-    const ctx2 = getActiveContext(db, 'alice', 'session-2');
+    const ctx2 = getActiveContext(db, 'agent1', 'session-2');
     assert.ok(ctx2, 'session-2 has an active context');
 
     const ctx3 = getActiveContext(db, 'hal', 'session-3');
@@ -249,10 +249,10 @@ describe('backfillContexts', () => {
     const db = createTestDb();
     ensureContextSchema(db);
 
-    insertConversation(db, 'alice', 'session-a');
-    insertConversation(db, 'alice', 'session-b');
-    insertMessages(db, 1, 'alice', 4);
-    insertMessages(db, 2, 'alice', 6);
+    insertConversation(db, 'agent1', 'session-a');
+    insertConversation(db, 'agent1', 'session-b');
+    insertMessages(db, 1, 'agent1', 4);
+    insertMessages(db, 2, 'agent1', 6);
 
     const first = backfillContexts(db);
     assert.equal(first.created, 2, 'first run creates 2');

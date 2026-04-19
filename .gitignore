@@ -8,6 +8,7 @@ dist/
 .npmrc
 tmp/
 bench/results/
+runs/
 
 # Secrets / credentials
 .env

@@ -27,7 +27,7 @@ const TABLE = args.find((_, i) => args[i - 1] === '--table') ?? 'all';
 const BATCH_SIZE_ARG = parseInt(args.find((_, i) => args[i - 1] === '--batch-size') ?? '0') || 0;
 const LIMIT = parseInt(args.find((_, i) => args[i - 1] === '--limit') ?? '0') || 0;
 
-const DATA_DIR = path.join(process.env.HOME || os.homedir(), '.openclaw', 'hypermem');
+const DATA_DIR = path.join(process.env.HOME || '/home/user', '.openclaw', 'hypermem');
 const LIBRARY_DB_PATH = path.join(DATA_DIR, 'library.db');
 const VECTORS_DB_PATH = path.join(DATA_DIR, 'vectors.db');
 
@@ -51,7 +51,7 @@ const OPENAI_BASE_URL = embeddingCfg.openaiBaseUrl ?? 'https://api.openai.com/v1
 if (PROVIDER === 'openai' && !OPENAI_API_KEY) {
   // Fall back to auth-profiles.json
   try {
-    const authPath = path.join(process.env.HOME || os.homedir(), '.openclaw', 'auth-profiles.json');
+    const authPath = path.join(process.env.HOME || '/home/user', '.openclaw', 'auth-profiles.json');
     const authProfiles = JSON.parse(fs.readFileSync(authPath, 'utf8'));
     // Try openrouter first, then openai
     OPENAI_API_KEY = authProfiles?.openrouter?.apiKey
@@ -64,7 +64,7 @@ if (PROVIDER === 'openai' && !OPENAI_API_KEY) {
 if (PROVIDER === 'openai' && !OPENAI_API_KEY) {
   // Fall back to openclaw.json env vars (gateway stores keys there)
   try {
-    const oclawPath = path.join(process.env.HOME || os.homedir(), '.openclaw', 'openclaw.json');
+    const oclawPath = path.join(process.env.HOME || '/home/user', '.openclaw', 'openclaw.json');
     const oclawCfg = JSON.parse(fs.readFileSync(oclawPath, 'utf8'));
     const envVars = oclawCfg?.env?.vars ?? {};
     OPENAI_API_KEY = envVars.OPENROUTER_API_KEY ?? envVars.OPENAI_API_KEY ?? null;

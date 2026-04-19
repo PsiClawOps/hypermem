@@ -204,6 +204,140 @@ export function archiveContext(
 }
 
 /**
+ * Get any context by id, regardless of status.
+ * Returns null if not found.
+ *
+ * @boundary INSPECTION ONLY — not a mining entry point.
+ * @policy See specs/DAG_HELPER_POLICY.md for helper classifications.
+ * Do not use this function to retrieve messages for active composition or
+ * historical mining. Use getArchivedContext + mineArchivedContext for archived
+ * mining, and getActiveContext for composition-path access.
+ */
+export function getContextById(
+  db: DatabaseSync,
+  contextId: number
+): Context | null {
+  const row = db
+    .prepare('SELECT * FROM contexts WHERE id = ?')
+    .get(contextId) as Record<string, unknown> | undefined;
+
+  if (!row) return null;
+  return parseContextRow(row);
+}
+
+/**
+ * Get all archived or forked contexts for an agent.
+ * Optionally filter by sessionKey and/or limit.
+ * Returns in reverse-chronological order (most recently updated first).
+ *
+ * @policy See specs/DAG_HELPER_POLICY.md. This is the operator-safe
+ * archived-context enumeration path.
+ */
+export function getArchivedContexts(
+  db: DatabaseSync,
+  agentId: string,
+  opts?: {
+    sessionKey?: string;
+    limit?: number;
+  }
+): Context[] {
+  let sql = "SELECT * FROM contexts WHERE agent_id = ? AND status IN ('archived', 'forked')";
+  const params: (string | number | null)[] = [agentId];
+
+  if (opts?.sessionKey) {
+    sql += ' AND session_key = ?';
+    params.push(opts.sessionKey);
+  }
+
+  sql += ' ORDER BY updated_at DESC';
+
+  if (opts?.limit) {
+    sql += ' LIMIT ?';
+    params.push(opts.limit);
+  }
+
+  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+  return rows.map(parseContextRow);
+}
+
+/**
+ * Get an archived or forked context by id.
+ * Returns null if the context does not exist OR if it is active.
+ *
+ * @policy See specs/DAG_HELPER_POLICY.md. This is the operator-safe
+ * single-context lookup path.
+ */
+export function getArchivedContext(
+  db: DatabaseSync,
+  contextId: number
+): Context | null {
+  const row = db
+    .prepare("SELECT * FROM contexts WHERE id = ? AND status IN ('archived', 'forked')")
+    .get(contextId) as Record<string, unknown> | undefined;
+
+  if (!row) return null;
+  return parseContextRow(row);
+}
+
+/**
+ * Walk the parent_context_id chain upward from the given context.
+ * Returns contexts in leaf-to-root order (starting context first).
+ * Includes the starting context itself.
+ * Caps traversal depth at 100 to avoid corrupt loops.
+ *
+ * @boundary STATUS-CROSSING BY DESIGN — this function traverses across
+ * active, archived, and forked contexts without filtering by status.
+ * @policy See specs/DAG_HELPER_POLICY.md for the call-site filtering rule.
+ * If you need only archived/forked contexts in the lineage chain, filter
+ * the returned array at the call site (e.g. `.filter(c => c.status !== 'active')`).
+ */
+export function getContextLineage(
+  db: DatabaseSync,
+  contextId: number
+): Context[] {
+  const lineage: Context[] = [];
+  const visited = new Set<number>();
+  let currentId: number | null = contextId;
+
+  while (currentId !== null && lineage.length < 100) {
+    if (visited.has(currentId)) break; // loop guard
+    visited.add(currentId);
+
+    const row = db
+      .prepare('SELECT * FROM contexts WHERE id = ?')
+      .get(currentId) as Record<string, unknown> | undefined;
+
+    if (!row) break;
+
+    const ctx = parseContextRow(row);
+    lineage.push(ctx);
+    currentId = ctx.parentContextId;
+  }
+
+  return lineage;
+}
+
+/**
+ * Get direct fork children of a context (contexts with parent_context_id = parentContextId).
+ * Returns in ascending creation order.
+ *
+ * @boundary STATUS-CROSSING BY DESIGN — returns children regardless of their status
+ * (may include active, archived, or forked children).
+ * @policy See specs/DAG_HELPER_POLICY.md for the call-site filtering rule.
+ * Filter at the call site if archived-only results are needed.
+ */
+export function getForkChildren(
+  db: DatabaseSync,
+  parentContextId: number
+): Context[] {
+  const rows = db
+    .prepare('SELECT * FROM contexts WHERE parent_context_id = ? ORDER BY created_at ASC')
+    .all(parentContextId) as Record<string, unknown>[];
+
+  return rows.map(parseContextRow);
+}
+
+/**
  * Rotate a session's active context: archive the current active context
  * and create a new one, optionally linking back via parent_context_id.
  *

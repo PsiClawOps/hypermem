@@ -8,7 +8,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LATEST_SCHEMA_VERSION = 8;
+export const LATEST_SCHEMA_VERSION = 10;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -276,6 +276,54 @@ export function migrate(db: DatabaseSync): void {
 
     db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(8, nowIso());
+  }
+
+  // v8 → v9: Tool Artifact Store — durable storage for full tool result payloads.
+  // Transcript stubs carry an artifactId pointer; raw payload lives here so
+  // wave-guard degradation is never lossy. See specs/TOOL_ARTIFACT_STORE.md.
+  if (currentVersion < 9) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS tool_artifacts (
+        id                 TEXT PRIMARY KEY,
+        content_hash       TEXT NOT NULL,
+        agent_id           TEXT NOT NULL,
+        session_key        TEXT NOT NULL,
+        conversation_id    INTEGER REFERENCES conversations(id),
+        message_id         INTEGER REFERENCES messages(id),
+        turn_id            TEXT,
+        tool_call_id       TEXT,
+        tool_name          TEXT NOT NULL,
+        is_error           INTEGER NOT NULL DEFAULT 0,
+        content_type       TEXT NOT NULL DEFAULT 'text/plain',
+        size_bytes         INTEGER NOT NULL,
+        token_estimate     INTEGER NOT NULL,
+        payload            TEXT NOT NULL,
+        summary            TEXT,
+        created_at         TEXT NOT NULL,
+        last_used_at       TEXT NOT NULL,
+        ref_count          INTEGER NOT NULL DEFAULT 1
+      )
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tool_artifacts_hash ON tool_artifacts(content_hash)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tool_artifacts_session ON tool_artifacts(agent_id, session_key, created_at DESC)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tool_artifacts_turn ON tool_artifacts(turn_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tool_artifacts_tool_call ON tool_artifacts(tool_call_id)');
+
+    db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(9, nowIso());
+  }
+
+  // v9 → v10: Retention sweep — add is_sensitive flag to tool_artifacts.
+  // Enables differential TTL: sensitive artifacts expire sooner than standard ones.
+  // See: ToolArtifactStore.sweep() and ToolArtifactRetentionPolicy.
+  if (currentVersion < 10) {
+    const taCols = (db.prepare('PRAGMA table_info(tool_artifacts)').all() as Array<{ name: string }>)
+      .map(r => r.name);
+    if (!taCols.includes('is_sensitive')) {
+      db.exec('ALTER TABLE tool_artifacts ADD COLUMN is_sensitive INTEGER NOT NULL DEFAULT 0');
+    }
+    db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(10, nowIso());
   }
 }
 

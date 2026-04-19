@@ -87,7 +87,7 @@ export type FactScope = 'agent' | 'session' | 'user';
 /**
  * Memory visibility levels:
  * - private:  Only the owning agent can read. Identity, SOUL, personal reflections.
- * - org:      Agents in the same org (e.g., alice's directors: Hank, Jack, Irene).
+ * - org:      Agents in the same org (e.g., agent1's directors: Pylon, Vigil, Plane).
  * - council:  All council seats can read.
  * - fleet:    Any agent in the fleet can read.
  */
@@ -118,8 +118,8 @@ export interface CrossAgentQuery {
 export interface AgentIdentity {
   agentId: string;
   tier: 'council' | 'director' | 'specialist' | 'worker';
-  org?: string;         // e.g., 'alice-org', 'bob-org', 'dave-org'
-  councilLead?: string; // director's council lead, e.g., 'alice' for Hank
+  org?: string;         // e.g., 'agent1-org', 'agent2-org', 'agent3-org'
+  councilLead?: string; // director's council lead, e.g., 'agent1' for Pylon
 }
 
 export interface Fact {
@@ -313,6 +313,99 @@ export interface ComposeDiagnostics {
   fingerprintCollisions?: number;
   /** True when the window cache fast-exit fired and full compose was skipped */
   windowCacheHit?: boolean;
+  /** Number of system messages in the stable cacheable prefix */
+  prefixSegmentCount?: number;
+  /** Estimated token cost of the stable cacheable prefix */
+  prefixTokens?: number;
+  /** Deterministic hash of the stable cacheable prefix content */
+  prefixHash?: string;
+  /**
+   * The prefixHash stored in the window cache from the previous compose.
+   * Emitted on full-compose passes when a cached bundle was found but had a
+   * different prefixHash (i.e. stable prefix changed). Useful for verifying
+   * that prefix mutations correctly bypassed the C4 fast-exit.
+   */
+  prevPrefixHash?: string;
+  /** Estimated token cost of all content below the stable prefix boundary */
+  volatileHistoryTokens?: number;
+  // ── Sprint 4: pre-compose history depth tightening ──────────────────────
+  /**
+   * Session type derived from observed message density.
+   * 'plain-chat'  — text-only or low tool ratio (< 20% tool messages)
+   * 'tool-heavy'  — high tool ratio (>= 20% tool messages in recent sample)
+   */
+  sessionType?: 'plain-chat' | 'tool-heavy';
+  /** The history depth actually requested from the store this compose pass. */
+  historyDepthChosen?: number;
+  /** Average estimated tokens per message observed in the density sample. */
+  estimatedMsgDensityTokens?: number;
+  /**
+   * True when budget-fit walk had to drop history clusters after gradient transform.
+   * Should be false in steady state for well-classified sessions.
+   */
+  rescueTrimFired?: boolean;
+  // ── B4: Model-aware lane budgets ─────────────────────────────────────────────────────────────────────────────
+  /**
+   * MECW model profile that matched (e.g. 'claude', 'gemini', 'gpt').
+   * Undefined when no MECW entry matched for the current model.
+   */
+  mecwProfile?: string;
+  /**
+   * True when MECW blending adjusted the historyFraction or memoryFraction
+   * from the configured defaults. Indicates model-aware lane adjustment fired.
+   */
+  mecwApplied?: boolean;
+  /**
+   * Linear blend factor used in MECW lane adjustment (0.0 = below MECW floor,
+   * 1.0 = at/above MECW ceiling). At 0 the config fractions are used unchanged;
+   * at 1 the preferred fractions are used in full.
+   */
+  mecwBlend?: number;
+  /**
+   * Effective historyFraction used this compose pass (post-B4 blending).
+   * Compare against the configured historyFraction to see how much B4 moved it.
+   */
+  effectiveHistoryFraction?: number;
+  /**
+   * Effective memoryFraction used this compose pass (post-B4 blending).
+   */
+  effectiveMemoryFraction?: number;
+  /** Canonical trim soft-target fraction shared by compose and afterTurn refresh. */
+  trimSoftTarget?: number;
+  /** Canonical growth-allowance fraction before steady-state trim fires. */
+  trimGrowthThreshold?: number;
+  /** Canonical headroom fraction used when steady-state trim does fire. */
+  trimHeadroomFraction?: number;
+  // ── C1: Tool-chain ejection telemetry ─────────────────────────────────────
+  /**
+   * Number of tool-result messages co-ejected alongside their parent tool-use
+   * during the safety-valve or cluster-drop trim pass.
+   * A co-ejected result is fully removed (zero budget cost).
+   */
+  toolChainCoEjections?: number;
+  /**
+   * Number of tool-result messages stubbed with the canonical ToolChainStub
+   * format because their parent tool-use was ejected but the result message
+   * could not be cleanly removed (e.g. the result message also carries text).
+   */
+  toolChainStubReplacements?: number;
+  /**
+   * C2: Number of retrieved doc chunks degraded to canonical ArtifactRef references
+   * because their token cost exceeded the model-aware oversize threshold.
+   */
+  artifactDegradations?: number;
+  /**
+   * C2: The computed artifact oversize threshold (tokens) for this compose pass.
+   * Scales with the effective model budget from B4.
+   */
+  artifactOversizeThresholdTokens?: number;
+  // ── Sprint 2.1: Tool artifact hydration ─────────────────────────────────
+  /** Number of artifact stubs rehydrated from tool_artifacts in the active turn. */
+  artifactsHydrated?: number;
+  /** Total bytes of payload injected by hydration this compose pass. */
+  hydrationBytes?: number;
+  /** Number of stubs whose artifact lookup returned no row (graceful miss). */
+  hydrationMisses?: number;
 }
 
 export interface ComposeResult {
@@ -353,7 +446,7 @@ export interface ProviderMessage {
  * to identify high-signal unprocessed messages.
  *
  * Stored in Redis (hm:{a}:s:{s}:cursor) with dual-write to SQLite for
- * durability across Redis eviction (bob Gate 2).
+ * durability across Redis eviction (agent2 Gate 2).
  */
 export interface SessionCursor {
   /** StoredMessage.id of the newest message included in the last window */
@@ -404,6 +497,8 @@ export interface HyperMemConfig {
   dreaming?: import('./dreaming-promoter.js').DreamerConfig;
   /** Optional Obsidian vault integration. Default: disabled. */
   obsidian?: import('./obsidian-watcher.js').ObsidianConfig;
+  /** Startup sweep that seeds fleet_agents from workspace identity files. Default: true. */
+  startupFleetSeeding?: boolean;
   /**
    * Cache replay threshold (ms). When > 0, assemble() returns a cached
    * contextBlock (systemPromptAddition) for sessions active within this
@@ -417,10 +512,11 @@ export interface HyperMemConfig {
 export interface EmbeddingProviderConfig {
   /**
    * Embedding provider. Default: 'ollama'.
+   * - 'none': disable all embedding calls — semantic search disabled, FTS5 fallback only
    * - 'ollama': local Ollama (nomic-embed-text or any pulled model)
    * - 'openai': OpenAI Embeddings API (text-embedding-3-small / 3-large)
    */
-  provider?: 'ollama' | 'openai' | 'gemini';
+  provider?: 'none' | 'ollama' | 'openai' | 'gemini';
   /** Ollama base URL. Default: http://localhost:11434 */
   ollamaUrl: string;
   /** OpenAI API key. Required when provider is 'openai'. */
@@ -644,4 +740,173 @@ export interface IndexerConfig {
   periodicInterval: number;    // milliseconds
   batchSize: number;           // messages per indexer tick
   maxMessagesPerTick: number;  // total messages processed per tick (all agents)
+  maxActiveConversations?: number;    // proactive pass: max concurrent conversations to scan
+  recentConversationCooldownMs?: number; // proactive pass: cooldown between scans per conversation
+  maxCandidatesPerPass?: number;      // proactive pass: max mutations per maintenance tick
+}
+
+/**
+ * Global write policy for fact ingestion.
+ * 'allow' — facts are written to the library DB normally.
+ * 'deny'  — fact writes are suppressed (read-only / replay mode).
+ */
+export type GlobalWritePolicy = 'allow' | 'deny';
+
+/**
+ * Diagnostics snapshot from a maintenance tick (proactive noise sweep + tool decay).
+ * Stored on BackgroundIndexer.lastMaintenanceDiagnostics after each tick.
+ */
+export interface MaintenanceTickDiagnostics {
+  considered: number;   // conversations evaluated
+  skipped: number;      // conversations skipped due to cooldown
+  scanned: number;      // conversations actually scanned
+  mutated: number;      // total messages mutated (deleted or updated)
+  durationMs: number;   // wall time for the maintenance phase
+  exitReason: 'complete' | 'cap-reached' | 'no-conversations';
+}
+
+// ─── Telemetry Types (Phase A Sprint 1) ──────────────────────────
+//
+// Structured logging around every trimHistoryToTokenBudget() call site and
+// every assemble() entry in the HyperMem plugin path. Emitters are zero-cost
+// when process.env.HYPERMEM_TELEMETRY !== '1' (the default).
+//
+// Event stream is JSONL, one record per line, at
+// process.env.HYPERMEM_TELEMETRY_PATH (default './hypermem-telemetry.jsonl').
+
+/**
+ * Labels for each trim call site. The set is closed — any new trim site must
+ * be added here before being instrumented.
+ */
+export type TrimTelemetryPath =
+  | 'assemble.normal'
+  | 'assemble.toolLoop'
+  | 'assemble.subagent'
+  | 'reshape'
+  | 'compact.nuclear'
+  | 'compact.history'
+  | 'compact.history2'
+  | 'afterTurn.secondary'
+  | 'warmstart';
+
+/**
+ * Emitted once per invocation of trimHistoryToTokenBudget() (or a caller that
+ * wraps it). Every trim site MUST emit exactly one of these, even if the
+ * underlying trim returned 0.
+ */
+export interface TrimTelemetryEvent {
+  event: 'trim';
+  ts: string;                 // ISO-8601 timestamp
+  path: TrimTelemetryPath;    // call-site label
+  agentId: string;
+  sessionKey: string;
+  preTokens: number;          // estimated window tokens before trim (best-effort, may be 0)
+  postTokens: number;         // estimated window tokens after trim (best-effort, may be 0)
+  removed: number;            // messages removed (return value of trimHistoryToTokenBudget)
+  cacheInvalidated: boolean;  // whether invalidateWindow() was called afterwards
+  reason: string;             // short textual reason ("pressure>85", "downshift", "afterTurn>80", etc.)
+}
+
+/**
+ * Emitted to trace assemble() entry + regime resolution. path captures the
+ * high-level compose regime:
+ *   - 'cold'     : first call of a session (no prior compose cache)
+ *   - 'subagent' : subagent session (sessionKey matches subagent pattern)
+ *   - 'replay'   : cache replay fast path taken
+ *
+ * Emission convention:
+ *   At assemble() entry we emit ONE trace with path='cold' or 'subagent'
+ *   because replay is not known until the cache-replay hit block executes.
+ *   When the cache-replay fast path fires, a SECOND trace is emitted with
+ *   path='replay' sharing the same turnId as the entry trace. Per-turn
+ *   analysis tools should group by (agentId, sessionKey, turnId) and
+ *   prefer the terminal path as the authoritative regime for that turn.
+ */
+export interface AssembleTraceEvent {
+  event: 'assemble';
+  ts: string;
+  agentId: string;
+  sessionKey: string;
+  turnId: string;             // stable per-turn id (timestamp + counter)
+  path: 'cold' | 'replay' | 'subagent';
+  toolLoop: boolean;          // true when last inbound message is a toolResult
+  msgCount: number;           // messages array length at entry
+}
+
+export type HyperMemTelemetryEvent = TrimTelemetryEvent | AssembleTraceEvent;
+
+// ─── Archived Mining Types (Phase 4 Sprint 2) ────────────────────
+
+/**
+ * Query parameters for mining a single archived/forked context.
+ *
+ * - contextId: must reference an archived or forked context (not active).
+ * - limit: per-context message cap; hard-capped at 200 in the implementation.
+ * - excludeHeartbeats: when true (default), heartbeat messages are omitted.
+ * - ftsQuery: optional keyword filter applied client-side for Sprint 2.
+ */
+export interface ArchivedMiningQuery {
+  /** Explicit archived or forked contextId — active contexts are rejected. */
+  contextId: number;
+  /** Maximum number of messages to return. Hard-capped at 200. Default: 200. */
+  limit?: number;
+  /** When true (default), exclude heartbeat messages from results. */
+  excludeHeartbeats?: boolean;
+  /** Optional FTS/keyword filter applied client-side this sprint. */
+  ftsQuery?: string;
+}
+
+/**
+ * Options for mineArchivedContexts (multi-context mining).
+ *
+ * Extends the per-context ArchivedMiningQuery options with a `maxContexts` gate
+ * that controls how many contextIds are accepted in a single call.
+ *
+ * ## maxContexts gate
+ * - Default effective cap: 20 (ARCHIVED_MULTI_CONTEXT_DEFAULT_MAX).
+ * - Hard ceiling: 50 (ARCHIVED_MULTI_CONTEXT_HARD_CEILING). Callers may not
+ *   exceed this regardless of what they pass.
+ * - A caller may supply a lower explicit limit (e.g. 10) to restrict the call
+ *   further; that lower limit is honored.
+ * - If a caller supplies a value above the hard ceiling, it is silently clamped
+ *   to the hard ceiling — callers need not know the exact constant.
+ * - If contextIds.length exceeds the effective max, mineArchivedContexts throws
+ *   immediately (before any DB access). Do not truncate silently.
+ */
+export interface MultiContextMiningOptions extends Omit<ArchivedMiningQuery, 'contextId'> {
+  /**
+   * Maximum number of contextIds accepted in this call.
+   *
+   * - Default: ARCHIVED_MULTI_CONTEXT_DEFAULT_MAX (20).
+   * - Hard ceiling: ARCHIVED_MULTI_CONTEXT_HARD_CEILING (50).
+   * - Values above the hard ceiling are clamped to the ceiling.
+   * - Values at or below the ceiling are used as-is.
+   */
+  maxContexts?: number;
+}
+
+/**
+ * Result wrapper returned by mineArchivedContext / mineArchivedContexts.
+ *
+ * The stable marker `isHistorical: true` distinguishes mining results from
+ * active-composition results. Consumers MUST check this before using results
+ * in active-composition paths.
+ *
+ * @template T - The payload type (typically StoredMessage[]).
+ */
+export interface ArchivedMiningResult<T> {
+  /** Always `true` — stable discriminator for archived/historical data. */
+  isHistorical: true;
+  /** The archived or forked context id that was mined. */
+  contextId: number;
+  /** The agentId owning this context. */
+  agentId: string;
+  /** The sessionKey the context belongs to. */
+  sessionKey: string;
+  /** The status of the context ('archived' | 'forked'). */
+  contextStatus: 'archived' | 'forked';
+  /** ISO timestamp of the context's last update. */
+  contextUpdatedAt: string;
+  /** The mined payload. */
+  data: T;
 }

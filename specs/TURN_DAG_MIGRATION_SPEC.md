@@ -1,9 +1,31 @@
 # Turn DAG Migration Spec
 
-**Status:** Proposed
+**Status:** Phases 0–4 and B2 implemented; Phase 5 next
 **Priority:** P0 (correctness + productivity)
 **Filed:** 2026-04-13
 **Filed by:** Forge
+**Last updated:** 2026-04-17
+
+## Execution Policy
+
+Turn DAG Phase 4 and later are **HyperBuilder-managed**.
+
+Required HyperBuilder configuration for this workstream: `turn-dag-phase4-full-fleet`.
+
+Before any new implementation work starts for a HyperBuilder-managed phase, the controlling artifact must name the required HyperBuilder configuration:
+- composition tier or named pipeline profile
+- mandatory stage roles
+- required evaluation lanes
+- any allowed override path
+
+Until that configuration is written down in the phase brief or sprint contract, implementation is blocked.
+
+Out of policy for HyperBuilder-managed work:
+- ad hoc single-agent implementation
+- partial-role or simplified pipeline execution
+- swapping to a different HyperBuilder configuration without updating the controlling artifact first
+
+Only ragesaq can approve a one-off deviation, and that approval must be explicit for the exact run.
 
 ## Problem
 
@@ -148,7 +170,7 @@ Forks become O(1) pointer operations.
 
 ## Migration Phases
 
-## Phase 0, complete
+## Phase 0 — complete
 
 **Fence enforcement on live read paths**
 
@@ -161,80 +183,99 @@ Done:
 
 Purpose: stop zombie pollution immediately.
 
-## Phase 1
+## Phase 1 — complete
 
 **Introduce context heads without changing live read semantics**
 
-### Changes
-- create `contexts` table
-- create one active context per existing active conversation
-- populate `head_message_id` with current conversation tail
-- on new writes, keep both `conversation_id` and `context_id` updated
+### What shipped
+- `src/context-store.ts`: `ensureContextSchema`, `getOrCreateActiveContext`, `updateContextHead`, `archiveContext`, `rotateSessionContext`
+- `src/context-backfill.ts`: `backfillContexts` for existing conversations
+- `src/message-store.ts`: `getOrCreateConversation` calls `getOrCreateActiveContext`; writes are context-aware
+- `src/index.ts`: exports context-store surface; `recordUserMessage`/`recordAssistantMessage` pass contextId
 
-### Why first
-Lowest-risk structural improvement. We gain an explicit active head before touching traversal logic.
-
-### Acceptance criteria
+### Acceptance criteria — met
 - every active session has exactly one active context
 - writes populate `context_id`
 - no change in prompt output versus Phase 0
 
-## Phase 2
+## Phase 2 — complete
 
 **Make writes DAG-capable**
 
-### Changes
-- backfill `parent_id` and `depth` for existing linear conversations
-- new writes set `parent_id`, `depth`, `context_id`
-- restarts/session rotations create a new context row instead of relying on flat conversation tail semantics
+### What shipped
+- `src/context-backfill.ts`: `backfillParentChains` reconstructs `parent_id`/`depth` for existing flat conversations by `message_index` order
+- `src/message-store.ts` `recordMessage`: sets `parent_id = context.head_message_id`, `depth = parent.depth + 1` on every new insert
+- Session rotations create a new context row via `rotateSessionContext`
 
-### Backfill rule
-For old flat conversations, reconstruct a linear chain by `message_index`:
-- first message: `parent_id = NULL`, `depth = 0`
-- each next message: `parent_id = previous.id`, `depth = previous.depth + 1`
-
-This does not create true historical forks, but it gives all legacy data a valid DAG shape.
-
-### Acceptance criteria
+### Acceptance criteria — met
 - all messages have correct `parent_id`/`depth`
 - new writes maintain head pointer correctly
 - no prompt regression under compatibility reads
 
-## Phase 3
+## Phase 3 — complete
 
 **Switch composer, warming, and recall to DAG-native reads**
 
-### Changes
-- history retrieval walks from `context.head_message_id`
-- warm preload walks active branch only
-- keystone/FTS/topic recall constrain to `context_id`
-- fence remains as transitional safety, not primary correctness mechanism
+### What shipped
+- `src/message-store.ts`: `getHistoryByDAGWalk` walks backward through `parent_id` chain from a head message
+- `src/compositor.ts`: `warmSession` and `refreshRedisGradient` use `getHistoryByDAGWalk` when an active context head is available
+- `src/compositor.ts`: `getHistory` resolves active context and uses DAG walk as primary path; fence retained as fallback
+- FTS and keystone recall in compositor are scoped to `context_id` when active context is present
+- Stable-prefix assembly: `getStablePrefixMessages`, `computeStablePrefixHash`, `CACHE_PREFIX_BOUNDARY_SLOT` boundary marker injected; `provider-translator.ts` applies `cache_control: {type: 'ephemeral'}` at the boundary
 
-### Acceptance criteria
-- prompt output matches intent of Phase 0 but without relying on fence as main boundary
+### Acceptance criteria — met
+- prompt output matches Phase 0 intent without relying on fence as main boundary
 - no cross-branch leakage in composition
-- restart continuity works without zombie creation
+- restart continuity works via context rotation
 
-## Phase 4
+### Phase B2 outcome
+Stable-prefix signal propagation is now implemented and verified.
+
+## Phase B2 — complete
+
+**Cache-prefix signal propagation and end-to-end verification**
+
+### Delivered
+- `prefixHash` is propagated into cache invalidation so stale window cache entries with a mismatched stable prefix are bypassed instead of returned as hits
+- window cache read and write paths are stable-prefix aware, including the volatile-only fast-exit path and bypass diagnostics via `prevPrefixHash`
+- end-to-end verification covers `cache_control: {type: 'ephemeral'}` placement at `CACHE_PREFIX_BOUNDARY_SLOT`
+- session lifecycle coverage includes `rotateSessionContext` continuity checks
+
+### Acceptance criteria — met
+- stale cache entries with mismatched stable prefix do not return as hits
+- unchanged stable prefix can return `windowCacheHit: true` on the volatile-only path
+- bypasses surface the previous prefix hash for diagnostics
+- boundary-scoped `cache_control: {type: 'ephemeral'}` placement is verified
+
+---
+
+## Phase 4 — complete
 
 **Separate live composition from archived mining**
 
-### Changes
-- introduce context lifecycle: `active`, `archived`, `forked`
-- define explicit APIs/jobs for mining archived contexts
-- fact extraction jobs may scan archived branches by policy, never by accident
+**Execution mode used:** HyperBuilder-managed (`turn-dag-phase4-full-fleet`)
+
+### Delivered
+- explicit context lifecycle support for `active`, `archived`, and `forked`
+- archived-context inspection helpers and archived-chain read paths
+- archived mining APIs that require explicit archived context selection and label results as historical
+- hard server-side `maxContexts` protection on `mineArchivedContexts`, with default 20 and hard ceiling 50
+- sanctioned operator facade on `HyperMem`: `listArchivedContexts`, `mineArchivedContext`, and `mineArchivedContexts`
+- canonical shared DAG helper policy in `specs/DAG_HELPER_POLICY.md`
+- explicit decision that `BackgroundIndexer` remains active-scope only in Phase 4
 
 ### Why this matters
-We want two different behaviors:
-- **composition:** only active branch
+We now have two different behaviors with a hard boundary:
+- **composition:** active branch only
 - **research/mining:** archived branches allowed when explicitly requested
 
 This preserves discoverability of old work without poisoning routine prompts.
 
-### Acceptance criteria
+### Acceptance criteria — met
 - archived contexts are invisible to standard composition
 - mining jobs can still access archived contexts intentionally
 - operators can inspect old chains without changing active prompt behavior
+- multi-context archived mining is capped before operator-facing use
 
 ## Phase 5
 

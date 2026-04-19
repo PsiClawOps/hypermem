@@ -15,8 +15,13 @@ import { LINT_STALE_DAYS } from './topic-synthesizer.js';
 export interface LintResult {
   staleDecayed: number;
   orphansFound: number;
+  orphansPruned: number;
   coverageGaps: string[];  // topic names needing synthesis
 }
+
+// Orphan topics older than this many days are eligible for pruning.
+// 48h = report threshold, 14d = prune threshold (conservative).
+export const ORPHAN_PRUNE_DAYS = 14;
 
 // ─── lintKnowledge ──────────────────────────────────────────────
 
@@ -37,6 +42,7 @@ export function lintKnowledge(libraryDb: DatabaseSync): LintResult {
   const result: LintResult = {
     staleDecayed: 0,
     orphansFound: 0,
+    orphansPruned: 0,
     coverageGaps: [],
   };
 
@@ -100,9 +106,47 @@ export function lintKnowledge(libraryDb: DatabaseSync): LintResult {
     result.orphansFound = orphans.length;
 
     if (orphans.length > 0) {
-      console.log(`[lint] ${orphans.length} orphan topic(s) found (< 3 messages, stale > 48h): ${
-        orphans.map(o => o.name).join(', ')
-      }`);
+      const sample = orphans.slice(0, 10).map(o => o.name).join(', ');
+      const remainder = Math.max(0, orphans.length - 10);
+      console.log(
+        `[lint] ${orphans.length} orphan topic(s) found (< 3 messages, stale > 48h)` +
+        (sample ? `; sample: ${sample}` : '') +
+        (remainder > 0 ? `; +${remainder} more` : '')
+      );
+    }
+
+    // Prune orphan topics older than ORPHAN_PRUNE_DAYS (conservative cleanup).
+    // Safety: only prune topics with no knowledge-synthesis entries and no facts
+    // referencing them (via source_ref 'topic:<id>' pattern).
+    try {
+      const prunable = libraryDb.prepare(`
+        SELECT t.id, t.name FROM topics t
+        WHERE t.message_count < 3
+          AND t.updated_at < datetime('now', '-' || ? || ' days')
+          AND NOT EXISTS (
+            SELECT 1 FROM knowledge k
+            WHERE k.agent_id = t.agent_id
+              AND k.domain = 'topic-synthesis'
+              AND k.key = t.name
+              AND k.superseded_by IS NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM facts f
+            WHERE f.source_ref LIKE 'topic:' || t.id || '%'
+          )
+      `).all(ORPHAN_PRUNE_DAYS) as Array<{ id: number; name: string }>;
+
+      if (prunable.length > 0) {
+        const ids = prunable.map(p => p.id);
+        const placeholders = ids.map(() => '?').join(',');
+        libraryDb.prepare(`DELETE FROM topics WHERE id IN (${placeholders})`).run(...ids);
+        result.orphansPruned = prunable.length;
+        console.log(
+          `[lint] pruned ${prunable.length} orphan topic(s) (< 3 messages, stale > ${ORPHAN_PRUNE_DAYS}d, no syntheses or facts)`
+        );
+      }
+    } catch (err) {
+      console.warn('[lint] orphan prune failed (non-fatal):', (err as Error).message);
     }
   } catch {
     // Non-fatal

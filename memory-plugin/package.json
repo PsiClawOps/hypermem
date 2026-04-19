@@ -1,14 +1,14 @@
 {
   "name": "@psiclawops/hypermem-memory",
   "version": "0.7.0",
-  "description": "HyperMem memory plugin for OpenClaw — bridges HyperMem retrieval into the memory slot",
+  "description": "HyperMem memory plugin for OpenClaw \u2014 bridges HyperMem retrieval into the memory slot",
   "type": "module",
   "main": "dist/index.js",
   "license": "Apache-2.0",
   "author": "PsiClawOps",
   "repository": {
     "type": "git",
-    "url": "https://github.com/PsiClawOps/hypermem-internal.git",
+    "url": "https://github.com/PsiClawOps/hypermem.git",
     "directory": "memory-plugin"
   },
   "publishConfig": {
@@ -38,7 +38,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@psiclawops/hypermem": "^0.6.3"
+    "@psiclawops/hypermem": "file:.."
   },
   "devDependencies": {
     "openclaw": "*",

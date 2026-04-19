@@ -12,6 +12,7 @@ import { HyperMem, toProviderFormat, repairToolCallPairs } from '../dist/index.j
 import { Compositor, DEFAULT_TRIGGERS } from '../dist/compositor.js';
 import { chunkMarkdown } from '../dist/doc-chunker.js';
 import { DocChunkStore } from '../dist/doc-chunk-store.js';
+import { runCachePrefixStabilitySuite } from './cache-prefix-stability.mjs';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -46,8 +47,8 @@ async function run() {
     process.exit(1);
   }
 
-  const agentId = 'alice';
-  const sessionKey = 'agent:alice:webchat:main';
+  const agentId = 'agent1';
+  const sessionKey = 'agent:agent1:webchat:main';
   const msgDb = hm.dbManager.getMessageDb(agentId);
   const libDb = hm.dbManager.getLibraryDb();
 
@@ -192,8 +193,8 @@ async function run() {
 
   // Warm the session
   await compositor.warmSession(agentId, sessionKey, msgDb, {
-    systemPrompt: 'You are alice, the infrastructure seat.',
-    identity: 'alice - Infrastructure Council Seat',
+    systemPrompt: 'You are agent1, the infrastructure seat.',
+    identity: 'agent1 - Infrastructure Council Seat',
     libraryDb: libDb,
   });
 
@@ -214,7 +215,7 @@ async function run() {
     return '';
   }).join(' ');
 
-  assert(warmedContent.includes('alice'), 'System prompt from Redis');
+  assert(warmedContent.includes('agent1'), 'System prompt from Redis');
 
   // ── Test 4b: Gate 1 - historyDepth constrains hot Redis sessions ──
   console.log('\n── Gate 1: historyDepth limits hot Redis sessions ──');
@@ -239,6 +240,11 @@ async function run() {
   assert(gateHistoryCount === 2,
     `Hot Redis historyDepth=2 returns 2 non-system messages (got ${gateHistoryCount})`);
   assert(gatedResult.tokenCount <= 50000, `Gate 1 token count ${gatedResult.tokenCount} within budget`);
+
+  await compositor.refreshRedisGradient(agentId, sessionKey, msgDb, 50000, 2);
+  const refreshedHistory = await hm.cache.getHistory(agentId, sessionKey, 10);
+  assert(refreshedHistory.length === 2,
+    `refreshRedisGradient respects historyDepth when refreshing hot window (got ${refreshedHistory.length})`);
 
   // ── Test 5: Empty session composition ──
   console.log('\n── Empty Session Composition ──');
@@ -275,7 +281,7 @@ async function run() {
   const cachedBoundaryMsg = emptySystemMessages.find(m => m.cache_control && m.cache_control.type === 'ephemeral');
   assert(cachedBoundaryMsg !== undefined, 'Anthropic output marks a static cache boundary');
   assert(
-    cachedBoundaryMsg && typeof cachedBoundaryMsg.content === 'string' && cachedBoundaryMsg.content.includes('## Output Standard'),
+    cachedBoundaryMsg === outputStandardMsg,
     'Cache boundary lands on the stable output-profile prefix'
   );
 
@@ -375,19 +381,19 @@ Every council response includes:
     collection: 'identity/job',
     sourcePath: '/workspace/JOB.md',
     scope: 'per-agent',
-    agentId: 'alice',
+    agentId: 'agent1',
   });
   hm.indexDocChunks(jobChunks);
 
   // The seeded policy doc contains unique text that can ONLY appear via chunk injection,
   // not from echoing the user message. We assert on that unique text.
-  // Unique dave in policyContent: "mandatory human review requirements"
-  // Unique dave in jobContent: "operationally fit, conditionally fit, or not fit"
+  // Unique agent3 in policyContent: "mandatory human review requirements"
+  // Unique agent3 in jobContent: "operationally fit, conditionally fit, or not fit"
   //
   // This ensures the test fails if FTS retrieval doesn't actually find the right chunks
-  // (Hank's repro: user message contained "escalation" but no chunk was injected).
+  // (Pylon's repro: user message contained "escalation" but no chunk was injected).
 
-  const chunkSessionKey = 'agent:alice:webchat:chunk-test';
+  const chunkSessionKey = 'agent:agent1:webchat:chunk-test';
   await hm.recordUserMessage(agentId, chunkSessionKey, 'What are the escalation triggers I should follow?');
 
   const escalationResult = await hm.compose({
@@ -403,7 +409,7 @@ Every council response includes:
   ).join('\n');
 
   // Assert on chunk-unique content - text that can only appear via chunk injection, not from the user message.
-  // The seeded policy chunk contains "No autonomous resolution allowed" - unique dave text
+  // The seeded policy chunk contains "No autonomous resolution allowed" - unique agent3 text
   // that does not appear in the user question "What are the escalation triggers I should follow?"
   assert(escalationText.includes('No autonomous resolution') || escalationText.includes('autonomous resolution'),
     'Chunk-unique policy text injected (not just user message echo)');
@@ -411,7 +417,7 @@ Every council response includes:
     'Library slot consumed (confirms chunk was actually injected, not just present in history)');
 
   // Seed a deliberation-related message to trigger identity/job chunks
-  const deliberationSessionKey = 'agent:alice:webchat:deliberation-test';
+  const deliberationSessionKey = 'agent:agent1:webchat:deliberation-test';
   await hm.recordUserMessage(agentId, deliberationSessionKey, 'We need a council round vote on this proposal and response contract.');
 
   const deliberationResult = await hm.compose({
@@ -438,7 +444,7 @@ Every council response includes:
   // Tier filter: council-scoped chunks should not appear for director queries
   const councilChunks = chunkMarkdown('# Charter\n\n## Council Structure\n\nThis section is for council seats only - their specific roles and responsibilities.\n', {
     collection: 'governance/charter',
-    sourcePath: '/workspace/alice/CHARTER.md',
+    sourcePath: '/workspace/agent1/CHARTER.md',
     scope: 'per-tier',
     tier: 'council',
   });
@@ -463,7 +469,7 @@ Every council response includes:
   hm.upsertKnowledge(agentId, 'deployments', 'k8s-staging',
     'K8S_STAGING_SENTINEL Kubernetes staging deployment requires readiness gates, rollout checks, and rollback verification.');
 
-  const promptRecallSessionKey = 'agent:alice:webchat:prompt-recall-test';
+  const promptRecallSessionKey = 'agent:agent1:webchat:prompt-recall-test';
   await hm.recordUserMessage(agentId, promptRecallSessionKey, 'Can you review our incident process?');
   await hm.recordAssistantMessage(agentId, promptRecallSessionKey, {
     role: 'assistant',
@@ -508,7 +514,7 @@ Every council response includes:
   // 'P0.1: prompt drives retrieval before message is in history'
   console.log('\n── P0.1: prompt drives retrieval before message is in history ──');
 
-  const freshPromptSessionKey = 'agent:alice:webchat:fresh-prompt-test';
+  const freshPromptSessionKey = 'agent:agent1:webchat:fresh-prompt-test';
   const freshPromptResult = await hm.compose({
     agentId,
     sessionKey: freshPromptSessionKey,
@@ -635,12 +641,12 @@ Every council response includes:
   console.log('\n── Cursor Dual-Write (P1.3) ──');
   // After compose(), the cursor should be written to both Redis AND SQLite.
   // Compose has already been called above - check the conversations table for cursor columns.
-  const cursorDb = hm.dbManager.getMessageDb('alice');
+  const cursorDb = hm.dbManager.getMessageDb('agent1');
   const cursorRow = cursorDb.prepare(`
     SELECT cursor_last_sent_id, cursor_last_sent_index, cursor_last_sent_at,
            cursor_window_size, cursor_token_count
     FROM conversations
-    WHERE session_key = 'agent:alice:webchat:main'
+    WHERE session_key = 'agent:agent1:webchat:main'
   `).get();
   assert(cursorRow !== undefined, 'Cursor row exists in conversations table');
   assert(cursorRow.cursor_last_sent_id !== null, `SQLite cursor_last_sent_id: ${cursorRow?.cursor_last_sent_id}`);
@@ -649,12 +655,12 @@ Every council response includes:
   assert(cursorRow.cursor_token_count > 0, `SQLite cursor_token_count: ${cursorRow?.cursor_token_count}`);
 
   // Verify cache has the same cursor
-  const cacheCursor = await hm.cache.getCursor('alice', 'agent:alice:webchat:main');
+  const cacheCursor = await hm.cache.getCursor('agent1', 'agent:agent1:webchat:main');
   assert(cacheCursor !== null, 'Cache cursor exists');
   assert(cacheCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Cache/SQLite cursor_last_sent_id match');
 
   // Verify facade returns cursor from cache
-  const facadeCursor = await hm.getSessionCursor('alice', 'agent:alice:webchat:main');
+  const facadeCursor = await hm.getSessionCursor('agent1', 'agent:agent1:webchat:main');
   assert(facadeCursor !== null, 'Facade cursor exists');
   assert(facadeCursor.lastSentId === cursorRow.cursor_last_sent_id, 'Facade cursor data matches SQLite');
 
@@ -1209,6 +1215,93 @@ ${repeated}`;
     assert(triggerBudgetResult.slots.library < uncappedTriggerTokens,
       `Aggregate trigger cap: capped below uncapped potential (${triggerBudgetResult.slots.library} < ${uncappedTriggerTokens})`);
   }
+
+  // ── Budget-pressure filtering (Phase 1 fixture) ──
+  console.log('\n── Budget-pressure filtering ──');
+  {
+    const tightBudget = 1500;
+    const pressureResult = await compositor.compose({
+      agentId,
+      sessionKey,
+      tokenBudget: tightBudget,
+      provider: 'anthropic',
+      model: 'claude-opus-4-6',
+      includeHistory: true,
+      includeFacts: true,
+      includeLibrary: true,
+    }, msgDb, libDb);
+
+    assert(typeof pressureResult.tokenCount === 'number',
+      `Budget-pressure: tokenCount is a number (${pressureResult.tokenCount})`);
+    const ceiling = tightBudget * 1.15;
+    assert(pressureResult.tokenCount <= ceiling,
+      `Budget-pressure: tokenCount ${pressureResult.tokenCount} <= ${ceiling} (within 15% tolerance)`);
+    assert(Array.isArray(pressureResult.messages),
+      'Budget-pressure: messages is an array');
+    assert(pressureResult.diagnostics !== undefined,
+      'Budget-pressure: diagnostics present');
+  }
+
+  // ── C1: budget_cluster_drop telemetry ──
+  console.log('\n── C1: budget_cluster_drop telemetry ──');
+  {
+    const telemetrySessionKey = 'agent:budget-cluster-drop:webchat:main';
+    msgDb.prepare(`
+      INSERT INTO conversations (session_key, session_id, agent_id, channel_type, status, message_count, token_count_in, token_count_out, created_at, updated_at)
+      VALUES (?, 'sess-budget-drop', ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+    `).run(telemetrySessionKey, agentId);
+
+    const conv = msgDb.prepare('SELECT id FROM conversations WHERE session_key = ?').get(telemetrySessionKey);
+    const convId = conv.id;
+    const insertToolMsg = msgDb.prepare(`
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, message_index, is_heartbeat, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
+    `);
+
+    let msgIdx = 1;
+    for (let i = 0; i < 6; i++) {
+      const callId = `budget-drop-${i}`;
+      insertToolMsg.run(
+        convId,
+        agentId,
+        'assistant',
+        `tool call ${i}`,
+        JSON.stringify([{ id: callId, name: 'read', arguments: JSON.stringify({ path: `/tmp/${i}.md` }) }]),
+        null,
+        msgIdx++,
+      );
+      insertToolMsg.run(
+        convId,
+        agentId,
+        'user',
+        null,
+        null,
+        JSON.stringify([{ callId, name: 'read', content: 'R'.repeat(1200), isError: false }]),
+        msgIdx++,
+      );
+    }
+
+    const clusterDropResult = await compositor.compose({
+      agentId,
+      sessionKey: telemetrySessionKey,
+      tokenBudget: 1800,
+      provider: 'anthropic',
+      model: 'claude-opus-4-6',
+      includeHistory: true,
+      includeFacts: false,
+      includeLibrary: false,
+      includeContext: false,
+    }, msgDb, libDb);
+
+    assert(clusterDropResult.diagnostics.toolChainCoEjections !== undefined && clusterDropResult.diagnostics.toolChainCoEjections > 0,
+      `C1 budget_cluster_drop: co-ejection counter present (got ${clusterDropResult.diagnostics.toolChainCoEjections})`);
+    assert(clusterDropResult.diagnostics.toolChainStubReplacements === undefined,
+      `C1 budget_cluster_drop: no stub replacements expected (got ${clusterDropResult.diagnostics.toolChainStubReplacements})`);
+    assert(clusterDropResult.warnings.some(w => w.includes('budget_cluster_drop')),
+      `C1 budget_cluster_drop: warning includes reason (got [${clusterDropResult.warnings.join(', ')}])`);
+  }
+
+  await runCachePrefixStabilitySuite(assert);
 
   // ── Cleanup ──
   console.log('\n── Cleanup ──');

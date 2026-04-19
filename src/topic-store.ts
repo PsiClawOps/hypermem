@@ -9,6 +9,28 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Topic, TopicStatus } from './types.js';
 
+/**
+ * Normalize a topic name for dedup purposes.
+ * Preserves casing of known product names; lowercases everything else.
+ */
+const KNOWN_NAMES: Record<string, string> = {
+  hypermem: 'HyperMem',
+  hyperbuilder: 'HyperBuilder',
+  clawcanvas: 'ClawCanvas',
+  clawdash: 'ClawDash',
+  clawdispatch: 'ClawDispatch',
+  clawtext: 'ClawText',
+  clawtomation: 'ClawTomation',
+  clawcouncil: 'ClawCouncil',
+  openclaw: 'OpenClaw',
+  clawhub: 'ClawHub',
+};
+
+export function normalizeTopicName(name: string): string {
+  const lower = name.trim().toLowerCase();
+  return KNOWN_NAMES[lower] ?? name.trim();
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -56,6 +78,28 @@ export class TopicStore {
       createdAt: now,
       updatedAt: now,
     };
+  }
+
+  /**
+   * Find an existing topic by name (case-insensitive) or create a new one.
+   * Prevents duplicate topics for the same logical concept.
+   */
+  findOrCreate(agentId: string, rawName: string, description?: string, visibility?: string): Topic {
+    const name = normalizeTopicName(rawName);
+    const existing = this.db.prepare(`
+      SELECT * FROM topics
+      WHERE agent_id = ?
+        AND lower(name) = lower(?)
+        AND status != 'closed'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `).get(agentId, name) as Record<string, unknown> | undefined;
+
+    if (existing) {
+      return parseTopicRow(existing);
+    }
+
+    return this.create(agentId, name, description, visibility);
   }
 
   /**

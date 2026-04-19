@@ -9,13 +9,14 @@
  *   node scripts/run-indexer.mjs                    # One-shot
  *   node scripts/run-indexer.mjs --daemon            # Run continuously (5 min interval)
  *   node scripts/run-indexer.mjs --stats             # Show watermark stats only
- *   node scripts/run-indexer.mjs --agent alice       # Process single agent
+ *   node scripts/run-indexer.mjs --agent agent1       # Process single agent
  */
 
 import path from 'node:path';
-import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
-const HYPERMEM_PATH = path.join(os.homedir(), '.openclaw/workspace/repo/hypermem/dist/index.js');
+const __scriptDir = fileURLToPath(new URL('.', import.meta.url));
+const HYPERMEM_PATH = path.resolve(__scriptDir, '../dist/index.js');
 const { HyperMem, BackgroundIndexer, createIndexer } = await import(HYPERMEM_PATH);
 
 const args = process.argv.slice(2);

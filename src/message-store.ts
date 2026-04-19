@@ -14,8 +14,11 @@ import type {
   ChannelType,
   ConversationStatus,
   RecentTurn,
+  ArchivedMiningQuery,
+  ArchivedMiningResult,
+  MultiContextMiningOptions,
 } from './types.js';
-import { getOrCreateActiveContext, updateContextHead } from './context-store.js';
+import { getOrCreateActiveContext, updateContextHead, getArchivedContext } from './context-store.js';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -453,6 +456,12 @@ export class MessageStore {
    *
    * Falls back to getRecentMessages if the head message has no parent chain
    * (e.g., legacy data before backfill).
+   *
+   * @boundary SHARED DAG PRIMITIVE — not for direct call at mining call sites.
+   * @policy See specs/DAG_HELPER_POLICY.md for operator-boundary rules.
+   * Use mineArchivedContext / mineArchivedContexts for archived context mining,
+   * and the active-composition paths for live session history. Direct call sites
+   * outside this class should be limited to exceptional diagnostic use.
    */
   getHistoryByDAGWalk(headMessageId: number, limit: number = 50): StoredMessage[] {
     try {
@@ -547,6 +556,170 @@ export class MessageStore {
       .prepare('SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?')
       .get(conversationId) as { count: number };
     return row.count;
+  }
+
+  /**
+   * Get the full message chain for an archived or forked context.
+   *
+   * Throws if the context does not exist or is active (not archived/forked).
+   * Returns an empty array if the context has no head message.
+   * Delegates to getHistoryByDAGWalk for the actual chain retrieval.
+   */
+  getArchivedChain(contextId: number, limit?: number): StoredMessage[] {
+    const context = getArchivedContext(this.db, contextId);
+
+    if (!context) {
+      throw new Error('getArchivedChain: context must be archived or forked');
+    }
+
+    if (context.headMessageId === null) {
+      return [];
+    }
+
+    return this.getHistoryByDAGWalk(context.headMessageId, limit ?? 200);
+  }
+
+  // ─── Archived Mining (Phase 4 Sprint 2 / Sprint 3) ─────────────
+
+  /**
+   * Default maximum number of contextIds accepted by mineArchivedContexts.
+   * Callers may supply a lower value but not a higher one.
+   */
+  static readonly ARCHIVED_MULTI_CONTEXT_DEFAULT_MAX = 20;
+
+  /**
+   * Hard ceiling for mineArchivedContexts.
+   * Values above this are clamped to this number regardless of caller intent.
+   * This prevents unbounded DB fan-out on misconfigured or adversarial inputs.
+   */
+  static readonly ARCHIVED_MULTI_CONTEXT_HARD_CEILING = 50;
+
+  // ─── Archived Mining (Phase 4 Sprint 2) ───────────────────────
+
+  /**
+   * Mine messages from a single archived or forked context.
+   *
+   * - Rejects active or missing contexts with a clear error.
+   * - Hard-caps limit at 200.
+   * - Defaults excludeHeartbeats to true.
+   * - Optionally filters by ftsQuery (client-side substring match for Sprint 3; SQL FTS is deferred).
+   * - Routes through getHistoryByDAGWalk for DAG-native retrieval.
+   * - Returns ArchivedMiningResult<StoredMessage[]> with isHistorical: true.
+   *
+   * This method does NOT widen active composition — it only operates on
+   * explicitly non-active (archived/forked) contexts.
+   */
+  mineArchivedContext(query: ArchivedMiningQuery): ArchivedMiningResult<StoredMessage[]> {
+    const { contextId, limit, excludeHeartbeats = true, ftsQuery } = query;
+
+    const context = getArchivedContext(this.db, contextId);
+    if (!context) {
+      throw new Error(
+        `mineArchivedContext: context ${contextId} does not exist or is not archived/forked. ` +
+        `Only archived or forked contexts may be mined.`
+      );
+    }
+
+    // Hard cap at 200
+    const effectiveLimit = Math.min(limit ?? 200, 200);
+
+    let messages: StoredMessage[] = [];
+
+    if (context.headMessageId !== null) {
+      messages = this.getHistoryByDAGWalk(context.headMessageId, effectiveLimit);
+    }
+
+    // Apply heartbeat filter (default: exclude)
+    if (excludeHeartbeats) {
+      messages = messages.filter(m => !m.isHeartbeat);
+    }
+
+    // Client-side ftsQuery filter (substring match for Sprint 2)
+    if (ftsQuery && ftsQuery.trim().length > 0) {
+      const q = ftsQuery.trim().toLowerCase();
+      messages = messages.filter(m =>
+        (m.textContent ?? '').toLowerCase().includes(q)
+      );
+    }
+
+    return {
+      isHistorical: true,
+      contextId: context.id,
+      agentId: context.agentId,
+      sessionKey: context.sessionKey,
+      contextStatus: context.status as 'archived' | 'forked',
+      contextUpdatedAt: context.updatedAt,
+      data: messages,
+    };
+  }
+
+  /**
+   * Mine messages from multiple archived or forked contexts.
+   *
+   * ## maxContexts gate (Phase 4 Sprint 3, Task 1)
+   * Accepts an optional `maxContexts` in opts to control how many contextIds
+   * are accepted in a single call:
+   * - Default: ARCHIVED_MULTI_CONTEXT_DEFAULT_MAX (20).
+   * - Hard ceiling: ARCHIVED_MULTI_CONTEXT_HARD_CEILING (50).
+   * - A caller-supplied value above the hard ceiling is clamped to the ceiling
+   *   (not rejected), so callers need not know the exact constant.
+   * - A caller-supplied value at or below the ceiling is used as-is.
+   * - If contextIds.length exceeds the effective max, this method THROWS
+   *   immediately — it does NOT soft-skip or truncate.
+   *
+   * ## Other behaviors (unchanged from Sprint 2)
+   * - Soft-skips active or missing contextIds with a warning (does not throw).
+   * - Preserves input order in the result array.
+   * - Applies per-context limit and same filters as mineArchivedContext.
+   * - Returns one ArchivedMiningResult per valid archived context.
+   *
+   * This method does NOT widen active composition — it only operates on
+   * explicitly non-active (archived/forked) contexts.
+   */
+  mineArchivedContexts(
+    contextIds: number[],
+    opts?: MultiContextMiningOptions
+  ): ArchivedMiningResult<StoredMessage[]>[] {
+    // ── maxContexts gate ──────────────────────────────────────────────────
+    const { maxContexts: callerMax, ...perContextOpts } = opts ?? {};
+    const effectiveMax = callerMax !== undefined
+      ? Math.min(callerMax, MessageStore.ARCHIVED_MULTI_CONTEXT_HARD_CEILING)
+      : MessageStore.ARCHIVED_MULTI_CONTEXT_DEFAULT_MAX;
+
+    if (contextIds.length > effectiveMax) {
+      throw new Error(
+        `mineArchivedContexts: too many contextIds (${contextIds.length}). ` +
+        `Effective limit is ${effectiveMax} ` +
+        `(hard ceiling: ${MessageStore.ARCHIVED_MULTI_CONTEXT_HARD_CEILING}, ` +
+        `default: ${MessageStore.ARCHIVED_MULTI_CONTEXT_DEFAULT_MAX}). ` +
+        `Pass fewer contextIds or supply a higher maxContexts (max: ${MessageStore.ARCHIVED_MULTI_CONTEXT_HARD_CEILING}).`
+      );
+    }
+    // ── end gate ─────────────────────────────────────────────────────────
+
+    const results: ArchivedMiningResult<StoredMessage[]>[] = [];
+
+    for (const contextId of contextIds) {
+      const context = getArchivedContext(this.db, contextId);
+      if (!context) {
+        console.warn(
+          `[hypermem:message-store] mineArchivedContexts: skipping contextId ${contextId} ` +
+          `— does not exist or is not archived/forked (may be active or missing).`
+        );
+        continue;
+      }
+
+      try {
+        results.push(this.mineArchivedContext({ contextId, ...perContextOpts }));
+      } catch (err) {
+        console.warn(
+          `[hypermem:message-store] mineArchivedContexts: skipping contextId ${contextId} ` +
+          `— ${(err as Error).message}`
+        );
+      }
+    }
+
+    return results;
   }
 
   // ─── Helpers ─────────────────────────────────────────────────

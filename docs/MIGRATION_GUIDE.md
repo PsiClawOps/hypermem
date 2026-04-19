@@ -32,7 +32,7 @@ Understanding the data model sets expectations for what migrates and what doesn'
 - Structured knowledge entries
 
 **Does not migrate (by design):**
-- The Redis hot cache — ephemeral, rebuilds automatically on first use
+- The hot cache — ephemeral, SQLite-backed in current releases, and rebuilt automatically on first use
 - Embeddings — hypermem regenerates these from imported text on the next indexer run
 - Tool call payloads from sessions where only text content was stored (tool results preserved as prose where available)
 - Graph structure from graph databases (edges, weights, triplets) — these are flattened to facts on import
@@ -169,7 +169,7 @@ QMD collections at `~/.openclaw/agents/<agentId>/qmd/` are untouched. Delete the
 **If you had content in extra QMD paths**, import it manually:
 ```js
 // import-qmd-extras.mjs
-import { createhypermem } from '@psiclawops/hypermem';
+import { HyperMem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -184,7 +184,7 @@ if (!extraDir) {
   process.exit(1);
 }
 
-const hm = await createhypermem({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await HyperMem.create({ dir: join(homedir(), '.openclaw/hypermem') });
 let imported = 0;
 const files = [];
 for await (const f of glob('**/*.md', { cwd: extraDir })) files.push(f);
@@ -310,7 +310,7 @@ Save this as `import-from-cognee.mjs` in the hypermem repo root:
 
 ```js
 // import-from-cognee.mjs
-import { createhypermem } from '@psiclawops/hypermem';
+import { HyperMem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -320,7 +320,7 @@ const exportPath = process.argv[3] ?? 'cognee_export.json';
 const dryRun = !process.argv.includes('--apply');
 
 const entries = JSON.parse(readFileSync(exportPath, 'utf-8'));
-const hm = await createhypermem({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await HyperMem.create({ dir: join(homedir(), '.openclaw/hypermem') });
 
 let imported = 0;
 let skipped = 0;
@@ -456,7 +456,7 @@ node scripts/migrate-mem0.mjs --agent main mem0_export.json
 Save this as `scripts/migrate-mem0.mjs`:
 ```js
 // scripts/migrate-mem0.mjs
-import { createhypermem } from '@psiclawops/hypermem';
+import { HyperMem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -469,7 +469,7 @@ const raw = JSON.parse(readFileSync(exportPath, 'utf-8'));
 // handle both export job format {memories: [...]} and get_all format {results: [...]}
 const entries = raw.memories ?? raw.results ?? raw;
 
-const hm = await createhypermem({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await HyperMem.create({ dir: join(homedir(), '.openclaw/hypermem') });
 let imported = 0, skipped = 0;
 
 for (const entry of entries) {
@@ -588,7 +588,7 @@ print(f"Exported {len(export['sessions'])} sessions, {len(export['facts'])} fact
 Save as `scripts/migrate-zep.mjs`:
 ```js
 // scripts/migrate-zep.mjs
-import { createhypermem } from '@psiclawops/hypermem';
+import { HyperMem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -598,7 +598,7 @@ const exportPath = process.argv[3] ?? 'zep_export.json';
 const dryRun = !process.argv.includes('--apply');
 
 const { sessions = [], facts = [] } = JSON.parse(readFileSync(exportPath, 'utf-8'));
-const hm = await createhypermem({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await HyperMem.create({ dir: join(homedir(), '.openclaw/hypermem') });
 
 let msgCount = 0, factCount = 0;
 
@@ -705,7 +705,7 @@ print(f"Exported {len(export['conclusions'])} conclusions")
 Save as `scripts/migrate-honcho.mjs`:
 ```js
 // scripts/migrate-honcho.mjs
-import { createhypermem } from '@psiclawops/hypermem';
+import { HyperMem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -715,7 +715,7 @@ const exportPath = process.argv[3] ?? 'honcho_export.json';
 const dryRun = !process.argv.includes('--apply');
 
 const { conclusions = [] } = JSON.parse(readFileSync(exportPath, 'utf-8'));
-const hm = await createhypermem({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await HyperMem.create({ dir: join(homedir(), '.openclaw/hypermem') });
 let imported = 0, skipped = 0;
 
 for (const c of conclusions) {
@@ -814,7 +814,7 @@ Install lancedb if needed: `pip install lancedb`
 Save as `scripts/migrate-lancedb.mjs`:
 ```js
 // scripts/migrate-lancedb.mjs
-import { createhypermem } from '@psiclawops/hypermem';
+import { HyperMem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -825,7 +825,7 @@ const exportPath = process.argv.find(a => a.endsWith('.json')) ?? 'lancedb_expor
 const dryRun = !process.argv.includes('--apply');
 
 const entries = JSON.parse(readFileSync(exportPath, 'utf-8'));
-const hm = await createhypermem({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await HyperMem.create({ dir: join(homedir(), '.openclaw/hypermem') });
 let imported = 0, skipped = 0;
 
 for (const entry of entries) {
@@ -917,9 +917,9 @@ Use hypermem's programmatic API to import directly.
 
 **Import facts:**
 ```js
-import { createhypermem } from '@psiclawops/hypermem';
+import { HyperMem } from '@psiclawops/hypermem';
 
-const hm = await createhypermem({ dir: '~/.openclaw/hypermem' });
+const hm = await HyperMem.create({ dir: '~/.openclaw/hypermem' });
 
 await hm.addFact('your-agent-id', 'User prefers dark mode in all UIs', {
   domain: 'preference',

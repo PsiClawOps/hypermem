@@ -17,9 +17,11 @@
  *  10. Topics (cross-session thread tracking)
  */
 
-import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync, renameSync, existsSync } from 'node:fs';
+import { join as pathJoin, dirname } from 'node:path';
 
-export const LIBRARY_SCHEMA_VERSION = 15;
+export const LIBRARY_SCHEMA_VERSION = 19;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -346,6 +348,7 @@ function applyV3Collections(db: DatabaseSync): void {
     )
   `);
   db.exec('CREATE INDEX IF NOT EXISTS idx_topics_agent ON topics(agent_id, status, updated_at DESC)');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_dedup ON topics(agent_id, lower(name))');
 
   // ── Fleet registry ──
   db.exec(`
@@ -938,6 +941,102 @@ function applyV12FosMod(db: DatabaseSync): void {
   }
 }
 
+// ── Repair utility ───────────────────────────────────────────
+// Safe to call BEFORE opening the main DB connection.
+// Handles the case where library.db has duplicate topics AND B-tree corruption,
+// making in-place DELETE impossible.
+//
+// Strategy:
+//   1. Detect duplicates (read-only: works on corrupt DBs)
+//   2. VACUUM INTO temp file (writes to a new clean file)
+//   3. Dedup + integrity check in temp
+//   4. Backup original via VACUUM INTO backups dir
+//   5. Atomic rename temp → original
+
+export function repairLibraryDb(dbPath: string): { repaired: boolean; backupPath?: string; message: string } {
+  if (!existsSync(dbPath)) {
+    return { repaired: false, message: `DB not found at ${dbPath}. Nothing to repair.` };
+  }
+
+  const backupsDir = pathJoin(dirname(dbPath), 'backups');
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const tempPath = `${dbPath}.repair-${ts}.sqlite`;
+  const backupPath = pathJoin(backupsDir, `library.db.pre-repair-${ts}.sqlite`);
+
+  const src = new DatabaseSync(dbPath);
+
+  // Step 1: detect duplicates
+  const dupeRow = src.prepare(`
+    SELECT COUNT(*) AS cnt FROM (
+      SELECT agent_id, lower(name) FROM topics
+      GROUP BY agent_id, lower(name) HAVING COUNT(*) > 1
+    )
+  `).get() as { cnt: number };
+
+  if (dupeRow.cnt === 0) {
+    src.close();
+    return { repaired: false, message: 'No duplicate topics found. No repair needed.' };
+  }
+
+  console.log(`[hypermem-repair] ${dupeRow.cnt} duplicate topic group(s) found. Starting repair...`);
+
+  // Step 2: VACUUM INTO temp (reads clean pages, writes fresh file)
+  try {
+    src.exec(`VACUUM INTO '${tempPath}'`);
+  } catch (err) {
+    src.close();
+    throw new Error(`[hypermem-repair] VACUUM INTO failed: ${(err as Error).message}. Cannot auto-repair.`);
+  }
+  src.close();
+
+  // Step 3: dedup + verify in temp
+  const tmp = new DatabaseSync(tempPath);
+  try {
+    tmp.exec(`
+      DELETE FROM topics WHERE id IN (
+        WITH ranked AS (
+          SELECT id, ROW_NUMBER() OVER (
+            PARTITION BY agent_id, lower(name)
+            ORDER BY updated_at DESC, created_at DESC, id DESC
+          ) AS rn FROM topics
+        )
+        SELECT id FROM ranked WHERE rn > 1
+      )
+    `);
+    tmp.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_dedup ON topics(agent_id, lower(name))');
+    const integ = tmp.prepare('PRAGMA integrity_check').get() as { integrity_check: string };
+    if (integ.integrity_check !== 'ok') {
+      throw new Error(`Repaired DB failed integrity check: ${integ.integrity_check}`);
+    }
+  } finally {
+    tmp.close();
+  }
+
+  // Step 4: backup original
+  mkdirSync(backupsDir, { recursive: true });
+  let savedBackup = false;
+  try {
+    const srcForBackup = new DatabaseSync(dbPath);
+    srcForBackup.exec(`VACUUM INTO '${backupPath}'`);
+    srcForBackup.close();
+    savedBackup = true;
+    console.log(`[hypermem-repair] Backup saved → ${backupPath}`);
+  } catch {
+    console.warn('[hypermem-repair] Could not save backup, proceeding with repair anyway.');
+  }
+
+  // Step 5: atomic swap
+  renameSync(tempPath, dbPath);
+
+  const msg = [
+    `Repair complete. ${dupeRow.cnt} duplicate topic group(s) removed.`,
+    savedBackup ? `Original backed up to: ${backupPath}` : 'Note: backup could not be saved.',
+  ].join(' ');
+
+  console.log(`[hypermem-repair] ${msg}`);
+  return { repaired: true, backupPath: savedBackup ? backupPath : undefined, message: msg };
+}
+
 // ── Migration runner ──────────────────────────────────────────
 
 export function migrateLibrary(db: DatabaseSync, engineVersion?: string): void {
@@ -1172,6 +1271,160 @@ export function migrateLibrary(db: DatabaseSync, engineVersion?: string): void {
 
     db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(15, nowIso());
+  }
+
+  if (currentVersion < 16) {
+    // contradiction_audits table — tracks detected contradictions for review
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS contradiction_audits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL CHECK(entity_type IN ('fact')),
+        new_content TEXT NOT NULL,
+        new_domain TEXT,
+        existing_fact_id INTEGER NOT NULL,
+        existing_content TEXT NOT NULL,
+        similarity_score REAL NOT NULL,
+        contradiction_score REAL NOT NULL,
+        reason TEXT NOT NULL,
+        detector TEXT NOT NULL DEFAULT 'heuristic_v1',
+        suggested_resolution TEXT NOT NULL DEFAULT 'review',
+        source_ref TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'dismissed')),
+        resolution_notes TEXT,
+        created_at TEXT NOT NULL,
+        resolved_at TEXT
+      )
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_contradiction_audits_agent_status ON contradiction_audits(agent_id, status, created_at DESC)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_contradiction_audits_existing_fact ON contradiction_audits(existing_fact_id, status)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_contradiction_audits_agent ON contradiction_audits(agent_id, created_at DESC)');
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(16, nowIso());
+  }
+
+  if (currentVersion < 17) {
+    // Stamp v17 — previously applied by an older engine build alongside contradiction_audits.
+    // No additional DDL needed; the table was already created in v16.
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(17, nowIso());
+  }
+
+  if (currentVersion < 18) {
+    // V18: collapse duplicate topics, then enforce unique constraint.
+    //
+    // Safety pattern for existing users who may have both duplicates AND B-tree corruption
+    // (e.g. from a WAL desync during a gateway crash):
+    //  1. Detect duplicates up front (read-only — works even on malformed DBs)
+    //  2. If dupes found: VACUUM INTO a backup file first (reads clean pages, writes new file)
+    //  3. Attempt in-place DELETE (works on healthy DBs)
+    //  4. If DELETE fails: throw a clear error pointing to the backup + repair command
+    const dupeCheck = db.prepare(`
+      SELECT COUNT(*) AS cnt FROM (
+        SELECT agent_id, lower(name) FROM topics
+        GROUP BY agent_id, lower(name) HAVING COUNT(*) > 1
+      )
+    `).get() as { cnt: number };
+
+    let v18BackupPath: string | undefined;
+
+    if (dupeCheck.cnt > 0) {
+      // Auto-backup via VACUUM INTO before any writes.
+      // VACUUM INTO reads clean pages and writes to a new file — works even on marginally
+      // corrupt DBs where regular writes fail.
+      const home = process.env['HOME'] ?? process.env['USERPROFILE'] ?? '';
+      const backupsDir = pathJoin(home, '.openclaw', 'hypermem', 'backups');
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      v18BackupPath = pathJoin(backupsDir, `library.db.v18-pre-dedup-${ts}.sqlite`);
+
+      try {
+        mkdirSync(backupsDir, { recursive: true });
+        db.exec(`VACUUM INTO '${v18BackupPath}'`);
+        console.log(`[hypermem-library] V18: backup saved → ${v18BackupPath}`);
+      } catch (e) {
+        console.warn(`[hypermem-library] V18: backup failed (${(e as Error).message}), proceeding without backup`);
+        v18BackupPath = undefined;
+      }
+
+      try {
+        db.exec(`
+          DELETE FROM topics
+          WHERE id IN (
+            WITH ranked AS (
+              SELECT
+                id,
+                ROW_NUMBER() OVER (
+                  PARTITION BY agent_id, lower(name)
+                  ORDER BY updated_at DESC, created_at DESC, id DESC
+                ) AS rn
+              FROM topics
+            )
+            SELECT id FROM ranked WHERE rn > 1
+          )
+        `);
+      } catch (err) {
+        const backupMsg = v18BackupPath
+          ? `A VACUUM backup was saved to:\n  ${v18BackupPath}\nRun: hypermem repair-library to recover automatically.`
+          : 'Run: hypermem repair-library to recover.';
+        throw new Error(
+          `[hypermem-library] V18 migration: failed to deduplicate topics (${(err as Error).message}).\n` +
+          `Your library.db has ${dupeCheck.cnt} duplicate topic group(s) that could not be removed in-place.\n` +
+          `This usually indicates B-tree corruption from a previous gateway crash.\n` +
+          backupMsg
+        );
+      }
+    }
+
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_dedup ON topics(agent_id, lower(name))');
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(18, nowIso());
+  }
+
+  if (currentVersion < 19) {
+    // V19: Extend contradiction_audits status CHECK constraint to include
+    // auto-resolution values. SQLite cannot ALTER CHECK constraints — recreate
+    // the table with the new constraint, preserving all existing rows.
+    // Use an explicit column list (not SELECT *) to guard against column drift.
+    db.exec(`
+      CREATE TABLE contradiction_audits_v19 (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id            TEXT NOT NULL,
+        entity_type         TEXT NOT NULL CHECK(entity_type IN ('fact')),
+        new_content         TEXT NOT NULL,
+        new_domain          TEXT,
+        existing_fact_id    INTEGER NOT NULL,
+        existing_content    TEXT NOT NULL,
+        similarity_score    REAL NOT NULL,
+        contradiction_score REAL NOT NULL,
+        reason              TEXT NOT NULL,
+        detector            TEXT NOT NULL DEFAULT 'heuristic_v1',
+        suggested_resolution TEXT NOT NULL DEFAULT 'review',
+        source_ref          TEXT,
+        status              TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending', 'accepted', 'dismissed', 'auto-superseded', 'auto-invalidated')),
+        resolution_notes    TEXT,
+        created_at          TEXT NOT NULL,
+        resolved_at         TEXT
+      );
+      INSERT INTO contradiction_audits_v19
+        (id, agent_id, entity_type, new_content, new_domain, existing_fact_id,
+         existing_content, similarity_score, contradiction_score, reason,
+         detector, suggested_resolution, source_ref, status, resolution_notes,
+         created_at, resolved_at)
+      SELECT
+        id, agent_id, entity_type, new_content, new_domain, existing_fact_id,
+        existing_content, similarity_score, contradiction_score, reason,
+        detector, suggested_resolution, source_ref, status, resolution_notes,
+        created_at, resolved_at
+      FROM contradiction_audits;
+      DROP TABLE contradiction_audits;
+      ALTER TABLE contradiction_audits_v19 RENAME TO contradiction_audits;
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_contradiction_audits_agent_status ON contradiction_audits(agent_id, status, created_at DESC)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_contradiction_audits_existing_fact ON contradiction_audits(existing_fact_id, status)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_contradiction_audits_agent ON contradiction_audits(agent_id, created_at DESC)');
+    db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(19, nowIso());
   }
 
   // Always ensure meta exists before stamping the running engine version.
