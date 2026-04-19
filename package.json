@@ -20,6 +20,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "install:runtime": "node scripts/install-runtime.mjs",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node test/smoke.mjs && node test/lightweight-mode.mjs && node test/cross-agent.mjs && node test/vector-search.mjs && node test/library.mjs && node test/compositor.mjs && node test/fleet-cache.mjs && node test/fleet-startup-seeding.mjs && node test/rotation.mjs && node test/knowledge-graph.mjs && node test/rate-limiter.mjs && node test/doc-chunker.mjs && node test/compaction-fence-gate.mjs && node test/hybrid-retrieval.mjs && node test/live-org-registry.mjs && node test/multi-turn-session.mjs && node test/secret-scanner.mjs && node --test test/content-type-classifier.mjs && node test/keystone-history.mjs && node test/cross-topic-keystone.mjs && node test/proactive-pass.mjs && node test/topic-synthesis.mjs && node test/session-topic-map.mjs && node test/virtual-sessions.mjs && node test/budget-downshift.mjs && node --test test/image-eviction.mjs && node test/fos-mod.mjs && node test/history-depth-estimator.mjs && node test/model-aware-budgeting-b4.mjs && node test/repair-tool-pairs.mjs && node test/tool-result-guards.mjs && node test/phase-c-fixtures.mjs && node test/oversized-artifact-c2.mjs && node test/oversized-artifact-guards.mjs && node test/doc-chunk-artifact-retrieval.mjs && node test/dreaming-promoter-temporal.mjs",

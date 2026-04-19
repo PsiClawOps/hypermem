@@ -11,10 +11,10 @@ export const MIN_REDIS_VERSION = '7.0.0';
 export const SQLITE_VEC_VERSION = '0.1.9';
 
 /**
- * Main DB (hypermem.db) schema version.
+ * Main DB (messages.db) schema version.
  * Re-exported here for convenience; authoritative value lives in schema.ts.
  */
-export const MAIN_SCHEMA_VERSION = 8;
+export const MAIN_SCHEMA_VERSION = 10;
 
 /**
  * Library DB (library.db) schema version.
@@ -24,8 +24,8 @@ export const LIBRARY_SCHEMA_VERSION_EXPORT = 19;
 
 /**
  * Compatibility version — the single number operators and consumers check.
- * Maps to: main schema v8, library schema v19.
- * Matches ENGINE_VERSION for the 0.5.2 release.
+ * Maps to: messages.db schema v10, library schema v19.
+ * Matches ENGINE_VERSION for the 0.8.0 release.
  */
 export const HYPERMEM_COMPAT_VERSION = '0.8.0';
 
@@ -35,6 +35,6 @@ export const HYPERMEM_COMPAT_VERSION = '0.8.0';
  */
 export const SCHEMA_COMPAT = {
   compatVersion: '0.8.0',
-  mainSchema: 8,
+  mainSchema: 10,
   librarySchema: 19,
 } as const;
