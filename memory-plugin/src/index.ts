@@ -20,15 +20,25 @@ import type { OpenClawConfig } from 'openclaw/plugin-sdk';
 import type {
   HyperMem as HyperMemClass,
 } from '@psiclawops/hypermem';
-import os from 'os';
 import path from 'path';
 import fs from 'fs/promises';
+import os from 'os';
+import { fileURLToPath } from 'url';
 
 // ─── HyperMem singleton ────────────────────────────────────────
 // Reuses the same singleton pattern as the context engine plugin.
-// Both plugins load from the same repo dist path and share the instance.
+// Both plugins load from the same installed runtime payload and share the instance.
 
-const HYPERMEM_PATH = path.join(os.homedir(), '.openclaw/workspace/repo/hypermem/dist/index.js');
+const __pluginDir = path.dirname(fileURLToPath(import.meta.url));
+
+async function resolveHyperMemPath(): Promise<string> {
+  try {
+    const resolvedUrl = await import.meta.resolve('@psiclawops/hypermem');
+    return resolvedUrl.startsWith('file:') ? fileURLToPath(resolvedUrl) : resolvedUrl;
+  } catch {
+    return path.resolve(__pluginDir, '../../dist/index.js');
+  }
+}
 
 type HyperMemInstance = Awaited<ReturnType<typeof HyperMemClass.create>>;
 
@@ -40,7 +50,8 @@ async function getHyperMem(): Promise<HyperMemInstance> {
   if (_hmInitPromise) return _hmInitPromise;
 
   _hmInitPromise = (async () => {
-    const mod = await import(HYPERMEM_PATH);
+    const hypermemPath = await resolveHyperMemPath();
+    const mod = await import(hypermemPath);
     const HyperMem = mod.HyperMem;
 
     const instance = await HyperMem.create({
@@ -239,7 +250,9 @@ function createMemorySearchManager(
         vector: {
           enabled: !!vectorStore,
           available: !!vectorStore,
-          dims: vectorStats ? 768 : undefined,
+          dims: (vectorStats as { dimensions?: number; dims?: number } | null)?.dimensions
+            ?? (vectorStats as { dimensions?: number; dims?: number } | null)?.dims
+            ?? undefined,
         },
         custom: {
           vectorStats: vectorStats ?? undefined,

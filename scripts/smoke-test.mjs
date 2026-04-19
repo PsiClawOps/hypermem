@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * hypermem 0.5.4 publish smoke test
+ * hypermem publish smoke test
  *
  * Validates:
  *   1. Package exports resolve cleanly
- *   2. HyperMem.create() initialises (in-memory / no Redis)
+ *   2. HyperMem.create() initialises (SQLite-backed hot cache)
  *   3. Compositor runs with default config
  *   4. Trigger registry loads and matches
- *   5. Config knobs pass through (cache TTL, promotion, budget)
- *   6. Migration dispatcher help flag exits 0
+ *   5. Config knobs pass through (promotion, budget)
+ *   6. Docs validation gate exits 0
  *
  * Run:
  *   node scripts/smoke-test.mjs
@@ -16,13 +16,14 @@
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root   = resolve(__dir, '..');
 const verbose = process.argv.includes('--verbose');
+const pkgVersion = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf-8')).version;
 
 let passed = 0;
 let failed = 0;
@@ -37,7 +38,7 @@ function fail(name, err) {
   if (verbose) console.error('     ', err?.message ?? err);
 }
 
-console.log(`\nhypermem 0.5.4 smoke test\n${'─'.repeat(40)}`);
+console.log(`\nhypermem ${pkgVersion} smoke test\n${'─'.repeat(40)}`);
 
 // ── 1. dist exists ──────────────────────────────────────────────────────────
 console.log('\n[1] dist artifacts');
@@ -65,10 +66,6 @@ try {
 // ── 3. Config knob passthrough ──────────────────────────────────────────────
 console.log('\n[3] config knob passthrough');
 const customConfig = {
-  redis: {
-    sessionTTL: 7200,    // 2h instead of 4h
-    historyTTL: 259200,  // 3d instead of 7d
-  },
   compositor: {
     defaultTokenBudget: 65000,
     maxFacts: 15,
@@ -89,16 +86,13 @@ const customConfig = {
 
 // Validate the knob shape is accepted without throwing at type level
 try {
-  // We don't call HyperMem.create() (needs Redis + disk), but we can validate
+  // We don't call HyperMem.create() here, but we can validate
   // that the config shape passes a partial-merge without exploding.
   const merged = {
-    redis: { host: 'localhost', port: 6379, keyPrefix: 'hm:', flushInterval: 1000, ...customConfig.redis },
     compositor: { maxHistoryMessages: 250, maxCrossSessionContext: 6000, maxRecentToolPairs: 3,
                   maxProseToolPairs: 10, contextWindowReserve: 0.15, ...customConfig.compositor },
     dreaming: customConfig.dreaming,
   };
-  if (merged.redis.sessionTTL === 7200) pass('redis.sessionTTL knob');
-  else fail('redis.sessionTTL knob', new Error('value not set'));
 
   if (merged.compositor.defaultTokenBudget === 65000) pass('compositor.defaultTokenBudget knob');
   else fail('compositor.defaultTokenBudget knob', new Error('value not set'));
@@ -155,13 +149,13 @@ try {
   fail('Compositor constructor', e);
 }
 
-// ── 6. Migration script runs ─────────────────────────────────────────────────
-console.log('\n[6] migration dispatcher');
+// ── 6. Docs validation gate ────────────────────────────────────────────────
+console.log('\n[6] docs validation gate');
 try {
-  execSync(`node ${resolve(root, 'scripts/migrate-legacy-sessions.mjs')} --help`, { stdio: 'pipe' });
-  pass('migrate-legacy-sessions.mjs --help exits 0');
+  execSync(`node ${resolve(root, 'scripts/validate-docs.mjs')}`, { stdio: 'pipe' });
+  pass('validate-docs.mjs exits 0');
 } catch (e) {
-  fail('migrate-legacy-sessions.mjs --help', e);
+  fail('validate-docs.mjs', e);
 }
 
 // ── Results ──────────────────────────────────────────────────────────────────
@@ -176,4 +170,4 @@ if (failures.length) {
   process.exit(1);
 }
 
-console.log('\n✅  hypermem 0.5.4 smoke test passed\n');
+console.log(`\n✅  hypermem ${pkgVersion} smoke test passed\n`);

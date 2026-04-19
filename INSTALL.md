@@ -4,7 +4,7 @@
 
 > **Disk space:** plugin installs pull OpenClaw as a dev dependency. Allow at least 2 GB free before starting.
 >
-> **Install path must be durable:** do not clone HyperMem into `/tmp` or another ephemeral directory for a real install. OpenClaw loads the plugin from the exact absolute paths you configure, so deleting or moving the clone breaks the install.
+> **Production runtime path:** install the built runtime payload into `~/.openclaw/plugins/hypermem`. Do not point production at `/tmp` or at your development repo clone.
 >
 > **Config merge warning:** if you already have values in `plugins.load.paths` or `plugins.allow`, merge them instead of overwriting them blindly.
 
@@ -14,6 +14,7 @@ cd hypermem
 npm install && npm run build
 npm --prefix plugin install && npm --prefix plugin run build   # ~1 min on a clean machine
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
+npm run install:runtime
 mkdir -p ~/.openclaw/hypermem
 cat > ~/.openclaw/hypermem/config.json <<'JSON'
 {
@@ -27,14 +28,14 @@ JSON
 Wire both plugins into OpenClaw:
 
 ```bash
-openclaw config set plugins.load.paths '["<path-to-hypermem>/plugin","<path-to-hypermem>/memory-plugin"]' --strict-json
+openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
 openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
 openclaw gateway restart
 ```
 
-Replace `<path-to-hypermem>` with the absolute path where you cloned the repo.
+The repo clone is for build and release work. OpenClaw should load the installed runtime payload from `~/.openclaw/plugins/hypermem/`.
 
 ### Verification checkpoints
 
@@ -67,7 +68,7 @@ If you see a fallback like `falling back to default engine "legacy"`, the instal
 
 ## What hypermem Does
 
-hypermem replaces OpenClaw's default context assembly with a four-layer memory system. Every turn, it queries all layers in parallel and composes context within a fixed token budget. No transcript accumulates. No lossy summarization. Content that doesn't fit this turn stays in storage instead of being destroyed.
+hypermem replaces OpenClaw's default context assembly with a four-layer SQLite-backed memory system. Every turn, it queries all layers in parallel and composes context within a fixed token budget. No transcript accumulates. No lossy summarization. Content that doesn't fit this turn stays in storage instead of being destroyed.
 
 | Layer | Storage | What it holds | Speed |
 |---|---|---|---|
@@ -76,7 +77,7 @@ hypermem replaces OpenClaw's default context assembly with a four-layer memory s
 | **L3** | Per-agent SQLite + sqlite-vec | Semantic search via embeddings | 0.29ms |
 | **L4** | Shared SQLite | Structured knowledge: facts, episodes, preferences, fleet registry | 0.09ms |
 
-Everything runs in-process. No external database services required.
+Everything runs in-process on SQLite memory databases. No external database services required.
 
 ---
 
@@ -317,11 +318,12 @@ npm install
 npm run build
 ```
 
-Build both plugins:
+Build both plugins, then install the runtime payload into OpenClaw's durable plugin directory:
 
 ```bash
 npm --prefix plugin install && npm --prefix plugin run build
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
+npm run install:runtime
 ```
 
 Verify:
@@ -337,8 +339,8 @@ The full suite takes 30–60 seconds. When complete, output ends with `ALL N TES
 Use the OpenClaw CLI. **Do not edit `openclaw.json` directly.**
 
 ```bash
-# Add plugin load paths (use absolute paths)
-openclaw config set plugins.load.paths '["<path-to-hypermem>/plugin","<path-to-hypermem>/memory-plugin"]' --strict-json
+# Add plugin load paths
+openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
 
 # Set the context engine slot
 openclaw config set plugins.slots.contextEngine hypercompositor
@@ -472,6 +474,12 @@ npm --prefix plugin install && npm --prefix plugin run build
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
 openclaw gateway restart
 ```
+
+What changed on the path from 0.5.x to current:
+- **0.6.0**: SQLite `:memory:` became the only hot layer. Redis was fully removed and the runtime no longer depends on any external cache service.
+- **0.7.0**: Temporal validity, expertise storage, contradiction detection, and maintenance APIs landed.
+- **0.8.0**: Phase C correctness guards, tool-artifact store, schema v10/v19, BLAKE3 dedup, RRF fusion, and fleet registry seeding shipped.
+- **Upgrade impact**: current releases use `messages.db` schema v10 and `library.db` schema v19. If you are upgrading from older 0.5.x installs, expect both schema and runtime-behavior changes.
 
 What changed in 0.5.x releases:
 - **0.5.5**: Plugin config schema, tuning knobs moved into `openclaw.json`. Manual `config.json` edits for compositor settings may be superseded by the plugin schema.
@@ -622,18 +630,22 @@ Expected on fresh installs. Facts and episodes accumulate over real conversation
 
 **Plugin not found**
 
-Confirm the build artifacts exist:
+Confirm the installed runtime artifacts exist:
 
 ```bash
-ls <path-to-hypermem>/plugin/dist/index.js
-ls <path-to-hypermem>/memory-plugin/dist/index.js
+ls ~/.openclaw/plugins/hypermem/plugin/dist/index.js
+ls ~/.openclaw/plugins/hypermem/memory-plugin/dist/index.js
+ls ~/.openclaw/plugins/hypermem/dist/index.js
 ```
 
-If missing, rebuild:
+If missing, rebuild and reinstall the runtime payload:
 
 ```bash
-npm --prefix <path-to-hypermem>/plugin run build
-npm --prefix <path-to-hypermem>/memory-plugin run build
+cd <path-to-hypermem>
+npm run build
+npm --prefix plugin run build
+npm --prefix memory-plugin run build
+npm run install:runtime
 ```
 
 Then restart the gateway.

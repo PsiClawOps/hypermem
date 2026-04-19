@@ -952,7 +952,7 @@ async function getHyperMem(): Promise<HyperMemInstance> {
           recentConversationCooldownMs: (userConfig as any)?.maintenance?.recentConversationCooldownMs ?? 30000,
           maxCandidatesPerPass: (userConfig as any)?.maintenance?.maxCandidatesPerPass ?? 200,
         },
-        // Cursor fetcher: reads from Redis → SQLite fallback
+        // Cursor fetcher: reads the SQLite-backed session cursor
         async (agentId: string, sessionKey: string) => {
           return instance.getSessionCursor(agentId, sessionKey);
         },

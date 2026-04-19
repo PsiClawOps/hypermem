@@ -6,7 +6,7 @@
 
 ---
 
-hypermem is a runtime context engine for OpenClaw agents.
+hypermem is a SQLite-backed runtime context engine for OpenClaw agents.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
@@ -53,18 +53,18 @@ OpenClaw also ships compaction safeguards and hybrid file search. That's a solid
 
 ## hypermem
 
-Four storage layers, sub-millisecond retrieval, no external database services required. Runs in-process with local SQLite storage and local Nomic embeddings by default, with optional hosted embeddings for L3.
+Four SQLite-backed memory databases, sub-millisecond retrieval, no external database services required. Runs in-process with local SQLite storage and local Nomic embeddings by default, with optional hosted embeddings for L3.
 
 | Layer | What it holds | Speed |
 |---|---|---|
-| **L1 In-memory** | What the agent needs right now. Identity, recent history, active state. | 0.08ms |
+| **L1 SQLite `:memory:`** | What the agent needs right now. Identity, recent history, active state. | 0.08ms |
 | **L2 History** | Every conversation, queryable and concurrent-safe. Per-agent. | 0.13ms |
 | **L3 Semantic** | Finds related content even when the words don't match. | 0.29ms |
 | **L4 Knowledge** | Facts, wiki pages, episodes, preferences. Shared across agents. | 0.09ms |
 
 Everything is retained. Storage survives session boundaries. The retry logic decision from last week, the deployment preferences from last month, the architecture choices from day one: all queryable, all available for composition.
 
-**Session warming.** Before the first turn fires, hypermem pre-loads the agent's full working state from the in-memory SQLite cache: recent history, facts ranked by confidence and recency, active topic context, cached embeddings for fast semantic recall. The agent's first reply draws from everything that was in scope at the end of the last session. The agent picks up where it left off.
+**Session warming.** Before the first turn fires, hypermem pre-loads the agent's full working state from its SQLite-backed memory stores and hot `:memory:` cache: recent history, facts ranked by confidence and recency, active topic context, cached embeddings for fast semantic recall. The agent's first reply draws from everything that was in scope at the end of the last session. The agent picks up where it left off.
 
 ---
 
@@ -77,7 +77,7 @@ Your agent has four layers of stored context, but what shows up in the prompt? H
 The hypercompositor queries all four layers in parallel on every turn and composes context within a fixed token budget. No transcript accumulates. No lossy transcript summarization. Amnesia isn't a storage problem; the memories exist, but nobody composed them into a coherent prompt. Compaction isn't inevitable; content that doesn't fit this turn stays in storage instead of being destroyed.
 
 **Bigger context windows don't help if you fill them with stale history.**
-128k tokens of stale history and irrelevant memory is worse than 32k of precisely selected content. 10 budget categories, priority-ordered, greedy-fill. Every token in the prompt earned its spot.
+128k tokens of stale history and irrelevant memory is worse than 32k of precisely selected content. 9 budget categories, priority-ordered, greedy-fill. Every token in the prompt earned its spot.
 
 ### What the model actually sees
 
@@ -111,7 +111,7 @@ Standard                                hypercompositor
 ────────────────────────────────        ────────────────────────────────
 message → append to transcript          message → detect active topic
 transcript full → trim oldest           query 4 storage layers in parallel
-trimmed content → summarize (lossy)     budget allocator: 10 slots, fixed cap
+trimmed content → summarize (lossy)     budget allocator: 9 slots, fixed cap
 send transcript to model                tool compression by turn age
 model responds → append again           keystone guard + hyperform profile
                                         composed prompt → model
@@ -217,7 +217,7 @@ Most memory systems store what was said. hypermem synthesizes what was learned.
 
 When a topic goes quiet, hypermem compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay.
 
-OpenClaw 2026.4.7 ships memory wiki for structured storage. hypermem goes further: wiki pages are synthesized automatically and injected by the compositor within token budget.
+OpenClaw 2026.4.7 ships memory wiki for structured storage. hypermem goes further: wiki pages are synthesized automatically and injected by the compositor within token budget, backed by SQLite memory databases instead of an external cache service.
 
 ### Subagents that hit the ground running
 
@@ -399,7 +399,7 @@ import {
   ENGINE_VERSION,        // '0.8.0'
   MIN_NODE_VERSION,      // '22.0.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
-  MAIN_SCHEMA_VERSION,   // 8  (hypermem.db)
+  MAIN_SCHEMA_VERSION,   // 10 (messages.db)
   LIBRARY_SCHEMA_VERSION_EXPORT, // 19 (library.db)
 } from '@psiclawops/hypermem';
 ```

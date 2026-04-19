@@ -46,9 +46,9 @@ All notable changes to hypermem are documented here.
 - Identity and doc chunk dedup against OpenClaw bootstrap injection.
 - Window cache with freshness diagnostics.
 
-## 0.5.0 — Redis removal and context engine
+## 0.5.0 — SQLite hot-cache transition and context engine
 
-- Redis replaced with SQLite in-memory cache. Zero external services.
+- SQLite `:memory:` hot cache introduced for the runtime hot layer. Redis compatibility artifacts still existed at this stage, full removal completed in 0.6.0.
 - Context engine plugin: runs as an OpenClaw `contextEngine` slot, composing prompts per-turn.
 - Transform-first assembly: tool results compressed before budget allocation, not after.
 - Cluster-aware budget shaping: related tool turns grouped and trimmed together.

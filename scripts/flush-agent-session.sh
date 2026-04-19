@@ -6,8 +6,7 @@
 #
 # What it does:
 #   1. Truncates the agent's active session JSONL to 0 bytes
-#   2. Flushes all Redis keys for the agent
-#   3. Reports what was cleared
+#   2. Reports what was cleared
 #
 # After running: ask ragesaq for a gateway restart.
 # Next session starts at near-zero pressure.
@@ -60,15 +59,6 @@ if [ -n "$ACTIVE_SESSION_ID" ]; then
   fi
 else
   echo "WARNING: could not determine active session ID — skipping JSONL truncation"
-fi
-
-# Flush Redis keys for this agent
-REDIS_COUNT=$(redis-cli keys "*${AGENT}*" 2>/dev/null | wc -l || echo 0)
-if [ "$REDIS_COUNT" -gt 0 ]; then
-  redis-cli keys "*${AGENT}*" | xargs redis-cli del > /dev/null 2>&1 || true
-  echo "FLUSHED REDIS: $REDIS_COUNT keys cleared"
-else
-  echo "REDIS: already clean (0 keys)"
 fi
 
 echo ""

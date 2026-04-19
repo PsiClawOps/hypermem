@@ -3,24 +3,15 @@
 Start here.
 
 - **Operator guide:** [`MIGRATION_GUIDE.md`](./MIGRATION_GUIDE.md)
-- **Agent reference:** [`AGENT_MIGRATION.md`](./AGENT_MIGRATION.md)
-- **Unified migration entrypoint:** `node scripts/migrate-legacy-sessions.mjs --source <type> [options]`
+- **Current repo state:** source-specific migration examples live in `MIGRATION_GUIDE.md`. There is no bundled unified migration dispatcher in this repo yet.
 
-Supported `--source` values:
-
-| Source | Underlying script | Purpose |
-|---|---|---|
-| `clawtext` | `scripts/migrate-clawtext.mjs` | Import legacy ClawText session history into HyperMem messages DB |
-| `memory-db` | `scripts/migrate-memory-db.mjs` | Import OpenClaw built-in `memory.db` facts into HyperMem library DB |
-| `memory-md` | `scripts/migrate-memory-md.mjs` | Import MEMORY.md daily checkpoint files into HyperMem library DB |
-
-All migration scripts default to **dry-run**. Add `--apply` to write data.
+All migration examples default to **dry-run** where shown. Add `--apply` only when you are ready to write data.
 
 ---
 
 ## Multi-operator deployments (breaking change warning)
 
-> ⚠️ **KL-01: No global-scope write gate (0.5.0)**
+> ⚠️ **KL-01: No global-scope write gate (still open as of 0.8.0)**
 >
 > hypermem 0.5.0 ships without a write gate for `scope='global'` facts. In a
 > **single-operator deployment** (one user, one fleet sharing `library.db`), this
@@ -46,14 +37,17 @@ Older versions below 0.5.0 used Redis, so the table keeps that history explicit.
 
 | hypermem version | Main DB schema | Library DB schema | Min Node | External cache |
 |---|---|---|---|---|
-| 0.5.0 | v6 | v12 | 22.0.0 | none, SQLite `:memory:` hot cache |
+| 0.8.0 | v10 | v19 | 22.0.0 | none, SQLite `:memory:` hot cache |
+| 0.7.0 | v7 | v13 | 22.0.0 | none, SQLite `:memory:` hot cache |
+| 0.6.0 | v6 | v12 | 22.0.0 | none, SQLite `:memory:` hot cache |
+| 0.5.0 | v6 | v12 | 22.0.0 | transition release, SQLite `:memory:` hot cache |
 | 0.4.0 | v5 | v10 | 20.0.0 | Redis 6.0.0 |
 
 Schema versions are importable for programmatic checks:
 ```ts
 import { SCHEMA_COMPAT, HYPERMEM_COMPAT_VERSION } from 'hypermem';
-// HYPERMEM_COMPAT_VERSION = '0.5.0'
-// SCHEMA_COMPAT = { compatVersion: '0.5.0', mainSchema: 6, librarySchema: 12 }
+// HYPERMEM_COMPAT_VERSION = '0.8.0'
+// SCHEMA_COMPAT = { compatVersion: '0.8.0', mainSchema: 10, librarySchema: 19 }
 ```
 
 If your DBs are behind, run:

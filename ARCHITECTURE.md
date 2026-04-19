@@ -1,6 +1,6 @@
 # hypermem Architecture
 
-_Agent-centric memory that outlives sessions._
+_Agent-centric memory that outlives sessions, backed by SQLite memory databases._
 
 ---
 
@@ -34,7 +34,7 @@ L4  Library DB               Fleet-wide structured knowledge
 
 ## Database Schema
 
-### messages.db (per agent, schema v3)
+### messages.db (per agent, schema v10)
 - `agent_meta` — agent metadata
 - `conversations` — session tracking
 - `messages` — raw message log (text, tool calls, tool results)
@@ -50,7 +50,7 @@ L4  Library DB               Fleet-wide structured knowledge
 - `vec_index_map` — tracks what's been indexed (source_table, source_id, source_db)
 - `embedding_cache` — avoids redundant Ollama API calls
 
-### library.db (shared, schema v5)
+### library.db (shared, schema v19)
 - `facts` — verifiable claims with confidence, domain, expiry, supersedes chains
 - `knowledge` — domain/key/value structured data
 - `knowledge_links` — DAG edges between entities (fact↔fact, fact↔knowledge, etc.)
@@ -243,7 +243,7 @@ For open and deferred items, see [docs/ROADMAP.md](docs/ROADMAP.md).
 |---|---|---|---|
 | `index.ts` | ~1,340 | All | Facade — all public API |
 | `compositor.ts` | ~1,140 | L1-L4 | Prompt assembly + token budgeting + safety valve + window/cursor write |
-| `library-schema.ts` | ~780 | L4 | Library schema v5 + migrations |
+| `library-schema.ts` | ~780 | L4 | Library schema v19 + migrations |
 | `background-indexer.ts` | ~680 | L2-L4 | LLM-powered extraction framework |
 | `vector-store.ts` | ~600 | L3 | Semantic search + embedding |
 | `hybrid-retrieval.ts` | ~450 | L3-L4 | FTS5 + KNN with Reciprocal Rank Fusion |
