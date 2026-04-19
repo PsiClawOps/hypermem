@@ -152,7 +152,7 @@ Visibility-tiered access model for cross-agent knowledge queries:
 
 `visibilityFilter()` resolves access levels using an `OrgRegistry` — a mapping of agents to tiers, orgs, and capabilities. Currently loaded from a hardcoded `defaultOrgRegistry()` in `cross-agent.ts`.
 
-**Known limitation:** This duplicates fleet structure that lives authoritatively in `fleet_agents` + `fleet_orgs` in library.db. Near-term roadmap item: replace with live-loaded registry from library.db, with the hardcoded version as cold-start fallback only.
+**Known limitation:** `defaultOrgRegistry()` duplicates fleet structure that lives authoritatively in `fleet_agents` + `fleet_orgs` in library.db. See [docs/ROADMAP.md](docs/ROADMAP.md) for the planned live-load migration.
 
 ### Unknown Agent Fallback (Restrictive Default)
 
@@ -229,19 +229,7 @@ Data Flow (current — P0 stabilized, window/cursor active):
 6. `compose()` deduplicates history by `id` before budget assembly.
 7. `getHistory()` honors its `limit` parameter on BOTH hot-cache and SQLite paths.
 
-Design spec: `specs/HYPERMEM_QUEUE_SPLIT.md`
-Incident history: `specs/HYPERMEM_INCIDENT_HISTORY.md`
-
-### Open Items (Tracked)
-
-| Item | WQ | Status | Notes |
-|---|---|---|---|
-| Cross-session context boundary markers | WQ-20260402-001 | 🟡 OPEN | `buildCrossSessionContext()` renders flat previews, no per-message boundaries or sender identity. Incident 6. |
-| Cursor durability (SQLite dual-write) | — | 🟡 DEFERRED | Cursor TTL = 24h. Dual-write to SQLite required before background indexer reads cursor. Gate 2. |
-| Plugin type unification | — | 🟡 DEFERRED | Plugin uses dynamic imports; can't use TS types from core. Shims are intentional. Structural change needed. |
-| Strict topic mode: legacy NULL backfill | — | 🟡 DEFERRED | After ≥2 weeks of topic detection in production, run backfill to assign `topic_id` to legacy NULL messages, then narrow `getRecentMessagesByTopic()` to exclude NULL. Gate: topic detection must be stable and coverage >80% of new messages before narrowing. Tracked in `specs/DEFERRED.md`. |
-| ACA Step 4 — retrieval stubs replace static files | — | 🔲 PENDING | `systemPromptAddition` carries governance doc chunks instead of embedding full workspace files. Blocked on Step 3 ✅ |
-| ACA Step 5 — governance context assembly | — | 🔲 PENDING | Full on-demand assembly replaces static prompt injection. Requires Step 4. |
+For open and deferred items, see [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ### Runtime Contract
 
