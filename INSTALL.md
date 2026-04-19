@@ -583,7 +583,7 @@ The recommended starting config for a standard single-agent deployment is intent
 
 | Knob | Recommended | What it controls | Notes |
 |---|---|---|---|
-| `budgetFraction` | 0.55 | Fraction of the detected context window used as input budget | Raise to 0.65 for agents that aggressively tool-use; autodetect handles window size |
+| `budgetFraction` | 0.55 | Fraction of the detected context window used as input budget | Raise to 0.65 for agents that aggressively tool-use. Autodetect only handles known model families — see *Context window overrides* below for custom/local/finetuned models |
 | `contextWindowReserve` | 0.25 | Reserve left for output and tool results | Below 0.20 on large-context models invites late-turn overflow |
 | `targetBudgetFraction` | 0.50 | Split between context assembly and history | Higher = richer facts/wiki; lower = more conversation headroom |
 | `warmHistoryBudgetFraction` | 0.27 | History's share of first-turn warming | The key lever against tight trim cycles; don't push below 0.20 |
@@ -616,6 +616,65 @@ The recommended starting config for a standard single-agent deployment is intent
   }
 }
 ```
+
+---
+
+### Context window overrides (custom, local, or finetuned models)
+
+HyperMem sizes the token budget from the model string using an internal pattern table covering known families (Claude, GPT, Gemini, GLM, Qwen, DeepSeek). If your model string doesn't match a known pattern, resolution silently falls through to `defaultTokenBudget` (90k), and **every downstream dial in this section becomes wrong**, because they're all fractions of the context window:
+
+- `budgetFraction` × *wrong window* → wrong input budget
+- `warmHistoryBudgetFraction` × *wrong budget* → wrong warm load on first turn
+- Trim tiers and compaction thresholds fire against the wrong ceiling
+
+The two symptoms that indicate window-detection failure:
+
+1. **Undersized window detected** (you have a 200k model, HyperMem thinks it's 90k): every turn warms near the top of the misdetected budget, trim fires constantly, semantic recall and facts get starved. You see continuous `warm→trim→compact` cycling even on short sessions.
+2. **Oversized window detected** (you have a 32k local model, HyperMem thinks it's larger): warm loads overshoot the real context window, turns land mid-response with truncated output or provider-side 400s on token overflow.
+
+**Check what HyperMem is using.** Enable `verboseLogging: true` in the compositor config and look for the `budget source:` log line on each turn:
+
+```
+[hypermem-plugin] budget source: runtime tokenBudget=163840 model=provider/my-model
+[hypermem-plugin] budget source: contextWindowOverrides[provider/my-model]=131072, reserve=0.25, effective=98304
+[hypermem-plugin] budget source: fallback contextWindowSize=90000, reserve=0.25, effective=67500 model=provider/my-model
+```
+
+If you see `fallback contextWindowSize` for your model, detection failed and you need an override.
+
+**Apply an override.** Add a `contextWindowOverrides` block to `~/.openclaw/hypermem/config.json`. The key is `"provider/model"` as it appears in your agent's model string (lowercase, exact match):
+
+```json
+{
+  "compositor": {
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.25,
+    "warmHistoryBudgetFraction": 0.27,
+    "contextWindowOverrides": {
+      "ollama/llama-3.3-70b":      { "contextTokens": 131072 },
+      "copilot-local/custom-sft":  { "contextTokens": 32768 },
+      "vllm/qwen3-coder-ft":       { "contextTokens": 262144 }
+    }
+  }
+}
+```
+
+Resolution order, highest-to-lowest priority:
+
+1. Runtime `tokenBudget` passed by OpenClaw (always wins if present)
+2. `contextWindowOverrides["provider/model"]` from this config
+3. Internal pattern-table match against the model string
+4. `defaultTokenBudget` fallback (90k) — **you do not want to end up here**
+
+Gateway restart required after editing overrides. Invalid override entries (malformed keys, impossible ranges, empty values) are dropped on load with a warning; the sanitizer will not let a bad override poison the resolver.
+
+**Interaction with warming and trimming.** Once the correct window is in place:
+
+- First-turn warm load = `detectedWindow × budgetFraction × (1 - contextWindowReserve) × warmHistoryBudgetFraction`
+- Trim pressure zones are computed from the same `detectedWindow × budgetFraction × (1 - reserve)` effective budget, so trim fires at the right proportions of the real window, not a wrong one
+- Compaction thresholds (85% nuclear, 80% afterTurn trim) are also against the effective budget, not the raw window
+
+TL;DR for operators running custom/local/finetuned models: **set `contextWindowOverrides` before tuning anything else in this section**. Every other knob here assumes the detected window is right.
 
 ---
 

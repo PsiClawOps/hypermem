@@ -389,6 +389,35 @@ effective budget × (1 - targetBudgetFraction) = history budget
 
 **Model swap resilience:** The budget is computed from the model's actual context window at compose time when OpenClaw passes `tokenBudget`. If runtime metadata is missing, HyperMem falls back to `contextWindowOverrides` and then `contextWindowSize`. Structured tool history is guarded from being overwritten during a budget downshift — the compositor computes the new allocation but doesn't persist a lower-context snapshot to disk, preserving the full history for when the larger model returns.
 
+### Custom, local, or finetuned models (window-detection override)
+
+The autodetect pattern table in step 2 covers known model families (`claude-*`, `gpt-*`, `gemini-*`, `glm-*`, `qwen-*`, `deepseek-*`). If your model string doesn't match any pattern — custom finetunes, local models behind unusual provider prefixes, experimental Ollama/vLLM/LM Studio names — resolution silently falls through to `defaultTokenBudget` (90k). **Every dial in this section is a fraction of the detected window, so wrong detection propagates everywhere**: `budgetFraction`, `warmHistoryBudgetFraction`, trim tier thresholds (50% / 65% / 85%), and compaction gates (80% afterTurn, 85% nuclear) all end up sized against the wrong ceiling.
+
+Two failure signatures:
+
+- **Undersized detection** (real 200k model detected as 90k): continuous warm→trim→compact cycling, starved facts/wiki slots, tight first-turn budgets. The agent feels "boxed in" even in short sessions.
+- **Oversized detection** (real 32k local model detected as larger): first-turn warm load exceeds the real window, turns hit provider-side truncation or 400 errors on input overflow.
+
+Verify what's being used by enabling `verboseLogging: true` and watching for the `budget source:` log line each turn. `runtime tokenBudget=...` or `contextWindowOverrides[...]` means HyperMem has the right number. `fallback contextWindowSize=...` with your model in the tail means detection failed.
+
+Fix by adding `contextWindowOverrides` in the `compositor` block of `~/.openclaw/hypermem/config.json`:
+
+```json
+{
+  "compositor": {
+    "contextWindowOverrides": {
+      "ollama/llama-3.3-70b":     { "contextTokens": 131072 },
+      "copilot-local/custom-sft": { "contextTokens": 32768 },
+      "vllm/qwen3-coder-ft":      { "contextTokens": 262144 }
+    }
+  }
+}
+```
+
+Key format: `"provider/model"`, lowercase, exact match against the model identifier your agent runs on. Values accept either `contextTokens` or `contextWindow` (same effect). Malformed keys, impossible ranges, and empty entries are dropped by the sanitizer on load with a warning; the override system is designed to be safe to edit without risking the resolver.
+
+Gateway restart required after changes. Overrides interact with warming and trimming exactly as the autodetect path does — once the correct window is in place, every other knob here behaves as documented. Set `contextWindowOverrides` **before** tuning `budgetFraction`, `warmHistoryBudgetFraction`, or any trim-zone dials, otherwise you're tuning against the wrong window and the numbers won't behave.
+
 ### How the budget fills
 
 The compositor fills slots in priority order. Each slot consumes tokens from the remaining budget before the next slot runs (greedy fill, not proportional allocation):
