@@ -49,10 +49,15 @@ Config knobs become defaults for T2. Other tiers apply multipliers baked into th
 On `/new`, compositor assembles only:
 - ACA stack (identity/soul/user): always
 - Meta facts: 8 facts pulled by query `"what does {user} usually discuss with {agent}"` — these are topic-agnostic hooks, not recent work
-- Active WORKQUEUE top item title (one line, if exists)
+- **WORKQUEUE breadcrumb:**
+  - Active items: full titles + one-line Next Step from checkpoint (up to 3 items)
+  - Most recently completed item: title only (1 item)
+  - Target budget: ≤1.5k tokens
 - Recent MEMORY.md index (already injected)
 
-Target turn-1 load: ≤3k tokens of warmed content (plus unavoidable ACA/identity).
+Rationale for WORKQUEUE inclusion: agents organize work through WORKQUEUE, so recent active items are the strongest topic-agnostic breadcrumb available. Including the Next Step lets the agent pick up coherently without re-reading the full checkpoint.
+
+Target turn-1 load: ≤4k tokens of warmed content (plus unavoidable ACA/identity).
 
 ### 3. Speculative warming tags
 
@@ -169,9 +174,9 @@ Each flag can be individually disabled for regression debugging. All three defau
 
 ## Open questions
 
-- Should `/new` breadcrumbs include the last WORKQUEUE checkpoint title if one exists, or only the active item? (Leaning: active only.)
 - Should T4 Stale always force a topic check, or allow override when MEMORY.md was recently updated? (Leaning: always force; MEMORY.md content gets pulled by recall if relevant.)
 - Centroid storage: session-scoped (reset per session) or session-group-scoped (persist across `/new`)? (Leaning: session-scoped; cross-session continuity is covered by cross-session context slot.)
+- How to handle agents without a WORKQUEUE.md (some specialist/director seats)? (Proposed: skip WORKQUEUE breadcrumb silently; meta-facts fill the gap.)
 
 ## Success criteria
 
