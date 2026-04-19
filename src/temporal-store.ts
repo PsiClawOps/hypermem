@@ -105,11 +105,11 @@ export class TemporalStore {
     const order = opts.order ?? 'DESC';
     const minConf = opts.minConfidence ?? 0;
 
-    const params: (string | number)[] = [];
+    const params: (string | number)[] = [minConf];
     const conditions: string[] = [
       'f.superseded_by IS NULL',
       'f.decay_score < 0.8',
-      `t.confidence >= ${minConf}`,
+      't.confidence >= ?',
     ];
 
     if (opts.agentId) {

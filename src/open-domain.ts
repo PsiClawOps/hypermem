@@ -71,7 +71,7 @@ export function buildOpenDomainFtsQuery(query: string): string | null {
     .split(/\s+/)
     .filter(w => w.length >= 3 && !STOP_WORDS.has(w))
     .slice(0, 6)
-    .map(w => `${w}*`);
+    .map(w => `"${w}"*`);
 
   if (terms.length === 0) return null;
   return terms.join(' OR ');
