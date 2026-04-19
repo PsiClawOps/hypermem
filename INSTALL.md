@@ -3,6 +3,10 @@
 ## Quick Start
 
 > **Disk space:** plugin installs pull OpenClaw as a dev dependency. Allow at least 2 GB free before starting.
+>
+> **Install path must be durable:** do not clone HyperMem into `/tmp` or another ephemeral directory for a real install. OpenClaw loads the plugin from the exact absolute paths you configure, so deleting or moving the clone breaks the install.
+>
+> **Config merge warning:** if you already have values in `plugins.load.paths` or `plugins.allow`, merge them instead of overwriting them blindly.
 
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git
@@ -10,6 +14,14 @@ cd hypermem
 npm install && npm run build
 npm --prefix plugin install && npm --prefix plugin run build   # ~1 min on a clean machine
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
+mkdir -p ~/.openclaw/hypermem
+cat > ~/.openclaw/hypermem/config.json <<'JSON'
+{
+  "embedding": {
+    "provider": "none"
+  }
+}
+JSON
 ```
 
 Wire both plugins into OpenClaw:
@@ -24,13 +36,32 @@ openclaw gateway restart
 
 Replace `<path-to-hypermem>` with the absolute path where you cloned the repo.
 
+### Verification checkpoints
+
+1. **Build verified**
+   - root build succeeds
+   - `plugin` build succeeds
+   - `memory-plugin` build succeeds
+
+2. **Wiring verified**
+   - OpenClaw accepts `plugins.load.paths`
+   - slots are set to `hypercompositor` and `hypermem`
+   - gateway restart succeeds
+
+3. **Runtime verified active**
+
 Send a message to any agent, then verify:
 
 ```bash
-openclaw logs --limit 50 | grep hypermem
+openclaw logs --limit 100 | grep -E 'hypermem|context-engine'
 ```
 
-You should see `[hypermem] hypermem initialized` and `[hypermem:compose]` lines. Done.
+Expected lightweight-mode lines:
+- `[hypermem] hypermem initialized`
+- `[hypermem] Embedding provider: none — semantic search disabled, using FTS5 fallback`
+- `[hypermem:compose]`
+
+If you see a fallback like `falling back to default engine "legacy"`, the install is **not** fully active yet even if the build and wiring steps succeeded.
 
 ---
 
@@ -94,7 +125,7 @@ Pick a tier based on your hardware:
 
 ### Minimal (no embedder)
 
-No Ollama, no API key. Set `provider: 'none'` explicitly in `~/.openclaw/hypermem/config.json` to disable embedding entirely:
+No Ollama, no API key. This config must exist **before gateway restart and runtime verification** so the clean install validates the intended lightweight behavior. Set `provider: 'none'` explicitly in `~/.openclaw/hypermem/config.json` to disable embedding entirely:
 
 ```json
 {
@@ -112,6 +143,29 @@ You'll see in the logs:
 ```
 
 Upgrade to a higher tier later without losing stored data.
+
+### Troubleshooting clean installs
+
+**Symptom:** `Context engine "hypercompositor" ... falling back to default engine "legacy"`
+- The plugin was found, but the context engine did not activate correctly.
+- Treat the install as failed at runtime, not successful.
+- Check for release artifact mismatch, stale plugin build output, or config collisions with existing plugin paths.
+
+**Symptom:** HyperMem logs never appear after restart
+- Re-check `plugins.load.paths` for exact absolute paths.
+- Confirm the clone directory still exists and was not created in a temp location.
+- Confirm existing `plugins.allow` and `plugins.load.paths` values were merged correctly instead of overwritten incorrectly.
+
+**Symptom:** build succeeds, but behavior is not lightweight mode
+- Confirm `~/.openclaw/hypermem/config.json` existed before restart.
+- Confirm it contains:
+  ```json
+  {
+    "embedding": {
+      "provider": "none"
+    }
+  }
+  ```
 
 ### Local — Ollama + nomic-embed-text
 
