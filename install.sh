@@ -216,6 +216,18 @@ install_hypermem() {
 
   info "Installing dependencies..."
   npm --prefix "$INSTALL_DIR" install --silent
+
+  info "Building core..."
+  npm --prefix "$INSTALL_DIR" run build
+
+  info "Building hypercompositor plugin..."
+  npm --prefix "$INSTALL_DIR/plugin" install --silent
+  npm --prefix "$INSTALL_DIR/plugin" run build
+
+  info "Building memory plugin..."
+  npm --prefix "$INSTALL_DIR/memory-plugin" install --silent
+  npm --prefix "$INSTALL_DIR/memory-plugin" run build
+
   success "HyperMem installed at $INSTALL_DIR"
 }
 
