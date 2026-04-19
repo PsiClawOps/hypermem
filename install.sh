@@ -76,9 +76,7 @@ preflight() {
   command -v curl &>/dev/null || die "curl is required"
   success "curl $(curl --version | head -1 | awk '{print $2}')"
 
-  # git
-  command -v git &>/dev/null || die "git is required"
-  success "git $(git --version | awk '{print $3}')"
+  # git (optional — only needed for dev installs)
 
   # node
   command -v node &>/dev/null || die "Node.js is required (v22+)"
@@ -202,31 +200,35 @@ INSTALL_DIR="${HYPERMEM_INSTALL_DIR:-$HOME/.hypermem}"
 install_hypermem() {
   echo -e "\n${BOLD}  Installing HyperMem${NC}"
 
-  if [[ -d "$INSTALL_DIR" ]]; then
-    if confirm "HyperMem already found at $INSTALL_DIR — update it?"; then
-      info "Pulling latest..."
-      git -C "$INSTALL_DIR" pull --ff-only
-    else
-      info "Using existing installation at $INSTALL_DIR"
-    fi
-  else
-    info "Cloning into $INSTALL_DIR..."
-    git clone https://github.com/PsiClawOps/hypermem.git "$INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR"
+
+  # Initialize package.json if this is a fresh install
+  if [[ ! -f "$INSTALL_DIR/package.json" ]]; then
+    info "Initializing install directory..."
+    npm --prefix "$INSTALL_DIR" init -y --silent 2>/dev/null
   fi
 
-  info "Installing dependencies..."
-  npm --prefix "$INSTALL_DIR" install --silent
+  if [[ -d "$INSTALL_DIR/node_modules/@psiclawops/hypermem" ]]; then
+    if confirm "HyperMem already found at $INSTALL_DIR — update it?"; then
+      info "Updating packages..."
+      npm --prefix "$INSTALL_DIR" install --silent @psiclawops/hypermem@latest @psiclawops/hypercompositor@latest @psiclawops/hypermem-memory@latest
+    else
+      info "Using existing installation"
+    fi
+  else
+    info "Installing @psiclawops/hypermem..."
+    npm --prefix "$INSTALL_DIR" install --silent @psiclawops/hypermem@latest
 
-  info "Building core..."
-  npm --prefix "$INSTALL_DIR" run build
+    info "Installing @psiclawops/hypercompositor..."
+    npm --prefix "$INSTALL_DIR" install --silent @psiclawops/hypercompositor@latest
 
-  info "Building hypercompositor plugin..."
-  npm --prefix "$INSTALL_DIR/plugin" install --silent
-  npm --prefix "$INSTALL_DIR/plugin" run build
+    info "Installing @psiclawops/hypermem-memory..."
+    npm --prefix "$INSTALL_DIR" install --silent @psiclawops/hypermem-memory@latest
+  fi
 
-  info "Building memory plugin..."
-  npm --prefix "$INSTALL_DIR/memory-plugin" install --silent
-  npm --prefix "$INSTALL_DIR/memory-plugin" run build
+  # Convenience vars for plugin registration
+  PLUGIN_DIR="$INSTALL_DIR/node_modules/@psiclawops/hypercompositor"
+  MEMORY_PLUGIN_DIR="$INSTALL_DIR/node_modules/@psiclawops/hypermem-memory"
 
   success "HyperMem installed at $INSTALL_DIR"
 }
@@ -378,8 +380,8 @@ register_plugin() {
   if ! command -v openclaw &>/dev/null; then
     warn "OpenClaw CLI not found, skipping plugin registration"
     echo -e "  ${DIM}Run these manually after installing OpenClaw:${NC}"
-    echo -e "  ${DIM}  openclaw plugins install file:$INSTALL_DIR/plugin${NC}"
-    echo -e "  ${DIM}  openclaw plugins install file:$INSTALL_DIR/memory-plugin${NC}"
+    echo -e "  ${DIM}  openclaw plugins install file:$PLUGIN_DIR${NC}"
+    echo -e "  ${DIM}  openclaw plugins install file:$MEMORY_PLUGIN_DIR${NC}"
     return
   fi
 
@@ -387,18 +389,18 @@ register_plugin() {
   if confirm "Register HyperMem plugins with OpenClaw?"; then
     # Context engine plugin (hypercompositor)
     info "Registering context engine plugin (hypercompositor)..."
-    if openclaw plugins install "file:$INSTALL_DIR/plugin" 2>/dev/null; then
+    if openclaw plugins install "file:$PLUGIN_DIR" 2>/dev/null; then
       success "hypercompositor registered"
     else
-      warn "Context engine registration failed — run: openclaw plugins install file:$INSTALL_DIR/plugin"
+      warn "Context engine registration failed — run: openclaw plugins install file:$PLUGIN_DIR"
     fi
 
     # Memory plugin (hypermem)
     info "Registering memory plugin (hypermem)..."
-    if openclaw plugins install "file:$INSTALL_DIR/memory-plugin" 2>/dev/null; then
+    if openclaw plugins install "file:$MEMORY_PLUGIN_DIR" 2>/dev/null; then
       success "hypermem registered"
     else
-      warn "Memory plugin registration failed — run: openclaw plugins install file:$INSTALL_DIR/memory-plugin"
+      warn "Memory plugin registration failed — run: openclaw plugins install file:$MEMORY_PLUGIN_DIR"
     fi
 
     # Configure plugin slots
@@ -436,21 +438,21 @@ EOF
   # Verify HyperMem core module loads
   node --input-type=module <<EOF 2>/dev/null \
     && success "HyperMem core module loads" \
-    || warn "HyperMem core module load failed — check $INSTALL_DIR"
+    || warn "HyperMem core module load failed — check $INSTALL_DIR/node_modules/@psiclawops/hypermem"
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-require('$INSTALL_DIR/dist/index.js');
+require('$INSTALL_DIR/node_modules/@psiclawops/hypermem/dist/index.js');
 EOF
 
   # Verify context engine plugin dist exists
-  [[ -f "$INSTALL_DIR/plugin/dist/index.js" ]] \
+  [[ -f "$PLUGIN_DIR/dist/index.js" ]] \
     && success "hypercompositor plugin built" \
-    || warn "hypercompositor plugin not built — run: npm --prefix $INSTALL_DIR/plugin run build"
+    || warn "hypercompositor plugin not built — reinstall: npm --prefix $INSTALL_DIR install @psiclawops/hypercompositor@latest"
 
   # Verify memory plugin dist exists
-  [[ -f "$INSTALL_DIR/memory-plugin/dist/index.js" ]] \
+  [[ -f "$MEMORY_PLUGIN_DIR/dist/index.js" ]] \
     && success "hypermem memory plugin built" \
-    || warn "hypermem memory plugin not built — run: npm --prefix $INSTALL_DIR/memory-plugin run build"
+    || warn "hypermem memory plugin not built — reinstall: npm --prefix $INSTALL_DIR install @psiclawops/hypermem-memory@latest"
 
   # Tier 2: verify transformers package is present
   if [[ "$SELECTED_TIER" == "2" ]]; then
