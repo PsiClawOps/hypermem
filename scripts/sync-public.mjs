@@ -159,6 +159,9 @@ const EXCLUDE_FILES = [
   'scripts/flush-agent-session.sh',     // Internal fleet ops only
   'scripts/migrate-clawtext.mjs',       // Internal migration tool, ClawText refs
   'scripts/sync-public.mjs',            // The sync script itself
+  'docs/ROADMAP.md',                    // Internal future work — not for public release
+  'docs/PHASE1-VALIDATION.md',          // Internal validation artifact
+  'docs/RELEASE_0.8.0_VALIDATION.md',   // Internal release checklist
 ];
 
 // ─── Text file extensions to sanitize ───────────────────────────
