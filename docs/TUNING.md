@@ -487,16 +487,18 @@ Small windows need aggressive reserve (tool results can easily consume 10k+ toke
 ```json
 {
   "compositor": {
-    "budgetFraction": 0.65,
-    "contextWindowReserve": 0.15,
-    "maxFacts": 60,
-    "maxHistoryMessages": 1000,
-    "keystoneHistoryFraction": 0.25
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.25,
+    "warmHistoryBudgetFraction": 0.27,
+    "maxFacts": 25,
+    "maxHistoryMessages": 500,
+    "keystoneHistoryFraction": 0.15,
+    "keystoneMaxMessages": 12
   }
 }
 ```
 
-Large windows can afford tighter reserves and richer context. The compositor naturally uses more of the window.
+Large windows tempt you to warm speculatively — don't. Keep warming lean, let semantic recall surface topic-relevant facts responsively, and reserve the extra window for tool-heavy turns and active conversation growth. The compositor naturally uses more of the window as the session accumulates real content.
 
 ### Dynamic reserve
 
@@ -707,29 +709,44 @@ All files pass through `secret-scanner` before ingest. Notes containing API keys
 
 ### Full Fleet (200k+, council)
 
+The recommended starting config for long-running multi-agent deployments. These values target a steady turn-over-turn pressure profile: warm lean enough that trim/compact cycles don't fire constantly, rely on semantic recall to surface topic-relevant facts responsively, leave meaningful headroom for tool-heavy turns.
+
 ```json
 {
   "compositor": {
-    "budgetFraction": 0.588,
-    "contextWindowReserve": 0.20,
-    "targetBudgetFraction": 0.55,
-    "maxFacts": 60,
-    "maxHistoryMessages": 1000,
-    "maxCrossSessionContext": 12000,
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.25,
+    "targetBudgetFraction": 0.50,
+    "warmHistoryBudgetFraction": 0.27,
+    "maxFacts": 25,
+    "maxHistoryMessages": 500,
+    "maxCrossSessionContext": 4000,
     "hyperformProfile": "full",
-    "keystoneHistoryFraction": 0.25,
-    "keystoneMaxMessages": 30,
-    "wikiTokenCap": 800,
-    "maxTotalTriggerTokens": 10000
+    "keystoneHistoryFraction": 0.15,
+    "keystoneMaxMessages": 12,
+    "wikiTokenCap": 500,
+    "maxTotalTriggerTokens": 10000,
+    "maxRecentToolPairs": 3,
+    "maxProseToolPairs": 10
+  },
+  "eviction": {
+    "enabled": true,
+    "imageAgeTurns": 1,
+    "toolResultAgeTurns": 4,
+    "minTokensToEvict": 600,
+    "keepPreviewChars": 240
   },
   "dreaming": {
     "enabled": true,
     "maxPromotionsPerRun": 8,
     "tickInterval": 6,
     "minScore": 0.65
-  }
+  },
+  "deferToolPruning": true
 }
 ```
+
+**Why these values differ from the `full` profile defaults.** The code-level `full` preset was tuned for maximum richness on first contact. In practice on 200k+ fleets, that turn-1 richness pushed sessions into warm→trim→compact cycling within 3–4 turns. Lowering `warmHistoryBudgetFraction` to 0.27 and trimming the fact/keystone caps leaves room for tool output and active conversation to grow without triggering eviction every turn. Semantic recall still fires against each incoming message, so topic-relevant facts surface when the conversation reaches them — the knowledge is still there, it just loads responsively instead of speculatively. If your fleet is idle for long stretches between sessions and amnesia is a bigger problem than pressure, raise `maxFacts` to 35 and `keystoneMaxMessages` to 18 as a gentler first step before touching `warmHistoryBudgetFraction`.
 
 ### Code Agent (128k, high tool output)
 

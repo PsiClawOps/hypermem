@@ -275,11 +275,18 @@ Add to `~/.openclaw/hypermem/config.json`:
 
 Fastest, highest quality. Uses the same OpenRouter key as hosted embeddings if you already have one.
 
+Put the key in your environment, not the config file:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-YOUR_OPENROUTER_KEY"
+```
+
+Then in `~/.openclaw/hypermem/config.json`:
+
 ```json
 {
   "reranker": {
     "provider": "openrouter",
-    "openrouterApiKey": "sk-or-YOUR_OPENROUTER_KEY",
     "openrouterModel": "cohere/rerank-4-pro",
     "topK": 10,
     "minCandidates": 5
@@ -287,15 +294,22 @@ Fastest, highest quality. Uses the same OpenRouter key as hosted embeddings if y
 }
 ```
 
+`openrouterApiKey` in the config file is still honored as a fallback for compatibility, but env-var-first keeps credentials out of any config-under-version-control.
+
 ### Hosted — ZeroEntropy (zerank-2)
 
 Alternative hosted option, specialized reranking service.
+
+```bash
+export ZEROENTROPY_API_KEY="YOUR_ZEROENTROPY_KEY"
+```
+
+Then:
 
 ```json
 {
   "reranker": {
     "provider": "zeroentropy",
-    "zeroEntropyApiKey": "YOUR_ZEROENTROPY_KEY",
     "zeroEntropyModel": "zerank-2",
     "topK": 10,
     "minCandidates": 5
@@ -303,7 +317,7 @@ Alternative hosted option, specialized reranking service.
 }
 ```
 
-Get a key at [zeroentropy.dev](https://zeroentropy.dev).
+`zeroEntropyApiKey` in the config file is still honored as a fallback. Get a key at [zeroentropy.dev](https://zeroentropy.dev).
 
 ---
 
@@ -544,48 +558,61 @@ Solo installs can skip this.
 
 ## Token Budget Tuning
 
-These settings live in `~/.openclaw/hypermem/config.json` under the `compositor` key. All fields are optional. Gateway restart required after changes.
+These settings live in `~/.openclaw/hypermem/config.json` under the `compositor` key. All fields are optional — omit any knob to get the code-level default. Gateway restart required after changes.
+
+The recommended starting config for a standard single-agent deployment is intentionally lean on turn-1 warming. Semantic recall and fact triggers fire against each incoming message, so topic-relevant context surfaces as the conversation takes shape. This produces a steadier pressure profile than aggressive pre-loading and avoids the warm→trim→compact cycling you see when every session starts near the top of the budget.
 
 ```json
 {
   "compositor": {
-    "defaultTokenBudget": 90000,
-    "maxHistoryMessages": 250,
-    "maxFacts": 28,
-    "maxCrossSessionContext": 6000,
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.25,
+    "targetBudgetFraction": 0.50,
+    "warmHistoryBudgetFraction": 0.27,
+    "maxFacts": 25,
+    "maxHistoryMessages": 500,
+    "maxCrossSessionContext": 4000,
     "maxRecentToolPairs": 3,
     "maxProseToolPairs": 10,
-    "warmHistoryBudgetFraction": 0.4,
-    "keystoneHistoryFraction": 0.2,
-    "keystoneMaxMessages": 15
+    "keystoneHistoryFraction": 0.15,
+    "keystoneMaxMessages": 12,
+    "wikiTokenCap": 500
   }
 }
 ```
 
-| Knob | Default | What it controls | Safe reduction |
+| Knob | Recommended | What it controls | Notes |
 |---|---|---|---|
-| `defaultTokenBudget` | 90000 | Total token ceiling per turn. Don't go below 40000. | 60000 |
-| `maxHistoryMessages` | 250 | Messages pulled before budget trimming | 100 |
-| `maxFacts` | 28 | Structured facts injected (50-150 tokens each) | 10–15 |
-| `maxCrossSessionContext` | 6000 | Cross-session context tokens. Solo agents: set to 0. | 2000 |
-| `maxRecentToolPairs` | 3 | Verbatim tool call/result pairs kept | 2 |
-| `maxProseToolPairs` | 10 | Compressed tool pairs before full drop | 5 |
-| `warmHistoryBudgetFraction` | 0.4 | History's share of total budget. Below 0.3 hurts. | 0.35 |
-| `keystoneHistoryFraction` | 0.2 | Older significant turns recalled for continuity | 0.1 |
+| `budgetFraction` | 0.55 | Fraction of the detected context window used as input budget | Raise to 0.65 for agents that aggressively tool-use; autodetect handles window size |
+| `contextWindowReserve` | 0.25 | Reserve left for output and tool results | Below 0.20 on large-context models invites late-turn overflow |
+| `targetBudgetFraction` | 0.50 | Split between context assembly and history | Higher = richer facts/wiki; lower = more conversation headroom |
+| `warmHistoryBudgetFraction` | 0.27 | History's share of first-turn warming | The key lever against tight trim cycles; don't push below 0.20 |
+| `maxFacts` | 25 | Structured facts injected per turn | Recall surfaces more as topics emerge; 35 is fine for long-memory seats |
+| `maxHistoryMessages` | 500 | Candidate pool for history ranking | Pool size, not load size. 300 is fine for short-session agents |
+| `maxCrossSessionContext` | 4000 | Cross-session context tokens | Solo agents with one session: set to 0 |
+| `maxRecentToolPairs` | 3 | Verbatim tool pairs kept | Raise to 5 for code agents with heavy tool output |
+| `maxProseToolPairs` | 10 | Compressed tool pairs before stubbing | |
+| `keystoneHistoryFraction` | 0.15 | Older significant turns reserved within history slot | |
+| `keystoneMaxMessages` | 12 | Max keystone candidates per turn | Raise to 18 if the agent loses track of older decisions |
+| `wikiTokenCap` | 500 | Cap on wiki/knowledge injection | Raise if your agent uses heavy doc content |
 
-**Lean profile** (~35-45% fewer tokens per turn):
+**Lean profile** (~35–45% fewer tokens per turn) — for constrained hosts, small models, or cost-sensitive deployments:
 
 ```json
 {
   "compositor": {
-    "defaultTokenBudget": 60000,
-    "maxHistoryMessages": 100,
-    "maxFacts": 15,
-    "maxCrossSessionContext": 2000,
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.30,
+    "warmHistoryBudgetFraction": 0.20,
+    "maxFacts": 10,
+    "maxHistoryMessages": 150,
+    "maxCrossSessionContext": 0,
     "maxRecentToolPairs": 2,
     "maxProseToolPairs": 6,
-    "warmHistoryBudgetFraction": 0.35,
-    "keystoneHistoryFraction": 0.1
+    "keystoneHistoryFraction": 0.10,
+    "keystoneMaxMessages": 5,
+    "wikiTokenCap": 300,
+    "hyperformProfile": "light"
   }
 }
 ```
