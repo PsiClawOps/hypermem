@@ -361,7 +361,7 @@ describe('Sprint 2.1 — Tool Artifact Hydration', () => {
     const store = new ToolArtifactStore(db);
 
     const rec = store.put({
-      agentId: 'agent1', sessionKey: 'sk8', toolName: 'image',
+      agentId: 'alice', sessionKey: 'sk8', toolName: 'image',
       payload: JSON.stringify({ result: 'some big image data' }),
     });
 

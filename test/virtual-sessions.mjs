@@ -216,7 +216,7 @@ console.log('\n── VS-5 plugin fix: message count increments on new topic ─
 {
   const db = makeDb();
   const topicMap = new SessionTopicMap(db);
-  const SK = 'agent:agent1:webchat:main';
+  const SK = 'agent:alice:webchat:main';
 
   // Create a topic (simulates the plugin path before the fix)
   const topicId = topicMap.createTopic(SK, 'Deploy discussion');

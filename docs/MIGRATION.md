@@ -2,7 +2,7 @@
 
 Start here.
 
-- **Operator guide:** [`MIGRATION_GUIDE.md`](./MIGRATION_GUIDE.md)
+- **operator guide:** [`MIGRATION_GUIDE.md`](./MIGRATION_GUIDE.md)
 - **Current repo state:** source-specific migration examples live in `MIGRATION_GUIDE.md`. There is no bundled unified migration dispatcher in this repo yet.
 
 All migration examples default to **dry-run** where shown. Add `--apply` only when you are ready to write data.

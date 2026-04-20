@@ -53,7 +53,7 @@ const markerSamples = [
   'model freeze in place for Copilot break',
   'pre-release pointer, 0.8.0 only',
   'feature blocked behind config gate',
-  'running in trial mode on crucible',
+  'running in trial mode on mike',
   'experimental path for DAG walk',
 ];
 
@@ -89,7 +89,7 @@ const blockedWithoutMeta = [
   'council mode paused for now while the Opus migration finishes',
   'Track 4 is temporary parking, deferred to the 0.8.2 release shelf',
   'exploratory period 2026-04-14 onward, no drift reporting required',
-  'ClawCanvas route in effect during migration only, revert after cutover',
+  'canvas route in effect during migration only, revert after cutover',
   'numeric parse active while rollout continues on the verification harness',
   'fact store override temporary for the FTS regression investigation',
   'hotfix for compositor pressure bug, remove after 0.8.1 ships',

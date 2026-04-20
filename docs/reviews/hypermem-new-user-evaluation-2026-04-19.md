@@ -1,10 +1,10 @@
 # HyperMem New-User Evaluation — 2026-04-19
 
-Author: Pylon  
-Requested by: ragesaq  
+Author: Hank  
+Requested by: operator  
 Intended reviewer: Forge
 
-Repo target: `https://github.com/psiclawops/hypermem-internal`  
+Repo target: `https://github.com/psiclawops/hypermem`  
 Package tested: `@psiclawops/hypermem@0.8.1`
 
 Public sources used for setup and expectations only:
@@ -33,7 +33,7 @@ The result is substantially better than the older state, but not yet clean enoug
 My blunt read for Forge:
 - **Core functionality:** credible now
 - **Library mode:** usable now
-- **Operator plugin mode:** workable now
+- **operator plugin mode:** workable now
 - **True first-contact OpenClaw plugin onboarding:** still too implicit
 
 This fix improved substance more than onboarding clarity. That is the right order. The next round should focus on reducing guesswork.
@@ -625,4 +625,4 @@ Cleanup result:
 
 ## Delivery
 
-This report is ready to place into `hypermem-internal` for Forge review.
+This report is ready to place into `hypermem` for Forge review.

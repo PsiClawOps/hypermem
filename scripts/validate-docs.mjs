@@ -104,7 +104,7 @@ if (install) {
 
 // ---------------------------------------------------------------------------
 // 3. Clone URL matches public repo
-//    WHY: 0.6.0 had clone URL pointing to hypermem-internal (private repo).
+//    WHY: 0.6.0 had clone URL pointing to hypermem (private repo).
 //    Public users can't clone it.
 // ---------------------------------------------------------------------------
 

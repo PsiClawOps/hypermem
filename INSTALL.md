@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - **Node.js 22+** (uses built-in `node:sqlite`)
-- **OpenClaw** must already be installed, onboarded, and running. The plugin install assumes a working OpenClaw home with a valid `openclaw.json` and a gateway that can restart.
+- **OpenClaw** must already be installed, onboarded, and running. HyperMem is a plugin for an existing OpenClaw deployment -- it does not bootstrap OpenClaw itself. If you have never run `openclaw gateway start` or completed OpenClaw onboarding, do that first. The HyperMem install guide picks up after OpenClaw is operational.
 - **Disk space:** allow at least 2 GB free. Plugin builds pull OpenClaw as a dev dependency.
 
 **Verify before starting:**
@@ -17,53 +17,88 @@ If `gateway status` shows "disabled" or "not configured", complete OpenClaw onbo
 
 ## Quick Start
 
-> **Disk space:** plugin installs pull OpenClaw as a dev dependency. Allow at least 2 GB free before starting.
->
-> **Prerequisites:** OpenClaw must be installed and onboarded before this step. Run `openclaw gateway status` to confirm. If the gateway is not configured, complete OpenClaw setup first.
->
-> **Production runtime path:** install the built runtime payload into `~/.openclaw/plugins/hypermem`. Do not point production at `/tmp` or at your development repo clone.
->
-> **Config merge warning:** if you already have values in `plugins.load.paths` or `plugins.allow`, merge them instead of overwriting them blindly.
+> **Release note:** if the npm package you installed does not contain `hypermem-install` or `install:runtime`, you are on an older public release. Use the source-clone path in this guide or wait for `0.8.4+`.
 
 ```bash
-git clone https://github.com/PsiClawOps/hypermem.git
-cd hypermem
-npm install && npm run build
-npm --prefix plugin install && npm --prefix plugin run build   # ~1 min on a clean machine
-npm --prefix memory-plugin install && npm --prefix memory-plugin run build
-npm run install:runtime
+npm install @psiclawops/hypermem
+npx hypermem-install
+```
+
+`hypermem-install` stages the plugin runtime into `~/.openclaw/plugins/hypermem`. It does **not** modify your OpenClaw config and does **not** restart the gateway.
+
+> **Prerequisites:** OpenClaw must be installed and onboarded. Run `openclaw gateway status` to confirm. If the gateway is not configured, complete OpenClaw setup first.
+>
+> **Config merge warning:** if you already have values in `plugins.load.paths` or `plugins.allow`, merge them instead of overwriting blindly.
+
+Create the config directory and write the current recommended fresh-install starter config. This does 2 things:
+
+1. sets `embedding.provider` to `none` so a clean install does not try to use Ollama by default
+2. applies the current recommended lean compositor settings so fresh installs start from the same OpenClaw and HyperMem guidance we want operators to use
+
+```bash
 mkdir -p ~/.openclaw/hypermem
 cat > ~/.openclaw/hypermem/config.json <<'JSON'
 {
   "embedding": {
     "provider": "none"
+  },
+  "compositor": {
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.25,
+    "targetBudgetFraction": 0.50,
+    "warmHistoryBudgetFraction": 0.27,
+    "maxFacts": 25,
+    "maxHistoryMessages": 500,
+    "maxCrossSessionContext": 4000,
+    "maxRecentToolPairs": 3,
+    "maxProseToolPairs": 10,
+    "keystoneHistoryFraction": 0.15,
+    "keystoneMaxMessages": 12,
+    "wikiTokenCap": 500
   }
 }
 JSON
 ```
 
-`install:runtime` stages the built plugin files into `~/.openclaw/plugins/hypermem`. It does **not** modify your OpenClaw config. The commands below wire the plugins manually.
+If you want a lighter or richer memory profile later, adjust from this baseline using the tuning guidance below instead of starting from the older code defaults.
 
 Wire both plugins into OpenClaw:
+
+**Step 1: Check your existing config (mandatory — do this before wiring).**
 
 ```bash
 openclaw config get plugins.load.paths
 openclaw config get plugins.allow
+```
 
+Note any existing values. You must include them in the commands below.
+
+**Step 2: Wire plugins.**
+
+```bash
+# Wire plugin load paths — use a variable to avoid shell quoting problems, then merge if needed:
 HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
-# If plugins.load.paths already has entries, merge them into HYPERMEM_PATHS before setting it.
 openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
+
+# Set the context engine and memory slots:
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
-# Only set plugins.allow if your config already uses an allowlist.
-# If it returns an array, append "hypercompositor" and "hypermem" to that array.
+
+# Only set plugins.allow if your OpenClaw config already uses an allowlist.
+# If `openclaw config get plugins.allow` returns null, empty, or unset, skip this step.
+# If it returns an array, copy that array and append "hypercompositor" and "hypermem".
 openclaw config set plugins.allow '["existing-plugin","hypercompositor","hypermem"]' --strict-json
+```
+
+> **⚠️  Merge, don't replace.** Do not set `plugins.allow` to only `['hypercompositor','hypermem']`. That can disable bundled CLI surfaces and channel plugins. If your system already has a non-empty allowlist, append the HyperMem plugin ids to that existing array.
+
+**Step 3: Restart.**
+
+```bash
 openclaw gateway restart
 ```
 
-Do **not** replace a working `plugins.allow` list with only `['hypercompositor','hypermem']`. That can disable bundled CLI surfaces and channel plugins.
-
-The repo clone is for build and release work. OpenClaw should load the installed runtime payload from `~/.openclaw/plugins/hypermem/`.
+OpenClaw loads the plugin runtime from `~/.openclaw/plugins/hypermem/`.
 
 ### Verification checkpoints
 
@@ -351,7 +386,9 @@ Then:
 
 ## Installation Steps
 
-### Step 1 — Clone and build
+### Step 1 — Source Build (contributors)
+
+> **Most users should use the npm Quick Start above.** This section is for contributors or users who need to modify HyperMem source.
 
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git
@@ -360,7 +397,7 @@ npm install
 npm run build
 ```
 
-Build both plugins, then install the runtime payload into OpenClaw's durable plugin directory:
+Build both plugins, then install the runtime payload into 's durable plugin directory:
 
 ```bash
 npm --prefix plugin install && npm --prefix plugin run build
@@ -374,37 +411,31 @@ Verify:
 npm test
 ```
 
-The full suite takes 30–60 seconds. When complete, output ends with `ALL N TESTS PASSED ✅`. If you see `ENOSPC`, free up disk space and retry.
+The full suite takes 30–60 seconds. When complete, output ends with `N passed, 0 failed`. If you see `ENOSPC`, free up disk space and retry.
 
 ### Step 2 — Wire the plugins
 
 Use the OpenClaw CLI. **Do not edit `openclaw.json` directly.**
 
 ```bash
+# Check existing values first — merge if non-empty:
 openclaw config get plugins.load.paths
 openclaw config get plugins.allow
 
+# Wire plugin load paths (use a variable to avoid shell quoting problems):
 HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
-# If plugins.load.paths already has entries, merge them into HYPERMEM_PATHS before setting it.
 openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
 
-# Set the context engine slot
+# Set the context engine and memory slots:
 openclaw config set plugins.slots.contextEngine hypercompositor
-
-# Set the memory slot
 openclaw config set plugins.slots.memory hypermem
 
-# Only set plugins.allow if it already exists as an array.
-# Copy the existing array and append "hypercompositor" and "hypermem".
+# Only set plugins.allow if your OpenClaw config already uses an allowlist.
+# If it returns an array, append the HyperMem plugin ids to that existing array.
 openclaw config set plugins.allow '["existing-plugin","hypercompositor","hypermem"]' --strict-json
 ```
 
-If you already have entries in `plugins.allow` or `plugins.load.paths`, merge rather than replace. Check current values:
-
-```bash
-openclaw config get plugins.allow
-openclaw config get plugins.load.paths
-```
+> **⚠️  Merge, don't replace.** Never replace a working `plugins.allow` list with only HyperMem entries. If `plugins.allow` is unset or empty, leave it alone.
 
 ### Step 3 — Choose embedding provider
 
@@ -436,7 +467,7 @@ Expected:
 [hypermem:compose] agent=main triggers=0 fallback=true facts=3 semantic=2 ...
 ```
 
-Full health check (run from the repo clone directory):
+Full health check (run from the repo clone directory — `bin/` is a relative path):
 
 ```bash
 node bin/hypermem-status.mjs              # full dashboard
@@ -444,6 +475,8 @@ node bin/hypermem-status.mjs --health     # health checks only (exit 1 on failur
 ```
 
 > **Note:** The health check requires the data directory to exist. It is created on first gateway restart with the plugin active. Run the `openclaw logs` check first to confirm initialization, then run the health check.
+>
+> **Empty results on fresh installs are normal.** If the health check shows `facts=0`, `episodes=0`, or `no agent messages.db found`, that means the install worked but no conversations have happened yet. Data populates after real agent sessions.
 
 If the plugin didn't load:
 
@@ -455,7 +488,7 @@ openclaw status                                     # look for hypermem in plugi
 
 ### Step 5 — Configure your fleet
 
-hypermem works out of the box for both single-agent and multi-agent installs. The source ships with generic placeholder agent names (`agent1`, `agent2`, `director1`, etc.) in two files that define fleet topology:
+hypermem works out of the box for both single-agent and multi-agent installs. The source ships with generic placeholder agent names (`alice`, `bob`, `director1`, etc.) in two files that define fleet topology:
 
 | File | What it defines |
 |---|---|
@@ -482,7 +515,7 @@ Facts, episodes, and topics are all scoped to your agent ID automatically. Cross
 
 #### Multi-agent installs
 
-hypermem ships with generic placeholder agent names (`agent1`, `agent2`, `director1`, etc.) in the two fleet topology files listed above.
+hypermem ships with generic placeholder agent names (`alice`, `bob`, `director1`, etc.) in the two fleet topology files listed above.
 
 Replace the placeholder names with your fleet:
 
@@ -490,7 +523,7 @@ Replace the placeholder names with your fleet:
 
 ```typescript
 // Before (placeholder):
-agent1: { agentId: 'agent1', tier: 'council' },
+alice: { agentId: 'alice', tier: 'council' },
 
 // After (your fleet):
 architect: { agentId: 'architect', tier: 'council' },
@@ -500,7 +533,7 @@ architect: { agentId: 'architect', tier: 'council' },
 
 ```typescript
 // Before (placeholder):
-agent1: 'infrastructure',
+alice: 'infrastructure',
 
 // After (your fleet):
 architect: 'infrastructure',
@@ -563,23 +596,66 @@ npm --prefix memory-plugin run build
 
 ---
 
-## OpenClaw Settings (Optional Tuning)
+## OpenClaw Platform Settings
 
-These are optional. hypermem works with OpenClaw defaults, but these changes reduce unnecessary overhead.
+HyperMem manages its own context pressure, memory injection, and compaction. Several OpenClaw defaults conflict with this or are too conservative for memory-augmented agents. Apply these after plugin installation, before the gateway restart.
 
-### Lower OpenClaw's compaction threshold
+### Disable OpenClaw context pruning (required)
 
-hypermem owns compaction. OpenClaw's default fires at 24K reserved tokens, which races hypermem's budget management:
+OpenClaw has a built-in context pruning system (`cache-ttl` mode) that independently truncates and clears tool results from the message history based on time and context-window ratio thresholds. When HyperMem is active, these two systems fight each other: OpenClaw prunes tool results to free space, then HyperMem injects context that refills it, triggering aggressive compaction on the next turn. The result is unpredictable amnesia.
+
+Disable OpenClaw's pruning and let HyperMem handle context pressure exclusively:
 
 ```bash
-openclaw config set agents.defaults.compaction.reserveTokens 1000 --strict-json
+openclaw config set agents.defaults.contextPruning.mode off
 ```
 
-This makes OpenClaw's compaction a last-resort safety net that never fires in normal operation.
+### Startup context (recommended)
+
+Controls how much daily memory context agents receive on session start. The defaults are very conservative (2 days, 2800 chars total). For memory-augmented agents, increase these so agents wake up with meaningful context:
+
+```bash
+openclaw config set agents.defaults.startupContext.dailyMemoryDays 4 --strict-json
+openclaw config set agents.defaults.startupContext.maxFileChars 4000 --strict-json
+openclaw config set agents.defaults.startupContext.maxTotalChars 12000 --strict-json
+openclaw config set agents.defaults.startupContext.maxFileBytes 32768 --strict-json
+```
+
+This gives agents 4 days of working memory at startup (~12k chars total). Still under 10% of a 128k context window.
+
+### Bootstrap max chars (recommended)
+
+Controls the maximum size of bootstrap files (AGENTS.md, SOUL.md, etc.) injected on session start. The default (12000) is tight for agents with governance rules, tool references, and identity docs:
+
+```bash
+openclaw config set agents.defaults.bootstrapMaxChars 20000 --strict-json
+```
+
+### Compaction safety net
+
+OpenClaw's built-in compaction (`safeguard` mode) serves as a last-resort safety net. Keep it enabled but tuned so it only fires when HyperMem's own pressure management is insufficient:
+
+```bash
+openclaw config set agents.defaults.compaction.mode safeguard
+openclaw config set agents.defaults.compaction.reserveTokens 16384 --strict-json
+openclaw config set agents.defaults.compaction.keepRecentTokens 6000 --strict-json
+openclaw config set agents.defaults.compaction.reserveTokensFloor 15000 --strict-json
+openclaw config set agents.defaults.compaction.maxHistoryShare 0.65 --strict-json
+```
+
+This reserves 16k tokens for reply generation. HyperMem's own pressure system (afterTurn at 80%, nuclear at 85%) fires first in normal operation. OpenClaw's safeguard catches edge cases.
+
+### LLM idle timeout
+
+Tool-heavy sessions with large outputs can stall during streaming. Raise the idle timeout from the default (120s):
+
+```bash
+openclaw config set agents.defaults.llm.idleTimeoutSeconds 300 --strict-json
+```
 
 ### Tighter session store retention
 
-With hypermem active, SQLite is the durable record. JSONL transcripts provide no memory benefit:
+With HyperMem active, SQLite is the durable record. JSONL transcripts provide no memory benefit:
 
 ```bash
 openclaw config set sessions.maintenance.pruneAfter "14d"
@@ -758,6 +834,10 @@ The background indexer runs on a 5-minute interval. After the first cycle, check
 
 Expected on fresh installs. Facts and episodes accumulate over real conversations. After a few sessions these numbers grow. Workspace files can be seeded manually via the seeder API.
 
+**Lost bundled plugins after setting `plugins.allow`**
+
+If you set `plugins.allow` to only `["hypercompositor","hypermem"]` without including your pre-existing allowed plugins, OpenClaw can stop loading bundled CLI surfaces and channel plugins. Fix: restore the prior allowlist, append `hypercompositor` and `hypermem`, then `openclaw gateway restart`. If `plugins.allow` was previously unset or empty, remove the HyperMem-only allowlist instead of keeping it.
+
 **Plugin not found**
 
 Confirm the installed runtime artifacts exist:
@@ -808,6 +888,24 @@ openclaw gateway restart
 ```
 
 Data in `~/.openclaw/hypermem/` is untouched. Re-enable by switching back.
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERMEM_DATA_DIR` | `~/.openclaw/hypermem` | Override the data directory where hypermem stores `library.db`, per-agent `messages.db` files, and `vectors.db`. Useful when you want data on a separate volume, need isolated test data dirs, or run multiple hypermem instances. The directory is created automatically if it does not exist. |
+
+Example:
+
+```bash
+# Point hypermem at a different data location:
+export HYPERMEM_DATA_DIR=/mnt/data/hypermem
+openclaw gateway restart
+```
+
+> The config file path (`~/.openclaw/hypermem/config.json`) is separate from the data directory. Moving `HYPERMEM_DATA_DIR` does not move the config file.
 
 ---
 

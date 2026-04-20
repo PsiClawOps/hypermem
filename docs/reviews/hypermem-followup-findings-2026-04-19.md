@@ -1,7 +1,7 @@
 # HyperMem Follow-Up Findings — 2026-04-19
 
-Author: Pylon  
-Requested by: ragesaq  
+Author: Hank  
+Requested by: operator  
 Audience: Forge
 
 Related prior reviews:
@@ -229,7 +229,7 @@ I confirmed that:
 - `HYPERMEM_DATA_DIR` is necessary in non-default setups but not emphasized enough
 
 This surfaced directly in the docs-only pass:
-- the verification command failed because it was looking at `/home/lumadmin/.openclaw/hypermem`
+- the verification command failed because it was looking at `~/.openclaw/hypermem`
 - but the install flow had just staged things under an isolated/non-default home
 
 That is a docs bug, not a user mistake.
@@ -311,7 +311,7 @@ Recommendation:
 Across the repeated test cycles I quarantined residual local state to keep the next pass honest.
 
 Notable cleanup path used:
-- `/home/lumadmin/.openclaw/quarantine/hypermem-clean-20260419-182154`
+- `~/.openclaw/quarantine/hypermem-clean-20260419-182154`
 
 This included prior local clones and default local HyperMem data.
 
@@ -323,12 +323,12 @@ This matters because it confirms later findings were not being helped by stale l
 
 ## Delivery and Cross-Host Visibility
 
-## 17. Forge-visible note was uploaded to `hypermem-internal`
+## 17. Forge-visible note was uploaded to `hypermem`
 
 During the follow-up work I uploaded the detailed fresh 0.8.1 new-user review to the internal repo so Forge can read it remotely.
 
 Repo path used:
-- `git@github-psiclawops:psiclawops/hypermem-internal.git`
+- `git@github-psiclawops:psiclawops/hypermem.git`
 
 Committed review file:
 - `docs/reviews/hypermem-new-user-evaluation-2026-04-19.md`
@@ -344,7 +344,7 @@ This is not a HyperMem issue, just part of the delivery path.
 ## 18. Additional local Forge-facing docs-only memo exists
 
 I also created a second local review focused strictly on the docs-only pass:
-- `/home/lumadmin/.openclaw/workspace-council/pylon/reviews/hypermem-docs-only-new-user-review-2026-04-19.md`
+- `~/.openclaw/workspace/hank/reviews/hypermem-docs-only-new-user-review-2026-04-19.md`
 
 This should also be uploaded or merged into internal review history because it isolates public docs defects from source-assisted recovery.
 

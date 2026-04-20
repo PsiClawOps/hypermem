@@ -2918,7 +2918,7 @@ export class Compositor {
 
             if (oldestIncluded) {
               ensureCompactionFenceSchema(db);
-              updateCompactionFence(db, conversation.id, oldestIncluded.id);
+              updateCompactionFence(db, conversation.id, oldestIncluded.id, { minTailMessages: 8 });
             }
           }
         }

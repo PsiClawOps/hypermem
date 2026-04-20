@@ -37,14 +37,14 @@ async function run() {
   try {
     hm = await HyperMem.create({ dataDir: tmpDir });
 
-    const councilRoot = path.join(tmpHome, '.openclaw', 'workspace-council');
+    const councilRoot = path.join(tmpHome, '.openclaw', 'workspace');
     fs.mkdirSync(councilRoot, { recursive: true });
 
     writeIdentity(councilRoot, 'forge', `# IDENTITY.md — Forge, Infrastructure\n\n- **Name:** Forge\n- **Role:** Council infrastructure seat — evaluates operational fitness\n`);
     writeIdentity(councilRoot, 'compass', `# IDENTITY.md — Compass, Vision\n\n- **Name:** Compass\n- **Role:** Council vision seat — holds the destination\n`);
-    writeIdentity(councilRoot, 'helm', `# IDENTITY.md — Helm, Strategy\n\n- **Name:** Helm\n- **Role:** Strategy Director — translates vision into executable direction\n- **Reports to:** Compass\n`);
-    writeIdentity(councilRoot, 'pylon', `# IDENTITY.md — Pylon, Infrastructure\n\n- **Name:** Pylon\n- **Role:** Infrastructure Director — executes infra changes\n- **Reports to:** Forge\n`);
-    writeIdentity(councilRoot, 'relay', `# IDENTITY.md — Relay, Aide-de-Camp\n\n- **Name:** Relay\n- **Role:** Aide-de-Camp — direct operational support\n- **Reports to:** operator (direct)\n`);
+    writeIdentity(councilRoot, 'eve', `# IDENTITY.md — Eve, Strategy\n\n- **Name:** Eve\n- **Role:** Strategy Director — translates vision into executable direction\n- **Reports to:** Compass\n`);
+    writeIdentity(councilRoot, 'hank', `# IDENTITY.md — Hank, Infrastructure\n\n- **Name:** Hank\n- **Role:** Infrastructure Director — executes infra changes\n- **Reports to:** Forge\n`);
+    writeIdentity(councilRoot, 'nancy', `# IDENTITY.md — Nancy, Aide-de-Camp\n\n- **Name:** Nancy\n- **Role:** Aide-de-Camp — direct operational support\n- **Reports to:** operator (direct)\n`);
 
     // Simulate an existing messages.db agent directory that has not yet been
     // backfilled into fleet_agents.
@@ -64,22 +64,22 @@ async function run() {
 
     const forge = hm.getFleetAgent('forge');
     const compass = hm.getFleetAgent('compass');
-    const helm = hm.getFleetAgent('helm');
-    const pylon = hm.getFleetAgent('pylon');
-    const relay = hm.getFleetAgent('relay');
+    const eve = hm.getFleetAgent('eve');
+    const hank = hm.getFleetAgent('hank');
+    const nancy = hm.getFleetAgent('nancy');
     const ember = hm.getFleetAgent('ember');
 
     assert(forge?.tier === 'council', `forge tier is council (got ${forge?.tier})`);
     assert(forge?.orgId === 'forge-org', `forge orgId is forge-org (got ${forge?.orgId})`);
     assert(compass?.tier === 'council', `compass tier is council (got ${compass?.tier})`);
     assert(compass?.orgId === 'compass-org', `compass orgId is compass-org (got ${compass?.orgId})`);
-    assert(helm?.tier === 'director', `helm tier is director (got ${helm?.tier})`);
-    assert(helm?.reportsTo === 'compass', `helm reportsTo is compass (got ${helm?.reportsTo})`);
-    assert(helm?.orgId === 'compass-org', `helm orgId is compass-org (got ${helm?.orgId})`);
-    assert(pylon?.reportsTo === 'forge', `pylon reportsTo is forge (got ${pylon?.reportsTo})`);
-    assert(pylon?.orgId === 'forge-org', `pylon orgId is forge-org (got ${pylon?.orgId})`);
-    assert(relay?.tier === 'specialist', `relay tier is specialist (got ${relay?.tier})`);
-    assert(relay?.reportsTo === null, 'relay does not map human direct report into reportsTo');
+    assert(eve?.tier === 'director', `eve tier is director (got ${eve?.tier})`);
+    assert(eve?.reportsTo === 'compass', `eve reportsTo is compass (got ${eve?.reportsTo})`);
+    assert(eve?.orgId === 'compass-org', `eve orgId is compass-org (got ${eve?.orgId})`);
+    assert(hank?.reportsTo === 'forge', `hank reportsTo is forge (got ${hank?.reportsTo})`);
+    assert(hank?.orgId === 'forge-org', `hank orgId is forge-org (got ${hank?.orgId})`);
+    assert(nancy?.tier === 'specialist', `nancy tier is specialist (got ${nancy?.tier})`);
+    assert(nancy?.reportsTo === null, 'nancy does not map human direct report into reportsTo');
     assert(ember?.tier === 'unknown', `message-db fallback seeds ember as unknown tier (got ${ember?.tier})`);
 
     const orgs = hm.listFleetOrgs();

@@ -297,7 +297,7 @@ const DEFAULT_CONFIG: HyperMemConfig = {
   cache: {
     keyPrefix: 'hm:',
     sessionTTL: 14400,      // 4 hours — system/identity/meta slots
-    historyTTL: 604800,     // 7 days — extended for ClawCanvas display
+    historyTTL: 604800,     // 7 days — extended for canvas display
   },
   compositor: {
     // TUNE-010 (2026-04-02): Raised from 65000 → 90000.
@@ -453,7 +453,7 @@ function discoverStartupFleetCandidates(
 ): StartupFleetCandidate[] {
   const homeDir = process.env.HOME || os.homedir();
   const workspaceRoots = opts.workspaceRoots ?? [
-    path.join(homeDir, '.openclaw', 'workspace-council'),
+    path.join(homeDir, '.openclaw', 'workspace'),
     path.join(homeDir, '.openclaw', 'workspace'),
   ];
   const candidates = new Map<string, StartupFleetCandidate>();
@@ -571,8 +571,8 @@ function discoverStartupFleetCandidates(
  *
  * Usage:
  *   const hm = await hypermem.create({ dataDir: '~/.openclaw/hypermem' });
- *   await hm.record('agent1', 'agent:agent1:webchat:main', userMsg);
- *   const result = await hm.compose({ agentId: 'agent1', sessionKey: '...', ... });
+ *   await hm.record('alice', 'agent:alice:webchat:main', userMsg);
+ *   const result = await hm.compose({ agentId: 'alice', sessionKey: '...', ... });
  */
 export class HyperMem {
   readonly dbManager: DatabaseManager;
@@ -830,7 +830,7 @@ export class HyperMem {
   /**
    * List archived or forked contexts for an agent.
    *
-   * Operator-safe enumeration path. This is the approved archived-context
+   * operator-safe enumeration path. This is the approved archived-context
    * listing surface. Active composition remains separate.
    */
   listArchivedContexts(

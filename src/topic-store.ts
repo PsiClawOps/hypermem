@@ -16,12 +16,12 @@ import type { Topic, TopicStatus } from './types.js';
 const KNOWN_NAMES: Record<string, string> = {
   hypermem: 'HyperMem',
   hyperbuilder: 'HyperBuilder',
-  clawcanvas: 'ClawCanvas',
-  clawdash: 'ClawDash',
-  clawdispatch: 'ClawDispatch',
+  canvas: 'canvas',
+  dashboard: 'dashboard',
+  dispatch: 'dispatch',
   clawtext: 'ClawText',
-  clawtomation: 'ClawTomation',
-  clawcouncil: 'ClawCouncil',
+  automation: 'automation',
+  council: 'council',
   openclaw: 'OpenClaw',
   clawhub: 'ClawHub',
 };

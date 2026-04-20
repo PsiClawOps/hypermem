@@ -20,7 +20,7 @@ Or via the shell installer:
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-Or install manually via `npm install @psiclawops/hypermem`, see [Installation](#installation) for plugin wiring, embedding setup, and step-by-step paths.
+Or install manually via `npm install @psiclawops/hypermem` — see [Installation](#installation) for plugin wiring, embedding setup, and step-by-step paths.
 
 
 ---
@@ -335,7 +335,7 @@ FTS5 queries use compound indexes on `agentId + sort key` and prefix optimizatio
 | Knowledge | Domain/key/value structured data with full-text search |
 | Episodes | Significant events with impact scores and participant tracking |
 | Topics | Cross-session thread tracking and synthesized wiki pages |
-| Preferences | Operator behavioral patterns |
+| Preferences | operator behavioral patterns |
 | Fleet Registry | Agent registry with tier, org, and capability metadata |
 | System Registry | Service state and lifecycle |
 | Work Items | Work queue with status transitions and FTS5 |
@@ -449,7 +449,7 @@ That's it. No gateway, no plugins, no config files. See [API](#api) for the full
 
 ### OpenClaw plugin install (from source)
 
-> **Release note:** if the npm package you installed does not contain `install:runtime`, you are on an older public release. Use the source-clone path below or update to a newer npm release.
+> **Release note:** if the npm package you installed does not contain `install:runtime`, you are on an older public release. Use the source-clone path below or wait for `0.8.4+`.
 
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git
@@ -460,7 +460,7 @@ npm --prefix memory-plugin install && npm --prefix memory-plugin run build
 npm run install:runtime
 ```
 
-`install:runtime` stages the runtime payload into `~/.openclaw/plugins/hypermem` and prints the exact config commands to wire the plugins. Before running them, create the data directory and config:
+`install:runtime` stages the runtime payload into `~/.openclaw/plugins/hypermem` and prints the exact config commands to wire the plugins. It does not finish wiring automatically. Before running them, create the data directory and write the current recommended starter config:
 
 ```bash
 mkdir -p ~/.openclaw/hypermem
@@ -468,33 +468,56 @@ cat > ~/.openclaw/hypermem/config.json <<'JSON'
 {
   "embedding": {
     "provider": "none"
+  },
+  "compositor": {
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.25,
+    "targetBudgetFraction": 0.50,
+    "warmHistoryBudgetFraction": 0.27,
+    "maxFacts": 25,
+    "maxHistoryMessages": 500,
+    "maxCrossSessionContext": 4000,
+    "maxRecentToolPairs": 3,
+    "maxProseToolPairs": 10,
+    "keystoneHistoryFraction": 0.15,
+    "keystoneMaxMessages": 12,
+    "wikiTokenCap": 500
   }
 }
 JSON
 ```
 
-This sets lightweight mode (FTS5 keyword search, no embedding provider needed). Add an embedding provider later for semantic search without losing stored data. See [INSTALL.md](./INSTALL.md#embedding-providers) for options.
+This keeps a fresh install in lightweight embedding mode while also applying the current recommended lean compositor baseline for OpenClaw operators. Add an embedding provider later for semantic search without losing stored data. See [INSTALL.md](./INSTALL.md#embedding-providers) and [docs/TUNING.md](./docs/TUNING.md) for adjustments.
 
 Wire the plugins into OpenClaw:
 
-```bash
-openclaw config get plugins.load.paths
-openclaw config get plugins.allow
+> **⚠️  Merge, don't overwrite.** If you already have values in `plugins.load.paths` or `plugins.allow`, check them first and include your existing entries alongside the new ones. Replacing the list drops whatever was there before.
+>
+> ```bash
+> openclaw config get plugins.allow
+> openclaw config get plugins.load.paths
+> ```
 
+```bash
+# Use a variable to avoid shell quote-escaping issues with $HOME:
 HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
-# If you already have load paths, merge them into HYPERMEM_PATHS before setting it.
 openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
+# If you have existing load paths, merge them into the array in HYPERMEM_PATHS.
+
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
-# Only set plugins.allow if your config already uses an allowlist.
+
+# Only set plugins.allow if your OpenClaw config already uses an allowlist.
+# If `openclaw config get plugins.allow` returns null, empty, or unset, skip this step.
 # If it returns an array, copy that array and append "hypercompositor" and "hypermem".
 openclaw config set plugins.allow '["existing-plugin","hypercompositor","hypermem"]' --strict-json
+
 openclaw gateway restart
 ```
 
 Do **not** replace a working `plugins.allow` list with only `['hypercompositor','hypermem']`. That can disable bundled CLI surfaces and channel plugins.
 
-Verify (run from the repo clone directory):
+Verify (run these commands from the repo clone directory — `bin/` is a relative path):
 
 ```bash
 openclaw plugins list                    # hypercompositor and hypermem should show as loaded
@@ -520,7 +543,7 @@ If you prefer, hand the install to your OpenClaw agent:
 
 > "Install hypermem following INSTALL.md. I'm running a [solo / multi-agent] setup."
 
-### Operator guides
+### operator guides
 
 - **[docs/MEMORY_MD_AUTHORING.md](./docs/MEMORY_MD_AUTHORING.md)**, how to keep `MEMORY.md` compact, durable, and reviewable
 - **[docs/TUNING.md](./docs/TUNING.md)**, context assembly and output shaping profiles
@@ -579,7 +602,7 @@ Full reference: **[docs/TUNING.md](./docs/TUNING.md)**
 
 ## API
 
-> **Note:** The examples below use placeholder agent names (`my-agent`, `agent1`, etc.). Replace these with your actual agent IDs from your OpenClaw config. Single-agent installs typically use `main`. Multi-agent fleets use whatever IDs you've configured. See [INSTALL.md § "Configure your fleet"](./INSTALL.md#step-5--configure-your-fleet-multi-agent-only) for details.
+> **Note:** The examples below use placeholder agent names (`my-agent`, `alice`, etc.). Replace these with your actual agent IDs from your OpenClaw config. Single-agent installs typically use `main`. Multi-agent fleets use whatever IDs you've configured. See [INSTALL.md § "Configure your fleet"](./INSTALL.md#step-5--configure-your-fleet-multi-agent-only) for details.
 
 ```typescript
 import { HyperMem } from '@psiclawops/hypermem';
@@ -699,7 +722,7 @@ The migration guide includes worked examples showing how to bring data from Open
 
 All examples default to dry-run. Nothing is written until you add `--apply`.
 
-Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
+operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 
 
 ---

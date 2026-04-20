@@ -87,7 +87,7 @@ export type FactScope = 'agent' | 'session' | 'user';
 /**
  * Memory visibility levels:
  * - private:  Only the owning agent can read. Identity, SOUL, personal reflections.
- * - org:      Agents in the same org (e.g., agent1's directors: Pylon, Vigil, Plane).
+ * - org:      Agents in the same org (e.g., alice's directors: Hank, Jack, Irene).
  * - council:  All council seats can read.
  * - fleet:    Any agent in the fleet can read.
  */
@@ -118,8 +118,8 @@ export interface CrossAgentQuery {
 export interface AgentIdentity {
   agentId: string;
   tier: 'council' | 'director' | 'specialist' | 'worker';
-  org?: string;         // e.g., 'agent1-org', 'agent2-org', 'agent3-org'
-  councilLead?: string; // director's council lead, e.g., 'agent1' for Pylon
+  org?: string;         // e.g., 'alice-org', 'bob-org', 'dave-org'
+  councilLead?: string; // director's council lead, e.g., 'alice' for Hank
 }
 
 export interface Fact {
@@ -446,7 +446,7 @@ export interface ProviderMessage {
  * to identify high-signal unprocessed messages.
  *
  * Stored in Redis (hm:{a}:s:{s}:cursor) with dual-write to SQLite for
- * durability across Redis eviction (agent2 Gate 2).
+ * durability across Redis eviction (bob Gate 2).
  */
 export interface SessionCursor {
   /** StoredMessage.id of the newest message included in the last window */

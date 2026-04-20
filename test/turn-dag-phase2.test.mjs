@@ -100,11 +100,11 @@ describe('Schema v7 — Turn DAG columns', () => {
 describe('backfillParentChains', () => {
   it('reconstructs a linear chain for a flat conversation', () => {
     const db = createTestDb();
-    const convId = insertConversation(db, 'agent1', 'session-1');
-    const msgIds = insertFlatMessages(db, convId, 'agent1', 5);
+    const convId = insertConversation(db, 'alice', 'session-1');
+    const msgIds = insertFlatMessages(db, convId, 'alice', 5);
 
     // Create context so backfill can stamp context_id
-    getOrCreateActiveContext(db, 'agent1', 'session-1', convId);
+    getOrCreateActiveContext(db, 'alice', 'session-1', convId);
 
     const result = backfillParentChains(db);
     assert.equal(result.conversationsProcessed, 1);
@@ -128,9 +128,9 @@ describe('backfillParentChains', () => {
 
   it('is idempotent — second run updates 0 messages', () => {
     const db = createTestDb();
-    const convId = insertConversation(db, 'agent1', 'session-1');
-    insertFlatMessages(db, convId, 'agent1', 4);
-    getOrCreateActiveContext(db, 'agent1', 'session-1', convId);
+    const convId = insertConversation(db, 'alice', 'session-1');
+    insertFlatMessages(db, convId, 'alice', 4);
+    getOrCreateActiveContext(db, 'alice', 'session-1', convId);
 
     const first = backfillParentChains(db);
     assert.equal(first.messagesUpdated, 4);
@@ -142,12 +142,12 @@ describe('backfillParentChains', () => {
 
   it('handles multiple conversations independently', () => {
     const db = createTestDb();
-    const conv1 = insertConversation(db, 'agent1', 'session-a');
-    const conv2 = insertConversation(db, 'agent1', 'session-b');
-    const ids1 = insertFlatMessages(db, conv1, 'agent1', 3);
-    const ids2 = insertFlatMessages(db, conv2, 'agent1', 4);
-    getOrCreateActiveContext(db, 'agent1', 'session-a', conv1);
-    getOrCreateActiveContext(db, 'agent1', 'session-b', conv2);
+    const conv1 = insertConversation(db, 'alice', 'session-a');
+    const conv2 = insertConversation(db, 'alice', 'session-b');
+    const ids1 = insertFlatMessages(db, conv1, 'alice', 3);
+    const ids2 = insertFlatMessages(db, conv2, 'alice', 4);
+    getOrCreateActiveContext(db, 'alice', 'session-a', conv1);
+    getOrCreateActiveContext(db, 'alice', 'session-b', conv2);
 
     const result = backfillParentChains(db);
     assert.equal(result.conversationsProcessed, 2);
@@ -173,9 +173,9 @@ describe('backfillParentChains', () => {
 
   it('stamps context_id on messages that lack it', () => {
     const db = createTestDb();
-    const convId = insertConversation(db, 'agent1', 'session-1');
-    insertFlatMessages(db, convId, 'agent1', 3);
-    const ctx = getOrCreateActiveContext(db, 'agent1', 'session-1', convId);
+    const convId = insertConversation(db, 'alice', 'session-1');
+    insertFlatMessages(db, convId, 'alice', 3);
+    const ctx = getOrCreateActiveContext(db, 'alice', 'session-1', convId);
 
     backfillParentChains(db);
 
@@ -194,11 +194,11 @@ describe('recordMessage — Phase 2 DAG writes', () => {
   it('sets parent_id and depth when contextId is provided', () => {
     const db = createTestDb();
     const store = new MessageStore(db);
-    const convId = insertConversation(db, 'agent1', 'session-1');
-    const ctx = getOrCreateActiveContext(db, 'agent1', 'session-1', convId);
+    const convId = insertConversation(db, 'alice', 'session-1');
+    const ctx = getOrCreateActiveContext(db, 'alice', 'session-1', convId);
 
     // First message
-    const msg1 = store.recordMessage(convId, 'agent1', {
+    const msg1 = store.recordMessage(convId, 'alice', {
       role: 'user',
       textContent: 'Hello',
       toolCalls: null,
@@ -211,7 +211,7 @@ describe('recordMessage — Phase 2 DAG writes', () => {
     assert.equal(row1.context_id, ctx.id, 'first message has context_id');
 
     // Second message — should chain off first
-    const msg2 = store.recordMessage(convId, 'agent1', {
+    const msg2 = store.recordMessage(convId, 'alice', {
       role: 'assistant',
       textContent: 'Hi there',
       toolCalls: null,
@@ -226,12 +226,12 @@ describe('recordMessage — Phase 2 DAG writes', () => {
   it('chains messages correctly across multiple turns', () => {
     const db = createTestDb();
     const store = new MessageStore(db);
-    const convId = insertConversation(db, 'agent1', 'session-1');
-    const ctx = getOrCreateActiveContext(db, 'agent1', 'session-1', convId);
+    const convId = insertConversation(db, 'alice', 'session-1');
+    const ctx = getOrCreateActiveContext(db, 'alice', 'session-1', convId);
 
     const messages = [];
     for (let i = 0; i < 5; i++) {
-      const msg = store.recordMessage(convId, 'agent1', {
+      const msg = store.recordMessage(convId, 'alice', {
         role: i % 2 === 0 ? 'user' : 'assistant',
         textContent: `Turn ${i}`,
         toolCalls: null,
@@ -253,16 +253,16 @@ describe('recordMessage — Phase 2 DAG writes', () => {
     }
 
     // Head should be the last message
-    const updated = getActiveContext(db, 'agent1', 'session-1');
+    const updated = getActiveContext(db, 'alice', 'session-1');
     assert.equal(updated.headMessageId, messages[4].id, 'head points to last message');
   });
 
   it('works without contextId — parent_id null, depth 0', () => {
     const db = createTestDb();
     const store = new MessageStore(db);
-    const convId = insertConversation(db, 'agent1', 'session-1');
+    const convId = insertConversation(db, 'alice', 'session-1');
 
-    const msg = store.recordMessage(convId, 'agent1', {
+    const msg = store.recordMessage(convId, 'alice', {
       role: 'user',
       textContent: 'No context',
       toolCalls: null,
@@ -282,14 +282,14 @@ describe('rotateSessionContext', () => {
   it('archives old context and creates a new one', () => {
     const db = createTestDb();
     const store = new MessageStore(db);
-    const convId = insertConversation(db, 'agent1', 'session-1');
-    const original = getOrCreateActiveContext(db, 'agent1', 'session-1', convId);
+    const convId = insertConversation(db, 'alice', 'session-1');
+    const original = getOrCreateActiveContext(db, 'alice', 'session-1', convId);
     // Write a message to advance the head pointer
-    store.recordMessage(convId, 'agent1', {
+    store.recordMessage(convId, 'alice', {
       role: 'user', textContent: 'Some progress', toolCalls: null, toolResults: null,
     }, { contextId: original.id });
 
-    const rotated = rotateSessionContext(db, 'agent1', 'session-1', convId);
+    const rotated = rotateSessionContext(db, 'alice', 'session-1', convId);
 
     // Old context should be archived
     const oldRow = db.prepare('SELECT status FROM contexts WHERE id = ?').get(original.id);
@@ -303,18 +303,18 @@ describe('rotateSessionContext', () => {
 
   it('links new context to old via parent_context_id', () => {
     const db = createTestDb();
-    const convId = insertConversation(db, 'agent1', 'session-1');
-    const original = getOrCreateActiveContext(db, 'agent1', 'session-1', convId);
+    const convId = insertConversation(db, 'alice', 'session-1');
+    const original = getOrCreateActiveContext(db, 'alice', 'session-1', convId);
 
-    const rotated = rotateSessionContext(db, 'agent1', 'session-1', convId);
+    const rotated = rotateSessionContext(db, 'alice', 'session-1', convId);
     assert.equal(rotated.parentContextId, original.id, 'parent_context_id links to old');
   });
 
   it('works when no prior context exists', () => {
     const db = createTestDb();
-    const convId = insertConversation(db, 'agent1', 'session-1');
+    const convId = insertConversation(db, 'alice', 'session-1');
 
-    const ctx = rotateSessionContext(db, 'agent1', 'session-1', convId);
+    const ctx = rotateSessionContext(db, 'alice', 'session-1', convId);
     assert.ok(ctx.id > 0, 'context created');
     assert.equal(ctx.parentContextId, null, 'no parent when no prior context');
     assert.equal(ctx.status, 'active');
@@ -323,23 +323,23 @@ describe('rotateSessionContext', () => {
   it('new writes after rotation start fresh chain', () => {
     const db = createTestDb();
     const store = new MessageStore(db);
-    const convId = insertConversation(db, 'agent1', 'session-1');
-    const ctx1 = getOrCreateActiveContext(db, 'agent1', 'session-1', convId);
+    const convId = insertConversation(db, 'alice', 'session-1');
+    const ctx1 = getOrCreateActiveContext(db, 'alice', 'session-1', convId);
 
     // Write some messages in original context
-    const msg1 = store.recordMessage(convId, 'agent1', {
+    const msg1 = store.recordMessage(convId, 'alice', {
       role: 'user', textContent: 'Before rotation', toolCalls: null, toolResults: null,
     }, { contextId: ctx1.id });
 
-    const msg2 = store.recordMessage(convId, 'agent1', {
+    const msg2 = store.recordMessage(convId, 'alice', {
       role: 'assistant', textContent: 'Reply before rotation', toolCalls: null, toolResults: null,
     }, { contextId: ctx1.id });
 
     // Rotate
-    const ctx2 = rotateSessionContext(db, 'agent1', 'session-1', convId);
+    const ctx2 = rotateSessionContext(db, 'alice', 'session-1', convId);
 
     // Write in new context
-    const msg3 = store.recordMessage(convId, 'agent1', {
+    const msg3 = store.recordMessage(convId, 'alice', {
       role: 'user', textContent: 'After rotation', toolCalls: null, toolResults: null,
     }, { contextId: ctx2.id });
 
@@ -350,7 +350,7 @@ describe('rotateSessionContext', () => {
     assert.equal(row3.context_id, ctx2.id, 'context_id is the new context');
 
     // Continue writing — should chain within new context
-    const msg4 = store.recordMessage(convId, 'agent1', {
+    const msg4 = store.recordMessage(convId, 'alice', {
       role: 'assistant', textContent: 'Reply after rotation', toolCalls: null, toolResults: null,
     }, { contextId: ctx2.id });
 

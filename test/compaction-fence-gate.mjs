@@ -100,7 +100,7 @@ function run() {
   // Test 2: No fence = no compaction
   {
     const db = createTestDb();
-    const convId = seedConversation(db, 'agent1', 'agent:agent1:webchat:main', 20);
+    const convId = seedConversation(db, 'alice', 'agent:alice:webchat:main', 20);
     const fence = getCompactionFence(db, convId);
     assert(fence === null, 'No fence exists by default');
 
@@ -112,7 +112,7 @@ function run() {
   // Test 3: Set fence, check eligibility
   {
     const db = createTestDb();
-    const convId = seedConversation(db, 'agent1', 'agent:agent1:webchat:main', 20);
+    const convId = seedConversation(db, 'alice', 'agent:alice:webchat:main', 20);
 
     // Get message IDs
     const msgs = db.prepare('SELECT id FROM messages WHERE conversation_id = ? ORDER BY message_index ASC').all(convId);
@@ -133,7 +133,7 @@ function run() {
   // Test 4: Monotone progress — fence never moves backward
   {
     const db = createTestDb();
-    const convId = seedConversation(db, 'agent1', 'agent:agent1:webchat:main', 20);
+    const convId = seedConversation(db, 'alice', 'agent:alice:webchat:main', 20);
     const msgs = db.prepare('SELECT id FROM messages WHERE conversation_id = ? ORDER BY message_index ASC').all(convId);
 
     // Set fence at message 15
@@ -158,7 +158,7 @@ function run() {
   // Test 5: Compactable messages excludes already-summarized
   {
     const db = createTestDb();
-    const convId = seedConversation(db, 'agent1', 'agent:agent1:webchat:main', 20);
+    const convId = seedConversation(db, 'alice', 'agent:alice:webchat:main', 20);
     const msgs = db.prepare('SELECT id FROM messages WHERE conversation_id = ? ORDER BY message_index ASC').all(convId);
 
     // Set fence at message 11
@@ -168,7 +168,7 @@ function run() {
     const now = new Date().toISOString();
     db.prepare(`
       INSERT INTO summaries (conversation_id, agent_id, depth, content, created_at, updated_at)
-      VALUES (?, 'agent1', 0, 'Summary of messages 1-5', ?, ?)
+      VALUES (?, 'alice', 0, 'Summary of messages 1-5', ?, ?)
     `).run(convId, now, now);
 
     const summaryRow = db.prepare('SELECT id FROM summaries WHERE conversation_id = ?').get(convId);
@@ -191,16 +191,48 @@ function run() {
   // Test 6: No fence = empty compactable set
   {
     const db = createTestDb();
-    const convId = seedConversation(db, 'agent1', 'agent:agent1:webchat:main', 20);
+    const convId = seedConversation(db, 'alice', 'agent:alice:webchat:main', 20);
     const compactable = getCompactableMessages(db, convId);
     assert(compactable.length === 0, 'No fence = empty compactable set');
+  }
+
+  // Test 7: Fence clamp preserves a minimum recent tail
+  {
+    const db = createTestDb();
+    const convId = seedConversation(db, 'alice', 'agent:alice:webchat:main', 20);
+    const msgs = db.prepare('SELECT id FROM messages WHERE conversation_id = ? ORDER BY message_index ASC').all(convId);
+
+    // Attempt to fence off everything except the newest message.
+    // The clamp should preserve the newest 8 messages above the fence.
+    updateCompactionFence(db, convId, msgs[19].id, { minTailMessages: 8 });
+
+    const fence = getCompactionFence(db, convId);
+    assert(fence.fenceMessageId === msgs[12].id, 'Fence clamp preserves the newest 8 messages');
+
+    const elig = getCompactionEligibility(db, convId);
+    assert(elig.eligibleCount === 12, `12 messages remain eligible below clamped fence (got ${elig.eligibleCount})`);
+  }
+
+  // Test 8: Short conversations clamp to the oldest available message
+  {
+    const db = createTestDb();
+    const convId = seedConversation(db, 'alice', 'agent:alice:webchat:main', 5);
+    const msgs = db.prepare('SELECT id FROM messages WHERE conversation_id = ? ORDER BY message_index ASC').all(convId);
+
+    updateCompactionFence(db, convId, msgs[4].id, { minTailMessages: 8 });
+
+    const fence = getCompactionFence(db, convId);
+    assert(fence.fenceMessageId === msgs[0].id, 'Short conversations keep the full tail protected');
+
+    const elig = getCompactionEligibility(db, convId);
+    assert(elig.eligibleCount === 0, `Short conversations expose zero compactable messages (got ${elig.eligibleCount})`);
   }
 
   // ─── Preservation Gate Tests ────────────────────────────────
 
   console.log('\n── Preservation Gate ──\n');
 
-  // Test 7: Identical vectors = perfect score
+  // Test 9: Identical vectors = perfect score
   {
     const vec = new Float32Array([1, 0, 0, 0]);
     const result = verifyPreservationFromVectors(vec, [vec, vec, vec]);
@@ -210,7 +242,7 @@ function run() {
     assert(result.passed === true, 'Identical vectors pass the gate');
   }
 
-  // Test 8: Orthogonal summary = zero score
+  // Test 10: Orthogonal summary = zero score
   {
     const summary = new Float32Array([1, 0, 0, 0]);
     const sources = [
@@ -224,7 +256,7 @@ function run() {
     assert(result.passed === false, 'Orthogonal vectors fail the gate');
   }
 
-  // Test 9: Partially aligned summary
+  // Test 11: Partially aligned summary
   {
     const summary = new Float32Array([0.8, 0.6, 0, 0]); // partially overlaps
     const sources = [
@@ -237,7 +269,7 @@ function run() {
     assert(result.score > 0.4, `Combined score > 0.4 (got ${result.score.toFixed(4)})`);
   }
 
-  // Test 10: Custom threshold
+  // Test 12: Custom threshold
   {
     const vec = new Float32Array([0.7, 0.7, 0, 0]);
     const sources = [new Float32Array([1, 0, 0, 0])];

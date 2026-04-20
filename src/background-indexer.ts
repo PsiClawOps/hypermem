@@ -42,27 +42,27 @@ import type { VectorStore } from './vector-store.js';
 // returns results. New agents default to 'general'.
 //
 // ── EXAMPLE DATA ──────────────────────────────────────────────────
-// The agent names below (agent1, director1, etc.) are PLACEHOLDERS.
+// The agent names below (alice, director1, etc.) are PLACEHOLDERS.
 // Replace them with your own agent IDs and domain labels to match
 // your fleet. Single-agent installs don't need to edit this:
 // unknown agents fall through to 'general' automatically.
 // See INSTALL.md § "Configure your fleet" for details.
 // ─────────────────────────────────────────────────────────────────
 const AGENT_DOMAIN_MAP: Record<string, string> = {
-  agent1:        'infrastructure',
+  alice:        'infrastructure',
   director2:        'infrastructure',
   director1:        'infrastructure',
   director3:        'infrastructure',
-  agent2:      'product',
+  bob:      'product',
   director4:         'product',
   director5:       'product',
   director6:        'product',
-  agent3:     'security',
+  dave:     'security',
   director7:      'security',
   director8:        'security',
   agent4:      'ux',
-  agent6:        'governance',
-  agent5:     'strategy',
+  carol:        'governance',
+  oscar:     'strategy',
   specialist1:     'development',
   specialist2:        'communications',
   main:         'general',
@@ -153,7 +153,7 @@ function extractFactCandidates(content: string): FactCandidate[] {
   // Preference patterns — medium confidence (0.60)
   const preferencePatterns = [
     /(?:prefer|always use|never use|don't use|avoid) (.{10,150})/gi,
-    /(?:operator|operator) (?:wants|prefers|likes|hates|dislikes) (.{10,150})/gi,
+    /(?:operator) (?:wants|prefers|likes|hates|dislikes) (.{10,150})/gi,
   ];
 
   // Operational patterns: deployments, incidents, fixes — high confidence (0.70)
@@ -211,7 +211,7 @@ const OPERATIONAL_BOILERPLATE: RegExp[] = [
   /still\s*waiting/i,
   /will\s*pick\s*(it\s*)?up\s*(on\s*(next|the))?/i,
   /message\s*is\s*in\s*(his|her|their|the)\s*queue/i,
-  /sent\s+to\s+(agent6|agent2|agent4|agent3|agent5|agent1)/i,
+  /sent\s+to\s+(carol|bob|agent4|dave|oscar|alice)/i,
   /dispatched\s+(it\s+)?to/i,
   /timed\s*out\s*after/i,
   /\bNO_REPLY\b/,
@@ -475,7 +475,7 @@ function detectTopic(content: string): string | null {
 
   // Product/project name detection
   const productMatch = content.match(
-    /\b(HyperMem|ClawText|ClawDash|ClawCanvas|ClawCouncil|ClawTomation|OpenClaw|ClawDispatch)\b/i
+    /\b(HyperMem|ClawText|dashboard|canvas|council|automation|OpenClaw|dispatch)\b/i
   );
   if (productMatch) return productMatch[1];
 

@@ -1052,6 +1052,37 @@ function extractTextFromInboundContent(content: InboundMessage['content']): stri
     .join('\n');
 }
 
+function resolveAssistantTokenCount(
+  msg: InboundMessage,
+  runtimeContext?: Record<string, unknown>
+): number | undefined {
+  const usage = (msg as { usage?: Record<string, unknown> }).usage;
+  if (usage && typeof usage === 'object') {
+    const candidates = [
+      usage.total,
+      usage.totalTokens,
+      usage.total_tokens,
+      usage.output,
+      usage.outputTokens,
+      usage.output_tokens,
+      usage.completionTokens,
+      usage.completion_tokens,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0) {
+        return Math.floor(candidate);
+      }
+    }
+  }
+
+  const runtimeTokenCount = runtimeContext?.currentTokenCount;
+  if (typeof runtimeTokenCount === 'number' && Number.isFinite(runtimeTokenCount) && runtimeTokenCount > 0) {
+    return Math.floor(runtimeTokenCount);
+  }
+
+  return undefined;
+}
+
 function collectNeutralToolPairStats(messages: NeutralMessage[]): ToolPairStats {
   const callIds = new Set<string>();
   const resultIds = new Set<string>();
@@ -1320,17 +1351,27 @@ function maybeLogPressureAccountingAnomaly(fields: {
     redisVsComposed: Math.abs(fields.redisTokens - fields.composedTokens),
     runtimeVsRedis: Math.abs(fields.runtimeTokens - fields.redisTokens),
   };
-  if (
-    deltas.runtimeVsComposed < threshold &&
-    deltas.redisVsComposed < threshold &&
-    deltas.runtimeVsRedis < threshold
-  ) {
+
+  // Post-0.6.0: "redis" is actually the L1 SQLite cache window, which lags
+  // behind the runtime message array between trim passes.  Cache-vs-runtime
+  // drift is structural and harmless — the runtime array is authoritative
+  // (it's what the model sees).  Only warn when runtimeVsComposed diverges,
+  // which indicates an actual trim accounting bug.
+  if (deltas.runtimeVsComposed < threshold) {
+    // Log cache drift at debug level for observability, not as a warning.
+    if (deltas.redisVsComposed >= threshold || deltas.runtimeVsRedis >= threshold) {
+      console.debug(
+        `[hypermem-plugin] cache-drift (non-anomalous): path=${fields.path} ` +
+        `runtime=${fields.runtimeTokens} cache=${fields.redisTokens} composed=${fields.composedTokens} ` +
+        `budget=${fields.budget}`
+      );
+    }
     return;
   }
 
   console.warn(
     `[hypermem-plugin] pressure-accounting anomaly: path=${fields.path} ` +
-    `runtime=${fields.runtimeTokens} redis=${fields.redisTokens} composed=${fields.composedTokens} ` +
+    `runtime=${fields.runtimeTokens} cache=${fields.redisTokens} composed=${fields.composedTokens} ` +
     `budget=${fields.budget} threshold=${threshold}`
   );
 
@@ -1666,10 +1707,10 @@ function createHyperMemEngine(): ContextEngine {
         // Non-fatal: missing files are silently skipped.
         let identityBlock: string | undefined;
         try {
-          // Council agents live at workspace-council/<agentId>/
+          // Council agents live at workspace/<agentId>/
           // Other agents at workspace/<agentId>/ — try council path first
           const homedir = os.homedir();
-          const councilPath = path.join(homedir, '.openclaw', 'workspace-council', agentId);
+          const councilPath = path.join(homedir, '.openclaw', 'workspace', agentId);
           const workspacePath = path.join(homedir, '.openclaw', 'workspace', agentId);
           let wsPath = councilPath;
           try {
@@ -1697,7 +1738,7 @@ function createHyperMemEngine(): ContextEngine {
         let _wsPathForSeed: string | undefined;
         try {
           const homedir2 = os.homedir();
-          const councilPath2 = path.join(homedir2, '.openclaw', 'workspace-council', agentId);
+          const councilPath2 = path.join(homedir2, '.openclaw', 'workspace', agentId);
           const workspacePath2 = path.join(homedir2, '.openclaw', 'workspace', agentId);
           try { await fs.access(councilPath2); _wsPathForSeed = councilPath2; }
           catch { _wsPathForSeed = workspacePath2; }
@@ -1731,7 +1772,7 @@ function createHyperMemEngine(): ContextEngine {
         // Post-warm pressure check: if messages.db had accumulated history,
         // warm() may have loaded the session straight to 80%+. Pre-trim now
         // so the first turn has headroom instead of starting saturated.
-        // This is the "restart at 98%" failure mode reported by Helm 2026-04-05:
+        // This is the "restart at 98%" failure mode reported by Eve 2026-04-05:
         // JSONL truncation + Redis flush isn't enough if messages.db is still full
         // and warm() reloads it. Trim here closes the loop.
         try {
@@ -2926,7 +2967,7 @@ ${replayRecovery.emittedText}`
      * it never calls ingest() or ingestBatch(). So we must ingest the new
      * messages here, using messages.slice(prePromptMessageCount).
      */
-    async afterTurn({ sessionId, sessionKey, messages, prePromptMessageCount, isHeartbeat }): Promise<void> {
+    async afterTurn({ sessionId, sessionKey, messages, prePromptMessageCount, isHeartbeat, runtimeContext }): Promise<void> {
       if (isHeartbeat) return;
 
       try {
@@ -2971,7 +3012,9 @@ ${replayRecovery.emittedText}`
             // recordUserMessage takes a plain string and would silently discard them.
             await hm.recordUserMessage(agentId, sk, stripMessageMetadata(neutral.textContent ?? ''));
           } else {
-            await hm.recordAssistantMessage(agentId, sk, neutral);
+            await hm.recordAssistantMessage(agentId, sk, neutral, {
+              tokenCount: neutral.role === 'assistant' ? resolveAssistantTokenCount(m, runtimeContext) : undefined,
+            });
           }
         }
 
@@ -3032,7 +3075,7 @@ ${replayRecovery.emittedText}`
         // gradient-compressed window to budget before writing to Redis. Without
         // this, afterTurn writes up to 250 messages regardless of budget, causing
         // trimHistoryToTokenBudget to fire and trim ~200 messages on every
-        // subsequent assemble() — the churn loop seen in Helm's logs.
+        // subsequent assemble() — the churn loop seen in Eve's logs.
         if (hm.cache.isConnected) {
           try {
             const modelState = await hm.cache.getModelState(agentId, sk);
@@ -3056,7 +3099,7 @@ ${replayRecovery.emittedText}`
         // If a session just finished a turn at >80% pressure, the NEXT turn's
         // incoming tool results (parallel web searches, large exec output, etc.)
         // will hit a window with no headroom — the ingestion wave failure mode
-        // (reported by Helm, 2026-04-05). Pre-trim here so the tool-loop
+        // (reported by Eve, 2026-04-05). Pre-trim here so the tool-loop
         // assemble() path starts the next turn with meaningful space.
         //
         // Uses modelState.tokenBudget if cached; skips if unavailable (non-fatal).

@@ -3,7 +3,6 @@
 import { cpSync, existsSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -28,7 +27,7 @@ const requiredEntries = [
 const optionalEntries = [
   ['plugin/README.md', 'plugin/README.md'],
   ['plugin/LICENSE', 'plugin/LICENSE'],
-  ['plugin/node_modules/zod', 'plugin/node_modules/zod'],
+  ['node_modules/zod', 'node_modules/zod'],
   ['memory-plugin/README.md', 'memory-plugin/README.md'],
   ['memory-plugin/LICENSE', 'memory-plugin/LICENSE'],
   ['node_modules/sqlite-vec', 'node_modules/sqlite-vec'],
@@ -65,46 +64,16 @@ symlinkSync(openclawInstallPath, path.join(installRoot, 'memory-plugin/node_modu
 symlinkSync('../../..', path.join(installRoot, 'plugin/node_modules/@psiclawops/hypermem'));
 symlinkSync('../../..', path.join(installRoot, 'memory-plugin/node_modules/@psiclawops/hypermem'));
 
-const desiredPaths = [`${installRoot}/plugin`, `${installRoot}/memory-plugin`];
-
-function readOpenClawConfig(pathKey) {
-  try {
-    const out = execFileSync('openclaw', ['config', 'get', pathKey], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    if (!out || out === 'null' || out === 'undefined') return null;
-    return JSON.parse(out);
-  } catch {
-    return null;
-  }
-}
-
-function mergeUnique(existing, additions) {
-  const arr = Array.isArray(existing) ? existing : [];
-  return [...new Set([...arr, ...additions])];
-}
-
-const existingLoadPaths = readOpenClawConfig('plugins.load.paths');
-const existingAllow = readOpenClawConfig('plugins.allow');
-const mergedLoadPaths = mergeUnique(existingLoadPaths, desiredPaths);
-const mergedAllow = Array.isArray(existingAllow)
-  ? mergeUnique(existingAllow, ['hypercompositor', 'hypermem'])
-  : null;
-
 console.log(`\n  Runtime installed to:\n    ${installRoot}\n`);
 console.log(`  Next steps — wire the plugins into OpenClaw:\n`);
-console.log(`    openclaw config get plugins.load.paths`);
-console.log(`    openclaw config get plugins.allow`);
-console.log(`    openclaw config set plugins.load.paths '${JSON.stringify(mergedLoadPaths)}' --strict-json`);
+console.log(`    openclaw config set plugins.load.paths '["${installRoot}/plugin","${installRoot}/memory-plugin"]' --strict-json`);
 console.log(`    openclaw config set plugins.slots.contextEngine hypercompositor`);
 console.log(`    openclaw config set plugins.slots.memory hypermem`);
-if (mergedAllow) {
-  console.log(`    openclaw config set plugins.allow '${JSON.stringify(mergedAllow)}' --strict-json`);
-} else {
-  console.log(`    # Only set plugins.allow if your OpenClaw config already uses an allowlist.`);
-  console.log(`    # If it returns an array, append "hypercompositor" and "hypermem" to that array.`);
-}
+console.log(`    # Check existing allowed plugins first, then merge hypermem entries in:`);
+console.log(`    openclaw config get plugins.allow`);
+console.log(`    # Example merge (if "my-plugin" was already allowed):`);
+console.log(`    #   openclaw config set plugins.allow '["my-plugin","hypercompositor","hypermem"]' --strict-json`);
+console.log(`    # If plugins.allow is empty or unset, skip that step instead of creating a new allowlist.`);
 console.log(`    openclaw gateway restart\n`);
 console.log(`  Verify:\n`);
 console.log(`    openclaw plugins list`);
