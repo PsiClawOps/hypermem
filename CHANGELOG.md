@@ -2,6 +2,14 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.8.4 — compaction fence fix, install-path fixes, zod runtime packaging
+
+- **Compaction fence tail preservation fixed.** The recent-tail preservation fix is included so compaction no longer drops the protected recent tail during fence advancement.
+- **`afterTurn` token count persistence fixed.** Token accounting now persists correctly after turn completion, which keeps follow-on pressure and compaction decisions honest.
+- **Registry install docs corrected and hardened.** Installation guidance now fixes the shipped `ocplatform` typo, clarifies older package behavior around missing `install:runtime`, improves `plugins.load.paths` quoting, and removes the dangerous overwrite-style `plugins.allow` example in favor of merge-safe guidance.
+- **Install tracks clarified.** Docs now distinguish source-clone plugin setup from older npm package behavior so first-run operators do not follow the wrong path.
+- **`zod` now ships for plugin runtime use.** The published package now includes the runtime `zod` dependency required by the HyperCompositor plugin, fixing `Cannot find module 'zod'` on package-based installs.
+
 ## 0.8.2 — npm packaging & install path clarity
 
 - **INSTALL.md and CHANGELOG.md now ship in the npm package.** Previously missing from `package.json` `files` array, so `npm pack` / `npm publish` excluded them. Users installing from the registry now get the full install guide without cloning the repo.

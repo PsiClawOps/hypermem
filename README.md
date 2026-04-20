@@ -449,6 +449,8 @@ That's it. No gateway, no plugins, no config files. See [API](#api) for the full
 
 ### OpenClaw plugin install (from source)
 
+> **Release note:** if the npm package you installed does not contain `install:runtime`, you are on an older public release. Use the source-clone path below or wait for `0.8.4+`.
+
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git
 cd hypermem
@@ -458,7 +460,7 @@ npm --prefix memory-plugin install && npm --prefix memory-plugin run build
 npm run install:runtime
 ```
 
-`install:runtime` stages the runtime payload into `~/.openclaw/plugins/hypermem` and prints the exact config commands to wire the plugins. Before running them, create the data directory and config:
+`install:runtime` stages the runtime payload into `~/.openclaw/plugins/hypermem` and prints the exact config commands to wire the plugins. It does not finish wiring automatically. Before running them, create the data directory and config:
 
 ```bash
 mkdir -p ~/.openclaw/hypermem
@@ -491,12 +493,15 @@ openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
 
-# ⚠️  Add to your existing plugins.allow — do not replace your current list.
-# Edit the array below to include any plugins you already have allowed:
-openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
+# Only set plugins.allow if your OpenClaw config already uses an allowlist.
+# If `openclaw config get plugins.allow` returns null, empty, or unset, skip this step.
+# If it returns an array, copy that array and append "hypercompositor" and "hypermem".
+openclaw config set plugins.allow '["existing-plugin","hypercompositor","hypermem"]' --strict-json
 
 openclaw gateway restart
 ```
+
+Do **not** replace a working `plugins.allow` list with only `['hypercompositor','hypermem']`. That can disable bundled CLI surfaces and channel plugins.
 
 Verify (run these commands from the repo clone directory — `bin/` is a relative path):
 

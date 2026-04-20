@@ -17,6 +17,8 @@ If `gateway status` shows "disabled" or "not configured", complete OpenClaw onbo
 
 ## Quick Start
 
+> **Release note:** if the npm package you installed does not contain `hypermem-install` or `install:runtime`, you are on an older public release. Use the source-clone path in this guide or wait for `0.8.4+`.
+
 ```bash
 npm install @psiclawops/hypermem
 npx hypermem-install
@@ -55,19 +57,21 @@ Note any existing values. You must include them in the commands below.
 **Step 2: Wire plugins.**
 
 ```bash
-# Wire plugin load paths — merge with any existing paths from Step 1:
-openclaw config set plugins.load.paths "[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
+# Wire plugin load paths — use a variable to avoid shell quoting problems, then merge if needed:
+HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
+openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
 
 # Set the context engine and memory slots:
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
 
-# Allow both plugins — merge with any existing allowed plugins from Step 1.
-# Example (if "my-plugin" was already allowed):
-openclaw config set plugins.allow '["my-plugin","hypercompositor","hypermem"]' --strict-json
+# Only set plugins.allow if your OpenClaw config already uses an allowlist.
+# If `openclaw config get plugins.allow` returns null, empty, or unset, skip this step.
+# If it returns an array, copy that array and append "hypercompositor" and "hypermem".
+openclaw config set plugins.allow '["existing-plugin","hypercompositor","hypermem"]' --strict-json
 ```
 
-> **⚠️  Merge, don't replace.** The command above sets `plugins.allow` to whatever you specify. If `plugins.allow` was non-empty in Step 1, include those entries in the array. Replacing it drops existing plugins (including bundled OpenClaw CLI surfaces and channel plugins).
+> **⚠️  Merge, don't replace.** Do not set `plugins.allow` to only `['hypercompositor','hypermem']`. That can disable bundled CLI surfaces and channel plugins. If your system already has a non-empty allowlist, append the HyperMem plugin ids to that existing array.
 
 **Step 3: Restart.**
 
@@ -399,18 +403,20 @@ Use the OpenClaw CLI. **Do not edit `openclaw.json` directly.**
 openclaw config get plugins.load.paths
 openclaw config get plugins.allow
 
-# Wire plugin load paths (merge with any existing paths):
-openclaw config set plugins.load.paths "[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
+# Wire plugin load paths (use a variable to avoid shell quoting problems):
+HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
+openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
 
 # Set the context engine and memory slots:
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
 
-# Allow both plugins — merge with any existing allowed plugins (example includes "my-plugin"):
-openclaw config set plugins.allow '["my-plugin","hypercompositor","hypermem"]' --strict-json
+# Only set plugins.allow if your OpenClaw config already uses an allowlist.
+# If it returns an array, append the HyperMem plugin ids to that existing array.
+openclaw config set plugins.allow '["existing-plugin","hypercompositor","hypermem"]' --strict-json
 ```
 
-> **⚠️  Merge, don't replace.** Check `openclaw config get plugins.allow` before running this command and include all existing entries in the array.
+> **⚠️  Merge, don't replace.** Never replace a working `plugins.allow` list with only HyperMem entries. If `plugins.allow` is unset or empty, leave it alone.
 
 ### Step 3 — Choose embedding provider
 
@@ -811,7 +817,7 @@ Expected on fresh installs. Facts and episodes accumulate over real conversation
 
 **Lost bundled plugins after setting `plugins.allow`**
 
-If you set `plugins.allow` to only `["hypercompositor","hypermem"]` without including your pre-existing allowed plugins, OpenClaw will stop loading everything else (including built-in CLI surfaces and bundled channel plugins). Fix: re-read your OpenClaw defaults (`openclaw config get plugins.allow`), merge hypermem entries back into the full list, and `openclaw gateway restart`.
+If you set `plugins.allow` to only `["hypercompositor","hypermem"]` without including your pre-existing allowed plugins, OpenClaw can stop loading bundled CLI surfaces and channel plugins. Fix: restore the prior allowlist, append `hypercompositor` and `hypermem`, then `openclaw gateway restart`. If `plugins.allow` was previously unset or empty, remove the HyperMem-only allowlist instead of keeping it.
 
 **Plugin not found**
 

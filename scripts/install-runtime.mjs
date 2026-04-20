@@ -27,7 +27,7 @@ const requiredEntries = [
 const optionalEntries = [
   ['plugin/README.md', 'plugin/README.md'],
   ['plugin/LICENSE', 'plugin/LICENSE'],
-  ['plugin/node_modules/zod', 'plugin/node_modules/zod'],
+  ['node_modules/zod', 'node_modules/zod'],
   ['memory-plugin/README.md', 'memory-plugin/README.md'],
   ['memory-plugin/LICENSE', 'memory-plugin/LICENSE'],
   ['node_modules/sqlite-vec', 'node_modules/sqlite-vec'],
