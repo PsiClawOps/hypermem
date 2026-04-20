@@ -164,7 +164,7 @@ Best fix:
 
 A brand-new user should not have to infer the difference between:
 - library use
-n- npm package runtime staging
+- npm package runtime staging
 - source-clone plugin builds
 - OpenClaw config integration
 
