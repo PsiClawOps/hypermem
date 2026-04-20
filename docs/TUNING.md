@@ -1,6 +1,6 @@
 # hypermem Tuning Guide
 
-Configuration reference for operators and agents. All settings are optional, but the installer now writes a fully-expanded `config.json` so operators can see every default in one place.
+Configuration reference for operators and agents. All settings are optional. The recommended install path writes a starter `config.json` with an explicit lightweight embedding choice and a declarative baseline compositor profile. Tune from that verified baseline, not from guesswork.
 
 Config lives in `~/.openclaw/hypermem/config.json` (takes effect on gateway restart) or is passed programmatically via `HyperMem.create()`:
 
@@ -22,6 +22,16 @@ Resolution order is:
 1. `plugins.entries.hypercompositor.config` in `openclaw.json`
 2. `~/.openclaw/hypermem/config.json`
 3. code defaults
+
+## Before you tune
+
+Do not tune an install that is only staged. Verify these first:
+
+1. `openclaw plugins list` shows `hypercompositor` and `hypermem` loaded
+2. `openclaw logs --limit 50 | grep hypermem` shows `hypermem initialized`
+3. after a real agent message, logs show `[hypermem:compose]`
+
+If any of those are missing, go back to `INSTALL.md`. That is an install-path problem, not a tuning problem.
 
 ---
 

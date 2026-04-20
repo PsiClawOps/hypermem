@@ -21,7 +21,7 @@ async function run() {
 
   const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
   const plugin = await import(pathToFileURL(path.join(repoRoot, 'plugin', 'dist', 'index.js')).href);
-  const { sanitizeContextWindowOverrides, resolveEffectiveBudget } = plugin;
+  const { sanitizeContextWindowOverrides, resolveEffectiveBudget, resolveModelIdentity, diffModelState } = plugin;
 
   const valid = sanitizeContextWindowOverrides({
     'openai-codex/gpt-5.4': { contextTokens: 200000, contextWindow: 200000 },
@@ -74,6 +74,40 @@ async function run() {
   });
   assert(fallbackBudget.source === 'fallback contextWindowSize', 'falls back to contextWindowSize when no runtime budget or override exists');
   assert(fallbackBudget.budget === 96000, 'applies reserve to fallback contextWindowSize');
+
+  const anthropicIdentity = resolveModelIdentity('anthropic/claude-sonnet-4-6');
+  assert(anthropicIdentity.provider === 'anthropic', 'resolveModelIdentity extracts provider');
+  assert(anthropicIdentity.modelId === 'claude-sonnet-4-6', 'resolveModelIdentity extracts model id');
+
+  const providerSwap = diffModelState(
+    {
+      model: 'github-copilot/claude-sonnet-4-6',
+      tokenBudget: 128000,
+    },
+    {
+      model: 'anthropic/claude-sonnet-4-6',
+      tokenBudget: 180000,
+    },
+  );
+  assert(providerSwap.modelChanged, 'provider/model detector treats full provider/model key as identity');
+  assert(providerSwap.providerChanged, 'provider/model detector flags provider swaps');
+  assert(!providerSwap.modelIdChanged, 'provider/model detector keeps same model id when only provider changes');
+  assert(providerSwap.budgetChanged && providerSwap.budgetUplift, 'provider/model detector flags budget uplift separately');
+
+  const modelSwap = diffModelState(
+    {
+      model: 'anthropic/claude-sonnet-4-6',
+      tokenBudget: 180000,
+    },
+    {
+      model: 'anthropic/claude-opus-4-7',
+      tokenBudget: 128000,
+    },
+  );
+  assert(modelSwap.modelChanged, 'provider/model detector flags model changes within the same provider');
+  assert(!modelSwap.providerChanged, 'provider/model detector does not invent provider changes');
+  assert(modelSwap.modelIdChanged, 'provider/model detector flags model-id changes');
+  assert(modelSwap.budgetChanged && modelSwap.budgetDownshift, 'provider/model detector flags downshift budgets');
 
   // ── Maintenance config resolution ──────────────────────────────
   // Verifies that the new maintenance keys have sane defaults when absent,

@@ -2,6 +2,13 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.8.5 — provider/model-aware failover detection, release parity
+
+- **Provider + model identity is now tracked explicitly in HyperCompositor model state.** Mid-session routing changes are detected on the full `provider/model` key, not budget alone, so `github-copilot/claude-sonnet-4-6` and `anthropic/claude-sonnet-4-6` are treated as different operational envelopes.
+- **Downshift detection now keys off provider/model-aware state.** Budget-downshift handling still stays conservative, but verbose logs now surface provider swaps, model swaps, and budget deltas clearly during `context:assemble`.
+- **Install docs now declare the full operator path.** README, INSTALL.md, and TUNING.md now separate staging from activation, document install states explicitly, add merge-safe wiring guidance, and clarify what healthy-but-empty looks like on a first run.
+- **0.8.5 release parity.** Package versions are aligned for the next publish while preserving the npm-first installer and merge-safe config guidance landed from Hank's install review.
+
 ## 0.8.4 — compaction fence fix, install-path fixes, zod runtime packaging
 
 - **Compaction fence tail preservation fixed.** The recent-tail preservation fix is included so compaction no longer drops the protected recent tail during fence advancement.

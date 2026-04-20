@@ -8,7 +8,7 @@
 
 hypermem is a SQLite-backed runtime context engine for OpenClaw agents.
 
-**Quick install** (interactive, detects hardware, writes config):
+**Quick install** (runtime staging + guided OpenClaw wiring):
 
 ```bash
 npm install @psiclawops/hypermem && npx hypermem-install
@@ -20,7 +20,7 @@ Or via the shell installer:
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-Or install manually via `npm install @psiclawops/hypermem` — see [Installation](#installation) for plugin wiring, embedding setup, and step-by-step paths.
+Or install manually via `npm install @psiclawops/hypermem` — see [Installation](#installation) for the full declarative plugin path, verification checkpoints, and setup variants.
 
 
 ---
@@ -386,7 +386,7 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.8.2.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
+**Current release: hypermem 0.8.5.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
 
 | Requirement | Version | Notes |
 |---|---|---|
@@ -399,7 +399,7 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.8.2'
+  ENGINE_VERSION,        // '0.8.5'
   MIN_NODE_VERSION,      // '22.0.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
   MAIN_SCHEMA_VERSION,   // 10 (messages.db)
@@ -447,9 +447,29 @@ const composed = await hm.compose({
 
 That's it. No gateway, no plugins, no config files. See [API](#api) for the full interface.
 
-### OpenClaw plugin install (from source)
+### OpenClaw plugin install
 
-> **Release note:** if the npm package you installed does not contain `install:runtime`, you are on an older public release. Use the source-clone path below or wait for `0.8.4+`.
+**Install contract:** HyperMem plugin install has 4 distinct states. Treat them separately.
+
+1. **Package installed**: `npm install @psiclawops/hypermem`
+2. **Runtime staged**: `npx hypermem-install` or `npm run install:runtime`
+3. **OpenClaw wired**: plugin paths, slots, and optional allowlist merged into config
+4. **Runtime verified active**: gateway restarted, plugins loaded, compose logs visible
+
+If you only finish step 2, HyperMem is **not installed yet**. It is only staged.
+
+> **Release note:** if the npm package you installed does not contain `hypermem-install` or `install:runtime`, you are on an older public release. Use the source-clone path below or wait for `0.8.5+`.
+
+#### Path A: npm package, recommended for operators
+
+```bash
+npm install @psiclawops/hypermem
+npx hypermem-install
+```
+
+`hypermem-install` stages the runtime payload into `~/.openclaw/plugins/hypermem`. It does **not** modify OpenClaw config and does **not** restart the gateway.
+
+#### Path B: source clone, recommended for contributors
 
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git
@@ -460,7 +480,11 @@ npm --prefix memory-plugin install && npm --prefix memory-plugin run build
 npm run install:runtime
 ```
 
-`install:runtime` stages the runtime payload into `~/.openclaw/plugins/hypermem` and prints the exact config commands to wire the plugins. It does not finish wiring automatically. Before running them, create the data directory and write the current recommended starter config:
+Both install paths converge here. The runtime payload is now staged under `~/.openclaw/plugins/hypermem`, but HyperMem is still **not active** until OpenClaw is wired and restarted.
+
+#### Step 1, write the starter config
+
+Before wiring the plugins, create the data directory and write the current recommended starter config:
 
 ```bash
 mkdir -p ~/.openclaw/hypermem
@@ -489,7 +513,16 @@ JSON
 
 This keeps a fresh install in lightweight embedding mode while also applying the current recommended lean compositor baseline for OpenClaw operators. Add an embedding provider later for semantic search without losing stored data. See [INSTALL.md](./INSTALL.md#embedding-providers) and [docs/TUNING.md](./docs/TUNING.md) for adjustments.
 
-Wire the plugins into OpenClaw:
+#### Step 2, inspect current OpenClaw plugin config
+
+```bash
+openclaw config get plugins.load.paths
+openclaw config get plugins.allow
+```
+
+Record what is already there. You are going to **merge**, not replace.
+
+#### Step 3, wire the plugins into OpenClaw
 
 > **⚠️  Merge, don't overwrite.** If you already have values in `plugins.load.paths` or `plugins.allow`, check them first and include your existing entries alongside the new ones. Replacing the list drops whatever was there before.
 >
@@ -517,7 +550,27 @@ openclaw gateway restart
 
 Do **not** replace a working `plugins.allow` list with only `['hypercompositor','hypermem']`. That can disable bundled CLI surfaces and channel plugins.
 
-Verify (run these commands from the repo clone directory — `bin/` is a relative path):
+If `plugins.allow` is unset, null, or empty, leave it alone. Do **not** create a new allowlist unless your OpenClaw install already uses one.
+
+#### Step 4, restart the gateway
+
+```bash
+openclaw gateway restart
+```
+
+#### Step 5, verify install state
+
+Verification should answer which state you are in, not just whether one command succeeded.
+
+| State | What it means | How to verify |
+|---|---|---|
+| Runtime staged | files copied into plugin runtime dir | `ls ~/.openclaw/plugins/hypermem` |
+| Wired | OpenClaw config points at HyperMem | `openclaw config get plugins.slots.contextEngine`, `openclaw config get plugins.slots.memory` |
+| Loaded | gateway actually loaded both plugins | `openclaw plugins list` |
+| Healthy but empty | plugin active, no real session data yet | `node bin/hypermem-status.mjs --health` may report no sessions ingested |
+| Active | HyperMem is composing live turns | `openclaw logs --limit 50 | grep hypermem` shows compose activity |
+
+Run these commands from the repo clone directory when using `bin/hypermem-status.mjs`, because `bin/` is a relative path:
 
 ```bash
 openclaw plugins list                    # hypercompositor and hypermem should show as loaded
@@ -525,7 +578,14 @@ node bin/hypermem-status.mjs --health    # confirms database initialization
 openclaw logs --limit 50 | grep hypermem # should show "hypermem initialized"
 ```
 
-If you see `falling back to default engine "legacy"` in the logs, the install is not active. Check [INSTALL.md troubleshooting](./INSTALL.md#troubleshooting-clean-installs).
+Expected first-run outcomes:
+
+- `openclaw plugins list` shows `hypercompositor` and `hypermem` loaded
+- `node bin/hypermem-status.mjs --health` may say `no sessions ingested` on a fresh install, which is normal
+- logs should show `hypermem initialized`
+- logs should show compose activity after you send a real message to any agent
+
+If you see `falling back to default engine "legacy"` in the logs, the install is **not active**. Check [INSTALL.md troubleshooting](./INSTALL.md#troubleshooting-clean-installs).
 
 ### One-line installer
 
@@ -535,7 +595,7 @@ curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh
 
 Interactive: detects hardware, selects embedding tier, writes config, registers plugins.
 
-Full guide with embedding tiers, reranker setup, fleet config, and tuning: **[INSTALL.md](./INSTALL.md)**
+Full guide with installation states, merge-safe config wiring, embedding tiers, reranker setup, fleet config, and tuning: **[INSTALL.md](./INSTALL.md)**
 
 ### Agent-assisted install
 
@@ -550,6 +610,8 @@ If you prefer, hand the install to your OpenClaw agent:
 - **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**, moving data in from existing memory systems
 
 ### Tuning
+
+Do tuning **after** the install is verified active. If logs still show `legacy` fallback or no compose activity, you do not have a tuning problem yet. You have an install problem.
 
 Two independent surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model writes). Pick a profile first. Most deployments adjust one or two settings on top.
 

@@ -10,6 +10,9 @@ import type { CacheConfig, ComposeDiagnostics, SessionMeta, SessionCursor, Store
 
 export interface ModelState {
   model: string;
+  modelKey?: string;
+  provider?: string;
+  modelId?: string;
   tokenBudget: number;
   composedAt: string;
   historyDepth: number;
