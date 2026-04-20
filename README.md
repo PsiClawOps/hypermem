@@ -11,10 +11,16 @@ hypermem is a SQLite-backed runtime context engine for OpenClaw agents.
 **Quick install** (interactive, detects hardware, writes config):
 
 ```bash
+npm install @psiclawops/hypermem && npx hypermem-install
+```
+
+Or via the shell installer:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-Or install manually — see [Installation](#installation) for library-only, plugin, and step-by-step paths.
+Or install manually via `npm install @psiclawops/hypermem` — see [Installation](#installation) for plugin wiring, embedding setup, and step-by-step paths.
 
 
 ---
