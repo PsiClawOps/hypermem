@@ -785,6 +785,10 @@ HyperMem sizes the token budget from the model string using an internal pattern 
 - `warmHistoryBudgetFraction` × *wrong budget* → wrong warm load on first turn
 - Trim tiers and compaction thresholds fire against the wrong ceiling
 
+**Treat this as mandatory tuning, not optional polish.** If the runtime does not pass the real model budget, you must supply the correct window yourself. In practice that means OpenAI-compatible surfaces, Codex/OpenRouter-style providers, custom provider prefixes, and local model gateways often need an explicit override because the model string alone is not a trustworthy source of truth.
+
+**When you know both numbers, set both.** Each override entry accepts `contextTokens` and `contextWindow`. HyperMem resolves from `contextTokens` first, then `contextWindow`, and the validator enforces `contextTokens <= contextWindow`. Setting both makes your intended usable budget explicit and documents the full advertised window for future operators.
+
 The two symptoms that indicate window-detection failure:
 
 1. **Undersized window detected** (you have a 200k model, HyperMem thinks it's 90k): every turn warms near the top of the misdetected budget, trim fires constantly, semantic recall and facts get starved. You see continuous `warm→trim→compact` cycling even on short sessions.
@@ -809,9 +813,10 @@ If you see `fallback contextWindowSize` for your model, detection failed and you
     "contextWindowReserve": 0.25,
     "warmHistoryBudgetFraction": 0.27,
     "contextWindowOverrides": {
-      "ollama/llama-3.3-70b":      { "contextTokens": 131072 },
-      "copilot-local/custom-sft":  { "contextTokens": 32768 },
-      "vllm/qwen3-coder-ft":       { "contextTokens": 262144 }
+      "ollama/llama-3.3-70b":      { "contextTokens": 131072, "contextWindow": 131072 },
+      "openai-codex/gpt-5.4":      { "contextTokens": 200000, "contextWindow": 200000 },
+      "copilot-local/custom-sft":  { "contextTokens": 32768,  "contextWindow": 32768 },
+      "vllm/qwen3-coder-ft":       { "contextTokens": 262144, "contextWindow": 262144 }
     }
   }
 }
@@ -825,6 +830,8 @@ Resolution order, highest-to-lowest priority:
 4. `defaultTokenBudget` fallback (90k) — **you do not want to end up here**
 
 Gateway restart required after editing overrides. Invalid override entries (malformed keys, impossible ranges, empty values) are dropped on load with a warning; the sanitizer will not let a bad override poison the resolver.
+
+**OpenAI-family warning.** Do not assume `gpt-*`, `openai/*`, `openai-codex/*`, or OpenAI-compatible hosted endpoints will always arrive with correct runtime budget metadata. If you cannot prove the runtime is logging `runtime tokenBudget=...` for that exact model, add an explicit override and verify it in logs before tuning anything else.
 
 **Interaction with warming and trimming.** Once the correct window is in place:
 

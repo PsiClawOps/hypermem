@@ -403,6 +403,10 @@ effective budget × (1 - targetBudgetFraction) = history budget
 
 The autodetect pattern table in step 2 covers known model families (`claude-*`, `gpt-*`, `gemini-*`, `glm-*`, `qwen-*`, `deepseek-*`). If your model string doesn't match any pattern — custom finetunes, local models behind unusual provider prefixes, experimental Ollama/vLLM/LM Studio names — resolution silently falls through to `defaultTokenBudget` (90k). **Every dial in this section is a fraction of the detected window, so wrong detection propagates everywhere**: `budgetFraction`, `warmHistoryBudgetFraction`, trim tier thresholds (50% / 65% / 85%), and compaction gates (80% afterTurn, 85% nuclear) all end up sized against the wrong ceiling.
 
+This is especially important on OpenAI-compatible surfaces. In real deployments, `openai/*`, `openai-codex/*`, OpenRouter-backed models, and custom OpenAI-compatible gateways often do **not** provide enough trustworthy runtime metadata to infer the usable context budget correctly. If you do not see a `runtime tokenBudget=...` log for the exact model you're running, assume you need a manual override.
+
+When you know both numbers, declare both: `contextTokens` for the usable prompt budget and `contextWindow` for the full advertised window. HyperMem uses `contextTokens` first, then `contextWindow`, and the config validator enforces `contextTokens <= contextWindow`.
+
 Two failure signatures:
 
 - **Undersized detection** (real 200k model detected as 90k): continuous warm→trim→compact cycling, starved facts/wiki slots, tight first-turn budgets. The agent feels "boxed in" even in short sessions.
@@ -416,17 +420,18 @@ Fix by adding `contextWindowOverrides` in the `compositor` block of `~/.openclaw
 {
   "compositor": {
     "contextWindowOverrides": {
-      "ollama/llama-3.3-70b":     { "contextTokens": 131072 },
-      "copilot-local/custom-sft": { "contextTokens": 32768 },
-      "vllm/qwen3-coder-ft":      { "contextTokens": 262144 }
+      "ollama/llama-3.3-70b":     { "contextTokens": 131072, "contextWindow": 131072 },
+      "openai-codex/gpt-5.4":     { "contextTokens": 200000, "contextWindow": 200000 },
+      "copilot-local/custom-sft": { "contextTokens": 32768,  "contextWindow": 32768 },
+      "vllm/qwen3-coder-ft":      { "contextTokens": 262144, "contextWindow": 262144 }
     }
   }
 }
 ```
 
-Key format: `"provider/model"`, lowercase, exact match against the model identifier your agent runs on. Values accept either `contextTokens` or `contextWindow` (same effect). Malformed keys, impossible ranges, and empty entries are dropped by the sanitizer on load with a warning; the override system is designed to be safe to edit without risking the resolver.
+Key format: `"provider/model"`, lowercase, exact match against the model identifier your agent runs on. Values accept either `contextTokens` or `contextWindow`, but for production installs you should prefer setting both. Malformed keys, impossible ranges, and empty entries are dropped by the sanitizer on load with a warning; the override system is designed to be safe to edit without risking the resolver.
 
-Gateway restart required after changes. Overrides interact with warming and trimming exactly as the autodetect path does — once the correct window is in place, every other knob here behaves as documented. Set `contextWindowOverrides` **before** tuning `budgetFraction`, `warmHistoryBudgetFraction`, or any trim-zone dials, otherwise you're tuning against the wrong window and the numbers won't behave.
+Gateway restart required after changes. Overrides interact with warming and trimming exactly as the autodetect path does — once the correct window is in place, every other knob here behaves as documented. Set `contextWindowOverrides` **before** tuning `budgetFraction`, `warmHistoryBudgetFraction`, or any trim-zone dials, otherwise you're tuning against the wrong window and the numbers won't behave. For OpenAI-family models, make log verification part of bring-up: no `runtime tokenBudget=...` log, no trust.
 
 ### How the budget fills
 
