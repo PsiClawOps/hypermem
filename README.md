@@ -164,9 +164,9 @@ Different models have different default behaviors. GPT-5.4 tends toward 2x verbo
 
 Adaptation entries are stored in the `model_output_directives` table and matched by model ID using exact match, then glob pattern (longest wins), then wildcard fallback. Each entry contains:
 
-- **Calibration** — known model tendencies and specific adjustments (e.g., "2x verbosity: cut first drafts in half")
-- **Corrections** — hard/medium/soft severity rules applied in order (e.g., "No preamble before the answer")
-- **Task overrides** — per-task-type adjustments
+- **Calibration:** known model tendencies and specific adjustments (e.g., "2x verbosity: cut first drafts in half")
+- **Corrections:** hard/medium/soft severity rules applied in order (e.g., "No preamble before the answer")
+- **Task overrides:** per-task-type adjustments
 
 Model adaptation is only active at the `full` tier. At `light` and `standard`, model-specific corrections are suppressed.
 
@@ -196,7 +196,7 @@ Would you like me to go deeper on any of these?
 WITH outputProfile: "light":
 For a 128k window: reserve 14k for identity/system, target 46k for history, 10k for recent
 tool context, and leave ~30k as allocator reserve. hypermem handles slot competition
-automatically — set `reserveFraction` to your preferred floor and let the compositor fill.
+automatically. Set `reserveFraction` to your preferred floor and let the compositor fill.
 ```
 
 **Confabulation resistance** checks output against stored facts before claims are recorded. No LLM call. Pattern matching against the fact corpus, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
@@ -412,7 +412,7 @@ npm --prefix memory-plugin install && npm --prefix memory-plugin run build
 
 # Embedding provider (required for semantic indexing):
 #   Local:  ollama pull nomic-embed-text
-#   Hosted: set embedding.provider in ~/.openclaw/hypermem/config.json — see docs/TUNING.md
+#   Hosted: set embedding.provider in ~/.openclaw/hypermem/config.json (see docs/TUNING.md)
 
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
@@ -449,7 +449,7 @@ If you prefer, hand the install to your OpenClaw agent:
 
 ### Tuning
 
-Two independent surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model writes). Pick a profile first — most deployments adjust one or two settings on top.
+Two independent surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model writes). Pick a profile first. Most deployments adjust one or two settings on top.
 
 | Profile | Target window | Best for |
 |---|---|---|
