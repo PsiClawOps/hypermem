@@ -555,6 +555,81 @@ export function resolveEffectiveBudget(args: {
   };
 }
 
+export interface ModelIdentity {
+  rawModel: string | null;
+  modelKey: string | null;
+  provider: string | null;
+  modelId: string | null;
+}
+
+export function resolveModelIdentity(model?: string): ModelIdentity {
+  const modelKey = normalizeModelKey(model);
+  if (!modelKey) {
+    return {
+      rawModel: model ?? null,
+      modelKey: null,
+      provider: null,
+      modelId: null,
+    };
+  }
+
+  const slash = modelKey.indexOf('/');
+  return {
+    rawModel: model ?? null,
+    modelKey,
+    provider: slash > 0 ? modelKey.slice(0, slash) : null,
+    modelId: slash > 0 && slash < modelKey.length - 1 ? modelKey.slice(slash + 1) : modelKey,
+  };
+}
+
+export function diffModelState(
+  previous: {
+    model?: string;
+    modelKey?: string | null;
+    provider?: string | null;
+    modelId?: string | null;
+    tokenBudget?: number;
+  } | null | undefined,
+  current: {
+    model?: string;
+    tokenBudget?: number;
+  },
+): {
+  previousIdentity: ModelIdentity;
+  currentIdentity: ModelIdentity;
+  modelChanged: boolean;
+  providerChanged: boolean;
+  modelIdChanged: boolean;
+  budgetChanged: boolean;
+  budgetDownshift: boolean;
+  budgetUplift: boolean;
+} {
+  const previousIdentity = previous?.modelKey || previous?.provider || previous?.modelId
+    ? {
+        rawModel: previous.model ?? null,
+        modelKey: previous.modelKey ?? normalizeModelKey(previous.model),
+        provider: previous.provider ?? resolveModelIdentity(previous.model).provider,
+        modelId: previous.modelId ?? resolveModelIdentity(previous.model).modelId,
+      }
+    : resolveModelIdentity(previous?.model);
+  const currentIdentity = resolveModelIdentity(current.model);
+
+  const previousBudget = previous?.tokenBudget;
+  const currentBudget = current.tokenBudget;
+  const budgetChanged = previousBudget != null && currentBudget != null && previousBudget !== currentBudget;
+
+  return {
+    previousIdentity,
+    currentIdentity,
+    modelChanged: previousIdentity.modelKey !== currentIdentity.modelKey,
+    providerChanged: previousIdentity.provider !== currentIdentity.provider,
+    modelIdChanged: previousIdentity.modelId !== currentIdentity.modelId,
+    budgetChanged,
+    budgetDownshift: previousBudget != null && currentBudget != null && currentBudget < previousBudget,
+    budgetUplift: previousBudget != null && currentBudget != null && currentBudget > previousBudget,
+  };
+}
+
 function normalizeModelKey(model?: string): string | null {
   if (!model) return null;
   const key = model.trim().toLowerCase();
@@ -2519,23 +2594,35 @@ function createHyperMemEngine(): ContextEngine {
       }
 
       // ── Budget downshift: proactive reshape pass ───────────────────────────────────────
-      // If this session previously composed at a higher token budget (e.g. gpt-5.4
-      // → claude-sonnet model switch), the Redis window is still sized for the old
-      // budget. trimHistoryToTokenBudget above trims by count but skips tool
-      // gradient logic. A downshift >10% triggers a full reshape: apply tool
-      // gradient at the new budget + trim, then write back before compose runs.
-      // This prevents several turns of compaction churn after a model switch.
-      //
-      // Bug fix: previously read from getWindow() which is always null here
-      // (afterTurn invalidates it every turn). Also fixed: was doing setWindow()
-      // then invalidateWindow() which is a write-then-delete no-op. Now reads
-      // from history list and writes back via replaceHistory().
+      // Detect provider/model identity changes as well as raw budget changes.
+      // Provider routing matters operationally because the same model family can
+      // land on a different effective context window, for example Copilot Sonnet
+      // vs direct Anthropic Sonnet. Only budget downshifts trigger the demoted
+      // reshape guard, but verbose logs now show provider/model swaps even when
+      // the effective budget stays flat or increases.
       let lastState: Awaited<ReturnType<typeof hm.cache.getModelState>> | null = null;
       try {
         lastState = await hm.cache.getModelState(agentId, sk);
         const DOWNSHIFT_THRESHOLD = 0.10;
-        const isDownshift = lastState &&
-          (lastState.tokenBudget - effectiveBudget) / lastState.tokenBudget > DOWNSHIFT_THRESHOLD;
+        const modelDelta = diffModelState(lastState, {
+          model,
+          tokenBudget: effectiveBudget,
+        });
+        const downshiftFraction = lastState?.tokenBudget
+          ? (lastState.tokenBudget - effectiveBudget) / lastState.tokenBudget
+          : 0;
+        const isDownshift = modelDelta.budgetDownshift && downshiftFraction > DOWNSHIFT_THRESHOLD;
+
+        if (lastState && (modelDelta.modelChanged || modelDelta.budgetChanged)) {
+          verboseLog(
+            `[hypermem-plugin] model state change: ` +
+            `prev=${modelDelta.previousIdentity.modelKey ?? 'unknown'} ` +
+            `next=${modelDelta.currentIdentity.modelKey ?? 'unknown'} ` +
+            `providerChanged=${modelDelta.providerChanged} ` +
+            `modelIdChanged=${modelDelta.modelIdChanged} ` +
+            `budget=${lastState.tokenBudget}->${effectiveBudget}`
+          );
+        }
 
         if (isDownshift && !_deferToolPruning) {
           // Sprint 2.2a: demote reshape to guard telemetry.
@@ -2716,8 +2803,12 @@ ${replayRecovery.emittedText}`
 
       // Update model state for downshift detection on next turn
       try {
+        const modelIdentity = resolveModelIdentity(model);
         await hm.cache.setModelState(agentId, sk, {
           model: model ?? 'unknown',
+          modelKey: modelIdentity.modelKey ?? undefined,
+          provider: modelIdentity.provider ?? undefined,
+          modelId: modelIdentity.modelId ?? undefined,
           tokenBudget: effectiveBudget,
           composedAt: new Date().toISOString(),
           historyDepth,

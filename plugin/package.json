@@ -1,6 +1,6 @@
 {
   "name": "@psiclawops/hypercompositor",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "description": "HyperCompositor — context engine plugin for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
