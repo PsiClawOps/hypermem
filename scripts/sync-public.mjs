@@ -6,7 +6,7 @@
  * Run from the repo root after confirming internal main is clean and tested.
  *
  * Usage:
- *   node scripts/sync-public.mjs "commit message" [--dry-run] [--no-push]
+ *   node scripts/sync-public.mjs "commit message" [--dry-run] [--no-push] [--no-release]
  *
  * Process:
  *   1. Verify internal main is clean (no uncommitted changes)
@@ -16,7 +16,8 @@
  *   5. Build + run full test suite
  *   6. Commit with the provided message
  *   7. Push to public remote (unless --no-push)
- *   8. Return to main
+ *   8. Create or update the GitHub release page for the pushed version (unless --no-release)
+ *   9. Return to main
  */
 
 import { execSync } from 'node:child_process';
@@ -34,10 +35,11 @@ const PUBLIC_REMOTE = 'public';
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes('--dry-run');
 const NO_PUSH = args.includes('--no-push') || DRY_RUN;
+const NO_RELEASE = args.includes('--no-release') || NO_PUSH;
 const commitMsg = args.filter(a => !a.startsWith('--'))[0];
 
 if (!commitMsg) {
-  console.error('Usage: node scripts/sync-public.mjs "commit message" [--dry-run] [--no-push]');
+  console.error('Usage: node scripts/sync-public.mjs "commit message" [--dry-run] [--no-push] [--no-release]');
   process.exit(1);
 }
 
@@ -518,6 +520,12 @@ async function main() {
   if (!NO_PUSH) {
     await waitForCI(publicCommit);
   }
+
+  // 11. Create or update the GitHub release page for this version
+  if (!NO_RELEASE) {
+    const version = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')).version;
+    await publishGitHubRelease(version);
+  }
 }
 
 // ─── CI Status Checker ───────────────────────────────────────────
@@ -528,7 +536,7 @@ const CI_POLL_INTERVAL_MS = 15_000;  // 15 seconds
 const CI_TIMEOUT_MS = 300_000;       // 5 minutes
 
 async function waitForCI(commitSha) {
-  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_PSICLAWOPS_TOKEN;
+  const token = getReleaseToken();
   if (!token) {
     console.log('\n⏭️  Skipping CI check (no GH_TOKEN/GITHUB_TOKEN set).');
     console.log('   Check manually: https://github.com/PsiClawOps/hypermem/actions');
@@ -586,6 +594,68 @@ async function waitForCI(commitSha) {
 
   console.log(`\n   ⚠️  CI check timed out after ${CI_TIMEOUT_MS / 1000}s.`);
   console.log(`   Check manually: https://github.com/${CI_OWNER}/${CI_REPO}/actions`);
+}
+
+function getReleaseToken() {
+  return process.env.GH_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_PSICLAWOPS_TOKEN;
+}
+
+function buildReleaseNotes(version) {
+  const changelogPath = join(REPO_ROOT, 'CHANGELOG.md');
+  const changelog = readFileSync(changelogPath, 'utf8');
+  const escaped = version.replace(/\./g, '\\.');
+  const sectionRe = new RegExp(`## \\[${escaped}\\][\\s\\S]*?(?=\\n## \\[|$)`);
+  const match = changelog.match(sectionRe);
+  const changelogSection = match ? match[0].trim() : `## [${version}]\n\n- See CHANGELOG.md for details.`;
+
+  return [
+    '## Install',
+    '',
+    '**npm:**',
+    '```bash',
+    `npm install @psiclawops/hypermem@${version}`,
+    '```',
+    '',
+    '**From source:**',
+    '```bash',
+    'git clone https://github.com/PsiClawOps/hypermem.git',
+    'cd hypermem && npm install && npm run build',
+    '```',
+    '',
+    'See [INSTALL.md](INSTALL.md) for full setup instructions.',
+    '',
+    '---',
+    '',
+    '## Changes',
+    '',
+    changelogSection,
+    '',
+  ].join('\n');
+}
+
+async function publishGitHubRelease(version) {
+  const token = getReleaseToken();
+  if (!token) {
+    throw new Error('Missing GH token. Set GH_TOKEN, GITHUB_TOKEN, or GH_PSICLAWOPS_TOKEN before sync-public so the GitHub release page is updated.');
+  }
+
+  const notesPath = '/tmp/hypermem-release-notes.md';
+  writeFileSync(notesPath, buildReleaseNotes(version), 'utf8');
+  const env = {
+    ...process.env,
+    GH_TOKEN: token,
+  };
+
+  try {
+    execSync(`gh release view v${version} --repo PsiClawOps/hypermem`, { stdio: 'ignore', env });
+    console.log(`\n[release] Updating GitHub release v${version}...`);
+    execSync(`gh release edit v${version} --repo PsiClawOps/hypermem --title "v${version}" --notes-file ${notesPath}`, { stdio: 'inherit', env });
+  } catch {
+    console.log(`\n[release] Creating GitHub release v${version}...`);
+    execSync(`gh release create v${version} --repo PsiClawOps/hypermem --title "v${version}" --notes-file ${notesPath}`, { stdio: 'inherit', env });
+  }
+
+  console.log(`  ✅ GitHub release page updated for v${version}`);
 }
 
 main().catch(err => {
