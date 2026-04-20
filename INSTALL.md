@@ -1,5 +1,7 @@
 # hypermem — Installation Guide
 
+This is the canonical install procedure. Keep README shorter and point operators here for the full bring-up path.
+
 ## Prerequisites
 
 - **Node.js 22+** (uses built-in `node:sqlite`)
@@ -19,7 +21,7 @@ If `gateway status` shows "disabled" or "not configured", complete OpenClaw onbo
 
 This guide is deliberately declarative. Follow the steps in order and verify each install state before moving on.
 
-> **Release note:** if the npm package you installed does not contain `hypermem-install` or `install:runtime`, you are on an older public release. Use the source-clone path in this guide or wait for `0.8.4+`.
+> **Release note:** if the npm package you installed does not contain `hypermem-install`, `install:runtime`, and `hypermem-model-audit`, you are on an older public release. Use the source-clone path in this guide or wait for the next npm release.
 
 ```bash
 npm install @psiclawops/hypermem

@@ -92,6 +92,26 @@ function normalizeModelKey(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
+function addModelishValue(out, value) {
+  if (typeof value === 'string') {
+    const normalized = normalizeModelKey(value);
+    if (normalized.includes('/')) out.add(normalized);
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) addModelishValue(out, item);
+    return;
+  }
+
+  if (!value || typeof value !== 'object') return;
+
+  addModelishValue(out, value.primary);
+  if (Array.isArray(value.fallbacks)) {
+    for (const fb of value.fallbacks) addModelishValue(out, fb);
+  }
+}
+
 function detectPattern(model) {
   const normalized = normalizeModelKey(model);
   return MODEL_CONTEXT_WINDOWS.find(entry => normalized.includes(entry.pattern));
@@ -104,24 +124,16 @@ function getOverrides(config) {
 
 function collectConfiguredModels(config) {
   const out = new Set();
-  const add = (value) => {
-    const normalized = normalizeModelKey(value);
-    if (normalized.includes('/')) out.add(normalized);
-  };
 
   if (Array.isArray(config?.agents?.list)) {
     for (const agent of config.agents.list) {
-      add(agent?.model);
-      if (Array.isArray(agent?.fallbacks)) {
-        for (const fb of agent.fallbacks) add(fb);
-      }
+      addModelishValue(out, agent?.model);
+      addModelishValue(out, agent?.fallbacks);
     }
   }
 
-  add(config?.agents?.defaults?.model);
-  if (Array.isArray(config?.agents?.defaults?.fallbacks)) {
-    for (const fb of config.agents.defaults.fallbacks) add(fb);
-  }
+  addModelishValue(out, config?.agents?.defaults?.model);
+  addModelishValue(out, config?.agents?.defaults?.fallbacks);
 
   return [...out].sort();
 }

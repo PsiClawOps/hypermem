@@ -205,7 +205,7 @@ if (install) {
   }
 
   // Check config set commands for plugin IDs
-  const slotSets = install.matchAll(/plugins\.slots\.(\w+)\s+(\w+)/g);
+  const slotSets = install.matchAll(/^\s*openclaw\s+config\s+set\s+plugins\.slots\.(\w+)\s+"?([a-zA-Z0-9._-]+)"?\s*$/gm);
   for (const match of slotSets) {
     const [, slot, pluginId] = match;
     if (pluginId !== 'legacy' && pluginId !== 'none' && knownPluginIds.size > 0) {

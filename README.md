@@ -449,6 +449,8 @@ That's it. No gateway, no plugins, no config files. See [API](#api) for the full
 
 ### OpenClaw plugin install
 
+For the full operator procedure, use `INSTALL.md` as the canonical guide. README keeps the short path and install-state model here so users know what "installed" actually means.
+
 **Install contract:** HyperMem plugin install has 4 distinct states. Treat them separately.
 
 1. **Package installed**: `npm install @psiclawops/hypermem`
@@ -458,7 +460,7 @@ That's it. No gateway, no plugins, no config files. See [API](#api) for the full
 
 If you only finish step 2, HyperMem is **not installed yet**. It is only staged.
 
-> **Release note:** if the npm package you installed does not contain `hypermem-install` or `install:runtime`, you are on an older public release. Use the source-clone path below or wait for `0.8.5+`.
+> **Release note:** if the npm package you installed does not contain `hypermem-install`, `install:runtime`, and `hypermem-model-audit`, you are on an older public release. Use the source-clone path below or wait for the next npm release.
 
 #### Path A: npm package, recommended for operators
 

@@ -2,6 +2,13 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.8.6 — docs cleanup, model audit config parsing, validator fix
+
+- **`hypermem-model-audit` now understands object-shaped OpenClaw model config.** It correctly reads `model.primary` plus fallback arrays from modern agent config instead of reporting an empty model set.
+- **Docs release notes no longer drift on package version text.** README and INSTALL now point operators to the next npm release instead of hard-coding conflicting minimum versions.
+- **README and INSTALL roles are clearer.** INSTALL is explicitly the canonical operator bring-up guide, while README stays as the shorter install-state overview.
+- **Docs validator false positives fixed.** `scripts/validate-docs.mjs` now checks only `openclaw config set plugins.slots.* ...` lines, so `config get` examples no longer trigger bogus plugin-id mismatch warnings.
+
 ## 0.8.5 — provider/model-aware failover detection, release parity
 
 - **Provider + model identity is now tracked explicitly in HyperCompositor model state.** Mid-session routing changes are detected on the full `provider/model` key, not budget alone, so `github-copilot/claude-sonnet-4-6` and `anthropic/claude-sonnet-4-6` are treated as different operational envelopes.
