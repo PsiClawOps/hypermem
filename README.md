@@ -104,10 +104,10 @@ What's in storage, not in this prompt:
   Change the topic, and the next turn pulls different content from the same storage.
 ```
 
-### Standard context engine vs. hypercompositor
+### OpenClaw default vs. hypercompositor
 
 ```
-Standard                                hypercompositor
+OpenClaw default                        hypercompositor
 ────────────────────────────────        ────────────────────────────────
 message → append to transcript          message → detect active topic
 transcript full → trim oldest           query 4 storage layers in parallel
@@ -125,7 +125,7 @@ When it fills:                          When budget is exceeded:
   no recovery path                        change topic back → retrieved again
 ```
 
-| | Standard | hypercompositor |
+| | OpenClaw default | hypercompositor |
 |---|---|---|
 | Context source | Growing transcript only | Transcript + 3 additional storage layers |
 | When context fills | Trim + summarize (lossy) | Budget allocation (lossless storage) |
@@ -241,16 +241,7 @@ SQL queries that interpolate datetime values are fully parameterized. FTS5 trigg
 
 ## Pressure management
 
-hypermem composes context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
-
-| Path | Trigger | Action |
-|---|---|---|
-| **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures projected occupancy before results land; trims large results at 80%+ and truncates the messages[] array for the current turn |
-| **AfterTurn trim** | Every turn at >80% | Pre-emptive headroom cut after the assistant replies, before the next turn arrives |
-| **Deep compaction** | compact() at >85% | Cuts in-memory cache to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
-| **Reshape guard** | Structured tool history on downshift | `canPersistReshapedHistory()` blocks a lower-context snapshot from overwriting the full JSONL history |
-
-**The one thing these paths cannot fix:** a session whose JSONL transcript on disk is already at 98% when the gateway restarts. The JSONL loads into runtime context before any compaction runs. Check `session_status` on startup. If you're above 85%, start a fresh session.
+hypermem manages context pressure automatically through four escalating paths. Most sessions never need manual intervention. For trigger thresholds and path details, see [Pressure management](#pressure-management-1) below.
 
 ---
 
@@ -410,6 +401,8 @@ Schema versions are stamped into each database on startup and checked on open. A
 
 ## Installation
 
+Clone into OpenClaw's default plugin resolution path. If you clone elsewhere, set `plugins.load.paths` accordingly.
+
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git ~/.openclaw/workspace/repo/hypermem
 cd ~/.openclaw/workspace/repo/hypermem
@@ -417,11 +410,19 @@ npm install && npm run build
 npm --prefix plugin install && npm --prefix plugin run build
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
 
+# Embedding provider (required for semantic indexing):
+#   Local:  ollama pull nomic-embed-text
+#   Hosted: set embedding.provider in ~/.openclaw/hypermem/config.json — see docs/TUNING.md
+
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
 openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin","~/.openclaw/workspace/repo/hypermem/memory-plugin"]' --strict-json
 openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
 openclaw gateway restart
+
+# Verify
+openclaw plugins list                    # hypercompositor and hypermem should show as loaded
+node bin/hypermem-status.mjs --health    # confirms database initialization
 ```
 
 Or use the one-line installer:
@@ -553,6 +554,21 @@ node bin/hypermem-status.mjs --agent my-agent   # scoped to one agent
 node bin/hypermem-status.mjs --json          # machine-readable output
 node bin/hypermem-status.mjs --health        # health checks only (exit 1 on failure)
 ```
+
+---
+
+## Pressure management
+
+hypermem composes context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
+
+| Path | Trigger | Action |
+|---|---|---|
+| **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures projected occupancy before results land; trims large results at 80%+ and truncates the messages[] array for the current turn |
+| **AfterTurn trim** | Every turn at >80% | Pre-emptive headroom cut after the assistant replies, before the next turn arrives |
+| **Deep compaction** | compact() at >85% | Cuts in-memory cache to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
+| **Reshape guard** | Structured tool history on downshift | `canPersistReshapedHistory()` blocks a lower-context snapshot from overwriting the full JSONL history |
+
+**The one thing these paths cannot fix:** a session whose JSONL transcript on disk is already at 98% when the gateway restarts. The JSONL loads into runtime context before any compaction runs. Check `session_status` on startup. If you're above 85%, start a fresh session.
 
 ---
 
