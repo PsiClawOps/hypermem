@@ -73,8 +73,7 @@ console.log(`    # Check existing allowed plugins first, then merge hypermem ent
 console.log(`    openclaw config get plugins.allow`);
 console.log(`    # Example merge (if "my-plugin" was already allowed):`);
 console.log(`    #   openclaw config set plugins.allow '["my-plugin","hypercompositor","hypermem"]' --strict-json`);
-console.log(`    # If plugins.allow is empty or unset:`);
-console.log(`    #   openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json`);
+console.log(`    # If plugins.allow is empty or unset, skip that step instead of creating a new allowlist.`);
 console.log(`    openclaw gateway restart\n`);
 console.log(`  Verify:\n`);
 console.log(`    openclaw plugins list`);

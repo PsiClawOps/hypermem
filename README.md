@@ -460,7 +460,7 @@ npm --prefix memory-plugin install && npm --prefix memory-plugin run build
 npm run install:runtime
 ```
 
-`install:runtime` stages the runtime payload into `~/.openclaw/plugins/hypermem` and prints the exact config commands to wire the plugins. It does not finish wiring automatically. Before running them, create the data directory and config:
+`install:runtime` stages the runtime payload into `~/.openclaw/plugins/hypermem` and prints the exact config commands to wire the plugins. It does not finish wiring automatically. Before running them, create the data directory and write the current recommended starter config:
 
 ```bash
 mkdir -p ~/.openclaw/hypermem
@@ -468,12 +468,26 @@ cat > ~/.openclaw/hypermem/config.json <<'JSON'
 {
   "embedding": {
     "provider": "none"
+  },
+  "compositor": {
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.25,
+    "targetBudgetFraction": 0.50,
+    "warmHistoryBudgetFraction": 0.27,
+    "maxFacts": 25,
+    "maxHistoryMessages": 500,
+    "maxCrossSessionContext": 4000,
+    "maxRecentToolPairs": 3,
+    "maxProseToolPairs": 10,
+    "keystoneHistoryFraction": 0.15,
+    "keystoneMaxMessages": 12,
+    "wikiTokenCap": 500
   }
 }
 JSON
 ```
 
-This sets lightweight mode (FTS5 keyword search, no embedding provider needed). Add an embedding provider later for semantic search without losing stored data. See [INSTALL.md](./INSTALL.md#embedding-providers) for options.
+This keeps a fresh install in lightweight embedding mode while also applying the current recommended lean compositor baseline for OpenClaw operators. Add an embedding provider later for semantic search without losing stored data. See [INSTALL.md](./INSTALL.md#embedding-providers) and [docs/TUNING.md](./docs/TUNING.md) for adjustments.
 
 Wire the plugins into OpenClaw:
 

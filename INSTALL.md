@@ -30,7 +30,10 @@ npx hypermem-install
 >
 > **Config merge warning:** if you already have values in `plugins.load.paths` or `plugins.allow`, merge them instead of overwriting blindly.
 
-Create the config directory and set the embedding provider:
+Create the config directory and write the current recommended fresh-install starter config. This does 2 things:
+
+1. sets `embedding.provider` to `none` so a clean install does not try to use Ollama by default
+2. applies the current recommended lean compositor settings so fresh installs start from the same OpenClaw and HyperMem guidance we want operators to use
 
 ```bash
 mkdir -p ~/.openclaw/hypermem
@@ -38,10 +41,26 @@ cat > ~/.openclaw/hypermem/config.json <<'JSON'
 {
   "embedding": {
     "provider": "none"
+  },
+  "compositor": {
+    "budgetFraction": 0.55,
+    "contextWindowReserve": 0.25,
+    "targetBudgetFraction": 0.50,
+    "warmHistoryBudgetFraction": 0.27,
+    "maxFacts": 25,
+    "maxHistoryMessages": 500,
+    "maxCrossSessionContext": 4000,
+    "maxRecentToolPairs": 3,
+    "maxProseToolPairs": 10,
+    "keystoneHistoryFraction": 0.15,
+    "keystoneMaxMessages": 12,
+    "wikiTokenCap": 500
   }
 }
 JSON
 ```
+
+If you want a lighter or richer memory profile later, adjust from this baseline using the tuning guidance below instead of starting from the older code defaults.
 
 Wire both plugins into OpenClaw:
 
