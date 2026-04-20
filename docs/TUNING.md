@@ -577,7 +577,7 @@ Large T0 results (>40k chars) at high context pressure (>80%) get head-and-tail 
 
 **When `deferToolPruning: true`**: hypermem skips its own gradient when OpenClaw's native `contextPruning` is active. The native pruner handles tool result trimming on those providers. The gradient remains active as fallback for other providers.
 
-> **Recommended:** disable OpenClaw's context pruning entirely (`openclaw config set agents.defaults.contextPruning.mode off`) and let HyperMem manage all context pressure. The two systems do not coordinate and can fight each other, causing unpredictable context loss. See INSTALL.md " Platform Settings" for the full recommended config.
+> **Recommended:** disable OpenClaw's context pruning entirely (`openclaw config set agents.defaults.contextPruning.mode off`) and let HyperMem manage all context pressure. The two systems do not coordinate and can fight each other, causing unpredictable context loss. See INSTALL.md "OpenClaw Platform Settings" for the full recommended config.
 
 **When `verboseLogging: true`**: HyperMem emits budget-source and trim-decision logs so you can see whether a turn used runtime `tokenBudget`, a manual `contextWindowOverrides` entry, or the `contextWindowSize` fallback.
 
