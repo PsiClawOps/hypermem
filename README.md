@@ -8,9 +8,19 @@
 
 hypermem is a SQLite-backed runtime context engine for OpenClaw agents.
 
+**Quick install** (interactive, detects hardware, writes config):
+
+```bash
+npm install @psiclawops/hypermem && npx hypermem-install
+```
+
+Or via the shell installer:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
+
+Or install manually via `npm install @psiclawops/hypermem`, see [Installation](#installation) for plugin wiring, embedding setup, and step-by-step paths.
 
 
 ---
@@ -376,7 +386,7 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.8.1.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
+**Current release: hypermem 0.8.2.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
 
 | Requirement | Version | Notes |
 |---|---|---|
@@ -389,7 +399,7 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.8.1'
+  ENGINE_VERSION,        // '0.8.2'
   MIN_NODE_VERSION,      // '22.0.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
   MAIN_SCHEMA_VERSION,   // 10 (messages.db)
@@ -439,6 +449,8 @@ That's it. No gateway, no plugins, no config files. See [API](#api) for the full
 
 ### OpenClaw plugin install (from source)
 
+> **Release note:** if the npm package you installed does not contain `install:runtime`, you are on an older public release. Use the source-clone path below or update to a newer npm release.
+
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git
 cd hypermem
@@ -466,12 +478,21 @@ This sets lightweight mode (FTS5 keyword search, no embedding provider needed). 
 Wire the plugins into OpenClaw:
 
 ```bash
-openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
+openclaw config get plugins.load.paths
+openclaw config get plugins.allow
+
+HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
+# If you already have load paths, merge them into HYPERMEM_PATHS before setting it.
+openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
-openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
+# Only set plugins.allow if your config already uses an allowlist.
+# If it returns an array, copy that array and append "hypercompositor" and "hypermem".
+openclaw config set plugins.allow '["existing-plugin","hypercompositor","hypermem"]' --strict-json
 openclaw gateway restart
 ```
+
+Do **not** replace a working `plugins.allow` list with only `['hypercompositor','hypermem']`. That can disable bundled CLI surfaces and channel plugins.
 
 Verify (run from the repo clone directory):
 

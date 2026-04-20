@@ -47,12 +47,21 @@ JSON
 Wire both plugins into OpenClaw:
 
 ```bash
-openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
+openclaw config get plugins.load.paths
+openclaw config get plugins.allow
+
+HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
+# If plugins.load.paths already has entries, merge them into HYPERMEM_PATHS before setting it.
+openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
-openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
+# Only set plugins.allow if your config already uses an allowlist.
+# If it returns an array, append "hypercompositor" and "hypermem" to that array.
+openclaw config set plugins.allow '["existing-plugin","hypercompositor","hypermem"]' --strict-json
 openclaw gateway restart
 ```
+
+Do **not** replace a working `plugins.allow` list with only `['hypercompositor','hypermem']`. That can disable bundled CLI surfaces and channel plugins.
 
 The repo clone is for build and release work. OpenClaw should load the installed runtime payload from `~/.openclaw/plugins/hypermem/`.
 
@@ -372,8 +381,12 @@ The full suite takes 30–60 seconds. When complete, output ends with `ALL N TES
 Use the OpenClaw CLI. **Do not edit `openclaw.json` directly.**
 
 ```bash
-# Add plugin load paths
-openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
+openclaw config get plugins.load.paths
+openclaw config get plugins.allow
+
+HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
+# If plugins.load.paths already has entries, merge them into HYPERMEM_PATHS before setting it.
+openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
 
 # Set the context engine slot
 openclaw config set plugins.slots.contextEngine hypercompositor
@@ -381,8 +394,9 @@ openclaw config set plugins.slots.contextEngine hypercompositor
 # Set the memory slot
 openclaw config set plugins.slots.memory hypermem
 
-# Allow both plugins
-openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
+# Only set plugins.allow if it already exists as an array.
+# Copy the existing array and append "hypercompositor" and "hypermem".
+openclaw config set plugins.allow '["existing-plugin","hypercompositor","hypermem"]' --strict-json
 ```
 
 If you already have entries in `plugins.allow` or `plugins.load.paths`, merge rather than replace. Check current values:
