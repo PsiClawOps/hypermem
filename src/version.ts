@@ -1,5 +1,5 @@
 /** Release version — matches package.json and is stamped into library.db on every startup. */
-export const ENGINE_VERSION = '0.8.1';
+export const ENGINE_VERSION = '0.8.2';
 
 /** Minimum Node.js version required — matches package.json engines field. */
 export const MIN_NODE_VERSION = '22.0.0';
@@ -25,16 +25,16 @@ export const LIBRARY_SCHEMA_VERSION_EXPORT = 19;
 /**
  * Compatibility version — the single number operators and consumers check.
  * Maps to: messages.db schema v10, library schema v19.
- * Matches ENGINE_VERSION for the 0.8.1 release.
+ * Matches ENGINE_VERSION for the 0.8.2 release.
  */
-export const HYPERMEM_COMPAT_VERSION = '0.8.1';
+export const HYPERMEM_COMPAT_VERSION = '0.8.2';
 
 /**
  * Schema compatibility map — machine-readable version requirements.
  * Use this to verify DB schemas match the running engine.
  */
 export const SCHEMA_COMPAT = {
-  compatVersion: '0.8.1',
+  compatVersion: '0.8.2',
   mainSchema: 10,
   librarySchema: 19,
 } as const;
