@@ -21,7 +21,7 @@
  */
 
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, cpSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, cpSync, existsSync, rmSync } from 'node:fs';
 import { join, relative, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -165,13 +165,14 @@ const LEAK_TERMS = [
 // ─── Files to exclude from public sync ──────────────────────────
 //
 // These files exist in internal only and must not appear in public.
-const EXCLUDE_FILES = [
+const EXCLUDE_PATHS = [
   'scripts/flush-agent-session.sh',     // Internal fleet ops only
   'scripts/migrate-clawtext.mjs',       // Internal migration tool, ClawText refs
   'scripts/sync-public.mjs',            // The sync script itself
   'docs/ROADMAP.md',                    // Internal future work — not for public release
   'docs/PHASE1-VALIDATION.md',          // Internal validation artifact
   'docs/RELEASE_0.8.0_VALIDATION.md',   // Internal release checklist
+  'docs/reviews',                       // Internal review artifacts
 ];
 
 // ─── Text file extensions to sanitize ───────────────────────────
@@ -255,7 +256,20 @@ function escapeRegex(str) {
 function shouldExclude(relativePath) {
   if (relativePath.includes('node_modules')) return true;
   if (relativePath.endsWith('package-lock.json') && relativePath !== 'package-lock.json') return true;
-  return EXCLUDE_FILES.some(ex => relativePath === ex || relativePath.endsWith('/' + ex));
+  return EXCLUDE_PATHS.some(ex =>
+    relativePath === ex ||
+    relativePath.startsWith(ex + '/') ||
+    relativePath.endsWith('/' + ex)
+  );
+}
+
+function purgeExcludedPaths() {
+  for (const relPath of EXCLUDE_PATHS) {
+    const absPath = join(REPO_ROOT, relPath);
+    if (!existsSync(absPath)) continue;
+    rmSync(absPath, { recursive: true, force: true });
+    console.log(`  purged excluded path: ${relPath}`);
+  }
 }
 
 function processFile(srcPath, destPath, relPath) {
@@ -363,6 +377,8 @@ async function main() {
 
   // Use git show to read each file from internal main, sanitize, write to working tree
   const internalFiles = gitOut(`ls-tree -r --name-only ${internalHead}`).split('\n').filter(Boolean);
+
+  purgeExcludedPaths();
 
   let synced = 0;
   let skipped = 0;
