@@ -183,7 +183,7 @@ const SANITIZE_EXTENSIONS = new Set([
 // ─── Directories to sync ─────────────────────────────────────────
 const SYNC_DIRS = ['src', 'test', 'scripts', 'docs', '.github', 'plugin', 'memory-plugin'];
 const SYNC_ROOT_FILES = [
-  'package.json', 'tsconfig.json',
+  'package.json', 'package-lock.json', 'tsconfig.json',
   'README.md', 'CHANGELOG.md', 'INSTALL.md',
   'ARCHITECTURE.md', 'MIGRATION_GUIDE.md',
   'LICENSE', '.npmignore',
@@ -538,9 +538,7 @@ const CI_TIMEOUT_MS = 300_000;       // 5 minutes
 async function waitForCI(commitSha) {
   const token = getReleaseToken();
   if (!token) {
-    console.log('\n⏭️  Skipping CI check (no GH_TOKEN/GITHUB_TOKEN set).');
-    console.log('   Check manually: https://github.com/PsiClawOps/hypermem/actions');
-    return;
+    throw new Error('Missing GH token. Set GH_TOKEN, GITHUB_TOKEN, or GH_PSICLAWOPS_TOKEN before sync-public so post-publish CI is verified automatically.');
   }
 
   console.log(`\n[CI] Waiting for GitHub Actions on ${commitSha}...`);
@@ -578,11 +576,8 @@ async function waitForCI(commitSha) {
         if (run.conclusion === 'success') {
           console.log(`   ✅ CI passed: ${run.html_url}`);
           return;
-        } else {
-          console.error(`   ❌ CI failed (${run.conclusion}): ${run.html_url}`);
-          process.exitCode = 1;
-          return;
         }
+        throw new Error(`Post-publish CI failed (${run.conclusion}): ${run.html_url}`);
       }
 
       const elapsed = Math.round((Date.now() - start) / 1000);
@@ -592,8 +587,7 @@ async function waitForCI(commitSha) {
     }
   }
 
-  console.log(`\n   ⚠️  CI check timed out after ${CI_TIMEOUT_MS / 1000}s.`);
-  console.log(`   Check manually: https://github.com/${CI_OWNER}/${CI_REPO}/actions`);
+  throw new Error(`Post-publish CI timed out after ${CI_TIMEOUT_MS / 1000}s. Check https://github.com/${CI_OWNER}/${CI_REPO}/actions`);
 }
 
 function getReleaseToken() {
