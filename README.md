@@ -8,9 +8,13 @@
 
 hypermem is a SQLite-backed runtime context engine for OpenClaw agents.
 
+**Quick install** (interactive, detects hardware, writes config):
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
+
+Or install manually — see [Installation](#installation) for library-only, plugin, and step-by-step paths.
 
 
 ---
@@ -376,7 +380,7 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.8.1.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
+**Current release: hypermem 0.8.2.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
 
 | Requirement | Version | Notes |
 |---|---|---|
@@ -389,7 +393,7 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.8.1'
+  ENGINE_VERSION,        // '0.8.2'
   MIN_NODE_VERSION,      // '22.0.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
   MAIN_SCHEMA_VERSION,   // 10 (messages.db)
@@ -473,7 +477,7 @@ openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
 openclaw gateway restart
 ```
 
-Verify (run from the repo clone directory):
+Verify (run these commands from the repo clone directory — `bin/` is a relative path):
 
 ```bash
 openclaw plugins list                    # hypercompositor and hypermem should show as loaded

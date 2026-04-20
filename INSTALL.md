@@ -44,7 +44,7 @@ JSON
 
 `install:runtime` stages the built plugin files into `~/.openclaw/plugins/hypermem`. It does **not** modify your OpenClaw config. The commands below wire the plugins manually.
 
-Wire both plugins into OpenClaw:
+Wire both plugins into OpenClaw (if you already have values in `plugins.load.paths` or `plugins.allow`, merge them — don't overwrite):
 
 ```bash
 openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
@@ -365,7 +365,7 @@ Verify:
 npm test
 ```
 
-The full suite takes 30–60 seconds. When complete, output ends with `ALL N TESTS PASSED ✅`. If you see `ENOSPC`, free up disk space and retry.
+The full suite takes 30–60 seconds. When complete, output ends with `N passed, 0 failed`. If you see `ENOSPC`, free up disk space and retry.
 
 ### Step 2 — Wire the plugins
 
@@ -422,7 +422,7 @@ Expected:
 [hypermem:compose] agent=main triggers=0 fallback=true facts=3 semantic=2 ...
 ```
 
-Full health check (run from the repo clone directory):
+Full health check (run from the repo clone directory — `bin/` is a relative path):
 
 ```bash
 node bin/hypermem-status.mjs              # full dashboard
