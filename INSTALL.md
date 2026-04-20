@@ -17,6 +17,8 @@ If `gateway status` shows "disabled" or "not configured", complete OpenClaw onbo
 
 ## Quick Start
 
+This guide is deliberately declarative. Follow the steps in order and verify each install state before moving on.
+
 > **Release note:** if the npm package you installed does not contain `hypermem-install` or `install:runtime`, you are on an older public release. Use the source-clone path in this guide or wait for `0.8.4+`.
 
 ```bash
@@ -24,7 +26,7 @@ npm install @psiclawops/hypermem
 npx hypermem-install
 ```
 
-`hypermem-install` stages the plugin runtime into `~/.openclaw/plugins/hypermem`. It does **not** modify your OpenClaw config and does **not** restart the gateway.
+`hypermem-install` stages the plugin runtime into `~/.openclaw/plugins/hypermem`. It does **not** modify your OpenClaw config and does **not** restart the gateway. That means a successful `npx hypermem-install` is **not** a completed install. It is only a completed staging step.
 
 > **Prerequisites:** OpenClaw must be installed and onboarded. Run `openclaw gateway status` to confirm. If the gateway is not configured, complete OpenClaw setup first.
 >
@@ -62,6 +64,20 @@ JSON
 
 If you want a lighter or richer memory profile later, adjust from this baseline using the tuning guidance below instead of starting from the older code defaults.
 
+### Install states
+
+Treat the install as 5 explicit states:
+
+| State | Meaning | Success signal |
+|---|---|---|
+| 1. Package installed | npm package is present | `npm install` succeeds |
+| 2. Runtime staged | plugin payload copied into `~/.openclaw/plugins/hypermem` | `npx hypermem-install` succeeds and files exist |
+| 3. OpenClaw wired | config points at HyperMem plugins | `plugins.load.paths` and `plugins.slots.*` are set correctly |
+| 4. Runtime loaded | gateway restarted and loaded both plugins | `openclaw plugins list` shows both plugins loaded |
+| 5. Runtime active | HyperMem is actually composing turns | logs show `hypermem initialized` and compose activity |
+
+Do not stop at state 2 and call the install done.
+
 Wire both plugins into OpenClaw:
 
 **Step 1: Check your existing config (mandatory — do this before wiring).**
@@ -71,7 +87,7 @@ openclaw config get plugins.load.paths
 openclaw config get plugins.allow
 ```
 
-Note any existing values. You must include them in the commands below.
+Note any existing values. You must include them in the commands below. If `plugins.allow` is null, unset, or empty, skip the allowlist step entirely.
 
 **Step 2: Wire plugins.**
 
@@ -102,30 +118,50 @@ OpenClaw loads the plugin runtime from `~/.openclaw/plugins/hypermem/`.
 
 ### Verification checkpoints
 
-1. **Build verified**
-   - root build succeeds
-   - `plugin` build succeeds
-   - `memory-plugin` build succeeds
+Walk the install state machine explicitly:
+
+1. **Runtime staged**
+   ```bash
+   ls ~/.openclaw/plugins/hypermem
+   ```
+   Expected: `dist`, `plugin`, `memory-plugin`, and package metadata exist.
 
 2. **Wiring verified**
-   - OpenClaw accepts `plugins.load.paths`
-   - slots are set to `hypercompositor` and `hypermem`
-   - gateway restart succeeds
+   ```bash
+   openclaw config get plugins.load.paths
+   openclaw config get plugins.slots.contextEngine
+   openclaw config get plugins.slots.memory
+   openclaw config get plugins.allow
+   ```
+   Expected: HyperMem paths are present, slots point to `hypercompositor` and `hypermem`, and allowlist entries were merged only if the install already used an allowlist.
 
-3. **Runtime verified active**
+3. **Runtime loaded**
+   ```bash
+   openclaw plugins list
+   ```
+   Expected: both `hypercompositor` and `hypermem` show as loaded.
 
-Send a message to any agent, then verify:
+4. **Runtime healthy**
+   Run from the repo clone directory, because `bin/` is a relative path:
+   ```bash
+   node bin/hypermem-status.mjs --health
+   ```
+   Expected on fresh installs: the plugin may report `no sessions ingested` or empty counts. That means healthy but unused, not broken.
 
-```bash
-openclaw logs --limit 100 | grep -E 'hypermem|context-engine'
-```
+5. **Runtime active**
 
-Expected lightweight-mode lines:
-- `[hypermem] hypermem initialized`
-- `[hypermem] Embedding provider: none — semantic search disabled, using FTS5 fallback`
-- `[hypermem:compose]`
+   Send a message to any agent, then verify:
 
-If you see a fallback like `falling back to default engine "legacy"`, the install is **not** fully active yet even if the build and wiring steps succeeded.
+   ```bash
+   openclaw logs --limit 100 | grep -E 'hypermem|context-engine'
+   ```
+
+   Expected lightweight-mode lines:
+   - `[hypermem] hypermem initialized`
+   - `[hypermem] Embedding provider: none — semantic search disabled, using FTS5 fallback`
+   - `[hypermem:compose]`
+
+If you see a fallback like `falling back to default engine "legacy"`, the install is **not** fully active yet even if staging and wiring succeeded.
 
 ---
 
@@ -158,7 +194,7 @@ Everything runs in-process on SQLite memory databases. No external database serv
 
 > **Package versions:** the root package (`hypermem`) and the two plugins (`hypercompositor`, `hypermem-memory`) are versioned independently. Plugin versions trail the core by one minor version when no plugin-facing API changes ship in a release — this is expected.
 
-The **embedding layer** (L3 semantic search) requires a configured provider. Without one, hypermem falls back to FTS5 keyword matching. This is functional but degrades recall quality. See [Setup Styles](#setup-styles) below.
+The **embedding layer** (L3 semantic search) requires a configured provider. Without one, hypermem falls back to FTS5 keyword matching. This is functional but degrades recall quality. Fresh installs should start with `provider: "none"` explicitly so the runtime behavior is intentional and easy to verify, then upgrade later. See [Setup Styles](#setup-styles) below.
 
 ---
 
@@ -446,6 +482,8 @@ See [Embedding Providers](#embedding-providers) above.
 - **Hosted/Gemini:** create `~/.openclaw/hypermem/config.json` with the provider config block from the relevant section above.
 
 ### Step 4 — Restart and verify
+
+Do not start tuning before this section passes. If HyperMem is not loaded and composing, the next problem is installation, not tuning.
 
 ```bash
 openclaw gateway restart
