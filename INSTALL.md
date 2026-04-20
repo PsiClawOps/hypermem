@@ -1,8 +1,25 @@
 # hypermem — Installation Guide
 
+## Prerequisites
+
+- **Node.js 22+** (uses built-in `node:sqlite`)
+- **OpenClaw** must already be installed, onboarded, and running. The plugin install assumes a working OpenClaw home with a valid `openclaw.json` and a gateway that can restart.
+- **Disk space:** allow at least 2 GB free. Plugin builds pull OpenClaw as a dev dependency.
+
+**Verify before starting:**
+
+```bash
+openclaw gateway status    # should show "running" or "ready"
+openclaw config get gateway # should return gateway config, not an error
+```
+
+If `gateway status` shows "disabled" or "not configured", complete OpenClaw onboarding first. `openclaw gateway restart` only works when the gateway service is already set up. On a brand-new OpenClaw install that has never been started, you need `openclaw gateway start` (or the full onboarding flow) before installing plugins.
+
 ## Quick Start
 
 > **Disk space:** plugin installs pull OpenClaw as a dev dependency. Allow at least 2 GB free before starting.
+>
+> **Prerequisites:** OpenClaw must be installed and onboarded before this step. Run `openclaw gateway status` to confirm. If the gateway is not configured, complete OpenClaw setup first.
 >
 > **Production runtime path:** install the built runtime payload into `~/.openclaw/plugins/hypermem`. Do not point production at `/tmp` or at your development repo clone.
 >
@@ -24,6 +41,8 @@ cat > ~/.openclaw/hypermem/config.json <<'JSON'
 }
 JSON
 ```
+
+`install:runtime` stages the built plugin files into `~/.openclaw/plugins/hypermem`. It does **not** modify your OpenClaw config. The commands below wire the plugins manually.
 
 Wire both plugins into OpenClaw:
 
@@ -387,11 +406,15 @@ See [Embedding Providers](#embedding-providers) above.
 openclaw gateway restart
 ```
 
+> **If restart reports the gateway is disabled or not configured:** you need to complete OpenClaw onboarding before this step. See [Prerequisites](#prerequisites). `gateway restart` only works on an already-running gateway.
+
 Send a message to any agent, then check:
 
 ```bash
 openclaw logs --limit 50 | grep hypermem
 ```
+
+> **If `openclaw logs` fails with an auth or token error:** the gateway API requires authentication. Run `openclaw gateway status` to confirm the gateway is running and accessible. If the gateway is running but logs fail, check `openclaw config get gateway.token` and ensure your shell session has the correct auth context.
 
 Expected:
 ```

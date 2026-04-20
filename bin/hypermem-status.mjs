@@ -104,6 +104,16 @@ if (flags.agent) {
 }
 
 if (!mainDbPath || !existsSync(mainDbPath)) {
+  if (args.includes('--health') || args.includes('--json')) {
+    const result = { status: 'no_sessions', message: 'Installed but no agent sessions ingested yet. Send a message to any agent, then re-run.' };
+    if (args.includes('--json')) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log('Status: installed, no sessions ingested yet.');
+      console.log('Send a message to any agent, then re-run this health check.');
+    }
+    process.exit(0);
+  }
   console.error('Error: no agent messages.db found. Has HyperMem ingested any sessions?');
   process.exit(1);
 }

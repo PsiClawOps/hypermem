@@ -2,6 +2,14 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.8.2 — npm packaging & install path clarity
+
+- **INSTALL.md and CHANGELOG.md now ship in the npm package.** Previously missing from `package.json` `files` array, so `npm pack` / `npm publish` excluded them. Users installing from the registry now get the full install guide without cloning the repo.
+- **Library vs plugin install paths split in README.** The Installation section now clearly separates standalone library usage (no OpenClaw required) from OpenClaw plugin wiring. Library consumers no longer have to read through plugin-specific steps.
+- **Cold-start prerequisites expanded.** INSTALL.md prerequisites now include explicit verification commands (`openclaw gateway status`, `node --version`), distinguish first-time OpenClaw setup from existing installs, and explain when to use `gateway start` vs `gateway restart`.
+- **Verification steps handle auth failures.** Step 4 verification now includes diagnostic callouts for `gateway restart` failures (not onboarded, missing config) and `openclaw logs` failures (gateway not running, path issues).
+- **Troubleshooting quick-reference added to README.** A 7-row common-issues table covers plugin-not-found, legacy fallback, no semantic results, build errors, empty facts, context pressure, and missing messages.db -- with symptoms, causes, and one-line fixes.
+
 ## 0.8.1 — Documentation fixes
 
 - **Install docs rewritten for clean first-run:** README and INSTALL.md installation sections restructured so config comes before restart, `$HOME` replaces `~` in shell-interpolated JSON strings, clone path is no longer hardcoded, and health-check instructions note the repo-dir requirement and data-dir timing.
