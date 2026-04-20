@@ -42,15 +42,30 @@ cat > ~/.openclaw/hypermem/config.json <<'JSON'
 JSON
 ```
 
-`install:runtime` stages the built plugin files into `~/.openclaw/plugins/hypermem`. It does **not** modify your OpenClaw config. The commands below wire the plugins manually.
+`install:runtime` stages the built plugin files into `~/.openclaw/plugins/hypermem`. It does **not** modify your OpenClaw config and does **not** restart the gateway. The commands below wire the plugins manually.
 
-Wire both plugins into OpenClaw (if you already have values in `plugins.load.paths` or `plugins.allow`, merge them — don't overwrite):
+Wire both plugins into OpenClaw:
+
+> **⚠️  Merge, don't overwrite.** If you already have values in `plugins.load.paths` or `plugins.allow`, check them first and include your existing entries alongside the new ones. Replacing the list drops whatever was there before — including bundled OpenClaw CLI surfaces.
+>
+> ```bash
+> openclaw config get plugins.allow
+> openclaw config get plugins.load.paths
+> ```
 
 ```bash
-openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
+# Use a variable to avoid shell quote-escaping issues with $HOME:
+HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
+openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
+# If you have existing load paths, merge them into the array in HYPERMEM_PATHS.
+
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
+
+# ⚠️  Add to your existing plugins.allow — do not replace your current list.
+# Edit the array below to include any plugins you already have allowed:
 openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
+
 openclaw gateway restart
 ```
 
@@ -430,6 +445,8 @@ node bin/hypermem-status.mjs --health     # health checks only (exit 1 on failur
 ```
 
 > **Note:** The health check requires the data directory to exist. It is created on first gateway restart with the plugin active. Run the `openclaw logs` check first to confirm initialization, then run the health check.
+>
+> **Empty results on fresh installs are normal.** If the health check shows `facts=0`, `episodes=0`, or `no agent messages.db found`, that means the install worked but no conversations have happened yet. Data populates after real agent sessions.
 
 If the plugin didn't load:
 
@@ -744,6 +761,10 @@ The background indexer runs on a 5-minute interval. After the first cycle, check
 
 Expected on fresh installs. Facts and episodes accumulate over real conversations. After a few sessions these numbers grow. Workspace files can be seeded manually via the seeder API.
 
+**Lost bundled plugins after setting `plugins.allow`**
+
+If you set `plugins.allow` to only `["hypercompositor","hypermem"]` without including your pre-existing allowed plugins, OpenClaw will stop loading everything else (including built-in CLI surfaces and bundled channel plugins). Fix: re-read your OpenClaw defaults (`openclaw config get plugins.allow`), merge hypermem entries back into the full list, and `openclaw gateway restart`.
+
 **Plugin not found**
 
 Confirm the installed runtime artifacts exist:
@@ -794,6 +815,24 @@ openclaw gateway restart
 ```
 
 Data in `~/.openclaw/hypermem/` is untouched. Re-enable by switching back.
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERMEM_DATA_DIR` | `~/.openclaw/hypermem` | Override the data directory where hypermem stores `library.db`, per-agent `messages.db` files, and `vectors.db`. Useful when you want data on a separate volume, need isolated test data dirs, or run multiple hypermem instances. The directory is created automatically if it does not exist. |
+
+Example:
+
+```bash
+# Point hypermem at a different data location:
+export HYPERMEM_DATA_DIR=/mnt/data/hypermem
+openclaw gateway restart
+```
+
+> The config file path (`~/.openclaw/hypermem/config.json`) is separate from the data directory. Moving `HYPERMEM_DATA_DIR` does not move the config file.
 
 ---
 

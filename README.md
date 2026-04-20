@@ -469,11 +469,26 @@ This sets lightweight mode (FTS5 keyword search, no embedding provider needed). 
 
 Wire the plugins into OpenClaw:
 
+> **⚠️  Merge, don't overwrite.** If you already have values in `plugins.load.paths` or `plugins.allow`, check them first and include your existing entries alongside the new ones. Replacing the list drops whatever was there before.
+>
+> ```bash
+> openclaw config get plugins.allow
+> openclaw config get plugins.load.paths
+> ```
+
 ```bash
-openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
+# Use a variable to avoid shell quote-escaping issues with $HOME:
+HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
+openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
+# If you have existing load paths, merge them into the array in HYPERMEM_PATHS.
+
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
+
+# ⚠️  Add to your existing plugins.allow — do not replace your current list.
+# Edit the array below to include any plugins you already have allowed:
 openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
+
 openclaw gateway restart
 ```
 
