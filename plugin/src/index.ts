@@ -1320,17 +1320,27 @@ function maybeLogPressureAccountingAnomaly(fields: {
     redisVsComposed: Math.abs(fields.redisTokens - fields.composedTokens),
     runtimeVsRedis: Math.abs(fields.runtimeTokens - fields.redisTokens),
   };
-  if (
-    deltas.runtimeVsComposed < threshold &&
-    deltas.redisVsComposed < threshold &&
-    deltas.runtimeVsRedis < threshold
-  ) {
+
+  // Post-0.6.0: "redis" is actually the L1 SQLite cache window, which lags
+  // behind the runtime message array between trim passes.  Cache-vs-runtime
+  // drift is structural and harmless — the runtime array is authoritative
+  // (it's what the model sees).  Only warn when runtimeVsComposed diverges,
+  // which indicates an actual trim accounting bug.
+  if (deltas.runtimeVsComposed < threshold) {
+    // Log cache drift at debug level for observability, not as a warning.
+    if (deltas.redisVsComposed >= threshold || deltas.runtimeVsRedis >= threshold) {
+      console.debug(
+        `[hypermem-plugin] cache-drift (non-anomalous): path=${fields.path} ` +
+        `runtime=${fields.runtimeTokens} cache=${fields.redisTokens} composed=${fields.composedTokens} ` +
+        `budget=${fields.budget}`
+      );
+    }
     return;
   }
 
   console.warn(
     `[hypermem-plugin] pressure-accounting anomaly: path=${fields.path} ` +
-    `runtime=${fields.runtimeTokens} redis=${fields.redisTokens} composed=${fields.composedTokens} ` +
+    `runtime=${fields.runtimeTokens} cache=${fields.redisTokens} composed=${fields.composedTokens} ` +
     `budget=${fields.budget} threshold=${threshold}`
   );
 
