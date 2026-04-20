@@ -64,7 +64,7 @@ openclaw config set plugins.slots.memory hypermem
 
 # Allow both plugins — merge with any existing allowed plugins from Step 1.
 # Example (if "my-plugin" was already allowed):
-ocplatform config set plugins.allow '["my-plugin","hypercompositor","hypermem"]' --strict-json
+openclaw config set plugins.allow '["my-plugin","hypercompositor","hypermem"]' --strict-json
 ```
 
 > **⚠️  Merge, don't replace.** The command above sets `plugins.allow` to whatever you specify. If `plugins.allow` was non-empty in Step 1, include those entries in the array. Replacing it drops existing plugins (including bundled OpenClaw CLI surfaces and channel plugins).
@@ -396,7 +396,7 @@ Use the OpenClaw CLI. **Do not edit `openclaw.json` directly.**
 
 ```bash
 # Check existing values first — merge if non-empty:
-ocplatform config get plugins.load.paths
+openclaw config get plugins.load.paths
 openclaw config get plugins.allow
 
 # Wire plugin load paths (merge with any existing paths):
@@ -407,7 +407,7 @@ openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
 
 # Allow both plugins — merge with any existing allowed plugins (example includes "my-plugin"):
-ocplatform config set plugins.allow '["my-plugin","hypercompositor","hypermem"]' --strict-json
+openclaw config set plugins.allow '["my-plugin","hypercompositor","hypermem"]' --strict-json
 ```
 
 > **⚠️  Merge, don't replace.** Check `openclaw config get plugins.allow` before running this command and include all existing entries in the array.
