@@ -2,6 +2,12 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.8.1 — Documentation fixes
+
+- **Install docs rewritten for clean first-run:** README and INSTALL.md installation sections restructured so config comes before restart, `$HOME` replaces `~` in shell-interpolated JSON strings, clone path is no longer hardcoded, and health-check instructions note the repo-dir requirement and data-dir timing.
+- **install:runtime output:** `npm run install:runtime` now prints the next-step commands (config creation + plugin wiring) so the user doesn't have to hunt through docs.
+- **Lightweight mode clarified:** Step 3 no longer says "skip for Lightweight" — a `config.json` with `provider: "none"` is required to suppress the Ollama fallback warning.
+
 ## 0.8.0 — Phase C correctness, tool-artifact store, tiered contradiction resolution
 
 - **Reranker credentials via environment variable:** `ZEROENTROPY_API_KEY` and `OPENROUTER_API_KEY` are now read from the environment. Config file `zeroEntropyApiKey` / `openrouterApiKey` still works as fallback. Recommended setup puts the key in a shell env file so it never lands in config-under-version-control.

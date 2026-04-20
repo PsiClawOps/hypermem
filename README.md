@@ -32,6 +32,8 @@ The difference isn't intelligence. It's what was in the prompt. Two failure mode
 
 **Compaction crunch.** Long sessions fill the context window. The runtime summarizes to make room. Specifics (tool output, exact decisions, file paths) are lost in the summary. The agent keeps running, but degraded.
 
+**Bloated context.** 128k tokens doesn't mean 128k of useful prompt. Without active curation, agents fill the window with stale history, redundant instructions, and memory that isn't relevant to this turn. A bigger context window just means more room to waste. The information is in the prompt somewhere, buried under content irrelevant to this turn.
+
 ---
 
 ## What OpenClaw provides today
@@ -104,10 +106,10 @@ What's in storage, not in this prompt:
   Change the topic, and the next turn pulls different content from the same storage.
 ```
 
-### Standard context engine vs. hypercompositor
+### OpenClaw default vs. hypercompositor
 
 ```
-Standard                                hypercompositor
+OpenClaw default                        hypercompositor
 ────────────────────────────────        ────────────────────────────────
 message → append to transcript          message → detect active topic
 transcript full → trim oldest           query 4 storage layers in parallel
@@ -125,7 +127,7 @@ When it fills:                          When budget is exceeded:
   no recovery path                        change topic back → retrieved again
 ```
 
-| | Standard | hypercompositor |
+| | OpenClaw default | hypercompositor |
 |---|---|---|
 | Context source | Growing transcript only | Transcript + 3 additional storage layers |
 | When context fills | Trim + summarize (lossy) | Budget allocation (lossless storage) |
@@ -164,9 +166,9 @@ Different models have different default behaviors. GPT-5.4 tends toward 2x verbo
 
 Adaptation entries are stored in the `model_output_directives` table and matched by model ID using exact match, then glob pattern (longest wins), then wildcard fallback. Each entry contains:
 
-- **Calibration** — known model tendencies and specific adjustments (e.g., "2x verbosity: cut first drafts in half")
-- **Corrections** — hard/medium/soft severity rules applied in order (e.g., "No preamble before the answer")
-- **Task overrides** — per-task-type adjustments
+- **Calibration:** known model tendencies and specific adjustments (e.g., "2x verbosity: cut first drafts in half")
+- **Corrections:** hard/medium/soft severity rules applied in order (e.g., "No preamble before the answer")
+- **Task overrides:** per-task-type adjustments
 
 Model adaptation is only active at the `full` tier. At `light` and `standard`, model-specific corrections are suppressed.
 
@@ -196,7 +198,7 @@ Would you like me to go deeper on any of these?
 WITH outputProfile: "light":
 For a 128k window: reserve 14k for identity/system, target 46k for history, 10k for recent
 tool context, and leave ~30k as allocator reserve. hypermem handles slot competition
-automatically — set `reserveFraction` to your preferred floor and let the compositor fill.
+automatically. Set `reserveFraction` to your preferred floor and let the compositor fill.
 ```
 
 **Confabulation resistance** checks output against stored facts before claims are recorded. No LLM call. Pattern matching against the fact corpus, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
@@ -241,16 +243,7 @@ SQL queries that interpolate datetime values are fully parameterized. FTS5 trigg
 
 ## Pressure management
 
-hypermem composes context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
-
-| Path | Trigger | Action |
-|---|---|---|
-| **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures projected occupancy before results land; trims large results at 80%+ and truncates the messages[] array for the current turn |
-| **AfterTurn trim** | Every turn at >80% | Pre-emptive headroom cut after the assistant replies, before the next turn arrives |
-| **Deep compaction** | compact() at >85% | Cuts in-memory cache to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
-| **Reshape guard** | Structured tool history on downshift | `canPersistReshapedHistory()` blocks a lower-context snapshot from overwriting the full JSONL history |
-
-**The one thing these paths cannot fix:** a session whose JSONL transcript on disk is already at 98% when the gateway restarts. The JSONL loads into runtime context before any compaction runs. Check `session_status` on startup. If you're above 85%, start a fresh session.
+hypermem manages context pressure automatically through four escalating paths. Most sessions never need manual intervention. For trigger thresholds and path details, see [Pressure management](#pressure-management-1) below.
 
 ---
 
@@ -383,7 +376,7 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.8.0.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
+**Current release: hypermem 0.8.1.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
 
 | Requirement | Version | Notes |
 |---|---|---|
@@ -396,7 +389,7 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.8.0'
+  ENGINE_VERSION,        // '0.8.1'
   MIN_NODE_VERSION,      // '22.0.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
   MAIN_SCHEMA_VERSION,   // 10 (messages.db)
@@ -410,29 +403,63 @@ Schema versions are stamped into each database on startup and checked on open. A
 
 ## Installation
 
+**Requirements:** Node.js 22+, OpenClaw with context engine plugin support. No standalone SQLite install needed (uses Node 22 built-in `node:sqlite`). Embedding provider is optional for first install.
+
+### From source
+
 ```bash
-git clone https://github.com/PsiClawOps/hypermem.git ~/.openclaw/workspace/repo/hypermem
-cd ~/.openclaw/workspace/repo/hypermem
+git clone https://github.com/PsiClawOps/hypermem.git
+cd hypermem
 npm install && npm run build
 npm --prefix plugin install && npm --prefix plugin run build
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
+npm run install:runtime
+```
 
+`install:runtime` stages the runtime payload into `~/.openclaw/plugins/hypermem` and prints the exact config commands to wire the plugins. Before running them, create the data directory and config:
+
+```bash
+mkdir -p ~/.openclaw/hypermem
+cat > ~/.openclaw/hypermem/config.json <<'JSON'
+{
+  "embedding": {
+    "provider": "none"
+  }
+}
+JSON
+```
+
+This sets lightweight mode (FTS5 keyword search, no embedding provider needed). Add an embedding provider later for semantic search without losing stored data. See [INSTALL.md](./INSTALL.md#embedding-providers) for options.
+
+Wire the plugins into OpenClaw:
+
+```bash
+openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
-openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin","~/.openclaw/workspace/repo/hypermem/memory-plugin"]' --strict-json
 openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
 openclaw gateway restart
 ```
 
-Or use the one-line installer:
+Verify (run from the repo clone directory):
+
+```bash
+openclaw plugins list                    # hypercompositor and hypermem should show as loaded
+node bin/hypermem-status.mjs --health    # confirms database initialization
+openclaw logs --limit 50 | grep hypermem # should show "hypermem initialized"
+```
+
+If you see `falling back to default engine "legacy"` in the logs, the install is not active. Check [INSTALL.md troubleshooting](./INSTALL.md#troubleshooting-clean-installs).
+
+### One-line installer
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-**Requirements:** Node.js 22+, OpenClaw with context engine plugin support, and either Ollama (local) or an OpenRouter API key (hosted) for embeddings. No standalone SQLite install is required for the documented repo install: hypermem uses the SQLite bundled with Node 22 via `node:sqlite`, and `sqlite-vec` provides the platform-specific extension through npm dependencies.
+Interactive: detects hardware, selects embedding tier, writes config, registers plugins.
 
-Full guide with deployment-specific options: **[INSTALL.md](./INSTALL.md)**
+Full guide with embedding tiers, reranker setup, fleet config, and tuning: **[INSTALL.md](./INSTALL.md)**
 
 ### Agent-assisted install
 
@@ -448,7 +475,7 @@ If you prefer, hand the install to your OpenClaw agent:
 
 ### Tuning
 
-Two independent surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model writes). Pick a profile first — most deployments adjust one or two settings on top.
+Two independent surfaces: **context assembly** (what fills the context window) and **output shaping** (how the model writes). Pick a profile first. Most deployments adjust one or two settings on top.
 
 | Profile | Target window | Best for |
 |---|---|---|
@@ -553,6 +580,21 @@ node bin/hypermem-status.mjs --agent my-agent   # scoped to one agent
 node bin/hypermem-status.mjs --json          # machine-readable output
 node bin/hypermem-status.mjs --health        # health checks only (exit 1 on failure)
 ```
+
+---
+
+## Pressure management
+
+hypermem composes context fresh on every turn, but a long-running session still accumulates history in its JSONL transcript. When that grows large enough, incoming tool results have nowhere to land and get silently stripped. Four automatic paths handle this:
+
+| Path | Trigger | Action |
+|---|---|---|
+| **Pressure-tiered tool-loop trim** | Any tool-loop turn | Measures projected occupancy before results land; trims large results at 80%+ and truncates the messages[] array for the current turn |
+| **AfterTurn trim** | Every turn at >80% | Pre-emptive headroom cut after the assistant replies, before the next turn arrives |
+| **Deep compaction** | compact() at >85% | Cuts in-memory cache to 25% budget and truncates JSONL to ~20% depth. Bypasses the normal reshape guard |
+| **Reshape guard** | Structured tool history on downshift | `canPersistReshapedHistory()` blocks a lower-context snapshot from overwriting the full JSONL history |
+
+**The one thing these paths cannot fix:** a session whose JSONL transcript on disk is already at 98% when the gateway restarts. The JSONL loads into runtime context before any compaction runs. Check `session_status` on startup. If you're above 85%, start a fresh session.
 
 ---
 
