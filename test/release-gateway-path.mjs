@@ -66,7 +66,7 @@ function latestEvent(events, predicate) {
 
 async function main() {
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log('  HyperMem 0.8.0 Release Path Verification');
+  console.log('  HyperMem 0.8.1 Release Path Verification');
   console.log('═══════════════════════════════════════════════════════════════\n');
 
   if (!fs.existsSync(coreDist)) {

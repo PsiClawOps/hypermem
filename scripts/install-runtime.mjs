@@ -64,4 +64,13 @@ symlinkSync(openclawInstallPath, path.join(installRoot, 'memory-plugin/node_modu
 symlinkSync('../../..', path.join(installRoot, 'plugin/node_modules/@psiclawops/hypermem'));
 symlinkSync('../../..', path.join(installRoot, 'memory-plugin/node_modules/@psiclawops/hypermem'));
 
-console.log(installRoot);
+console.log(`\n  Runtime installed to:\n    ${installRoot}\n`);
+console.log(`  Next steps — wire the plugins into OpenClaw:\n`);
+console.log(`    openclaw config set plugins.load.paths '["${installRoot}/plugin","${installRoot}/memory-plugin"]' --strict-json`);
+console.log(`    openclaw config set plugins.slots.contextEngine hypercompositor`);
+console.log(`    openclaw config set plugins.slots.memory hypermem`);
+console.log(`    openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json`);
+console.log(`    openclaw gateway restart\n`);
+console.log(`  Verify:\n`);
+console.log(`    openclaw plugins list`);
+console.log(`    node bin/hypermem-status.mjs --health\n`);

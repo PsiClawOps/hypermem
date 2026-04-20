@@ -5,7 +5,7 @@ Requested by: ragesaq
 Intended reviewer: Forge
 
 Repo target: `https://github.com/psiclawops/hypermem-internal`
-Package tested: `@psiclawops/hypermem@0.8.0`
+Package tested: `@psiclawops/hypermem@0.8.1`
 Public sources used for setup and expectations:
 - npm package metadata
 - published README / install docs

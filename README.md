@@ -376,7 +376,7 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.8.0.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
+**Current release: hypermem 0.8.1.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
 
 | Requirement | Version | Notes |
 |---|---|---|
@@ -389,7 +389,7 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.8.0'
+  ENGINE_VERSION,        // '0.8.1'
   MIN_NODE_VERSION,      // '22.0.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
   MAIN_SCHEMA_VERSION,   // 10 (messages.db)
@@ -403,39 +403,63 @@ Schema versions are stamped into each database on startup and checked on open. A
 
 ## Installation
 
-Clone into OpenClaw's default plugin resolution path. If you clone elsewhere, set `plugins.load.paths` accordingly.
+**Requirements:** Node.js 22+, OpenClaw with context engine plugin support. No standalone SQLite install needed (uses Node 22 built-in `node:sqlite`). Embedding provider is optional for first install.
+
+### From source
 
 ```bash
-git clone https://github.com/PsiClawOps/hypermem.git ~/.openclaw/workspace/repo/hypermem
-cd ~/.openclaw/workspace/repo/hypermem
+git clone https://github.com/PsiClawOps/hypermem.git
+cd hypermem
 npm install && npm run build
 npm --prefix plugin install && npm --prefix plugin run build
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
-
-# Embedding provider (required for semantic indexing):
-#   Local:  ollama pull nomic-embed-text
-#   Hosted: set embedding.provider in ~/.openclaw/hypermem/config.json (see docs/TUNING.md)
-
-openclaw config set plugins.slots.contextEngine hypercompositor
-openclaw config set plugins.slots.memory hypermem
-openclaw config set plugins.load.paths '["~/.openclaw/workspace/repo/hypermem/plugin","~/.openclaw/workspace/repo/hypermem/memory-plugin"]' --strict-json
-openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
-openclaw gateway restart
-
-# Verify
-openclaw plugins list                    # hypercompositor and hypermem should show as loaded
-node bin/hypermem-status.mjs --health    # confirms database initialization
+npm run install:runtime
 ```
 
-Or use the one-line installer:
+`install:runtime` stages the runtime payload into `~/.openclaw/plugins/hypermem` and prints the exact config commands to wire the plugins. Before running them, create the data directory and config:
+
+```bash
+mkdir -p ~/.openclaw/hypermem
+cat > ~/.openclaw/hypermem/config.json <<'JSON'
+{
+  "embedding": {
+    "provider": "none"
+  }
+}
+JSON
+```
+
+This sets lightweight mode (FTS5 keyword search, no embedding provider needed). Add an embedding provider later for semantic search without losing stored data. See [INSTALL.md](./INSTALL.md#embedding-providers) for options.
+
+Wire the plugins into OpenClaw:
+
+```bash
+openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
+openclaw config set plugins.slots.contextEngine hypercompositor
+openclaw config set plugins.slots.memory hypermem
+openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
+openclaw gateway restart
+```
+
+Verify (run from the repo clone directory):
+
+```bash
+openclaw plugins list                    # hypercompositor and hypermem should show as loaded
+node bin/hypermem-status.mjs --health    # confirms database initialization
+openclaw logs --limit 50 | grep hypermem # should show "hypermem initialized"
+```
+
+If you see `falling back to default engine "legacy"` in the logs, the install is not active. Check [INSTALL.md troubleshooting](./INSTALL.md#troubleshooting-clean-installs).
+
+### One-line installer
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-**Requirements:** Node.js 22+, OpenClaw with context engine plugin support, and either Ollama (local) or an OpenRouter API key (hosted) for embeddings. No standalone SQLite install is required for the documented repo install: hypermem uses the SQLite bundled with Node 22 via `node:sqlite`, and `sqlite-vec` provides the platform-specific extension through npm dependencies.
+Interactive: detects hardware, selects embedding tier, writes config, registers plugins.
 
-Full guide with deployment-specific options: **[INSTALL.md](./INSTALL.md)**
+Full guide with embedding tiers, reranker setup, fleet config, and tuning: **[INSTALL.md](./INSTALL.md)**
 
 ### Agent-assisted install
 

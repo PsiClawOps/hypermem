@@ -373,9 +373,13 @@ openclaw config get plugins.allow
 openclaw config get plugins.load.paths
 ```
 
-### Step 3 — Choose setup style
+### Step 3 — Choose embedding provider
 
-See [Setup Styles](#setup-styles) above. For Lightweight, skip this step. For Local, pull the Ollama models. For High, create `~/.openclaw/hypermem/config.json` with the embedding and optional reranker config blocks.
+See [Embedding Providers](#embedding-providers) above.
+
+- **Lightweight (no embedder):** create `~/.openclaw/hypermem/config.json` with `{"embedding":{"provider":"none"}}`. The Quick Start block above already does this. Without this file, the default provider is `ollama` and you'll see a non-fatal init warning if Ollama isn't running.
+- **Local:** `ollama pull nomic-embed-text`. No config file needed (Ollama is the default).
+- **Hosted/Gemini:** create `~/.openclaw/hypermem/config.json` with the provider config block from the relevant section above.
 
 ### Step 4 — Restart and verify
 
@@ -395,12 +399,14 @@ Expected:
 [hypermem:compose] agent=main triggers=0 fallback=true facts=3 semantic=2 ...
 ```
 
-Full health check:
+Full health check (run from the repo clone directory):
 
 ```bash
 node bin/hypermem-status.mjs              # full dashboard
 node bin/hypermem-status.mjs --health     # health checks only (exit 1 on failure)
 ```
+
+> **Note:** The health check requires the data directory to exist. It is created on first gateway restart with the plugin active. Run the `openclaw logs` check first to confirm initialization, then run the health check.
 
 If the plugin didn't load:
 
@@ -492,6 +498,7 @@ openclaw gateway restart
 What changed on the path from 0.5.x to current:
 - **0.6.0**: SQLite `:memory:` became the only hot layer. Redis was fully removed and the runtime no longer depends on any external cache service.
 - **0.7.0**: Temporal validity, expertise storage, contradiction detection, and maintenance APIs landed.
+- **0.8.1**: Documentation fixes — install instructions rewritten for clean first-run, `$HOME` replaces `~` in shell-interpolated paths, Lightweight mode config clarified.
 - **0.8.0**: Phase C correctness guards, tool-artifact store, schema v10/v19, BLAKE3 dedup, RRF fusion, and fleet registry seeding shipped.
 - **Upgrade impact**: current releases use `messages.db` schema v10 and `library.db` schema v19. If you are upgrading from older 0.5.x installs, expect both schema and runtime-behavior changes.
 
