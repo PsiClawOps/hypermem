@@ -125,11 +125,19 @@ const PRODUCT_NAME_MAP = [
   { from: 'ClawTomation', to: 'automation' },
   { from: 'ClawMap',      to: 'dependency analyzer' },
   { from: 'ClawDispatch', to: 'dispatch' },
+  // Lowercase variants (e.g. object keys in topic-store)
+  { from: 'clawdash',     to: 'dashboard' },
+  { from: 'clawcanvas',   to: 'canvas' },
+  { from: 'clawcouncil',  to: 'council' },
+  { from: 'clawtomation', to: 'automation' },
+  { from: 'clawmap',      to: 'dep-analyzer' },
+  { from: 'clawdispatch', to: 'dispatch' },
 ];
 
 // Broad operator name substitution (in all text contexts)
 const OPERATOR_BROAD_MAP = [
   { from: 'operator', to: 'operator' },
+  { from: 'ragesaq',  to: 'operator' },
 ];
 
 // ─── Leak detection terms ───────────────────────────────────────
