@@ -405,7 +405,39 @@ Schema versions are stamped into each database on startup and checked on open. A
 
 **Requirements:** Node.js 22+, OpenClaw with context engine plugin support. No standalone SQLite install needed (uses Node 22 built-in `node:sqlite`). Embedding provider is optional for first install.
 
-### From source
+hypermem works two ways:
+- **As a library** — import directly into your own Node.js code. No OpenClaw required.
+- **As an OpenClaw plugin** — replaces the default context engine. Requires a running OpenClaw gateway.
+
+### Library usage (no OpenClaw required)
+
+```bash
+npm install @psiclawops/hypermem
+```
+
+```typescript
+import { HyperMem } from '@psiclawops/hypermem';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+const hm = await HyperMem.create({
+  dataDir: join(homedir(), '.openclaw', 'hypermem'),
+  embedding: { provider: 'none' },
+});
+
+await hm.recordUserMessage('my-agent', 'session-1', 'Hello');
+const composed = await hm.compose({
+  agentId: 'my-agent',
+  sessionKey: 'session-1',
+  prompt: 'Hello',
+  tokenBudget: 4000,
+  provider: 'anthropic',
+});
+```
+
+That's it. No gateway, no plugins, no config files. See [API](#api) for the full interface.
+
+### OpenClaw plugin install (from source)
 
 ```bash
 git clone https://github.com/PsiClawOps/hypermem.git
@@ -530,9 +562,11 @@ Full reference: **[docs/TUNING.md](./docs/TUNING.md)**
 
 ```typescript
 import { HyperMem } from '@psiclawops/hypermem';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 const hm = await HyperMem.create({
-  dataDir: '~/.openclaw/hypermem',
+  dataDir: join(homedir(), '.openclaw', 'hypermem'),
   cache: { maxEntries: 10000 },
   // Local (Ollama):
   embedding: { ollamaUrl: 'http://localhost:11434', model: 'nomic-embed-text' },
@@ -581,6 +615,14 @@ node bin/hypermem-status.mjs --json          # machine-readable output
 node bin/hypermem-status.mjs --health        # health checks only (exit 1 on failure)
 ```
 
+By default, `hypermem-status` looks for data in `~/.openclaw/hypermem`. If your data directory is elsewhere (e.g. testing in an isolated environment), set:
+
+```bash
+HYPERMEM_DATA_DIR=/path/to/data node bin/hypermem-status.mjs --health
+```
+
+> **Fresh install note:** If no agent has run a session yet, `--health` will report "no sessions ingested" rather than a database error. This is expected. Send a test message to any agent, then re-run the health check.
+
 ---
 
 ## Pressure management
@@ -609,6 +651,22 @@ hypermem composes context fresh on every turn, but a long-running session still 
         ├── messages_2026Q1.db   (rotated archive)
         └── vectors.db
 ```
+
+---
+
+## Common issues
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `falling back to default engine "legacy"` in logs | Plugin not loaded or slot misconfigured | Check `openclaw config get plugins.slots.contextEngine` is `hypercompositor`, paths are correct, and both plugins are in `plugins.allow` |
+| `openclaw gateway restart` says disabled/not configured | OpenClaw not fully onboarded | Complete OpenClaw setup first. `gateway restart` requires a running gateway. |
+| `openclaw logs` fails with auth/token error | Gateway auth not set up for CLI | Run `openclaw gateway status` to confirm the gateway is accessible |
+| `facts=0 semantic=0` every turn | Fresh install, no data yet | Expected. Facts accumulate over real conversations. |
+| Health check says "no sessions ingested" | No agent has run a session yet | Send a test message, then re-run |
+| JS code creates `./~/.openclaw/` directory | Used literal `~` in JS instead of `homedir()` | Use `join(homedir(), '.openclaw', 'hypermem')` from `node:path` and `node:os` |
+| `INSTALL.md` not found in npm package | Older published version | Update to latest or read INSTALL.md on [GitHub](https://github.com/PsiClawOps/hypermem/blob/main/INSTALL.md) |
+
+Full troubleshooting: **[INSTALL.md § Troubleshooting](./INSTALL.md#troubleshooting)**
 
 ---
 

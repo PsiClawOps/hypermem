@@ -48,6 +48,8 @@
     "dist/**/*.d.ts",
     "dist/**/*.d.ts.map",
     "README.md",
+    "INSTALL.md",
+    "CHANGELOG.md",
     "ARCHITECTURE.md",
     "LICENSE"
   ],
