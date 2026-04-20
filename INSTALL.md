@@ -603,7 +603,7 @@ This gives agents 4 days of working memory at startup (~12k chars total). Still 
 Controls the maximum size of bootstrap files (AGENTS.md, SOUL.md, etc.) injected on session start. The default (12000) is tight for agents with governance rules, tool references, and identity docs:
 
 ```bash
-ocplatform config set agents.defaults.bootstrapMaxChars 20000 --strict-json
+openclaw config set agents.defaults.bootstrapMaxChars 20000 --strict-json
 ```
 
 ### Compaction safety net
@@ -611,10 +611,10 @@ ocplatform config set agents.defaults.bootstrapMaxChars 20000 --strict-json
 OpenClaw's built-in compaction (`safeguard` mode) serves as a last-resort safety net. Keep it enabled but tuned so it only fires when HyperMem's own pressure management is insufficient:
 
 ```bash
-ocplatform config set agents.defaults.compaction.mode safeguard
+openclaw config set agents.defaults.compaction.mode safeguard
 openclaw config set agents.defaults.compaction.reserveTokens 16384 --strict-json
-ocplatform config set agents.defaults.compaction.keepRecentTokens 6000 --strict-json
-ocplatform config set agents.defaults.compaction.reserveTokensFloor 15000 --strict-json
+openclaw config set agents.defaults.compaction.keepRecentTokens 6000 --strict-json
+openclaw config set agents.defaults.compaction.reserveTokensFloor 15000 --strict-json
 openclaw config set agents.defaults.compaction.maxHistoryShare 0.65 --strict-json
 ```
 
