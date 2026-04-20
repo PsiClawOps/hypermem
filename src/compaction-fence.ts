@@ -47,6 +47,15 @@ export interface CompactionEligibility {
   fence: CompactionFence | null;
 }
 
+export interface UpdateCompactionFenceOptions {
+  /**
+   * Minimum number of most-recent non-system messages that must remain above
+   * the fence. Prevents compaction from fencing off the live conversational
+   * tail under pressure.
+   */
+  minTailMessages?: number;
+}
+
 // ─── Schema ─────────────────────────────────────────────────────
 
 /**
@@ -79,9 +88,37 @@ export function ensureCompactionFenceSchema(db: DatabaseSync): void {
 export function updateCompactionFence(
   db: DatabaseSync,
   conversationId: number,
-  oldestVisibleMessageId: number
+  oldestVisibleMessageId: number,
+  opts: UpdateCompactionFenceOptions = {}
 ): void {
   const now = new Date().toISOString();
+  const minTailMessages = typeof opts.minTailMessages === 'number' && Number.isFinite(opts.minTailMessages)
+    ? Math.max(1, Math.floor(opts.minTailMessages))
+    : undefined;
+
+  const oldestRecentRow = minTailMessages != null
+    ? (
+        db.prepare(`
+          SELECT id FROM messages
+          WHERE conversation_id = ?
+            AND role != 'system'
+          ORDER BY message_index DESC
+          LIMIT 1 OFFSET ?
+        `).get(conversationId, minTailMessages - 1) as { id: number } | undefined
+      ) ?? (
+        db.prepare(`
+          SELECT id FROM messages
+          WHERE conversation_id = ?
+            AND role != 'system'
+          ORDER BY message_index ASC
+          LIMIT 1
+        `).get(conversationId) as { id: number } | undefined
+      )
+    : undefined;
+
+  const clampedMessageId = oldestRecentRow
+    ? Math.min(oldestVisibleMessageId, oldestRecentRow.id)
+    : oldestVisibleMessageId;
 
   const existing = db.prepare(
     'SELECT fence_message_id FROM compaction_fences WHERE conversation_id = ?'
@@ -91,15 +128,15 @@ export function updateCompactionFence(
     // First fence for this conversation
     db.prepare(
       'INSERT INTO compaction_fences (conversation_id, fence_message_id, updated_at) VALUES (?, ?, ?)'
-    ).run(conversationId, oldestVisibleMessageId, now);
+    ).run(conversationId, clampedMessageId, now);
     return;
   }
 
   // Monotone progress: fence only moves forward
-  if (oldestVisibleMessageId > existing.fence_message_id) {
+  if (clampedMessageId > existing.fence_message_id) {
     db.prepare(
       'UPDATE compaction_fences SET fence_message_id = ?, updated_at = ? WHERE conversation_id = ?'
-    ).run(oldestVisibleMessageId, now, conversationId);
+    ).run(clampedMessageId, now, conversationId);
   }
 }
 

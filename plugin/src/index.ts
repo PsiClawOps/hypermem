@@ -1052,6 +1052,37 @@ function extractTextFromInboundContent(content: InboundMessage['content']): stri
     .join('\n');
 }
 
+function resolveAssistantTokenCount(
+  msg: InboundMessage,
+  runtimeContext?: Record<string, unknown>
+): number | undefined {
+  const usage = (msg as { usage?: Record<string, unknown> }).usage;
+  if (usage && typeof usage === 'object') {
+    const candidates = [
+      usage.total,
+      usage.totalTokens,
+      usage.total_tokens,
+      usage.output,
+      usage.outputTokens,
+      usage.output_tokens,
+      usage.completionTokens,
+      usage.completion_tokens,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0) {
+        return Math.floor(candidate);
+      }
+    }
+  }
+
+  const runtimeTokenCount = runtimeContext?.currentTokenCount;
+  if (typeof runtimeTokenCount === 'number' && Number.isFinite(runtimeTokenCount) && runtimeTokenCount > 0) {
+    return Math.floor(runtimeTokenCount);
+  }
+
+  return undefined;
+}
+
 function collectNeutralToolPairStats(messages: NeutralMessage[]): ToolPairStats {
   const callIds = new Set<string>();
   const resultIds = new Set<string>();
@@ -2936,7 +2967,7 @@ ${replayRecovery.emittedText}`
      * it never calls ingest() or ingestBatch(). So we must ingest the new
      * messages here, using messages.slice(prePromptMessageCount).
      */
-    async afterTurn({ sessionId, sessionKey, messages, prePromptMessageCount, isHeartbeat }): Promise<void> {
+    async afterTurn({ sessionId, sessionKey, messages, prePromptMessageCount, isHeartbeat, runtimeContext }): Promise<void> {
       if (isHeartbeat) return;
 
       try {
@@ -2981,7 +3012,9 @@ ${replayRecovery.emittedText}`
             // recordUserMessage takes a plain string and would silently discard them.
             await hm.recordUserMessage(agentId, sk, stripMessageMetadata(neutral.textContent ?? ''));
           } else {
-            await hm.recordAssistantMessage(agentId, sk, neutral);
+            await hm.recordAssistantMessage(agentId, sk, neutral, {
+              tokenCount: neutral.role === 'assistant' ? resolveAssistantTokenCount(m, runtimeContext) : undefined,
+            });
           }
         }
 
