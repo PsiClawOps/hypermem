@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - **Node.js 22+** (uses built-in `node:sqlite`)
-- **OpenClaw** must already be installed, onboarded, and running. The plugin install assumes a working OpenClaw home with a valid `openclaw.json` and a gateway that can restart.
+- **OpenClaw** must already be installed, onboarded, and running. HyperMem is a plugin for an existing OpenClaw deployment -- it does not bootstrap OpenClaw itself. If you have never run `openclaw gateway start` or completed OpenClaw onboarding, do that first. The HyperMem install guide picks up after OpenClaw is operational.
 - **Disk space:** allow at least 2 GB free. Plugin builds pull OpenClaw as a dev dependency.
 
 **Verify before starting:**
@@ -46,26 +46,38 @@ JSON
 
 Wire both plugins into OpenClaw:
 
-> **⚠️  Merge, don't overwrite.** If you already have values in `plugins.load.paths` or `plugins.allow`, check them first and include your existing entries alongside the new ones. Replacing the list drops whatever was there before — including bundled OpenClaw CLI surfaces.
->
-> ```bash
-> openclaw config get plugins.allow
-> openclaw config get plugins.load.paths
-> ```
+> **⚠️  Merge, don't overwrite.** The commands below set `plugins.load.paths` and `plugins.allow` to new values. If you already have entries in either list, you must merge them -- not replace. Replacing `plugins.allow` drops existing plugins (including bundled OpenClaw CLI surfaces and channel plugins).
+
+**Step 1: Check your existing config.**
 
 ```bash
-# Use a variable to avoid shell quote-escaping issues with $HOME:
-HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
-openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
-# If you have existing load paths, merge them into the array in HYPERMEM_PATHS.
+openclaw config get plugins.load.paths
+openclaw config get plugins.allow
+```
 
+If either returns existing values, note them. You will include them in the commands below.
+
+**Step 2: Wire plugins.**
+
+If `plugins.load.paths` and `plugins.allow` are empty or unset (fresh OpenClaw install):
+
+```bash
+openclaw config set plugins.load.paths "[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
-
-# ⚠️  Add to your existing plugins.allow — do not replace your current list.
-# Edit the array below to include any plugins you already have allowed:
 openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
+```
 
+If you have existing entries, merge them into the arrays. Example for a host that already has `"my-plugin"` allowed and `"/path/to/my-plugin"` in load paths:
+
+```bash
+openclaw config set plugins.load.paths "[\"/path/to/my-plugin\",\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
+openclaw config set plugins.allow '["my-plugin","hypercompositor","hypermem"]' --strict-json
+```
+
+**Step 3: Restart.**
+
+```bash
 openclaw gateway restart
 ```
 
@@ -387,25 +399,23 @@ The full suite takes 30–60 seconds. When complete, output ends with `N passed,
 Use the OpenClaw CLI. **Do not edit `openclaw.json` directly.**
 
 ```bash
-# Add plugin load paths
-openclaw config set plugins.load.paths "[\"$HOME/.openclaw/plugins/hypermem/plugin\",\"$HOME/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
+# Check existing values first — merge if non-empty:
+openclaw config get plugins.load.paths
+openclaw config get plugins.allow
 
-# Set the context engine slot
+# Wire plugin load paths (merge with any existing paths):
+openclaw config set plugins.load.paths "[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]" --strict-json
+
+# Set the context engine and memory slots:
 openclaw config set plugins.slots.contextEngine hypercompositor
-
-# Set the memory slot
 openclaw config set plugins.slots.memory hypermem
 
-# Allow both plugins
+# Allow both plugins (merge with any existing allowed plugins):
+# If plugins.allow already has entries, include them in this array.
 openclaw config set plugins.allow '["hypercompositor","hypermem"]' --strict-json
 ```
 
-If you already have entries in `plugins.allow` or `plugins.load.paths`, merge rather than replace. Check current values:
-
-```bash
-openclaw config get plugins.allow
-openclaw config get plugins.load.paths
-```
+> **⚠️  If `plugins.allow` already had entries**, the command above replaces them. Include your existing allowed plugins in the array. See the Quick Start section above for a merge example.
 
 ### Step 3 — Choose embedding provider
 
