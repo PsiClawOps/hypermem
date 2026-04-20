@@ -7,7 +7,8 @@
   "types": "dist/index.d.ts",
   "bin": {
     "hypermem-status": "bin/hypermem-status.mjs",
-    "hypermem-install": "scripts/install-runtime.mjs"
+    "hypermem-install": "scripts/install-runtime.mjs",
+    "hypermem-model-audit": "bin/hypermem-model-audit.mjs"
   },
   "exports": {
     ".": {
@@ -54,6 +55,7 @@
     "dist/**/*.d.ts",
     "dist/**/*.d.ts.map",
     "bin/hypermem-status.mjs",
+    "bin/hypermem-model-audit.mjs",
     "plugin/dist/**",
     "plugin/package.json",
     "plugin/openclaw.plugin.json",

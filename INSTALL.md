@@ -804,6 +804,16 @@ The two symptoms that indicate window-detection failure:
 
 If you see `fallback contextWindowSize` for your model, detection failed and you need an override.
 
+**Packaged audit helper.** HyperMem now ships `hypermem-model-audit`, which inspects your configured models plus any existing `contextWindowOverrides` and flags models that are running on risky autodetect paths:
+
+```bash
+hypermem-model-audit
+hypermem-model-audit --strict
+hypermem-model-audit --models openai-codex/gpt-5.4,ollama/llama-3.3-70b
+```
+
+Use it during install and after model changes. `--strict` exits non-zero if a model is missing explicit metadata or is only partially overridden.
+
 **Apply an override.** Add a `contextWindowOverrides` block to `~/.openclaw/hypermem/config.json`. The key is `"provider/model"` as it appears in your agent's model string (lowercase, exact match):
 
 ```json

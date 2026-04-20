@@ -16,6 +16,8 @@ const requiredEntries = [
   ['package.json', 'package.json'],
   ['README.md', 'README.md'],
   ['LICENSE', 'LICENSE'],
+  ['bin/hypermem-status.mjs', 'bin/hypermem-status.mjs'],
+  ['bin/hypermem-model-audit.mjs', 'bin/hypermem-model-audit.mjs'],
   ['plugin/dist', 'plugin/dist'],
   ['plugin/package.json', 'plugin/package.json'],
   ['plugin/openclaw.plugin.json', 'plugin/openclaw.plugin.json'],

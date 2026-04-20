@@ -414,6 +414,15 @@ Two failure signatures:
 
 Verify what's being used by enabling `verboseLogging: true` and watching for the `budget source:` log line each turn. `runtime tokenBudget=...` or `contextWindowOverrides[...]` means HyperMem has the right number. `fallback contextWindowSize=...` with your model in the tail means detection failed.
 
+You can also run the packaged audit helper:
+
+```bash
+hypermem-model-audit
+hypermem-model-audit --strict
+```
+
+It inspects configured agent models plus your existing `contextWindowOverrides` and flags models that still rely on weak autodetect paths.
+
 Fix by adding `contextWindowOverrides` in the `compositor` block of `~/.openclaw/hypermem/config.json`:
 
 ```json
