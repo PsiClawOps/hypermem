@@ -42,7 +42,25 @@ for pkg in "${PACKAGES[@]}"; do
 done
 
 echo ""
-echo "Done. Don't forget:"
-echo "  1. git add package.json plugin/package.json memory-plugin/package.json"
-echo "  2. git commit -m 'release: v$VERSION'"
-echo "  3. npm publish (from each package dir if publishing separately)"
+echo "Versions bumped. Next steps:"
+echo "  git add package.json plugin/package.json memory-plugin/package.json"
+echo "  git commit -m 'release: v$VERSION'"
+echo "  git push"
+
+if [ "${2:-}" = "--publish" ]; then
+  echo ""
+  echo "Publishing to npm..."
+  for dir in "." "plugin" "memory-plugin"; do
+    PKG="$REPO_ROOT/$dir"
+    if [ -f "$PKG/package.json" ]; then
+      NAME=$(grep '"name"' "$PKG/package.json" | head -1 | sed 's/.*: "//;s/".*//')
+      echo "  Publishing $NAME@$VERSION..."
+      (cd "$PKG" && npm publish --access public 2>&1 | tail -1)
+    fi
+  done
+  echo "Done."
+else
+  echo ""
+  echo "To also publish to npm, re-run with --publish:"
+  echo "  $0 $VERSION --publish"
+fi
