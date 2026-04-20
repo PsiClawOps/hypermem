@@ -32,6 +32,8 @@ The difference isn't intelligence. It's what was in the prompt. Two failure mode
 
 **Compaction crunch.** Long sessions fill the context window. The runtime summarizes to make room. Specifics (tool output, exact decisions, file paths) are lost in the summary. The agent keeps running, but degraded.
 
+**Bloated context.** 128k tokens doesn't mean 128k of useful prompt. Without active curation, agents fill the window with stale history, redundant instructions, and memory that isn't relevant to this turn. A bigger context window just means more room to waste. The information is in the prompt somewhere, buried under content irrelevant to this turn.
+
 ---
 
 ## What OpenClaw provides today
