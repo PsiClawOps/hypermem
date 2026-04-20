@@ -566,23 +566,66 @@ npm --prefix memory-plugin run build
 
 ---
 
-## OpenClaw Settings (Optional Tuning)
+## OpenClaw Platform Settings
 
-These are optional. hypermem works with OpenClaw defaults, but these changes reduce unnecessary overhead.
+HyperMem manages its own context pressure, memory injection, and compaction. Several OpenClaw defaults conflict with this or are too conservative for memory-augmented agents. Apply these after plugin installation, before the gateway restart.
 
-### Lower OpenClaw's compaction threshold
+### Disable OpenClaw context pruning (required)
 
-hypermem owns compaction. OpenClaw's default fires at 24K reserved tokens, which races hypermem's budget management:
+OpenClaw has a built-in context pruning system (`cache-ttl` mode) that independently truncates and clears tool results from the message history based on time and context-window ratio thresholds. When HyperMem is active, these two systems fight each other: OpenClaw prunes tool results to free space, then HyperMem injects context that refills it, triggering aggressive compaction on the next turn. The result is unpredictable amnesia.
+
+Disable OpenClaw's pruning and let HyperMem handle context pressure exclusively:
 
 ```bash
-openclaw config set agents.defaults.compaction.reserveTokens 1000 --strict-json
+openclaw config set agents.defaults.contextPruning.mode off
 ```
 
-This makes OpenClaw's compaction a last-resort safety net that never fires in normal operation.
+### Startup context (recommended)
+
+Controls how much daily memory context agents receive on session start. The defaults are very conservative (2 days, 2800 chars total). For memory-augmented agents, increase these so agents wake up with meaningful context:
+
+```bash
+openclaw config set agents.defaults.startupContext.dailyMemoryDays 4 --strict-json
+openclaw config set agents.defaults.startupContext.maxFileChars 4000 --strict-json
+openclaw config set agents.defaults.startupContext.maxTotalChars 12000 --strict-json
+openclaw config set agents.defaults.startupContext.maxFileBytes 32768 --strict-json
+```
+
+This gives agents 4 days of working memory at startup (~12k chars total). Still under 10% of a 128k context window.
+
+### Bootstrap max chars (recommended)
+
+Controls the maximum size of bootstrap files (AGENTS.md, SOUL.md, etc.) injected on session start. The default (12000) is tight for agents with governance rules, tool references, and identity docs:
+
+```bash
+ocplatform config set agents.defaults.bootstrapMaxChars 20000 --strict-json
+```
+
+### Compaction safety net
+
+OpenClaw's built-in compaction (`safeguard` mode) serves as a last-resort safety net. Keep it enabled but tuned so it only fires when HyperMem's own pressure management is insufficient:
+
+```bash
+ocplatform config set agents.defaults.compaction.mode safeguard
+openclaw config set agents.defaults.compaction.reserveTokens 16384 --strict-json
+ocplatform config set agents.defaults.compaction.keepRecentTokens 6000 --strict-json
+ocplatform config set agents.defaults.compaction.reserveTokensFloor 15000 --strict-json
+openclaw config set agents.defaults.compaction.maxHistoryShare 0.65 --strict-json
+```
+
+This reserves 16k tokens for reply generation. HyperMem's own pressure system (afterTurn at 80%, nuclear at 85%) fires first in normal operation. OpenClaw's safeguard catches edge cases.
+
+### LLM idle timeout
+
+Tool-heavy sessions with large outputs can stall during streaming. Raise the idle timeout from the default (120s):
+
+```bash
+openclaw config set agents.defaults.llm.idleTimeoutSeconds 300 --strict-json
+```
 
 ### Tighter session store retention
 
-With hypermem active, SQLite is the durable record. JSONL transcripts provide no memory benefit:
+With HyperMem active, SQLite is the durable record. JSONL transcripts provide no memory benefit:
 
 ```bash
 openclaw config set sessions.maintenance.pruneAfter "14d"
