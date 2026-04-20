@@ -374,7 +374,7 @@ npm install
 npm run build
 ```
 
-Build both plugins, then install the runtime payload into OCPlatform's durable plugin directory:
+Build both plugins, then install the runtime payload into 's durable plugin directory:
 
 ```bash
 npm --prefix plugin install && npm --prefix plugin run build
