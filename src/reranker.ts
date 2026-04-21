@@ -6,7 +6,7 @@
  * order without disruption.
  *
  * Providers:
- *   - ZeroEntropyReranker — https://api.zeroentropy.dev/v1/rerank (zerank-2)
+ *   - ZeroEntropyReranker — https://api.zeroentropy.dev/v1/models/rerank (zerank-2)
  *   - OpenRouterReranker  — https://openrouter.ai/api/v1/rerank (cohere/rerank-4-pro)
  *   - OllamaReranker      — http://localhost:11434/api/chat (yes/no classification)
  *
@@ -141,7 +141,7 @@ export class ZeroEntropyReranker implements RerankerProvider {
     if (this.circuit.isOpen()) return null;
     const { controller, clear } = withTimeout(this.timeoutMs);
     try {
-      const response = await fetch('https://api.zeroentropy.dev/v1/rerank', {
+      const response = await fetch('https://api.zeroentropy.dev/v1/models/rerank', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
