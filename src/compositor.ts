@@ -17,6 +17,8 @@ import type {
   ComposeRequest,
   ComposeResult,
   ComposeDiagnostics,
+  CompositorBudgetLanes,
+  OpenAIPrefixCacheDiag,
   SlotTokenCounts,
   NeutralMessage,
   ProviderMessage,
@@ -38,7 +40,7 @@ import { CacheLayer } from './cache.js';
 type AnyCache = CacheLayer;
 import { MessageStore } from './message-store.js';
 import { SessionTopicMap } from './session-topic-map.js';
-import { toProviderFormat } from './provider-translator.js';
+import { toProviderFormat, detectProvider as s4DetectProvider } from './provider-translator.js';
 import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
 import { hybridSearch, type HybridSearchResult, type RerankerTelemetry } from './hybrid-retrieval.js';
@@ -415,6 +417,49 @@ export function computeAdaptiveHistoryDepth(
   // historyBudget / avgMsgCost gives the message count that fills the budget.
   const depth = Math.floor((historyBudgetTokens * SAFETY_MARGIN) / observedDensity);
   return Math.min(maxHistoryMessages, Math.max(20, depth));
+}
+
+// ─── Sprint 3: Unified Pressure Signal ───────────────────────────────────────────────────────
+
+/**
+ * Canonical pressure labels shared across compose and compaction paths.
+ * Use these constants when setting the `pressureSource` field so all consumers
+ * can filter logs with a stable string without guessing spellings.
+ */
+export const PRESSURE_SOURCE = {
+  /** Compose path: pressure derived from (budget - remaining) after full slot assembly. */
+  COMPOSE_POST_ASSEMBLY: 'compose:post-assembly',
+  /** Compaction path: pressure from Redis token estimate / effectiveBudget. */
+  COMPACT_REDIS_ESTIMATE: 'compact:redis-estimate',
+  /** Compaction path: pressure from runtime-reported currentTokenCount / effectiveBudget. */
+  COMPACT_RUNTIME_TOTAL: 'compact:runtime-total',
+  /** Tool-loop assemble path: pressure from in-memory working message array / effectiveBudget. */
+  TOOLLOOP_RUNTIME_ARRAY: 'toolloop:runtime-array',
+} as const;
+
+export type PressureSourceLabel = typeof PRESSURE_SOURCE[keyof typeof PRESSURE_SOURCE];
+
+/**
+ * Compute a unified pressure fraction so compose and compaction paths report
+ * the same numeric concept without drift.
+ *
+ * Always clamps to [0, Infinity) — callers get the raw fraction so they can
+ * decide their own thresholds without us hardcoding them here.
+ *
+ * @param usedTokens  Tokens consumed (numerator).
+ * @param budgetTokens  Effective budget (denominator). Must be > 0.
+ * @param source  Label from PRESSURE_SOURCE for telemetry (metadata only).
+ * @returns { fraction, pct, source } where fraction = usedTokens / budgetTokens,
+ *          pct = Math.round(fraction * 100), source = canonical label.
+ */
+export function computeUnifiedPressure(
+  usedTokens: number,
+  budgetTokens: number,
+  source: string,
+): { fraction: number; pct: number; source: string } {
+  const fraction = budgetTokens > 0 ? usedTokens / budgetTokens : 0;
+  const pct = Math.round(fraction * 100);
+  return { fraction, pct, source };
 }
 
 const DEFAULT_CONFIG: CompositorConfig = {
@@ -2807,7 +2852,24 @@ export class Compositor {
     }
 
     // ── Inject assembled context block ──────────────────────
+    // Sprint 4: Prompt-tail placement.
+    // Volatile context (active facts, temporal, open-domain, semantic recall,
+    // doc chunks, cross-session) moves AFTER all history messages so that
+    // query-shaped material lands near the user turn rather than buried mid-prompt.
+    //
+    // Layout after Sprint 4:
+    //   [stable prefix: system, identity, FOS/MOD, stable facts, knowledge, prefs]
+    //   [history: keystones, cross-topic, recent conversation messages]
+    //   [volatile context block ← here, at the tail]   ← Sprint 4 reorder
+    //   [last user message]
+    //
+    // The cache boundary (dynamicBoundary: true) stays on this block so the
+    // Anthropic/OpenAI cache-prefix logic still fires correctly — everything
+    // ABOVE this message is the stable prefix eligible for caching.
     const assembledContextBlock = volatileContextParts.length > 0 ? volatileContextParts.join('\n\n') : undefined;
+
+    let s4VolatileContextPosition: number | undefined;
+    let s4MessagesBeforeVolatile: number | undefined;
 
     if (assembledContextBlock) {
       const contextMsg: NeutralMessage = {
@@ -2820,7 +2882,22 @@ export class Compositor {
         // everything at or below it is per-session / per-turn context.
         metadata: { dynamicBoundary: true, cacheBoundarySlot: CACHE_PREFIX_BOUNDARY_SLOT },
       };
-      messages.splice(stableInsertIdx + stablePrefixMessages.length, 0, contextMsg);
+      // Sprint 4: Insert at tail (end of messages array), AFTER history.
+      // The last user message (if any) should remain the final message, so we
+      // insert the volatile block just before the last user message.
+      const lastMsgIdx = messages.length - 1;
+      const lastMsg = lastMsgIdx >= 0 ? messages[lastMsgIdx] : undefined;
+      if (lastMsg && lastMsg.role === 'user') {
+        // Insert volatile block before the last user message so user turn stays last
+        messages.splice(lastMsgIdx, 0, contextMsg);
+        s4VolatileContextPosition = lastMsgIdx;
+        s4MessagesBeforeVolatile = lastMsgIdx;
+      } else {
+        // No trailing user message — append at end
+        messages.push(contextMsg);
+        s4VolatileContextPosition = messages.length - 1;
+        s4MessagesBeforeVolatile = messages.length - 1;
+      }
     }
 
     const stablePrefix = getStablePrefixMessages(messages);
@@ -2851,6 +2928,9 @@ export class Compositor {
 
       // Collect indices of messages to eject before mutating the array.
       // Walk forward from the first non-system message, trimming oldest first.
+      // Sprint 4: Skip the volatile context block (dynamicBoundary: true) — it
+      // is query-shaped content that should not be evicted during the safety
+      // valve pass. The stable prefix system messages are also protected (role=system).
       const firstNonSystemIdx = messages.findIndex(m => m.role !== 'system');
       const ejectIndices = new Set<number>();
 
@@ -2859,6 +2939,9 @@ export class Compositor {
         while (i < messages.length && trimmed < overage) {
           // Don't trim the last user message (current prompt).
           if (i === messages.length - 1 && messages[i].role === 'user') break;
+          // Sprint 4: Don't trim the volatile context block (dynamicBoundary marker).
+          const meta = messages[i].metadata as Record<string, unknown> | undefined;
+          if (meta?.dynamicBoundary) { i++; continue; }
           const msgTokens = estimateMessageTokens(messages[i]);
           ejectIndices.add(i);
           trimmed += msgTokens;
@@ -2912,6 +2995,9 @@ export class Compositor {
     }
 
     const totalTokens = budget - remaining;
+
+    // Sprint 3: Unified pressure signal — compose path
+    const s3Pressure = computeUnifiedPressure(totalTokens, budget, PRESSURE_SOURCE.COMPOSE_POST_ASSEMBLY);
 
     // ─── Slot reconciliation ─────────────────────────────────────────────────
     // totalTokens = budget - remaining is the authoritative spend figure.
@@ -3020,6 +3106,68 @@ export class Compositor {
       }
     }
 
+    // ── Sprint 4: Explicit budget lanes ───────────────────────────────────────────────
+    // Compute allocated token lanes for this compose pass.
+    // Budget = effective input budget (post-reserve).
+    // Filled values reflect actual spend after slot fill and safety-valve trim.
+    const s4HistoryLane = Math.floor(budget * b4HistoryFraction);
+    const s4MemoryLane = Math.floor(budget * b4MemoryFraction);
+    const s4StableFilledTokens = (slots.system ?? 0) + (slots.identity ?? 0);
+    const s4HistoryFilledTokens = slots.history ?? 0;
+    const s4MemoryFilledTokens = (slots.facts ?? 0) + (slots.context ?? 0) + (slots.library ?? 0);
+    const s4TotalFilled = s4StableFilledTokens + s4HistoryFilledTokens + s4MemoryFilledTokens;
+    const budgetLanes: CompositorBudgetLanes = {
+      effectiveBudget: budget,
+      stablePrefix: slots.system + slots.identity,
+      history: s4HistoryLane,
+      memory: s4MemoryLane,
+      historyFraction: b4HistoryFraction,
+      memoryFraction: b4MemoryFraction,
+      overhead: Math.max(0, budget - s4TotalFilled),
+      filled: {
+        stablePrefix: s4StableFilledTokens,
+        history: s4HistoryFilledTokens,
+        memory: s4MemoryFilledTokens,
+      },
+    };
+
+    // ── Sprint 4: OpenAI prefix-cache diagnostics ────────────────────────────────────
+    // Expose prefix-boundary information for OpenAI providers so operators
+    // can tune prompt layout for cache hit rate without guesswork.
+    // Non-fatal — never block compose.
+    let openaiPrefixCacheDiag: OpenAIPrefixCacheDiag | undefined;
+    try {
+      const s4Provider = s4DetectProvider(request.provider ?? request.model);
+      if (s4Provider === 'openai' || s4Provider === 'openai-responses') {
+        const totalWindowTokens = messages.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
+        const cacheableFraction = totalWindowTokens > 0
+          ? Math.round((prefixTokens / totalWindowTokens) * 1000) / 1000
+          : 0;
+        // Sprint 4: volatileAtTail is true when the volatile context block is
+        // positioned AFTER any history (or, vacuously, when no history exists and
+        // the block sits just before the final user turn). In both cases nothing
+        // but the current user message follows the boundary, which is the
+        // cacheable layout. When assembledContextBlock is missing we report
+        // false since there is nothing to place at tail.
+        let s4VolatileAtTail = false;
+        if (s4VolatileContextPosition !== undefined) {
+          // Any messages after the boundary must be user turns only (no history).
+          const tail = messages.slice(s4VolatileContextPosition + 1);
+          s4VolatileAtTail = tail.every(m => m.role === 'user')
+            && s4VolatileContextPosition >= prefixSegmentCount;
+        }
+        openaiPrefixCacheDiag = {
+          stablePrefixMessageCount: prefixSegmentCount,
+          stablePrefixTokens: prefixTokens,
+          volatileAtTail: s4VolatileAtTail,
+          cacheableFraction,
+          prefixHash,
+        };
+      }
+    } catch {
+      // Provider detection is best-effort — never block compose
+    }
+
     const diagnostics: import('./types.js').ComposeDiagnostics = {
       triggerHits: diagTriggerHits,
       triggerFallbackUsed: diagTriggerFallbackUsed,
@@ -3049,6 +3197,14 @@ export class Compositor {
       historyDepthChosen: s4EffectiveDepth,
       estimatedMsgDensityTokens: s4ObservedDensity,
       rescueTrimFired: s4RescueTrimFired,
+      // Sprint 4: prompt-tail placement diagnostics
+      budgetLanes,
+      volatileContextPosition: s4VolatileContextPosition,
+      messagesBeforeVolatile: s4MessagesBeforeVolatile,
+      openaiPrefixCacheDiag,
+      // Sprint 3: unified pressure signal
+      sessionPressureFraction: s3Pressure.fraction,
+      pressureSource: s3Pressure.source,
       // B4: model-aware lane budget diagnostics
       mecwProfile: b4MecwProfile,
       mecwApplied: b4MecwApplied,

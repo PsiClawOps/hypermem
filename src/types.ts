@@ -263,6 +263,86 @@ export interface ComposeRequest {
   skipWindowCache?: boolean;
 }
 
+/**
+ * Sprint 4: Explicit budget lane allocations computed at compose time.
+ *
+ * Each lane is a fraction of the effective token budget (post-reserve).
+ * Values are in tokens (not fractions). The sum of all lanes may be less than
+ * effectiveBudget — the gap is reserved for system/identity overhead and
+ * rounding. Lanes do not hard-cap each other; they are planning targets that
+ * compose() fills in priority order.
+ *
+ * Reading the lanes:
+ *   stablePrefix  — tokens allocated for system + identity + FOS/MOD
+ *   history       — tokens allocated for conversation history (from historyFraction)
+ *   memory        — tokens allocated for the shared memory pool (from memoryFraction):
+ *                     facts, knowledge, preferences, semantic recall, doc chunks
+ *   overhead      — tokens remaining after lanes are filled (slop + output headroom)
+ *   effectiveBudget — total effective input budget for this compose pass
+ */
+export interface CompositorBudgetLanes {
+  /** Effective input budget for this compose pass (post-reserve). */
+  effectiveBudget: number;
+  /** Tokens allocated for stable prefix slots (system, identity, output profile). */
+  stablePrefix: number;
+  /** Tokens allocated for conversation history. Derived from historyFraction. */
+  history: number;
+  /** Tokens allocated for the shared memory pool (facts, recall, doc chunks, etc.). Derived from memoryFraction. */
+  memory: number;
+  /** Effective historyFraction used (post B4 MECW blending). */
+  historyFraction: number;
+  /** Effective memoryFraction used (post B4 MECW blending). */
+  memoryFraction: number;
+  /** Tokens remaining after all lanes are filled (headroom). */
+  overhead: number;
+  /** Actual tokens consumed by each lane after fill (filled, not allocated). */
+  filled: {
+    stablePrefix: number;
+    history: number;
+    memory: number;
+  };
+}
+
+/**
+ * Sprint 4: OpenAI prefix-cache diagnostic payload.
+ *
+ * OpenAI caches prefix tokens when the leading portion of the prompt is
+ * byte-identical across requests. This diagnostic surfaces the boundary
+ * between cacheable prefix and volatile content so tuning can be done
+ * without guesswork.
+ *
+ * See: https://platform.openai.com/docs/guides/prompt-caching
+ */
+export interface OpenAIPrefixCacheDiag {
+  /**
+   * Number of messages in the stable prefix (system + identity + FOS/MOD +
+   * stable facts/knowledge/preferences). These messages should be
+   * byte-identical across turns for OpenAI prefix caching to fire.
+   */
+  stablePrefixMessageCount: number;
+  /** Estimated token count of the stable prefix. */
+  stablePrefixTokens: number;
+  /**
+   * True when the volatile context block is positioned AFTER history in
+   * the final message array (Sprint 4 tail placement). When false the
+   * volatile block precedes history (legacy placement — reduces cache
+   * reuse because the prefix boundary is lower in the window).
+   */
+  volatileAtTail: boolean;
+  /**
+   * Estimated fraction of the assembled window that is prefix-cacheable
+   * (stablePrefixTokens / totalTokens). Higher = better cache hit rate.
+   * When volatile content is at tail, history + memory become volatile
+   * (not cacheable), which is expected — the stable prefix is small.
+   */
+  cacheableFraction: number;
+  /**
+   * Deterministic content hash of the stable prefix messages.
+   * Matches ComposeDiagnostics.prefixHash.
+   */
+  prefixHash?: string;
+}
+
 export interface SlotTokenCounts {
   system: number;
   identity: number;
@@ -376,6 +456,29 @@ export interface ComposeDiagnostics {
   trimGrowthThreshold?: number;
   /** Canonical headroom fraction used when steady-state trim does fire. */
   trimHeadroomFraction?: number;
+  // ── Sprint 4: Prompt placement + budget lanes + provider diagnostics ────────────────────────────────
+  /**
+   * Sprint 4: Explicit compositor budget lane allocations for this compose pass.
+   * All values are in tokens. Undefined when the compose fast-exit returned a cache hit.
+   */
+  budgetLanes?: CompositorBudgetLanes;
+  /**
+   * Sprint 4: Position (message index) of the volatile-context message in the final
+   * assembled window. Should be near the tail (after history) when prompt-tail placement
+   * is active. Undefined when no volatile context was injected.
+   */
+  volatileContextPosition?: number;
+  /**
+   * Sprint 4: Number of messages in the assembled window that precede the volatile-
+   * context block (i.e., stable prefix + history). Useful for verifying that
+   * query-shaped content landed near the tail.
+   */
+  messagesBeforeVolatile?: number;
+  /**
+   * Sprint 4: OpenAI prefix-cache diagnostics. Undefined when the provider is not
+   * an OpenAI variant or when no stable-prefix content was assembled.
+   */
+  openaiPrefixCacheDiag?: OpenAIPrefixCacheDiag;
   // ── C1: Tool-chain ejection telemetry ─────────────────────────────────────
   /**
    * Number of tool-result messages co-ejected alongside their parent tool-use
@@ -444,6 +547,26 @@ export interface ComposeDiagnostics {
    * (i.e. now above the fence after the compose pass updated it).
    */
   compactionProcessedCount?: number;
+  // ── Sprint 3: Unified pressure signal ───────────────────────────────────
+  /**
+   * Sprint 3: Fractional window pressure at the end of compose (0.0–1.0+).
+   * Computed as totalTokensUsed / effectiveBudget using the same denominator
+   * as the compaction path. Use this to compare compose vs compact pressure
+   * without drift from mismatched denominators.
+   * Compare with TrimTelemetryEvent.reason which carries the numeric pressure
+   * seen by trim sites.
+   */
+  sessionPressureFraction?: number;
+  /**
+   * Sprint 3: Label for the source that provided the pressure estimate.
+   * Canonical values:
+   *   'compose:post-assembly'   — compose path: (budget - remaining) / budget after slot filling
+   *   'compact:redis-estimate'  — compact path: Redis token estimate / effectiveBudget
+   *   'compact:runtime-total'   — compact path: runtime-reported currentTokenCount / effectiveBudget
+   *   'toolloop:runtime-array'  — tool-loop assemble: in-memory message array / effectiveBudget
+   * Undefined when the compose path has not yet emitted this field (pre-Sprint 3 paths).
+   */
+  pressureSource?: string;
 }
 
 export interface ComposeResult {

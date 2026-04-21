@@ -96,6 +96,8 @@ export {
 export type { ReplayRecoveryInputs, ReplayRecoveryDecision } from './replay-recovery.js';
 
 export { Compositor, type CompositorDeps, applyToolGradientToWindow, canPersistReshapedHistory, OPENCLAW_BOOTSTRAP_FILES, resolveToolChainEjections, type ToolChainEjectionResult } from './compositor.js';
+// Sprint 3 + Sprint 4: depth estimator, session classifier, unified pressure signal
+export { classifySessionType, estimateObservedMsgDensity, computeAdaptiveHistoryDepth, computeUnifiedPressure, PRESSURE_SOURCE, type SessionType, type PressureSourceLabel } from './compositor.js';
 
 export {
   type CollectionTrigger,

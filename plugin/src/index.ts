@@ -55,6 +55,9 @@ import {
   formatToolChainStub,
   decideReplayRecovery,
   isReplayState,
+  // Sprint 3: unified pressure signal
+  computeUnifiedPressure,
+  PRESSURE_SOURCE,
 } from '@psiclawops/hypermem';
 import { evictStaleContent } from '@psiclawops/hypermem/image-eviction';
 import { repairToolPairs } from '@psiclawops/hypermem';
@@ -2259,7 +2262,9 @@ function createHyperMemEngine(): ContextEngine {
           });
           const replayMarkerText = replayRecovery.emittedText;
           const preTrimTokens = runtimeTokens;
-          const pressure = preTrimTokens / effectiveBudget;
+          // Sprint 3: unified pressure signal — tool-loop assemble path
+          const s3ToolLoopPressure = computeUnifiedPressure(preTrimTokens, effectiveBudget, PRESSURE_SOURCE.TOOLLOOP_RUNTIME_ARRAY);
+          const pressure = s3ToolLoopPressure.fraction;
 
           // Pressure-tiered trim targets use a single authority: the working
           // message array. Redis drift is logged as an anomaly, never used as
@@ -2408,19 +2413,19 @@ function createHyperMemEngine(): ContextEngine {
             const keptCount = processedConvMsgs.length - kept.length;
             if (keptCount > 0) {
               console.log(
-                `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}% → ` +
+                `[hypermem-plugin] tool-loop trim: pressure=${s3ToolLoopPressure.pct}% source=${s3ToolLoopPressure.source} → ` +
                 `target=${(trimTarget * 100).toFixed(0)}% (redis=${trimmed} msgs, messages=${keptCount} dropped)`
               );
               trimmedMessages = [...systemMsgs, ...kept] as unknown as typeof messages;
             } else if (trimmed > 0) {
               console.log(
-                `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}% → ` +
+                `[hypermem-plugin] tool-loop trim: pressure=${s3ToolLoopPressure.pct}% source=${s3ToolLoopPressure.source} → ` +
                 `target=${(trimTarget * 100).toFixed(0)}% (redis=${trimmed} msgs)`
               );
             }
           } else if (trimmed > 0) {
             console.log(
-              `[hypermem-plugin] tool-loop trim: pressure=${(pressure * 100).toFixed(1)}% → ` +
+              `[hypermem-plugin] tool-loop trim: pressure=${s3ToolLoopPressure.pct}% source=${s3ToolLoopPressure.source} → ` +
               `target=${(trimTarget * 100).toFixed(0)}% (redis=${trimmed} msgs)`
             );
           }
@@ -2952,6 +2957,10 @@ ${replayRecovery.emittedText}`
         const effectiveBudget = computeEffectiveBudget(tokenBudget, model);
         const tokensBefore = await estimateWindowTokens(hm, agentId, sk);
 
+        // Sprint 3: Unified pressure signal — compact path (Redis estimate)
+        const s3CompactPressure = computeUnifiedPressure(tokensBefore, effectiveBudget, PRESSURE_SOURCE.COMPACT_REDIS_ESTIMATE);
+        console.log(`[hypermem-plugin] compact: pressure=${s3CompactPressure.pct}% source=${s3CompactPressure.source} tokens=${tokensBefore}/${effectiveBudget}`);
+
         // Target depth for both Redis trimming and JSONL truncation.
         // Target 50% of budget capacity, assume ~500 tokens/message average.
         const targetDepth = Math.max(20, Math.floor((effectiveBudget * 0.5) / 500));
@@ -2966,6 +2975,10 @@ ${replayRecovery.emittedText}`
         // Also triggered when reshape ran recently but the session is still
         // critically full — bypass the reshape guard in that case.
         const NUCLEAR_THRESHOLD = 0.85;
+        // Sprint 3: runtime-total pressure for nuclear check uses its own source label
+        const s3NuclearPressure = currentTokenCount != null
+          ? computeUnifiedPressure(currentTokenCount, effectiveBudget, PRESSURE_SOURCE.COMPACT_RUNTIME_TOTAL)
+          : s3CompactPressure;
         const isNuclear = currentTokenCount != null && currentTokenCount > effectiveBudget * NUCLEAR_THRESHOLD;
         if (isNuclear) {
           // Cut deep: target 20% of normal depth = ~25 messages for a 128k session.
@@ -2984,12 +2997,12 @@ ${replayRecovery.emittedText}`
               postTokens: tokensAfter,
               removed: nuclearRemoved,
               cacheInvalidated: true,
-              reason: `currentTokenCount=${currentTokenCount}/${effectiveBudget}`,
+              reason: `${s3NuclearPressure.source}:${s3NuclearPressure.pct}% currentTokenCount=${currentTokenCount}/${effectiveBudget}`,
             });
           }
           console.log(
-            `[hypermem-plugin] compact: NUCLEAR — session at ${currentTokenCount}/${effectiveBudget} tokens ` +
-            `(${Math.round((currentTokenCount / effectiveBudget) * 100)}% full), ` +
+            `[hypermem-plugin] compact: NUCLEAR — pressure=${s3NuclearPressure.pct}% source=${s3NuclearPressure.source} ` +
+            `session at ${currentTokenCount}/${effectiveBudget} tokens, ` +
             `deep-trimmed JSONL to ${nuclearDepth} messages, Redis ${tokensBefore}→${tokensAfter} tokens`
           );
           return { ok: true, compacted: true, result: { tokensBefore, tokensAfter } };
@@ -3085,10 +3098,10 @@ ${replayRecovery.emittedText}`
             postTokens: tokensAfter,
             removed: historyTrimmed,
             cacheInvalidated: true,
-            reason: `over-budget tokensBefore=${tokensBefore}/${effectiveBudget}`,
+            reason: `${s3CompactPressure.source}:${s3CompactPressure.pct}% over-budget tokensBefore=${tokensBefore}/${effectiveBudget}`,
           });
         }
-        console.log(`[hypermem-plugin] compact: trimmed ${tokensBefore} → ${tokensAfter} tokens (budget: ${effectiveBudget})`);
+        console.log(`[hypermem-plugin] compact: trimmed ${tokensBefore} → ${tokensAfter} tokens (budget: ${effectiveBudget}, pressure=${s3CompactPressure.pct}% source=${s3CompactPressure.source})`);
 
         // Density-aware JSONL truncation: derive target depth from actual avg tokens/message
         // rather than assuming a fixed 500 tokens/message. This prevents a large-message

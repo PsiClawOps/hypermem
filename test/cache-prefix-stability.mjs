@@ -96,8 +96,12 @@ export async function runCachePrefixStabilitySuite(assert) {
       `B1: prefix token estimate captured (${firstDiag.prefixTokens})`);
     assert((firstDiag.volatileHistoryTokens ?? 0) > 0,
       `B1: volatile token estimate captured (${firstDiag.volatileHistoryTokens})`);
-    assert(firstBoundaryIdx === firstDiag.prefixSegmentCount,
-      `B1: dynamic boundary follows stable prefix (${firstBoundaryIdx} === ${firstDiag.prefixSegmentCount})`);
+    // Sprint 4: volatile context block is now at the TAIL (after history), not immediately
+    // after the stable prefix. Verify the boundary exists and is beyond the stable prefix.
+    assert(firstBoundaryIdx >= 0,
+      `B1: Sprint 4 — dynamic boundary message exists in assembled window (found at idx ${firstBoundaryIdx})`);
+    assert(firstBoundaryIdx >= (firstDiag.prefixSegmentCount ?? 0),
+      `B1: Sprint 4 — dynamic boundary is at or after stable prefix (${firstBoundaryIdx} >= ${firstDiag.prefixSegmentCount})`);
 
     const firstPrefixText = firstMessages
       .slice(0, firstDiag.prefixSegmentCount)
