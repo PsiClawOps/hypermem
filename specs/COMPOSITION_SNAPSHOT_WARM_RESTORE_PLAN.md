@@ -253,6 +253,7 @@ Warm restore should work like this:
 
 Hard restore invariants:
 - `system`, `bootstrap`, and `stable_prefix` must remain intact
+- `stable_prefix` must preserve boundary semantics, not just slot presence: restored output must preserve the exact ordered prefix segment set, the prefix-to-tail cut line, and the rule that no elastic or volatile segment may be interleaved above that boundary
 - tool call and tool result pairs must remain atomic and correctly ordered
 - source lineage must be explicit on the repaired context and restore result
 - required slots must never partially degrade
@@ -273,8 +274,27 @@ target_tokens = clamp(
 
 Where:
 - `source_fill_pct` is a starting heuristic, not the correctness target
-- `min_restore_tokens` and `max_restore_tokens` are planner-defined clamps to avoid pathological underfill or overfill
+- `min_restore_tokens` and `max_restore_tokens` are fixed v1 clamps, not planner folklore
 - the restore planner must reserve continuity floors before elastic slots compete for remaining budget
+
+### V1 budget clamps and floor defaults
+
+Default v1 clamps:
+- `provider_reserve_tokens = 8192`
+- `max_restore_tokens = min(round(target_model_context_window * 0.85), target_model_context_window - provider_reserve_tokens)`
+- `min_restore_tokens = min(max(required_slot_tokens + 32768, 65536), max_restore_tokens)`
+
+Default v1 continuity-floor reservations after required slots are placed in full:
+- `hypermem_expertise`: reserve 6144 tokens
+- `hypermem_facts`: reserve 12288 tokens
+- `keystones`: reserve 8192 tokens
+- `tool_pairs`: reserve 12288 tokens
+
+Interpretation rules for v1:
+- these are minimum reservation targets used during planning, not permission to partially trim continuity-critical slots
+- continuity-critical slots remain whole-slot-or-fail in v1; if a protected slot selected for restore cannot fit in full after required-slot placement and floor reservation ordering, restore fails safe
+- elastic slots (`recent_tail`, `volatile_tail`) only compete for budget after required slots and continuity-critical reservation checks succeed
+- `provider_annotations` has zero floor and is always the first class dropped under pressure
 
 Example:
 - source: 200k / 272k = 0.735
@@ -307,7 +327,7 @@ Degradation policy in v1:
 - `recent_tail`, `volatile_tail`: degrade by deterministic segment trimming only
 - `provider_annotations`: optional, zero-floor, first to drop
 
-Planner should confirm exact floor values from existing compositor behavior, but the contract should ship with the policy shape above rather than leaving it implicit.
+The contract should ship with the numeric floor and clamp defaults above rather than leaving them to planner interpretation.
 
 ### Tool handling invariants
 
@@ -617,6 +637,18 @@ Parity checks to add in capture-only rollout:
 - surface dropped or transformed slot classes at the provider boundary
 - block automatic restore rollout until observed parity drift is within agreed thresholds
 
+### V1 parity-drift thresholds for Phase 3 auto-restore
+
+Phase 3 automatic restore is gated until capture-only and manual-restore telemetry show all of the following over at least the most recent 500 eligible captures or 7 consecutive days, whichever yields more samples:
+- p95 absolute token drift between planned restore payload and final provider payload is `<= 3%`
+- p99 absolute token drift is `<= 5%`
+- required-slot drop rate is exactly `0%`
+- `stable_prefix` boundary-semantic violations are exactly `0%`
+- tool-pair parity violations are exactly `0%`
+- continuity-critical slot-class transformation rate at the provider boundary is `< 0.5%`
+
+If any threshold is missed, auto-restore remains disabled and the feature stays in capture-only or manual mode until corrected.
+
 ## Rollout plan
 
 ### Phase 1
@@ -633,7 +665,7 @@ Parity checks to add in capture-only rollout:
 
 ### Phase 3
 - enable automatic repair flows for approved triggers such as provider failover or model window mismatch
-- only after parity drift and restore-invariant metrics are within agreed thresholds
+- only after parity drift and restore-invariant metrics meet the numeric Phase 3 thresholds defined above
 
 This staged rollout reduces blast radius.
 
@@ -701,7 +733,7 @@ Focus review on:
 2. Should computed slot content be inline-only in v1 or optionally content-addressed from day one?
 3. Does the replacement session need its own explicit context status beyond active/archived/forked, or is repair lineage metadata enough?
 4. Which triggers should be allowed in Phase 2 manual restore versus Phase 3 automatic restore?
-5. What exact floor and clamp values should ship in v1 for continuity-critical versus elastic slots across common model-window classes?
+5. Do the v1 floor defaults need model-family-specific overrides later, or should they remain uniform until real telemetry proves a split is necessary?
 
 ## Recommended verdict
 
