@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { cpSync, existsSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +35,14 @@ const optionalEntries = [
   ['node_modules/sqlite-vec', 'node_modules/sqlite-vec'],
 ];
 
+const sqliteVecNativeEntries = (() => {
+  const nodeModulesRoot = path.join(REPO_ROOT, 'node_modules');
+  if (!existsSync(nodeModulesRoot)) return [];
+  return readdirSync(nodeModulesRoot)
+    .filter((name) => name.startsWith('sqlite-vec-'))
+    .map((name) => [`node_modules/${name}`, `node_modules/${name}`]);
+})();
+
 for (const [srcRel] of requiredEntries) {
   const src = path.join(REPO_ROOT, srcRel);
   if (!existsSync(src)) {
@@ -46,6 +54,7 @@ for (const [srcRel] of requiredEntries) {
 const entries = [
   ...requiredEntries,
   ...optionalEntries.filter(([srcRel]) => existsSync(path.join(REPO_ROOT, srcRel))),
+  ...sqliteVecNativeEntries.filter(([srcRel]) => existsSync(path.join(REPO_ROOT, srcRel))),
 ];
 
 rmSync(installRoot, { recursive: true, force: true });
