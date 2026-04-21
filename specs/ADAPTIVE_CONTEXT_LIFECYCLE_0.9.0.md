@@ -4,6 +4,7 @@
 **Target release:** 0.9.0
 **Authors:** Forge, ragesaq
 **Date:** 2026-04-19
+**Sequencing:** See `specs/ROADMAP_RESEQUENCING_2026-04-21.md` for the pre-0.9.0 hotfix and dependency order.
 
 ## Problem
 
@@ -25,7 +26,7 @@ Result: either amnesia (lean warming, wrong content trimmed) or always-trimming 
 ## Non-goals
 
 - No new storage tier or schema change.
-- No reranker/embedding swap.
+- No reranker provider/model swap. Existing reranker integration lands before 0.9.0 per `specs/ROADMAP_RESEQUENCING_2026-04-21.md`.
 - No change to fact/keystone ingestion or dreaming promoter.
 
 ## Design
@@ -121,6 +122,17 @@ Log per-assembly:
 - Post-trim projected pressure vs target landing band
 
 Enables tuning thresholds and catching regressions.
+
+## 0.9.0 placement in the broader roadmap
+
+This spec now sits after the following pre-0.9.0 work:
+- reranker hotfix integration
+- compose/trim stability closeout
+- pressure accounting unification
+- slot-span and cache-boundary diagnostics
+- prompt-tail reordering for query-shaped context
+
+Also, any proactive compaction trigger should land inside Sprint 3 or Sprint 4 of this spec, not as a separate earlier trim path.
 
 ## Implementation plan
 
