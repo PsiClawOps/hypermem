@@ -80,7 +80,9 @@ CREATE TABLE composition_snapshots (
   total_tokens INTEGER NOT NULL,
   fill_pct REAL NOT NULL,
   snapshot_kind TEXT NOT NULL DEFAULT 'full',
+  repair_depth INTEGER NOT NULL DEFAULT 0,
   slots_json TEXT NOT NULL,
+  slots_integrity_hash TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
 
@@ -117,6 +119,7 @@ Starting taxonomy and contract class:
 - `system`
 - `bootstrap`
 - `stable_prefix`
+- `repair_notice`
 
 **Continuity-critical, protected by reservation floors**
 - `hypermem_expertise`
@@ -189,6 +192,7 @@ For computed non-message content:
 Hybrid plan for v1:
 - turn-derived content: store as `message_ref`
 - computed compositor-only content: store inline in `slots_json`
+- every inline segment must carry a deterministic integrity hash in the slot payload, and the snapshot row must store a top-level `slots_integrity_hash` over the canonicalized slot set so restore can reject tampered or truncated inline content
 - blob dedup: explicitly deferred
 
 ### 5. Warm restore should be a general session-repair primitive
@@ -246,16 +250,21 @@ Warm restore should work like this:
 4. Resolve the target-model restore budget using a clamped fill-percent heuristic.
 5. Reserve hard continuity budget for required and continuity-critical slots.
 6. Rebuild a prompt from slot entries using slot policy, priority, and recency rules.
-7. Enforce tool-call / tool-result atomicity and lineage metadata.
-8. Validate restore invariants before the repaired session is allowed to run.
-9. Mark the restore payload as `warm_restore=true` so the compositor does not immediately double-compose over it for the first repaired turn.
-10. Resume normal composition on the next turn.
+7. Inject a `repair_notice` required slot into the restored prompt that explicitly states the session is a repaired continuation, identifies the source model and source snapshot, and records whether the target model differs from the source model.
+8. Enforce tool-call / tool-result atomicity, cross-provider assistant-turn policy, integrity-hash validation, lineage metadata, and repair-depth policy.
+9. Validate restore invariants before the repaired session is allowed to run.
+10. Mark the restore payload as `warm_restore=true` so the compositor does not immediately double-compose over it for the first repaired turn.
+11. Resume normal composition on the next turn.
 
 Hard restore invariants:
-- `system`, `bootstrap`, and `stable_prefix` must remain intact
+- `system`, `bootstrap`, `stable_prefix`, and `repair_notice` must remain intact
 - `stable_prefix` must preserve boundary semantics, not just slot presence: restored output must preserve the exact ordered prefix segment set, the prefix-to-tail cut line, and the rule that no elastic or volatile segment may be interleaved above that boundary
+- `repair_notice` must be placed above all restored conversational and tool content, below the static bootstrap/system material, and must not be suppressible by budget pressure
 - tool call and tool result pairs must remain atomic and correctly ordered
 - source lineage must be explicit on the repaired context and restore result
+- if source and target provider families differ, assistant-authored historical turns are treated as quoted historical context only; restore must not synthesize them as fresh assistant claims, and the repair notice must disclose the cross-provider boundary
+- every inline slot payload must pass integrity-hash verification before restore; any hash mismatch fails the snapshot and triggers fallback to the previous snapshot or cold rewarm
+- repair generation depth must be capped at 1 in v1: a repaired session may not be snapshotted and warm-restored again as the source of another repaired session until an ordinary composed turn has established a new clean baseline
 - required slots must never partially degrade
 - slots may only degrade if their contract explicitly allows deterministic segment trimming
 - if invariants cannot be met within target budget, restore fails safe to ordinary bootstrap + rewarm
@@ -358,6 +367,9 @@ Suggested reasons:
 - `budget_mapping_failed`
 - `content_resolution_failed`
 - `snapshot_too_old`
+- `slots_integrity_hash_mismatch`
+- `cross_provider_policy_violation`
+- `repair_depth_exceeded`
 
 ## Likely code areas
 
@@ -469,7 +481,8 @@ Deliver:
 
 Acceptance:
 - restore can recreate a prompt for a replacement model with a smaller window
-- required slots are preserved
+- required slots, including `repair_notice`, are preserved
+- cross-provider restore behavior is explicit and deterministic
 - unsupported snapshots fail safe
 
 ### Sprint 3: tool-pair and boundary correctness
@@ -521,6 +534,8 @@ This feature needs heavy testing. It changes recovery, not just storage.
 - stores correct token counts
 - stores source model and window size correctly
 - prunes to newest 2 snapshots only
+- stores top-level `slots_integrity_hash` deterministically
+- stores inline-segment integrity hashes deterministically
 - handles missing optional slots cleanly
 
 #### Restore planner tests
@@ -528,11 +543,15 @@ This feature needs heavy testing. It changes recovery, not just storage.
 - fill-percent mapping from smaller window to larger window
 - budget clamp application is deterministic
 - required slots always included in full
+- `repair_notice` is injected on every restored prompt and is placed at the required boundary
 - continuity-critical slot floors are honored before elastic slots consume budget
 - lower-priority slots dropped first under pressure
 - non-degradable slots never partially restore
 - previous snapshot fallback works
 - unsupported schema version fails safely
+- cross-provider restore marks assistant history as quoted historical context and never as fresh assistant output
+- repair depth greater than 1 fails safe
+- integrity-hash mismatch on inline content fails the snapshot
 - `provider_annotations` cannot expand into arbitrary unbounded payload content
 
 #### Tool-pair tests
