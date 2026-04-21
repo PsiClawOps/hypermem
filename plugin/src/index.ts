@@ -845,6 +845,23 @@ async function loadUserConfig(): Promise<{
    * - 'off'   — skip all HyperMem warming; pass messages through as-is
    */
   subagentWarming?: 'full' | 'light' | 'off';
+  /**
+   * Optional reranker config. Wired into hybridSearch() after RRF fusion.
+   * Missing/none → RRF-only ordering (graceful fallback).
+   */
+  reranker?: {
+    provider: 'zeroentropy' | 'openrouter' | 'local' | 'none';
+    minCandidates?: number;
+    maxDocuments?: number;
+    topK?: number;
+    timeoutMs?: number;
+    zeroEntropyApiKey?: string;
+    zeroEntropyModel?: string;
+    openrouterApiKey?: string;
+    openrouterModel?: string;
+    ollamaUrl?: string;
+    ollamaModel?: string;
+  };
 }> {
   // Resolve data dir: pluginConfig > default
   const dataDir = _pluginConfig.dataDir ?? path.join(os.homedir(), '.openclaw/hypermem');
@@ -874,6 +891,7 @@ async function loadUserConfig(): Promise<{
   if (_pluginConfig.compositor) merged.compositor = { ...merged.compositor, ..._pluginConfig.compositor };
   if (_pluginConfig.eviction) merged.eviction = { ...merged.eviction, ..._pluginConfig.eviction };
   if (_pluginConfig.embedding) merged.embedding = { ...merged.embedding, ..._pluginConfig.embedding };
+  if (_pluginConfig.reranker) merged.reranker = { ...merged.reranker, ..._pluginConfig.reranker };
 
   if (Object.keys(fileConfig).length > 0 && Object.keys(_pluginConfig).filter(k => k !== 'hyperMemPath' && k !== 'dataDir').length > 0) {
     console.log('[hypermem-plugin] Note: migrating config.json keys to plugins.entries.hypercompositor.config in openclaw.json is recommended');
@@ -981,6 +999,9 @@ async function getHyperMem(): Promise<HyperMemInstance> {
       },
       ...(userConfig.compositor ? { compositor: userConfig.compositor } : {}),
       ...(_embeddingConfig ? { embedding: _embeddingConfig } : {}),
+      ...((userConfig as { reranker?: unknown }).reranker
+        ? { reranker: (userConfig as { reranker: Record<string, unknown> }).reranker }
+        : {}),
     });
 
     _hm = instance;
@@ -3632,6 +3653,23 @@ const hypercompositorConfigSchema = z.object({
     dimensions: z.number().int().positive().optional(),
     timeout: z.number().int().positive().optional(),
     batchSize: z.number().int().positive().optional(),
+  }).optional(),
+  /**
+   * Optional reranker config. When omitted or provider is 'none', the
+   * compositor runs with RRF-only ordering. See INSTALL.md → Reranker.
+   */
+  reranker: z.object({
+    provider: z.enum(['zeroentropy', 'openrouter', 'local', 'none']),
+    minCandidates: z.number().int().nonnegative().optional(),
+    maxDocuments: z.number().int().positive().optional(),
+    topK: z.number().int().positive().optional(),
+    timeoutMs: z.number().int().positive().optional(),
+    zeroEntropyApiKey: z.string().optional(),
+    zeroEntropyModel: z.string().optional(),
+    openrouterApiKey: z.string().optional(),
+    openrouterModel: z.string().optional(),
+    ollamaUrl: z.string().optional(),
+    ollamaModel: z.string().optional(),
   }).optional(),
 });
 

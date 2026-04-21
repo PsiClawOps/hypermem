@@ -138,7 +138,15 @@ export { migrateLibrary, LIBRARY_SCHEMA_VERSION } from './library-schema.js';
 export { VectorStore, generateEmbeddings } from './vector-store.js';
 export type { EmbeddingConfig, VectorSearchResult, VectorIndexStats } from './vector-store.js';
 export { hybridSearch, buildFtsQuery } from './hybrid-retrieval.js';
-export type { HybridSearchResult, HybridSearchOptions } from './hybrid-retrieval.js';
+export type { HybridSearchResult, HybridSearchOptions, RerankerTelemetry, RerankerStatus } from './hybrid-retrieval.js';
+
+export {
+  createReranker,
+  ZeroEntropyReranker,
+  OpenRouterReranker,
+  OllamaReranker,
+} from './reranker.js';
+export type { RerankerProvider, RerankerConfig, RerankResult } from './reranker.js';
 
 export { ContradictionDetector } from './contradiction-detector.js';
 export type { ContradictionCandidate, ContradictionResult, ContradictionDetectorConfig } from './contradiction-detector.js';
@@ -648,6 +656,25 @@ export class HyperMem {
         }
       } catch (err) {
         console.warn('[hypermem] Vector store init failed (non-fatal):', (err as Error).message);
+      }
+    }
+
+    // ── Reranker init ─────────────────────────────────────────
+    // Reranker is optional; when config.reranker is omitted or provider is
+    // 'none', the compositor receives null and hybridSearch skips the rerank
+    // hook. On provider errors, hybridSearch falls back to RRF ordering.
+    if (merged.reranker && merged.reranker.provider !== 'none') {
+      try {
+        const { createReranker } = await import('./reranker.js');
+        const rr = createReranker(merged.reranker);
+        if (rr) {
+          hm.compositor.setReranker(rr);
+          console.log(`[hypermem] Reranker enabled: provider=${rr.name}`);
+        } else {
+          console.log(`[hypermem] Reranker configured (${merged.reranker.provider}) but no API key resolved — RRF-only`);
+        }
+      } catch (err) {
+        console.warn('[hypermem] Reranker init failed (non-fatal):', (err as Error).message);
       }
     }
 

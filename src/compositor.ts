@@ -1352,6 +1352,17 @@ export interface CompositorDeps {
   libraryDb?: DatabaseSync | null;
   /** Custom trigger registry; defaults to DEFAULT_TRIGGERS if not provided */
   triggerRegistry?: CollectionTrigger[];
+  /**
+   * Optional reranker applied to fused hybridSearch results. Null disables
+   * reranking; hybridSearch still runs and returns the RRF-ordered list.
+   */
+  reranker?: import('./reranker.js').RerankerProvider | null;
+  /** Min fused-candidate count before the reranker is invoked. Default: 2. */
+  rerankerMinCandidates?: number;
+  /** Max docs sent to reranker (bounds provider cost). Default: all fused. */
+  rerankerMaxDocuments?: number;
+  /** Top-K passed to reranker. Default: slice length. */
+  rerankerTopK?: number;
 }
 
 /** Guard: logRegistryStartup() fires only once per process, not per instance. */
@@ -1363,6 +1374,10 @@ export class Compositor {
   private vectorStore: VectorStore | null;
   private readonly libraryDb: DatabaseSync | null;
   private readonly triggerRegistry: CollectionTrigger[];
+  private reranker: import('./reranker.js').RerankerProvider | null;
+  private readonly rerankerMinCandidates: number;
+  private readonly rerankerMaxDocuments: number | undefined;
+  private readonly rerankerTopK: number | undefined;
   /** Cached org registry loaded from fleet_agents at construction time. */
   private _orgRegistry: OrgRegistry;
 
@@ -1374,6 +1389,10 @@ export class Compositor {
     this.vectorStore = deps.vectorStore || null;
     this.libraryDb = deps.libraryDb || null;
     this.triggerRegistry = deps.triggerRegistry || DEFAULT_TRIGGERS;
+    this.reranker = deps.reranker ?? null;
+    this.rerankerMinCandidates = deps.rerankerMinCandidates ?? 2;
+    this.rerankerMaxDocuments = deps.rerankerMaxDocuments;
+    this.rerankerTopK = deps.rerankerTopK;
     // Load org registry from DB on init; fall back to hardcoded if DB empty.
     this._orgRegistry = this.libraryDb
       ? buildOrgRegistryFromDb(this.libraryDb)
@@ -1391,6 +1410,14 @@ export class Compositor {
    */
   setVectorStore(vs: VectorStore): void {
     this.vectorStore = vs;
+  }
+
+  /**
+   * Set or replace the reranker after construction.
+   * Called by hypermem.create() once the reranker config has been resolved.
+   */
+  setReranker(rr: import('./reranker.js').RerankerProvider | null): void {
+    this.reranker = rr;
   }
 
   /**
@@ -3636,6 +3663,10 @@ export class Compositor {
         agentId,
         maxKnnDistance: 1.2,
         precomputedEmbedding,
+        reranker: this.reranker,
+        rerankerMinCandidates: this.rerankerMinCandidates,
+        rerankerMaxDocuments: this.rerankerMaxDocuments,
+        rerankerTopK: this.rerankerTopK,
       });
 
       if (results.length === 0) return null;

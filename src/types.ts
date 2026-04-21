@@ -507,6 +507,12 @@ export interface HyperMemConfig {
    * Default: 900_000 (15 minutes).
    */
   warmCacheReplayThresholdMs?: number;
+  /**
+   * Optional reranker config. When provided and the resolved provider is
+   * non-null, hybridSearch reranks fused candidates after RRF.
+   * See reranker.ts for RerankerConfig and createReranker().
+   */
+  reranker?: import('./reranker.js').RerankerConfig;
 }
 
 export interface EmbeddingProviderConfig {

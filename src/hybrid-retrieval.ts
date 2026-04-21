@@ -16,6 +16,39 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { VectorStore, VectorSearchResult } from './vector-store.js';
+import type { RerankerProvider } from './reranker.js';
+
+// ─── Reranker telemetry ─────────────────────────────────────────
+//
+// Metadata-only signal emitted from hybridSearch() whenever the fused-result
+// path runs: no document content, no prompts, no provider keys. The signal
+// has a stable shape so operators can prove reranking actually ran without
+// needing to trace the retrieval pipeline end-to-end.
+export type RerankerStatus =
+  | 'applied'
+  | 'bypass_no_provider'
+  | 'bypass_below_threshold'
+  | 'failed'
+  | 'timeout';
+
+export interface RerankerTelemetry {
+  /** Provider name (e.g. 'zeroentropy', 'openrouter', 'ollama') or null when no provider. */
+  provider: string | null;
+  /** Number of fused candidates seen by the reranker hook. */
+  candidates: number;
+  /** Outcome for this invocation. */
+  status: RerankerStatus;
+}
+
+function emitRerankerLog(ev: RerankerTelemetry): void {
+  // Single-line, structured, metadata-only — safe for production logs.
+  // Guarded behind HYPERMEM_RERANKER_LOG=1 to avoid console spam on every query.
+  if (process.env['HYPERMEM_RERANKER_LOG'] === '1') {
+    console.log(
+      `[hypermem] reranker: provider=${ev.provider ?? 'none'} candidates=${ev.candidates} status=${ev.status}`
+    );
+  }
+}
 
 // ─── Types ─────────────────────────────────────────────────────
 
@@ -53,6 +86,34 @@ export interface HybridSearchOptions {
   minFtsTerms?: number;
   /** Pre-computed embedding for the query — skips Ollama call in VectorStore.search() */
   precomputedEmbedding?: Float32Array;
+  /**
+   * Optional reranker applied after RRF fusion. Only runs on the fused path
+   * (both FTS and KNN produced results). FTS-only and KNN-only branches are
+   * unchanged. Null/undefined disables reranking.
+   */
+  reranker?: RerankerProvider | null;
+  /**
+   * Minimum fused-candidate count required to invoke the reranker.
+   * Below this, the reranker is bypassed and original RRF order is returned.
+   * Default: 2.
+   */
+  rerankerMinCandidates?: number;
+  /**
+   * Max documents sent to the reranker. Clamps provider cost when the fused
+   * candidate list is large. Defaults to fused.length (all candidates).
+   */
+  rerankerMaxDocuments?: number;
+  /** Top-K passed to the reranker. Defaults to the sliced candidate count. */
+  rerankerTopK?: number;
+  /**
+   * External guard timeout for the reranker call in ms. Provider timeouts are
+   * enforced inside each RerankerProvider; this is a belt-and-suspenders
+   * ceiling that also distinguishes 'timeout' from 'failed' in telemetry.
+   * Default: 3000.
+   */
+  rerankerTimeoutMs?: number;
+  /** Optional telemetry sink. When omitted, falls back to emitRerankerLog. */
+  onRerankerTelemetry?: (ev: RerankerTelemetry) => void;
 }
 
 // ─── FTS5 Query Building ───────────────────────────────────────
@@ -465,7 +526,93 @@ export async function hybridSearch(
 
   // Both sources present — RRF fusion
   const fused = fuseResults(ftsMap, knnMap, rrfK, ftsWeight, knnWeight);
-  return fused.slice(0, limit).map(toHybridResult);
+
+  // ── Reranker hook ─────────────────────────────────────────────
+  // Reranking runs only on the fused path. FTS-only / KNN-only branches
+  // above return before this point. On any error, timeout, or null result
+  // the original fused ordering is preserved.
+  const reranked = await maybeRerank(fused, query, opts);
+  return reranked.slice(0, limit).map(toHybridResult);
+}
+
+/**
+ * Apply a reranker to the fused candidate list, falling back to the original
+ * order on any failure. Emits a single-line telemetry event.
+ */
+async function maybeRerank(
+  fused: FusionEntry[],
+  query: string,
+  opts?: HybridSearchOptions
+): Promise<FusionEntry[]> {
+  const reranker = opts?.reranker ?? null;
+  const emit = opts?.onRerankerTelemetry ?? emitRerankerLog;
+
+  if (!reranker) {
+    emit({ provider: null, candidates: fused.length, status: 'bypass_no_provider' });
+    return fused;
+  }
+
+  const minCandidates = opts?.rerankerMinCandidates ?? 2;
+  if (fused.length < minCandidates) {
+    emit({ provider: reranker.name, candidates: fused.length, status: 'bypass_below_threshold' });
+    return fused;
+  }
+
+  const maxDocs = opts?.rerankerMaxDocuments ?? fused.length;
+  const slice = fused.slice(0, Math.max(0, maxDocs));
+  const topK = opts?.rerankerTopK ?? slice.length;
+  const timeoutMs = opts?.rerankerTimeoutMs ?? 3000;
+
+  let timedOut = false;
+  const timeoutToken = Symbol('rerank-timeout');
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<typeof timeoutToken>((resolve) => {
+    timer = setTimeout(() => { timedOut = true; resolve(timeoutToken); }, timeoutMs);
+  });
+
+  try {
+    const rerankCall = reranker.rerank(query, slice.map((e) => e.content), topK);
+    const race = await Promise.race([rerankCall, timeoutPromise]);
+
+    if (race === timeoutToken) {
+      emit({ provider: reranker.name, candidates: slice.length, status: 'timeout' });
+      return fused;
+    }
+
+    const results = race as Awaited<typeof rerankCall>;
+    if (!results || results.length === 0) {
+      emit({ provider: reranker.name, candidates: slice.length, status: 'failed' });
+      return fused;
+    }
+
+    const seen = new Set<number>();
+    const reordered: FusionEntry[] = [];
+    for (const r of results) {
+      if (r.index < 0 || r.index >= slice.length) continue;
+      if (seen.has(r.index)) continue;
+      seen.add(r.index);
+      reordered.push(slice[r.index]);
+    }
+    // Preserve any fused entries the reranker did not score so we never shrink
+    // the candidate set on a graceful-degrade path. Keep original RRF order
+    // for the tail.
+    for (let i = 0; i < fused.length; i++) {
+      if (i < slice.length && seen.has(i)) continue;
+      reordered.push(fused[i]);
+    }
+
+    emit({ provider: reranker.name, candidates: slice.length, status: 'applied' });
+    return reordered;
+  } catch {
+    if (timedOut) {
+      emit({ provider: reranker.name, candidates: slice.length, status: 'timeout' });
+    } else {
+      emit({ provider: reranker.name, candidates: slice.length, status: 'failed' });
+    }
+    return fused;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function toHybridResult(entry: FusionEntry): HybridSearchResult {
