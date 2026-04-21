@@ -109,20 +109,37 @@ The tradeoff is worth it.
 
 Do not use freeform slot names.
 
-Define a stable composition-slot enum in compositor code and version it. Example starting taxonomy:
+Define a stable composition-slot enum in compositor code and version it with an explicit `slot_schema_version`. Treat the enum as a contract, not an implementation detail.
 
+Starting taxonomy and contract class:
+
+**Required, non-degradable in v1**
 - `system`
 - `bootstrap`
+- `stable_prefix`
+
+**Continuity-critical, protected by reservation floors**
 - `hypermem_expertise`
 - `hypermem_facts`
 - `keystones`
-- `stable_prefix`
-- `recent_tail`
 - `tool_pairs`
+
+**Elastic, segment-degradable**
+- `recent_tail`
 - `volatile_tail`
+
+**Optional, zero-floor**
 - `provider_annotations`
 
-Unknown future slot additions require a schema-version bump or an explicitly backward-compatible extension.
+Contract rules:
+- required slots must restore in full or restore fails safe
+- continuity-critical slots must restore according to per-slot floor policy before elastic slots compete for budget
+- elastic slots may degrade by dropping whole trailing segments in deterministic order
+- `provider_annotations` is bounded structured metadata only, not a freeform content bucket or junk drawer
+- deprecated slots must carry an explicit migration or ignore policy for at least one schema-version window
+- unknown future slot additions require a schema-version bump or an explicitly backward-compatible extension
+
+This contract should live in compositor code as a versioned enum plus slot-policy table, so capture and restore share the same source of truth.
 
 ### 3. Keep two snapshots per active context
 
@@ -219,48 +236,78 @@ At the end of normal composition, before provider invocation:
 
 ## Restore path
 
+Warm restore must be defined as a deterministic re-planning step from a captured composition graph, not as a lossy payload replay.
+
 Warm restore should work like this:
 
 1. Create or resolve replacement active context.
 2. Load newest valid snapshot for source logical session.
 3. If newest is invalid, unreadable, or over policy, fall back to previous snapshot.
-4. Compute target token budget.
-5. Rebuild a prompt from slot entries using slot priority plus recency rules.
-6. Enforce tool-call / tool-result atomicity.
-7. Mark the restore payload as `warm_restore=true` so the compositor does not immediately double-compose over it for the first repaired turn.
-8. Resume normal composition on the next turn.
+4. Resolve the target-model restore budget using a clamped fill-percent heuristic.
+5. Reserve hard continuity budget for required and continuity-critical slots.
+6. Rebuild a prompt from slot entries using slot policy, priority, and recency rules.
+7. Enforce tool-call / tool-result atomicity and lineage metadata.
+8. Validate restore invariants before the repaired session is allowed to run.
+9. Mark the restore payload as `warm_restore=true` so the compositor does not immediately double-compose over it for the first repaired turn.
+10. Resume normal composition on the next turn.
+
+Hard restore invariants:
+- `system`, `bootstrap`, and `stable_prefix` must remain intact
+- tool call and tool result pairs must remain atomic and correctly ordered
+- source lineage must be explicit on the repaired context and restore result
+- required slots must never partially degrade
+- slots may only degrade if their contract explicitly allows deterministic segment trimming
+- if invariants cannot be met within target budget, restore fails safe to ordinary bootstrap + rewarm
 
 ### Budget mapping
 
 Default target:
 
 ```text
-target_tokens = round(source_fill_pct * target_model_context_window)
+target_tokens = clamp(
+  round(source_fill_pct * target_model_context_window),
+  min_restore_tokens,
+  max_restore_tokens
+)
 ```
+
+Where:
+- `source_fill_pct` is a starting heuristic, not the correctness target
+- `min_restore_tokens` and `max_restore_tokens` are planner-defined clamps to avoid pathological underfill or overfill
+- the restore planner must reserve continuity floors before elastic slots compete for remaining budget
 
 Example:
 - source: 200k / 272k = 0.735
 - target window: 200k
-- target restore size: 147k
+- raw restore size: 147k
+- clamped target: planner-defined if floor reservations or safety caps require adjustment
 
-This is the core continuity behavior.
+This is continuity-guided budget mapping, not semantic equivalence by percent alone.
 
 ### Slot selection policy
 
 Restore is not pure recency replay.
 
 Selection order should be:
-1. required slots first
-2. then higher-priority slots
-3. then recency within those slots
+1. required slots first, full-fidelity only
+2. then continuity-critical slots, subject to floor reservations
+3. then elastic slots by priority
+4. then recency within degradable elastic slots
+5. drop `provider_annotations` first when budget is tight
 
 Initial policy proposal:
-- Always include: `system`, `bootstrap`, `stable_prefix`
-- Prefer strongly: `hypermem_expertise`, `hypermem_facts`, `keystones`
-- Then include: `recent_tail`, `tool_pairs`, `volatile_tail`
+- Always include in full: `system`, `bootstrap`, `stable_prefix`
+- Reserve floors for: `hypermem_expertise`, `hypermem_facts`, `keystones`, `tool_pairs`
+- Use remaining budget for: `recent_tail`, then `volatile_tail`
 - Drop lowest-value provider-only annotations first if budget is tight
 
-Planner should confirm the exact priority contract from existing compositor behavior.
+Degradation policy in v1:
+- `system`, `bootstrap`, `stable_prefix`: no degradation allowed
+- `hypermem_expertise`, `hypermem_facts`, `keystones`, `tool_pairs`: restore whole-slot or fail the restore plan if minimum protected continuity cannot be met
+- `recent_tail`, `volatile_tail`: degrade by deterministic segment trimming only
+- `provider_annotations`: optional, zero-floor, first to drop
+
+Planner should confirm exact floor values from existing compositor behavior, but the contract should ship with the policy shape above rather than leaving it implicit.
 
 ### Tool handling invariants
 
@@ -459,10 +506,14 @@ This feature needs heavy testing. It changes recovery, not just storage.
 #### Restore planner tests
 - fill-percent mapping from larger window to smaller window
 - fill-percent mapping from smaller window to larger window
-- required slots always included
+- budget clamp application is deterministic
+- required slots always included in full
+- continuity-critical slot floors are honored before elastic slots consume budget
 - lower-priority slots dropped first under pressure
+- non-degradable slots never partially restore
 - previous snapshot fallback works
 - unsupported schema version fails safely
+- `provider_annotations` cannot expand into arbitrary unbounded payload content
 
 #### Tool-pair tests
 - include tool call + result together
@@ -501,9 +552,12 @@ This feature needs heavy testing. It changes recovery, not just storage.
 Useful for evaluator lanes:
 - restore output token count never exceeds target budget
 - required slots never vanish when source snapshot is valid
+- required slots never partially degrade
+- continuity-critical slot floors are either satisfied or restore fails safe
 - tool invariants always hold
 - snapshot retention never exceeds 2 per context
 - source lineage metadata always points to existing archived context or valid source context id
+- elastic-slot trimming is deterministic for identical input snapshots and target budgets
 
 ### D. Performance tests
 
@@ -542,6 +596,8 @@ Add structured logs and counters for:
 - `warm_restore_failed`
 - `warm_restore_fallback_previous_snapshot`
 - `warm_restore_fallback_cold_start`
+- `composition_snapshot_payload_parity_checked`
+- `composition_snapshot_payload_parity_drift`
 
 Useful dimensions:
 - source model
@@ -551,6 +607,15 @@ Useful dimensions:
 - source fill percent
 - restore token target
 - restore reason
+- slot schema version
+- parity result
+- parity drift class
+
+Parity checks to add in capture-only rollout:
+- compare captured snapshot plan against final provider payload shape after translation
+- measure token-count drift between planned assembly and sent payload
+- surface dropped or transformed slot classes at the provider boundary
+- block automatic restore rollout until observed parity drift is within agreed thresholds
 
 ## Rollout plan
 
@@ -559,13 +624,16 @@ Useful dimensions:
 - capture snapshots only
 - do not restore yet
 - verify storage shape and overhead in production-like sessions
+- run snapshot-vs-provider-payload parity checks and drift reporting
 
 ### Phase 2
 - enable restore on manual operator invocation only
 - validate repaired sessions against known scenarios
+- require invariant-validation and explicit drift telemetry review before widening use
 
 ### Phase 3
 - enable automatic repair flows for approved triggers such as provider failover or model window mismatch
+- only after parity drift and restore-invariant metrics are within agreed thresholds
 
 This staged rollout reduces blast radius.
 
@@ -579,7 +647,8 @@ Mitigation:
 ### Risk: restore overfits to one provider’s composition style
 Mitigation:
 - keep snapshot schema provider-neutral
-- restore based on slots and token budgets, not provider payload formatting
+- define restore as deterministic re-planning from slot contract and invariants, not provider payload replay
+- measure parity drift at the provider boundary before auto-restore is enabled
 
 ### Risk: invalid tool history after repair
 Mitigation:
@@ -632,7 +701,7 @@ Focus review on:
 2. Should computed slot content be inline-only in v1 or optionally content-addressed from day one?
 3. Does the replacement session need its own explicit context status beyond active/archived/forked, or is repair lineage metadata enough?
 4. Which triggers should be allowed in Phase 2 manual restore versus Phase 3 automatic restore?
-5. Should fill-percent mapping allow configurable clamps, for example minimum or maximum restore target percent?
+5. What exact floor and clamp values should ship in v1 for continuity-critical versus elastic slots across common model-window classes?
 
 ## Recommended verdict
 
