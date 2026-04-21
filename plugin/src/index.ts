@@ -159,6 +159,16 @@ function assembleTrace(fields: {
   path: 'cold' | 'replay' | 'subagent';
   toolLoop: boolean;
   msgCount: number;
+  // Sprint 1 optional observability fields
+  prefixChanged?: boolean;
+  prefixHash?: string;
+  rerankerStatus?: string;
+  rerankerCandidates?: number;
+  rerankerProvider?: string | null;
+  slotSpans?: Record<string, { allocated: number; filled: number; overflow: boolean }>;
+  compactionEligibleCount?: number;
+  compactionEligibleRatio?: number;
+  compactionProcessedCount?: number;
 }): void {
   if (!telemetryEnabled()) return;
   const stream = getTelemetryStream();
@@ -2738,6 +2748,37 @@ function createHyperMemEngine(): ContextEngine {
         replayState: replayRecovery.emittedMarker?.state,
         replayReason: replayRecovery.emittedMarker?.reason,
       });
+
+      // Sprint 1: emit assemble-level trace with full observability fields
+      // after a full compose (not replay). Surfaces prefix stability,
+      // reranker outcome, slot spans, and compaction eligibility.
+      if (telemetryEnabled() && !cachedContextBlock) {
+        const diag = result.diagnostics;
+        // prefixChanged: compare current prefixHash against prevPrefixHash
+        // (surfaced by the compositor when a cache bypass detected prefix mutation).
+        // When no previous hash is available (first turn), leave prefixChanged undefined.
+        let prefixChanged: boolean | undefined;
+        if (diag?.prefixHash && diag?.prevPrefixHash) {
+          prefixChanged = diag.prefixHash !== diag.prevPrefixHash;
+        }
+        assembleTrace({
+          agentId,
+          sessionKey: sk,
+          turnId: _asmTurnId,
+          path: isSubagent ? 'subagent' : 'cold',
+          toolLoop: isToolLoop,
+          msgCount: result.messages.length,
+          prefixChanged,
+          prefixHash: diag?.prefixHash,
+          rerankerStatus: diag?.rerankerStatus,
+          rerankerCandidates: diag?.rerankerCandidates,
+          rerankerProvider: diag?.rerankerProvider,
+          slotSpans: diag?.slotSpans,
+          compactionEligibleCount: diag?.compactionEligibleCount,
+          compactionEligibleRatio: diag?.compactionEligibleRatio,
+          compactionProcessedCount: diag?.compactionProcessedCount,
+        });
+      }
 
       // Use cached contextBlock if available (cache replay), otherwise use fresh result.
       // After a full compose, write the new contextBlock to cache for the next turn.

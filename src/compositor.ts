@@ -41,8 +41,8 @@ import { SessionTopicMap } from './session-topic-map.js';
 import { toProviderFormat } from './provider-translator.js';
 import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
-import { hybridSearch, type HybridSearchResult } from './hybrid-retrieval.js';
-import { ensureCompactionFenceSchema, updateCompactionFence, getCompactionFence } from './compaction-fence.js';
+import { hybridSearch, type HybridSearchResult, type RerankerTelemetry } from './hybrid-retrieval.js';
+import { ensureCompactionFenceSchema, updateCompactionFence, getCompactionFence, getCompactionEligibility } from './compaction-fence.js';
 import { getActiveContext, type Context } from './context-store.js';
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
 import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
@@ -2200,6 +2200,10 @@ export class Compositor {
     let diagFingerprintDedups = 0;
     let diagFingerprintCollisions = 0;
     let diagRetrievalMode: ComposeDiagnostics['retrievalMode'] = 'none';
+    // Sprint 1: reranker telemetry captured from hybridSearch via onRerankerTelemetry
+    let diagRerankerStatus: string | undefined;
+    let diagRerankerCandidates: number | undefined;
+    let diagRerankerProvider: string | null | undefined;
 
     function normalizeFingerprintText(text: string): string {
       return text.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -2502,7 +2506,13 @@ export class Compositor {
             Math.floor(remaining * 0.12), // Cap at 12% of remaining (W4: was 0.15)
             libDb || undefined,
             precomputedEmbedding,
-            contextFingerprints  // C2: skip results already in Active Facts
+            contextFingerprints,  // C2: skip results already in Active Facts
+            // Sprint 1: capture reranker telemetry at assemble level
+            (ev: RerankerTelemetry) => {
+              diagRerankerStatus = ev.status;
+              diagRerankerCandidates = ev.candidates;
+              diagRerankerProvider = ev.provider;
+            },
           );
           if (semanticContent) {
             const tokens = estimateTokens(semanticContent);
@@ -2924,10 +2934,35 @@ export class Compositor {
     // Record the oldest message ID that the LLM can see in this compose
     // cycle. Everything below this ID becomes eligible for compaction.
     // If history was included, query the DB for the oldest included message.
+    //
+    // Sprint 1: Capture compaction eligibility counts BEFORE updating the fence
+    // so we can report how many messages were eligible at the start of this pass.
+    let diagCompactionEligibleCount: number | undefined;
+    let diagCompactionEligibleRatio: number | undefined;
+    let diagCompactionProcessedCount: number | undefined;
     if (request.includeHistory !== false && slots.history > 0) {
       try {
         const conversation = store.getConversation(request.sessionKey);
         if (conversation) {
+          // Sprint 1: read eligibility BEFORE advancing the fence
+          try {
+            ensureCompactionFenceSchema(db);
+            const eligibilityBefore = getCompactionEligibility(db, conversation.id);
+            if (eligibilityBefore.fence !== null) {
+              // Total messages below fence (denominator for ratio)
+              const totalRow = db.prepare(
+                'SELECT COUNT(*) AS cnt FROM messages WHERE conversation_id = ?'
+              ).get(conversation.id) as { cnt: number } | undefined;
+              const totalMessages = totalRow?.cnt ?? 0;
+              diagCompactionEligibleCount = eligibilityBefore.eligibleCount;
+              diagCompactionEligibleRatio = totalMessages > 0
+                ? Math.round((eligibilityBefore.eligibleCount / totalMessages) * 1000) / 1000
+                : 0;
+            }
+          } catch {
+            // Eligibility query is best-effort
+          }
+
           // The compositor included N history messages (after truncation).
           // Count how many non-system messages are in the output to determine
           // how far back we reached.
@@ -2944,8 +2979,20 @@ export class Compositor {
             `).get(conversation.id, historyMsgCount - 1) as { id: number } | undefined;
 
             if (oldestIncluded) {
-              ensureCompactionFenceSchema(db);
               updateCompactionFence(db, conversation.id, oldestIncluded.id, { minTailMessages: 8 });
+              // Sprint 1: count how many messages moved from eligible -> fence-protected
+              // (i.e. they are now above the updated fence)
+              try {
+                const eligibilityAfter = getCompactionEligibility(db, conversation.id);
+                if (diagCompactionEligibleCount !== undefined) {
+                  diagCompactionProcessedCount = Math.max(
+                    0,
+                    diagCompactionEligibleCount - eligibilityAfter.eligibleCount,
+                  );
+                }
+              } catch {
+                // After-eligibility query is best-effort
+              }
             }
           }
         }
@@ -3021,6 +3068,23 @@ export class Compositor {
       artifactsHydrated: hydrationResult.artifactsHydrated > 0 ? hydrationResult.artifactsHydrated : undefined,
       hydrationBytes: hydrationResult.hydrationBytes > 0 ? hydrationResult.hydrationBytes : undefined,
       hydrationMisses: hydrationResult.hydrationMisses > 0 ? hydrationResult.hydrationMisses : undefined,
+      // Sprint 1: observability layer
+      rerankerStatus: diagRerankerStatus,
+      rerankerCandidates: diagRerankerCandidates,
+      rerankerProvider: diagRerankerProvider,
+      // Sprint 1: named slot spans (allocated vs filled, overflow flag)
+      slotSpans: {
+        system:   { allocated: slots.system,   filled: slots.system,   overflow: false },
+        identity: { allocated: slots.identity, filled: slots.identity, overflow: false },
+        history:  { allocated: Math.floor(budget * b4HistoryFraction), filled: slots.history,  overflow: slots.history > Math.floor(budget * b4HistoryFraction) },
+        facts:    { allocated: Math.floor(budget * b4MemoryFraction),  filled: slots.facts,    overflow: false },
+        context:  { allocated: Math.floor(budget * b4MemoryFraction),  filled: slots.context,  overflow: false },
+        library:  { allocated: Math.floor(budget * b4MemoryFraction),  filled: slots.library,  overflow: false },
+      },
+      // Sprint 1: compaction eligibility
+      compactionEligibleCount: diagCompactionEligibleCount,
+      compactionEligibleRatio: diagCompactionEligibleRatio,
+      compactionProcessedCount: diagCompactionProcessedCount,
     };
 
     if (pressureHigh) {
@@ -3645,7 +3709,8 @@ export class Compositor {
     maxTokens: number,
     libraryDb?: DatabaseSync,
     precomputedEmbedding?: Float32Array,
-    existingFingerprints?: Set<string>  // C2: skip results already in Active Facts
+    existingFingerprints?: Set<string>,  // C2: skip results already in Active Facts
+    onRerankerTelemetry?: (ev: RerankerTelemetry) => void,  // Sprint 1: surface reranker status at assemble level
   ): Promise<string | null> {
     const libDb = libraryDb || this.libraryDb;
     if (!libDb && !this.vectorStore) return null;
@@ -3667,6 +3732,8 @@ export class Compositor {
         rerankerMinCandidates: this.rerankerMinCandidates,
         rerankerMaxDocuments: this.rerankerMaxDocuments,
         rerankerTopK: this.rerankerTopK,
+        // Sprint 1: thread reranker telemetry into compose diagnostics
+        onRerankerTelemetry,
       });
 
       if (results.length === 0) return null;

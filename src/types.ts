@@ -406,6 +406,44 @@ export interface ComposeDiagnostics {
   hydrationBytes?: number;
   /** Number of stubs whose artifact lookup returned no row (graceful miss). */
   hydrationMisses?: number;
+  // ── Sprint 1: Observability layer ────────────────────────────────────────
+  /**
+   * Sprint 1: Reranker outcome for the hybridSearch call in buildSemanticRecall.
+   * Matches RerankerStatus from hybrid-retrieval.ts.
+   * 'applied' | 'bypass_no_provider' | 'bypass_below_threshold' | 'failed' | 'timeout'
+   */
+  rerankerStatus?: string;
+  /** Sprint 1: Number of fused candidates seen by the reranker hook. */
+  rerankerCandidates?: number;
+  /** Sprint 1: Reranker provider name (e.g. 'zeroentropy', 'ollama') or null when no provider. */
+  rerankerProvider?: string | null;
+  /**
+   * Sprint 1: Per-named-slot token span summary.
+   * Keys are slot names ('system', 'identity', 'history', 'facts', 'context', 'library').
+   * Values are { allocated: number; filled: number; overflow: boolean }.
+   * Metadata only — no content.
+   */
+  slotSpans?: Record<string, { allocated: number; filled: number; overflow: boolean }>;
+  /**
+   * Sprint 1: True when the stable prefix hash changed since the previous compose.
+   * Undefined when no previous hash is available for comparison.
+   */
+  prefixChanged?: boolean;
+  /**
+   * Sprint 1: Number of messages eligible for compaction (below fence, not yet summarized).
+   * Emitted before the compaction fence update on full-compose passes.
+   */
+  compactionEligibleCount?: number;
+  /**
+   * Sprint 1: Ratio of eligible-to-total messages below fence (0.0–1.0).
+   * Emitted before the compaction fence update on full-compose passes.
+   */
+  compactionEligibleRatio?: number;
+  /**
+   * Sprint 1: Number of messages that transitioned from fence-eligible to fence-protected
+   * (i.e. now above the fence after the compose pass updated it).
+   */
+  compactionProcessedCount?: number;
 }
 
 export interface ComposeResult {

@@ -92,6 +92,29 @@ async function run() {
       console.log(`    scopeFiltered:          ${d.scopeFiltered ?? 0}`);
       console.log(`    retrievalMode:          ${d.retrievalMode ?? 'n/a'}`);
       console.log(`    dynamicReserveActive:   ${d.dynamicReserveActive ?? false}`);
+      // Sprint 1: observability fields
+      if (d.rerankerStatus != null) {
+        console.log(`    rerankerStatus:         ${d.rerankerStatus}`);
+        console.log(`    rerankerCandidates:     ${d.rerankerCandidates ?? 0}`);
+        console.log(`    rerankerProvider:       ${d.rerankerProvider ?? 'n/a'}`);
+      }
+      if (d.prefixChanged != null) {
+        console.log(`    prefixChanged:          ${d.prefixChanged}`);
+      }
+      if (d.slotSpans) {
+        console.log('    slotSpans:');
+        for (const [slotName, span] of Object.entries(d.slotSpans)) {
+          if (span.filled > 0) {
+            const overflow = span.overflow ? ' [OVERFLOW]' : '';
+            console.log(`      ${slotName}: filled=${span.filled} allocated=${span.allocated}${overflow}`);
+          }
+        }
+      }
+      if (d.compactionEligibleCount != null) {
+        const ratio = d.compactionEligibleRatio != null ? ` ratio=${d.compactionEligibleRatio.toFixed(3)}` : '';
+        const processed = d.compactionProcessedCount != null ? ` processed=${d.compactionProcessedCount}` : '';
+        console.log(`    compactionEligible:     ${d.compactionEligibleCount}${ratio}${processed}`);
+      }
       if (result.warnings?.length > 0) {
         console.log('  Warnings:');
         for (const w of result.warnings) {
