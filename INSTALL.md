@@ -718,6 +718,16 @@ Solo installs can skip this.
 
 ## Token Budget Tuning
 
+**Lookup paths for operators and agents.** To inspect the active config at any time:
+
+```bash
+cat ~/.openclaw/hypermem/config.json
+openclaw config get plugins.entries.hypercompositor.config
+openclaw config get plugins.slots.contextEngine
+```
+
+Resolution order is: (1) `plugins.entries.hypercompositor.config` in `openclaw.json`, (2) `~/.openclaw/hypermem/config.json`, (3) code defaults. See [docs/TUNING.md](./docs/TUNING.md) for the full tuning reference.
+
 These settings live in `~/.openclaw/hypermem/config.json` under the `compositor` key. All fields are optional — omit any knob to get the code-level default. Gateway restart required after changes.
 
 The recommended starting config for a standard single-agent deployment is intentionally lean on turn-1 warming. Semantic recall and fact triggers fire against each incoming message, so topic-relevant context surfaces as the conversation takes shape. This produces a steadier pressure profile than aggressive pre-loading and avoids the warm→trim→compact cycling you see when every session starts near the top of the budget.

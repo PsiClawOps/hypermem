@@ -33,7 +33,8 @@
     "test:ci": "npm test && npm --prefix plugin run typecheck",
     "smoke": "node scripts/smoke-test.mjs",
     "sync-public": "node scripts/sync-public.mjs",
-    "validate:docs": "node scripts/validate-docs.mjs"
+    "validate:docs": "node scripts/validate-docs.mjs",
+    "validate:config": "node scripts/validate-config-surface.mjs"
   },
   "dependencies": {
     "sqlite-vec": "^0.1.9",

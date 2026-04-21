@@ -660,6 +660,10 @@ Or configure through `openclaw.json` (preferred for managed deployments):
 
 Plugin config in `openclaw.json` takes precedence over `config.json`. Both sources are merged, with plugin config winning on overlap. The config schema is validated on gateway start and visible via `openclaw config get plugins.entries.hypercompositor.config`.
 
+**Key tuning knobs:**
+- `verboseLogging` — set to `true` in the compositor config to see per-turn budget resolution in the gateway logs (`budget source:` lines show which window size is active and why).
+- `contextWindowOverrides` — override the detected context window per `"provider/model"` key when autodetect gives wrong results for custom, local, or finetuned models. Fixes all downstream budget fractions in one place.
+
 Full reference: **[docs/TUNING.md](./docs/TUNING.md)**
 
 ---
