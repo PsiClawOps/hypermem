@@ -109,6 +109,27 @@ export {
 } from './trigger-registry.js';
 
 export {
+  canonicalizeSnapshotJson,
+  hashSnapshotJson,
+  parseSnapshotSlotsJson,
+  isInlineSnapshotSlotPayload,
+  computeInlineIntegrityHash,
+  attachInlineIntegrityHash,
+  computeSlotsIntegrityHash,
+  verifySnapshotSlotsIntegrity,
+} from './composition-snapshot-integrity.js';
+export type {
+  SnapshotJsonPrimitive,
+  SnapshotJsonValue,
+  SnapshotJsonObject,
+  SnapshotSlotsRecord,
+  InlineSnapshotSlotPayload,
+  SnapshotIntegrityFailureReason,
+  SnapshotIntegrityFailure,
+  SnapshotIntegrityVerification,
+} from './composition-snapshot-integrity.js';
+
+export {
   ensureCompactionFenceSchema,
   updateCompactionFence,
   getCompactionFence,
