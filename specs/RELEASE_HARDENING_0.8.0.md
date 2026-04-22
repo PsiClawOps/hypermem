@@ -30,7 +30,7 @@ After the temporal-screen PR lands, the remaining work is release packaging, not
 
 - **Track 4 council/bootstrap weight reduction** — governance-doc seed pass, trigger-based demand loading for `JOB.md`/`MOTIVATIONS.md`/`WORKQUEUE.md`, archive oversized historical council transcripts.
 - **Enhanced dreaming features** — expose `plugins.entries.hypermem.config.dreaming` knob, one-seat opt-in rollout with telemetry, human review cycle before fleet-wide enable.
-- **Contradiction-aware decay** (`specs/CONTRADICTION_AWARE_DECAY.md`) — accelerated decay for superseded facts, sibling to V19 tiered resolution.
+- **Contradiction-aware decay** (`docs/ROADMAP.md`) — accelerated decay for superseded facts, sibling to V19 tiered resolution.
 - **Cache-aware prompt boundary tracking** (`WQ-20260411-001`) — stable-prefix/dynamic-suffix compositor pattern, sticky latches, cache-hit optimization.
 - **Benchmark harnesses** (WQ-BENCH-001/002/003) — LongMemEval, LOCOMO, BEAM. Pylon-owned.
 - **Obsidian Vault integration** (`WQ-20260406-002`) — re-targeted from stale 0.5.0 tag.
