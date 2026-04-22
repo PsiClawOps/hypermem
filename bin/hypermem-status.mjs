@@ -11,13 +11,31 @@
  * Requires: compiled dist/ (run `npm run build` first)
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dir, '..');
+const homeDir = process.env.HOME || os.homedir();
+const configPath = join(homeDir, '.openclaw', 'hypermem', 'config.json');
+
+function readStatusEmbeddingConfig() {
+  const fallback = { provider: 'ollama', model: 'nomic-embed-text' };
+  if (!existsSync(configPath)) return fallback;
+
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
+    const embedding = parsed?.embedding ?? {};
+    return {
+      provider: typeof embedding.provider === 'string' ? embedding.provider : fallback.provider,
+      model: typeof embedding.model === 'string' ? embedding.model : fallback.model,
+    };
+  } catch {
+    return fallback;
+  }
+}
 
 // ── Arg parsing ──────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -119,9 +137,12 @@ if (!mainDbPath || !existsSync(mainDbPath)) {
 }
 
 const libraryDbPath = join(dataDir, 'library.db');
+const vectorDbPath = join(dataDir, 'vectors.db');
+const embeddingConfig = readStatusEmbeddingConfig();
 
 const mainDb = openDb(mainDbPath, 'messages.db');
 const libraryDb = openDb(libraryDbPath, 'library.db');
+const vectorDb = existsSync(vectorDbPath) ? openDb(vectorDbPath, 'vectors.db') : null;
 
 // ── Import metrics functions ─────────────────────────────────────
 const distPath = join(root, 'dist', 'metrics-dashboard.js');
@@ -139,7 +160,7 @@ if (flags.agent) {
 }
 
 try {
-  const metrics = await collectMetrics(mainDb, libraryDb, opts);
+  const metrics = await collectMetrics(mainDb, libraryDb, { ...opts, embeddingProvider: embeddingConfig.provider, embeddingModel: embeddingConfig.model }, vectorDb);
 
   if (flags.health) {
     // Health-only mode: check and exit
@@ -150,6 +171,7 @@ try {
       console.log(JSON.stringify(h, null, 2));
     } else {
       console.log(`hypermem ${h.packageVersion} health check`);
+      console.log(`  embedding: provider=${h.embeddingProvider ?? 'unknown'}${h.embeddingModel ? ` model=${h.embeddingModel}` : ''}`);
       console.log(`  main db:    ${h.mainDbOk ? '✅' : '❌'}${h.mainSchemaVersion !== null ? ` (schema v${h.mainSchemaVersion})` : ''}`);
       console.log(`  library db: ${h.libraryDbOk ? '✅' : '❌'}${h.librarySchemaVersion !== null ? ` (schema v${h.librarySchemaVersion})` : ''}`);
       if (h.cacheOk !== null) {
@@ -173,4 +195,5 @@ try {
 } finally {
   try { mainDb.close(); } catch {}
   try { libraryDb.close(); } catch {}
+  try { vectorDb?.close(); } catch {}
 }

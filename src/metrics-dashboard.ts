@@ -51,6 +51,15 @@ export interface VectorMetrics {
   cacheHitRate: number | null;
 }
 
+export interface DocChunkMetrics {
+  /** Total doc chunks indexed across all collections */
+  totalDocChunks: number;
+  /** Doc chunks per collection */
+  byCollection: Record<string, number>;
+  /** Doc chunks added in the last 24h */
+  recentDocChunks: number;
+}
+
 export interface CompositionMetrics {
   /** Average assembly time in ms (from output_metrics table) */
   avgAssemblyMs: number | null;
@@ -90,6 +99,10 @@ export interface SystemHealth {
   librarySchemaVersion: number | null;
   /** hypermem package version */
   packageVersion: string;
+  /** Resolved embedding provider from the installed config */
+  embeddingProvider: string | null;
+  /** Resolved embedding model from the installed config */
+  embeddingModel: string | null;
   /** Cache connection status (if provided) */
   cacheOk: boolean | null;
   /** Timestamp of this snapshot */
@@ -98,6 +111,7 @@ export interface SystemHealth {
 
 export interface HyperMemMetrics {
   facts: FactMetrics;
+  docChunks: DocChunkMetrics;
   wiki: WikiMetrics;
   episodes: EpisodeMetrics;
   vectors: VectorMetrics;
@@ -111,6 +125,10 @@ export interface MetricsDashboardOptions {
   agentIds?: string[];
   /** Include per-agent breakdowns. Default: true */
   includeBreakdowns?: boolean;
+  /** Resolved embedding provider for health display. */
+  embeddingProvider?: string | null;
+  /** Resolved embedding model for health display. */
+  embeddingModel?: string | null;
 }
 
 function safeQuery<T>(db: DatabaseSync, sql: string, params: SQLInputValue[] = []): T | null {
@@ -171,6 +189,43 @@ function collectFactMetrics(
     totalFacts: total?.count ?? 0,
     byAgent: Object.fromEntries(byAgentRows.map(r => [r.agent_id, r.count])),
     recentFacts: recent?.count ?? 0,
+  };
+}
+
+/**
+ * Collect doc chunk metrics from the library DB.
+ */
+function collectDocChunkMetrics(
+  libraryDb: DatabaseSync,
+  opts: MetricsDashboardOptions,
+): DocChunkMetrics {
+  const { clause, params } = buildAgentFilter(opts.agentIds);
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+  const total = safeQuery<{ count: number }>(
+    libraryDb,
+    `SELECT COUNT(*) AS count FROM doc_chunks WHERE 1=1 ${clause}`,
+    params,
+  );
+
+  const recent = safeQuery<{ count: number }>(
+    libraryDb,
+    `SELECT COUNT(*) AS count FROM doc_chunks WHERE created_at > ? ${clause}`,
+    [cutoff, ...params],
+  );
+
+  const byCollectionRows = (opts.includeBreakdowns !== false)
+    ? safeQueryAll<{ collection: string; count: number }>(
+        libraryDb,
+        `SELECT collection, COUNT(*) AS count FROM doc_chunks WHERE 1=1 ${clause} GROUP BY collection`,
+        params,
+      )
+    : [];
+
+  return {
+    totalDocChunks: total?.count ?? 0,
+    byCollection: Object.fromEntries(byCollectionRows.map(r => [r.collection, r.count])),
+    recentDocChunks: recent?.count ?? 0,
   };
 }
 
@@ -261,16 +316,24 @@ function collectEpisodeMetrics(
 }
 
 /**
- * Collect vector index metrics from the library DB.
+ * Collect vector index metrics from the shared vectors DB.
  */
-function collectVectorMetrics(libraryDb: DatabaseSync): VectorMetrics {
+function collectVectorMetrics(vectorDb: DatabaseSync | null): VectorMetrics {
+  if (!vectorDb) {
+    return {
+      totalVectors: 0,
+      byTable: {},
+      cacheHitRate: null,
+    };
+  }
+
   const total = safeQuery<{ cnt: number }>(
-    libraryDb,
+    vectorDb,
     'SELECT COUNT(*) as cnt FROM vec_index_map',
   );
 
   const byTableRows = safeQueryAll<{ source_table: string; cnt: number }>(
-    libraryDb,
+    vectorDb,
     'SELECT source_table, COUNT(*) as cnt FROM vec_index_map GROUP BY source_table',
   );
 
@@ -282,10 +345,10 @@ function collectVectorMetrics(libraryDb: DatabaseSync): VectorMetrics {
 }
 
 /**
- * Collect composition performance metrics from the output_metrics table (main DB).
+ * Collect composition performance metrics from the output_metrics table (library DB).
  */
 function collectCompositionMetrics(
-  mainDb: DatabaseSync,
+  libraryDb: DatabaseSync,
   opts: MetricsDashboardOptions,
 ): CompositionMetrics {
   const { clause, params } = buildAgentFilter(opts.agentIds);
@@ -297,7 +360,7 @@ function collectCompositionMetrics(
     avg_cache: number | null;
     total: number;
   }>(
-    mainDb,
+    libraryDb,
     `SELECT
        AVG(latency_ms) AS avg_latency,
        AVG(output_tokens) AS avg_output,
@@ -312,7 +375,7 @@ function collectCompositionMetrics(
   let p95: number | null = null;
   if ((agg?.total ?? 0) > 0) {
     const p95Row = safeQuery<{ latency_ms: number }>(
-      mainDb,
+      libraryDb,
       `SELECT latency_ms FROM output_metrics WHERE latency_ms IS NOT NULL ${clause}
        ORDER BY latency_ms ASC
        LIMIT 1 OFFSET MAX(0, CAST(COUNT(*) * 0.95 AS INT) - 1)`,
@@ -321,7 +384,7 @@ function collectCompositionMetrics(
     // Fallback: approximate p95 with a subquery
     if (!p95Row) {
       const p95Approx = safeQuery<{ latency_ms: number }>(
-        mainDb,
+        libraryDb,
         `SELECT latency_ms FROM output_metrics WHERE latency_ms IS NOT NULL ${clause}
          ORDER BY latency_ms DESC
          LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.05 AS INT)) FROM output_metrics WHERE latency_ms IS NOT NULL ${clause})`,
@@ -395,6 +458,7 @@ function collectIngestionMetrics(
 function collectHealth(
   mainDb: DatabaseSync,
   libraryDb: DatabaseSync,
+  opts: MetricsDashboardOptions,
 ): SystemHealth {
 
   let mainSchemaVersion: number | null = null;
@@ -420,6 +484,8 @@ function collectHealth(
     mainSchemaVersion,
     librarySchemaVersion,
     packageVersion: HYPERMEM_COMPAT_VERSION,
+    embeddingProvider: opts.embeddingProvider ?? null,
+    embeddingModel: opts.embeddingModel ?? null,
     cacheOk: null, // caller must inject cache status
     snapshotAt: new Date().toISOString(),
   };
@@ -433,15 +499,17 @@ export async function collectMetrics(
   mainDb: DatabaseSync,
   libraryDb: DatabaseSync,
   opts: MetricsDashboardOptions = {},
+  vectorDb: DatabaseSync | null = null,
 ): Promise<HyperMemMetrics> {
   return {
     facts: collectFactMetrics(libraryDb, opts),
+    docChunks: collectDocChunkMetrics(libraryDb, opts),
     wiki: collectWikiMetrics(libraryDb, opts),
     episodes: collectEpisodeMetrics(libraryDb, opts),
-    vectors: collectVectorMetrics(libraryDb),
-    composition: collectCompositionMetrics(mainDb, opts),
+    vectors: collectVectorMetrics(vectorDb),
+    composition: collectCompositionMetrics(libraryDb, opts),
     ingestion: collectIngestionMetrics(libraryDb, opts),
-    health: collectHealth(mainDb, libraryDb),
+    health: collectHealth(mainDb, libraryDb, opts),
   };
 }
 
@@ -457,6 +525,12 @@ export function formatMetricsSummary(m: HyperMemMetrics): string {
 
   lines.push('## Memory');
   lines.push(`  facts:    ${m.facts.totalFacts.toLocaleString()} total, ${m.facts.recentFacts} added last 24h`);
+  lines.push(`  doc chunks: ${m.docChunks.totalDocChunks.toLocaleString()} total, ${m.docChunks.recentDocChunks} added last 24h`);
+  if (Object.keys(m.docChunks.byCollection).length > 0) {
+    for (const [collection, count] of Object.entries(m.docChunks.byCollection)) {
+      lines.push(`    ${collection}: ${count.toLocaleString()}`);
+    }
+  }
   lines.push(`  wiki:     ${m.wiki.totalPages} pages, ${m.wiki.recentPages} synthesized last 24h${m.wiki.oldestPageAgeHours !== null ? `, oldest ${m.wiki.oldestPageAgeHours}h` : ''}`);
   lines.push(`  episodes: ${m.episodes.totalEpisodes.toLocaleString()}${m.episodes.avgSignificance !== null ? `, avg significance ${m.episodes.avgSignificance.toFixed(2)}` : ''}`);
   lines.push(`  vectors:  ${m.vectors.totalVectors.toLocaleString()} indexed`);
@@ -465,6 +539,11 @@ export function formatMetricsSummary(m: HyperMemMetrics): string {
       lines.push(`    ${table}: ${count.toLocaleString()}`);
     }
   }
+
+  lines.push('');
+  lines.push('## Embedding');
+  lines.push(`  provider: ${m.health.embeddingProvider ?? 'unknown'}`);
+  lines.push(`  model:    ${m.health.embeddingModel ?? 'unknown'}`);
 
   lines.push('');
   lines.push('## Composition');
@@ -487,6 +566,7 @@ export function formatMetricsSummary(m: HyperMemMetrics): string {
 
   lines.push('');
   lines.push('## Health');
+  lines.push(`  embedding: ${m.health.embeddingProvider ?? 'unknown'}${m.health.embeddingModel ? ` / ${m.health.embeddingModel}` : ''}`);
   lines.push(`  main db:    ${m.health.mainDbOk ? '✅' : '❌'}${m.health.mainSchemaVersion !== null ? ` (schema v${m.health.mainSchemaVersion})` : ''}`);
   lines.push(`  library db: ${m.health.libraryDbOk ? '✅' : '❌'}${m.health.librarySchemaVersion !== null ? ` (schema v${m.health.librarySchemaVersion})` : ''}`);
   if (m.health.cacheOk !== null) {

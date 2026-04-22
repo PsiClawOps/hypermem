@@ -55,6 +55,7 @@ import {
   formatToolChainStub,
   decideReplayRecovery,
   isReplayState,
+  recordOutputMetrics,
   // Sprint 3: unified pressure signal
   computeUnifiedPressure,
   PRESSURE_SOURCE,
@@ -64,6 +65,7 @@ import { repairToolPairs } from '@psiclawops/hypermem';
 import os from 'os';
 import path from 'path';
 import fs from 'fs/promises';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'url';
 import fsSync from 'fs';
 
@@ -1190,6 +1192,39 @@ function resolveAssistantTokenCount(
   }
 
   return undefined;
+}
+
+function resolveAssistantOutputTokenCount(
+  msg: InboundMessage,
+  runtimeContext?: Record<string, unknown>
+): number | undefined {
+  const usage = (msg as { usage?: Record<string, unknown> }).usage;
+  if (usage && typeof usage === 'object') {
+    const candidates = [
+      usage.output,
+      usage.outputTokens,
+      usage.output_tokens,
+      usage.completionTokens,
+      usage.completion_tokens,
+      usage.totalTokens,
+      usage.total_tokens,
+      usage.total,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0) {
+        return Math.floor(candidate);
+      }
+    }
+  }
+
+  const runtimeTokenCount = runtimeContext?.currentTokenCount;
+  if (typeof runtimeTokenCount === 'number' && Number.isFinite(runtimeTokenCount) && runtimeTokenCount > 0) {
+    return Math.floor(runtimeTokenCount);
+  }
+
+  const text = extractTextFromInboundContent(msg.content);
+  const tokenEstimate = Math.ceil(text.length / 4);
+  return tokenEstimate > 0 ? tokenEstimate : undefined;
 }
 
 function collectNeutralToolPairStats(messages: NeutralMessage[]): ToolPairStats {
@@ -3182,6 +3217,52 @@ ${replayRecovery.emittedText}`
               tokenCount: neutral.role === 'assistant' ? resolveAssistantTokenCount(m, runtimeContext) : undefined,
             });
           }
+        }
+
+        try {
+          const lastAssistantMessage = [...newMessages].reverse().find(m => m.role === 'assistant') as InboundMessage | undefined;
+          if (lastAssistantMessage) {
+            const modelState = await hm.cache.getModelState(agentId, sk).catch(() => null);
+            const promptCacheUsage = (runtimeContext?.promptCache as { lastCallUsage?: Record<string, unknown> } | undefined)?.lastCallUsage;
+            const outputTokens = resolveAssistantOutputTokenCount(lastAssistantMessage, runtimeContext) ?? 1;
+            const inputTokens = typeof promptCacheUsage?.input === 'number'
+              ? Math.floor(promptCacheUsage.input)
+              : typeof runtimeContext?.currentTokenCount === 'number'
+                ? Math.floor(runtimeContext.currentTokenCount)
+                : null;
+            const cacheReadTokens = typeof promptCacheUsage?.cacheRead === 'number'
+              ? Math.floor(promptCacheUsage.cacheRead)
+              : null;
+            const modelId = typeof lastAssistantMessage.model === 'string'
+              ? lastAssistantMessage.model
+              : modelState?.modelId ?? modelState?.model ?? 'unknown';
+            const provider = typeof lastAssistantMessage.provider === 'string'
+              ? lastAssistantMessage.provider
+              : modelState?.provider ?? 'unknown';
+            const taskType = typeof (runtimeContext as { taskType?: unknown } | undefined)?.taskType === 'string'
+              ? (runtimeContext as { taskType?: string }).taskType ?? null
+              : null;
+
+            recordOutputMetrics(hm.dbManager.getLibraryDb(), {
+              id: `turn-metric-${agentId}-${Date.now()}-${randomUUID()}`,
+              timestamp: new Date().toISOString(),
+              agent_id: agentId,
+              session_key: sk,
+              model_id: modelId,
+              provider,
+              fos_version: null,
+              mod_version: null,
+              mod_id: null,
+              task_type: taskType,
+              output_tokens: outputTokens,
+              input_tokens: inputTokens,
+              cache_read_tokens: cacheReadTokens,
+              corrections_fired: [],
+              latency_ms: null,
+            });
+          }
+        } catch {
+          // Non-fatal telemetry path
         }
 
         // P3.1: Topic detection on the inbound user message
