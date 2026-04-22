@@ -108,6 +108,38 @@ describe('composition snapshot store', () => {
     assert.deepEqual(snapshots.map(s => s.model), ['m3', 'm2']);
   });
 
+
+  it('skips repaired snapshots when resolving the latest valid snapshot', () => {
+    const db = createDb();
+    const convId = insertConversation(db, 'forge', 'agent:forge:webchat:repair-depth');
+    const ctx = getOrCreateActiveContext(db, 'forge', 'agent:forge:webchat:repair-depth', convId);
+
+    insertCompositionSnapshot(db, {
+      contextId: ctx.id,
+      model: 'm1',
+      contextWindow: 1000,
+      totalTokens: 100,
+      fillPct: 0.1,
+      capturedAt: '2026-04-22T10:00:00.000Z',
+      slots: { stable_prefix: { source: 'hydrated', refs: ['identity'] } },
+    });
+    insertCompositionSnapshot(db, {
+      contextId: ctx.id,
+      model: 'm2',
+      contextWindow: 1000,
+      totalTokens: 110,
+      fillPct: 0.11,
+      capturedAt: '2026-04-22T10:01:00.000Z',
+      repairDepth: 1,
+      slots: { stable_prefix: { source: 'hydrated', refs: ['identity', 'policy'] } },
+    });
+
+    const resolved = getLatestValidCompositionSnapshot(db, ctx.id);
+    assert.ok(resolved);
+    assert.equal(resolved.snapshot.model, 'm1');
+    assert.equal(resolved.snapshot.repairDepth, 0);
+  });
+
   it('falls back to the previous snapshot when the latest one is tampered', () => {
     const db = createDb();
     const convId = insertConversation(db, 'forge', 'agent:forge:webchat:fallback');

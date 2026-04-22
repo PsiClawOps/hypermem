@@ -627,6 +627,7 @@ export interface SessionCursor {
 export interface SessionSlots {
   system: string | null;
   identity: string | null;
+  repair_notice: string | null;
   history: StoredMessage[];
   context: string | null;
   facts: string | null;

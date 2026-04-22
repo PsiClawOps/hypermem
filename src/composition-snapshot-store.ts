@@ -182,7 +182,7 @@ export function getLatestValidCompositionSnapshot(
   db: DatabaseSync,
   contextId: number,
 ): LatestValidCompositionSnapshot | null {
-  const candidates = listCompositionSnapshots(db, contextId, 2);
+  const candidates = listCompositionSnapshots(db, contextId, 2).filter(snapshot => snapshot.repairDepth <= 0);
   for (let i = 0; i < candidates.length; i++) {
     const snapshot = candidates[i];
     const verification = verifyCompositionSnapshot(snapshot);

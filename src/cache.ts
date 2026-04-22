@@ -505,6 +505,7 @@ export class CacheLayer {
     slots: {
       system?: string;
       identity?: string;
+      repairNotice?: string;
       context?: string;
       facts?: string;
       tools?: string;
@@ -514,11 +515,12 @@ export class CacheLayer {
   ): Promise<void> {
     if (!this.isConnected) return;
     const exp = now() + this.config.sessionTTL;
-    if (slots.system)   this.stmtSetSlot.run(agentId, sessionKey, 'system',   slots.system,   exp);
-    if (slots.identity) this.stmtSetSlot.run(agentId, sessionKey, 'identity', slots.identity, exp);
-    if (slots.context)  this.stmtSetSlot.run(agentId, sessionKey, 'context',  slots.context,  exp);
-    if (slots.facts)    this.stmtSetSlot.run(agentId, sessionKey, 'facts',    slots.facts,    exp);
-    if (slots.tools)    this.stmtSetSlot.run(agentId, sessionKey, 'tools',    slots.tools,    exp);
+    if (slots.system)      this.stmtSetSlot.run(agentId, sessionKey, 'system',      slots.system,      exp);
+    if (slots.identity)    this.stmtSetSlot.run(agentId, sessionKey, 'identity',    slots.identity,    exp);
+    if (slots.repairNotice) this.stmtSetSlot.run(agentId, sessionKey, 'repair_notice', slots.repairNotice, exp);
+    if (slots.context)     this.stmtSetSlot.run(agentId, sessionKey, 'context',     slots.context,     exp);
+    if (slots.facts)       this.stmtSetSlot.run(agentId, sessionKey, 'facts',       slots.facts,       exp);
+    if (slots.tools)       this.stmtSetSlot.run(agentId, sessionKey, 'tools',       slots.tools,       exp);
     if (slots.meta)     await this.setSessionMeta(agentId, sessionKey, slots.meta);
     if (slots.history && slots.history.length > 0) await this.pushHistory(agentId, sessionKey, slots.history);
     await this.addActiveSession(agentId, sessionKey);

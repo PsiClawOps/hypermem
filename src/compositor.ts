@@ -45,7 +45,7 @@ import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
 import { hybridSearch, type HybridSearchResult, type RerankerTelemetry } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence, getCompactionFence, getCompactionEligibility } from './compaction-fence.js';
-import { getActiveContext, type Context } from './context-store.js';
+import { getActiveContext, getOrCreateActiveContext, type Context } from './context-store.js';
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
 import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './cross-agent.js';
 import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderLightFOS, resolveOutputTier, buildActionVerificationSummary } from './fos-mod.js';
@@ -55,6 +55,8 @@ import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
 import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
 import { formatToolChainStub, parseToolChainStub, formatArtifactRef, isArtifactRef, type ArtifactRef, type DegradationReason } from './degradation.js';
 import { ToolArtifactStore } from './tool-artifact-store.js';
+import { insertCompositionSnapshot, getLatestValidCompositionSnapshot } from './composition-snapshot-store.js';
+import { buildCompositionSnapshotSlots, restoreWarmSnapshotState } from './composition-snapshot-runtime.js';
 
 /**
  * Files that OpenClaw's contextInjection injects into the system prompt.
@@ -1922,6 +1924,27 @@ export class Compositor {
       }
     }
 
+    const repairNoticeContent = await this.getSlotContent(
+      request.agentId,
+      request.sessionKey,
+      'repair_notice',
+      db
+    );
+
+    if (repairNoticeContent) {
+      const tokens = estimateTokens(repairNoticeContent);
+      if (tokens <= remaining) {
+        messages.push({
+          role: 'system',
+          textContent: repairNoticeContent,
+          toolCalls: null,
+          toolResults: null,
+        });
+        slots.system += tokens;
+        remaining -= tokens;
+      }
+    }
+
     // ─── Conversation History ──────────────────────────────────
     let diagCrossTopicKeystones = 0;
     // Sprint 4: hoisted so diagnostics block can read it regardless of includeHistory branch.
@@ -3334,6 +3357,34 @@ export class Compositor {
       }
     }
 
+    try {
+      const conversation = sampleConv ?? store.getConversation(request.sessionKey);
+      if (conversation) {
+        const snapshotContext = getOrCreateActiveContext(db, request.agentId, request.sessionKey, conversation.id);
+        const repairNoticeContent = await this.cache.getSlot(request.agentId, request.sessionKey, 'repair_notice');
+
+        insertCompositionSnapshot(db, {
+          contextId: snapshotContext.id,
+          headMessageId: snapshotContext.headMessageId ?? null,
+          model: request.model ?? request.provider ?? 'unknown',
+          contextWindow: totalWindow,
+          totalTokens,
+          fillPct: totalWindow > 0 ? Math.round((totalTokens / totalWindow) * 10000) / 10000 : 0,
+          snapshotKind: 'composed_window',
+          repairDepth: repairNoticeContent ? 1 : 0,
+          slots: buildCompositionSnapshotSlots({
+            system: systemContent,
+            identity: identityContent,
+            repairNotice: repairNoticeContent,
+            messages,
+            contextBlock: assembledContextBlock,
+          }),
+        });
+      }
+    } catch (error) {
+      console.warn(`[hypermem:compositor] composition snapshot write skipped: ${(error as Error).message}`);
+    }
+
     console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode} crossTopicKeystones=${diagCrossTopicKeystones} c2_degradations=${c2ArtifactDegradations} c2_threshold=${c2ArtifactThresholdTokens}`);
     return {
       messages: outputMessages,
@@ -3372,9 +3423,13 @@ export class Compositor {
     // Uses context.head_message_id to walk only the active branch.
     let activeContext: Context | null = null;
     try {
-      activeContext = getActiveContext(db, agentId, sessionKey);
+      activeContext = getOrCreateActiveContext(db, agentId, sessionKey, conversation.id);
     } catch {
-      // Context resolution is best-effort
+      try {
+        activeContext = getActiveContext(db, agentId, sessionKey);
+      } catch {
+        // Context resolution is best-effort
+      }
     }
 
     // Phase 0 fence enforcement: resolve compaction fence for warm bootstrap.
@@ -3386,6 +3441,51 @@ export class Compositor {
       if (fence) warmFenceMessageId = fence.fenceMessageId;
     } catch {
       // Fence lookup is best-effort
+    }
+
+    const warmMeta = {
+      agentId,
+      sessionKey,
+      provider: conversation.provider,
+      model: conversation.model,
+      channelType: conversation.channelType,
+      tokenCount: conversation.tokenCountIn + conversation.tokenCountOut,
+      lastActive: conversation.updatedAt,
+      status: conversation.status,
+    };
+
+    if (activeContext) {
+      try {
+        const latestSnapshot = getLatestValidCompositionSnapshot(db, activeContext.id);
+        if (latestSnapshot?.verification.slots) {
+          const restored = restoreWarmSnapshotState(latestSnapshot.verification.slots);
+          if (restored) {
+            const targetModel = opts?.model ?? conversation.model ?? 'unknown';
+            const sourceModel = latestSnapshot.snapshot.model;
+            const repairNoticeContent = [
+              `Repair notice: this session is a repaired continuation from snapshot ${latestSnapshot.snapshot.id}.`,
+              `Source model: ${sourceModel}. Target model: ${targetModel}.`,
+              `Cross-model boundary: ${sourceModel !== targetModel ? 'yes' : 'no'}.`,
+              'Repair depth: 1.',
+            ].join(' ');
+
+            await this.cache.invalidateWindow(agentId, sessionKey);
+            await this.cache.warmSession(agentId, sessionKey, {
+              system: restored.system ?? opts?.systemPrompt,
+              identity: restored.identity ?? opts?.identity,
+              repairNotice: repairNoticeContent,
+              history: restored.history,
+              meta: warmMeta,
+            });
+            console.info(
+              `[hypermem:compositor] warm snapshot restore session=${sessionKey} snapshot=${latestSnapshot.snapshot.id} fallback=${latestSnapshot.fallbackUsed}`,
+            );
+            return;
+          }
+        }
+      } catch {
+        // Snapshot restore is best-effort — fall through to cold rewarm
+      }
     }
 
     // Fetch a generous pool from SQLite, apply gradient transform, then
@@ -3432,8 +3532,6 @@ export class Compositor {
       warmTokens += cost;
     }
 
-    const libDb = opts?.libraryDb || this.libraryDb;
-
     // Note: facts and context are intentionally NOT cached here.
     // compose() calls buildFactsFromDb() and buildCrossSessionContext() directly
     // from SQLite on every turn (~0.3ms each) — faster than a Redis GET round-trip.
@@ -3448,16 +3546,7 @@ export class Compositor {
       system: opts?.systemPrompt,
       identity: opts?.identity,
       history,
-      meta: {
-        agentId,
-        sessionKey,
-        provider: conversation.provider,
-        model: conversation.model,
-        channelType: conversation.channelType,
-        tokenCount: conversation.tokenCountIn + conversation.tokenCountOut,
-        lastActive: conversation.updatedAt,
-        status: conversation.status,
-      },
+      meta: warmMeta,
     });
   }
 
