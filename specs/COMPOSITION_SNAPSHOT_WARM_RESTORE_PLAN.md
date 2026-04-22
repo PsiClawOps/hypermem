@@ -759,3 +759,69 @@ Focus review on:
 Proceed.
 
 This is a high-value continuity feature that fits the Turn DAG architecture, builds on Phase 4 cleanly, and is timely given current provider instability. The sidecar-table design is the right balance of speed, correctness, observability, and future extensibility.
+
+## 2026-04-22 gate closeout map
+
+Sentinel round 3 gates 5a through 5d remain open for implementation after `a62143d`.
+
+What `a62143d` did land:
+- prompt-placement groundwork in `src/compositor.ts`
+- type additions in `src/types.ts`
+- prompt-placement and unified-pressure tests
+
+That is adjacent groundwork for restore invariants and telemetry, but it does not close the warm-restore gates below.
+
+### Gate 5a — repair notice and repair-depth cap
+Status: spec complete, implementation open.
+
+Implementation closeout:
+1. Add required `repair_notice` slot construction on restore output.
+2. Place it below static bootstrap/system material and above all restored conversational and tool content.
+3. Make it non-suppressible under budget pressure.
+4. Enforce `repair_depth <= 1` in v1 and fail safe on exceeded depth.
+5. Add restore-path tests for notice placement, notice presence, and depth-cap failure.
+
+### Gate 5b — cross-provider assistant-turn policy
+Status: spec complete, implementation open.
+
+Implementation closeout:
+1. Detect provider-family mismatch between source snapshot and target restore.
+2. Treat assistant-authored historical turns from foreign provider families as quoted historical context only.
+3. Disclose the boundary explicitly in `repair_notice`.
+4. Add restore-path tests proving foreign assistant turns are never replayed as fresh assistant claims.
+
+### Gate 5c — `slots_json` integrity hashing
+Status: spec complete, implementation open.
+
+Implementation closeout:
+1. Canonicalize slot payload serialization at snapshot write time.
+2. Store deterministic per-inline integrity hashes inside slot payloads.
+3. Store a top-level `slots_integrity_hash` over the canonicalized slot set.
+4. Verify both layers on restore.
+5. On mismatch, reject the snapshot and fall back to previous snapshot or cold rewarm.
+6. Add tests for tamper, truncation, and partial malformed `slots_json` failures.
+
+### Gate 5d — measurement gates and explicit boundary telemetry
+Status: thresholds pinned in spec, implementation open.
+
+Pinned thresholds for Phase 3 automatic restore remain:
+- p95 absolute token drift <= 3%
+- p99 absolute token drift <= 5%
+- required-slot drop rate = 0%
+- `stable_prefix` boundary-semantic violations = 0%
+- tool-pair parity violations = 0%
+- continuity-critical slot-class transformation rate at provider boundary < 0.5%
+
+Implementation closeout:
+1. Emit capture-only parity telemetry comparing planned restore payload versus final provider payload.
+2. Record required-slot drops, stable-prefix boundary violations, tool-pair parity violations, and continuity-critical boundary transformations as explicit counters.
+3. Mark cut tool-pair boundaries explicitly in instrumentation output rather than inferring them from generic drops.
+4. Block auto-restore rollout until the pinned thresholds are met over the required sample window.
+5. Add tests for zero-tolerance invariants: required slots, stable prefix, and tool-pair parity.
+
+### Recommended implementation order
+1. Snapshot write/read shape plus restore entrypoint
+2. Gate 5c integrity hashing and validation
+3. Gate 5a repair notice and depth cap
+4. Gate 5b cross-provider assistant history policy
+5. Gate 5d parity telemetry, thresholds, and rollout enforcement
