@@ -8,7 +8,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const LATEST_SCHEMA_VERSION = 10;
+export const LATEST_SCHEMA_VERSION = 11;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -324,6 +324,34 @@ export function migrate(db: DatabaseSync): void {
     }
     db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
       .run(10, nowIso());
+  }
+
+  // v10 → v11: composition snapshot sidecar for warm-restore capture.
+  if (currentVersion < 11) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS composition_snapshots (
+        id INTEGER PRIMARY KEY,
+        context_id INTEGER NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
+        head_message_id INTEGER REFERENCES messages(id),
+        schema_version INTEGER NOT NULL DEFAULT 1,
+        captured_at TEXT NOT NULL,
+        model TEXT NOT NULL,
+        context_window INTEGER NOT NULL,
+        total_tokens INTEGER NOT NULL,
+        fill_pct REAL NOT NULL,
+        snapshot_kind TEXT NOT NULL DEFAULT 'full',
+        repair_depth INTEGER NOT NULL DEFAULT 0,
+        slots_json TEXT NOT NULL,
+        slots_integrity_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_composition_snapshots_context_recent
+        ON composition_snapshots(context_id, captured_at DESC)
+    `);
+    db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
+      .run(11, nowIso());
   }
 }
 

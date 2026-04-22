@@ -14,7 +14,7 @@ export const SQLITE_VEC_VERSION = '0.1.9';
  * Main DB (messages.db) schema version.
  * Re-exported here for convenience; authoritative value lives in schema.ts.
  */
-export const MAIN_SCHEMA_VERSION = 10;
+export const MAIN_SCHEMA_VERSION = 11;
 
 /**
  * Library DB (library.db) schema version.
@@ -24,7 +24,7 @@ export const LIBRARY_SCHEMA_VERSION_EXPORT = 19;
 
 /**
  * Compatibility version — the single number operators and consumers check.
- * Maps to: messages.db schema v10, library schema v19.
+ * Maps to: messages.db schema v11, library schema v19.
  * Matches ENGINE_VERSION for the 0.8.2 release.
  */
 export const HYPERMEM_COMPAT_VERSION = '0.8.2';
@@ -35,6 +35,6 @@ export const HYPERMEM_COMPAT_VERSION = '0.8.2';
  */
 export const SCHEMA_COMPAT = {
   compatVersion: '0.8.2',
-  mainSchema: 10,
+  mainSchema: 11,
   librarySchema: 19,
 } as const;

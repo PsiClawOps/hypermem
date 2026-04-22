@@ -130,6 +130,19 @@ export type {
 } from './composition-snapshot-integrity.js';
 
 export {
+  insertCompositionSnapshot,
+  listCompositionSnapshots,
+  getCompositionSnapshot,
+  verifyCompositionSnapshot,
+  getLatestValidCompositionSnapshot,
+} from './composition-snapshot-store.js';
+export type {
+  CompositionSnapshotRecord,
+  InsertCompositionSnapshotInput,
+  LatestValidCompositionSnapshot,
+} from './composition-snapshot-store.js';
+
+export {
   ensureCompactionFenceSchema,
   updateCompactionFence,
   getCompactionFence,
