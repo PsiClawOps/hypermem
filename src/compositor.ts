@@ -56,7 +56,11 @@ import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
 import { formatToolChainStub, parseToolChainStub, formatArtifactRef, isArtifactRef, type ArtifactRef, type DegradationReason } from './degradation.js';
 import { ToolArtifactStore } from './tool-artifact-store.js';
 import { insertCompositionSnapshot, getLatestValidCompositionSnapshot } from './composition-snapshot-store.js';
-import { buildCompositionSnapshotSlots, restoreWarmSnapshotState } from './composition-snapshot-runtime.js';
+import {
+  buildCompositionSnapshotSlots,
+  restoreWarmSnapshotState,
+  WARM_RESTORE_MEASUREMENT_GATES,
+} from './composition-snapshot-runtime.js';
 
 /**
  * Files that OpenClaw's contextInjection injects into the system prompt.
@@ -3458,16 +3462,50 @@ export class Compositor {
       try {
         const latestSnapshot = getLatestValidCompositionSnapshot(db, activeContext.id);
         if (latestSnapshot?.verification.slots) {
-          const restored = restoreWarmSnapshotState(latestSnapshot.verification.slots);
+          const targetModel = opts?.model ?? conversation.model ?? 'unknown';
+          const sourceModel = latestSnapshot.snapshot.model;
+          const sourceProvider = s4DetectProvider(sourceModel);
+          const targetProvider = s4DetectProvider(conversation.provider ?? targetModel);
+          const restored = restoreWarmSnapshotState(latestSnapshot.verification.slots, {
+            sourceProvider,
+            targetProvider,
+          });
           if (restored) {
-            const targetModel = opts?.model ?? conversation.model ?? 'unknown';
-            const sourceModel = latestSnapshot.snapshot.model;
-            const repairNoticeContent = [
+            const repairNoticeLines = [
               `Repair notice: this session is a repaired continuation from snapshot ${latestSnapshot.snapshot.id}.`,
               `Source model: ${sourceModel}. Target model: ${targetModel}.`,
+              `Source provider: ${sourceProvider}. Target provider: ${targetProvider}.`,
               `Cross-model boundary: ${sourceModel !== targetModel ? 'yes' : 'no'}.`,
+              `Cross-provider boundary: ${restored.diagnostics.crossProviderBoundary ? 'yes' : 'no'}.`,
               'Repair depth: 1.',
-            ].join(' ');
+            ];
+
+            if (restored.diagnostics.quotedAssistantTurns > 0) {
+              repairNoticeLines.push(
+                `Quoted foreign-provider assistant turns: ${restored.diagnostics.quotedAssistantTurns}.`,
+              );
+            }
+            if (restored.diagnostics.toolPairParityViolations > 0) {
+              repairNoticeLines.push(
+                `Tool-pair parity gaps flagged: ${restored.diagnostics.toolPairParityViolations}.`,
+              );
+            }
+            if (restored.diagnostics.requiredSlotDrops.length > 0) {
+              repairNoticeLines.push(
+                `Required-slot gaps flagged: ${restored.diagnostics.requiredSlotDrops.join(', ')}.`,
+              );
+            }
+            if (
+              restored.diagnostics.requiredSlotDropRate > WARM_RESTORE_MEASUREMENT_GATES.requiredSlotDropRateMax
+              || restored.diagnostics.stablePrefixBoundaryViolations > WARM_RESTORE_MEASUREMENT_GATES.stablePrefixBoundaryViolationsMax
+              || restored.diagnostics.toolPairParityViolations > WARM_RESTORE_MEASUREMENT_GATES.toolPairParityViolationsMax
+              || restored.diagnostics.continuityCriticalBoundaryTransformRate > WARM_RESTORE_MEASUREMENT_GATES.continuityCriticalBoundaryTransformRateMax
+            ) {
+              repairNoticeLines.push(
+                `Warm-restore instrumentation gap: stable_prefix violations=${restored.diagnostics.stablePrefixBoundaryViolations}, continuity-critical transform rate=${restored.diagnostics.continuityCriticalBoundaryTransformRate.toFixed(4)}.`,
+              );
+            }
+            const repairNoticeContent = repairNoticeLines.join(' ');
 
             await this.cache.invalidateWindow(agentId, sessionKey);
             await this.cache.warmSession(agentId, sessionKey, {
@@ -3478,7 +3516,7 @@ export class Compositor {
               meta: warmMeta,
             });
             console.info(
-              `[hypermem:compositor] warm snapshot restore session=${sessionKey} snapshot=${latestSnapshot.snapshot.id} fallback=${latestSnapshot.fallbackUsed}`,
+              `[hypermem:compositor] warm snapshot restore session=${sessionKey} snapshot=${latestSnapshot.snapshot.id} fallback=${latestSnapshot.fallbackUsed} cross_provider=${restored.diagnostics.crossProviderBoundary} quoted_assistant_turns=${restored.diagnostics.quotedAssistantTurns} tool_pair_gaps=${restored.diagnostics.toolPairParityViolations}`,
             );
             return;
           }

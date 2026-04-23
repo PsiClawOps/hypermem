@@ -17,7 +17,35 @@ export interface RestoredWarmSnapshotState {
   system?: string;
   identity?: string;
   history: StoredMessage[];
+  diagnostics: WarmSnapshotRestoreDiagnostics;
 }
+
+export interface WarmSnapshotRestoreDiagnostics {
+  sourceProvider: string | null;
+  targetProvider: string | null;
+  crossProviderBoundary: boolean;
+  requiredSlotDrops: string[];
+  requiredSlotDropRate: number;
+  stablePrefixBoundaryViolations: number;
+  toolPairParityViolations: number;
+  quotedAssistantTurns: number;
+  continuityCriticalBoundaryTransformCount: number;
+  continuityCriticalBoundaryTransformRate: number;
+}
+
+export interface RestoreWarmSnapshotOptions {
+  sourceProvider?: string | null;
+  targetProvider?: string | null;
+}
+
+export const WARM_RESTORE_MEASUREMENT_GATES = Object.freeze({
+  tokenParityDriftP95Max: 0.03,
+  tokenParityDriftP99Max: 0.05,
+  requiredSlotDropRateMax: 0,
+  stablePrefixBoundaryViolationsMax: 0,
+  toolPairParityViolationsMax: 0,
+  continuityCriticalBoundaryTransformRateMax: 0.005,
+});
 
 function toSnapshotInlineContent(content: SnapshotJsonValue): { kind: 'inline'; content: SnapshotJsonValue } {
   return { kind: 'inline', content };
@@ -110,9 +138,75 @@ function restoreStoredMessages(value: SnapshotJsonValue | undefined): StoredMess
   return restored;
 }
 
-export function restoreWarmSnapshotState(slots: SnapshotSlotsRecord): RestoredWarmSnapshotState | null {
+function quoteForeignProviderAssistantTurns(
+  history: StoredMessage[],
+  sourceProvider: string | null,
+  targetProvider: string | null,
+): { history: StoredMessage[]; quotedAssistantTurns: number; toolPairParityViolations: number } {
+  if (!sourceProvider || !targetProvider || sourceProvider === targetProvider) {
+    return { history, quotedAssistantTurns: 0, toolPairParityViolations: 0 };
+  }
+
+  let quotedAssistantTurns = 0;
+  let toolPairParityViolations = 0;
+
+  const quotedHistory = history.map(message => {
+    if (message.role !== 'assistant') return message;
+
+    quotedAssistantTurns++;
+    const hadToolPayload = Boolean(
+      (message.toolCalls && message.toolCalls.length > 0)
+      || (message.toolResults && message.toolResults.length > 0)
+    );
+    if (hadToolPayload) toolPairParityViolations++;
+
+    const quotedText = (message.textContent && message.textContent.trim().length > 0)
+      ? `"""${message.textContent.trim()}"""`
+      : '[no text content retained]';
+    const prefix = `Historical assistant turn from ${sourceProvider} provider, quoted for ${targetProvider} replay.`;
+    const toolGap = hadToolPayload
+      ? '[tool call/result payload omitted at cross-provider boundary]'
+      : null;
+
+    return {
+      ...message,
+      role: 'user' as const,
+      textContent: [prefix, quotedText, toolGap].filter(Boolean).join('\n'),
+      toolCalls: null,
+      toolResults: null,
+      metadata: {
+        ...(message.metadata || {}),
+        _historicalQuote: true,
+        _quotedFromRole: 'assistant',
+        _quotedSourceProvider: sourceProvider,
+        _quotedTargetProvider: targetProvider,
+      },
+    };
+  });
+
+  return { history: quotedHistory, quotedAssistantTurns, toolPairParityViolations };
+}
+
+export function restoreWarmSnapshotState(
+  slots: SnapshotSlotsRecord,
+  options?: RestoreWarmSnapshotOptions,
+): RestoredWarmSnapshotState | null {
+  const requiredSlotDrops: string[] = [];
+  if (extractInlineContent(slots.system) === undefined) requiredSlotDrops.push('system');
+  if (extractInlineContent(slots.identity) === undefined) requiredSlotDrops.push('identity');
+  if (extractInlineContent(slots.history) === undefined) requiredSlotDrops.push('history');
+
+  const stablePrefixBoundaryViolations = Array.isArray(extractInlineContent(slots.stable_prefix)) ? 0 : 1;
   const history = restoreStoredMessages(extractInlineContent(slots.history));
   if (!history || history.length === 0) return null;
+
+  const sourceProvider = options?.sourceProvider ?? null;
+  const targetProvider = options?.targetProvider ?? null;
+  const quoted = quoteForeignProviderAssistantTurns(history, sourceProvider, targetProvider);
+  const continuityCriticalBoundaryTransformCount = quoted.quotedAssistantTurns;
+  const continuityCriticalBoundaryTransformRate = quoted.history.length > 0
+    ? continuityCriticalBoundaryTransformCount / quoted.history.length
+    : 0;
 
   const restoreStringSlot = (key: string): string | undefined => {
     const value = extractInlineContent(slots[key]);
@@ -122,9 +216,21 @@ export function restoreWarmSnapshotState(slots: SnapshotSlotsRecord): RestoredWa
   return {
     system: restoreStringSlot('system'),
     identity: restoreStringSlot('identity'),
-    history: history.map(message => ({
+    history: quoted.history.map(message => ({
       ...message,
       metadata: { ...(message.metadata || {}), _warmed: true },
     })),
+    diagnostics: {
+      sourceProvider,
+      targetProvider,
+      crossProviderBoundary: Boolean(sourceProvider && targetProvider && sourceProvider !== targetProvider),
+      requiredSlotDrops,
+      requiredSlotDropRate: requiredSlotDrops.length / 3,
+      stablePrefixBoundaryViolations,
+      toolPairParityViolations: quoted.toolPairParityViolations,
+      quotedAssistantTurns: quoted.quotedAssistantTurns,
+      continuityCriticalBoundaryTransformCount,
+      continuityCriticalBoundaryTransformRate,
+    },
   };
 }
