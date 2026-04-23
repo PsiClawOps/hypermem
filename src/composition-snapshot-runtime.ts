@@ -31,6 +31,9 @@ export interface WarmSnapshotRestoreDiagnostics {
   quotedAssistantTurns: number;
   continuityCriticalBoundaryTransformCount: number;
   continuityCriticalBoundaryTransformRate: number;
+  tokenParityDriftSampleCount: number;
+  tokenParityDriftP95: number;
+  tokenParityDriftP99: number;
 }
 
 export interface RestoreWarmSnapshotOptions {
@@ -138,6 +141,35 @@ function restoreStoredMessages(value: SnapshotJsonValue | undefined): StoredMess
   return restored;
 }
 
+function estimateTextTokens(text: string | null | undefined): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
+}
+
+function estimateToolTokens(value: unknown): number {
+  if (!value) return 0;
+  return Math.ceil(JSON.stringify(value).length / 2);
+}
+
+function estimateStoredMessageTokens(message: Pick<StoredMessage, 'textContent' | 'toolCalls' | 'toolResults'>): number {
+  return estimateTextTokens(message.textContent)
+    + estimateToolTokens(message.toolCalls)
+    + estimateToolTokens(message.toolResults)
+    + 4;
+}
+
+function computeRelativeTokenDrift(baselineTokens: number, restoredTokens: number): number {
+  if (baselineTokens <= 0) return restoredTokens > 0 ? 1 : 0;
+  return Math.abs(restoredTokens - baselineTokens) / baselineTokens;
+}
+
+function computePercentile(values: number[], percentile: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const rank = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * percentile) - 1));
+  return sorted[rank] ?? 0;
+}
+
 function quoteForeignProviderAssistantTurns(
   history: StoredMessage[],
   sourceProvider: string | null,
@@ -213,9 +245,33 @@ export function restoreWarmSnapshotState(
     return typeof value === 'string' && value.length > 0 ? value : undefined;
   };
 
+  const restoredSystem = restoreStringSlot('system');
+  const restoredIdentity = restoreStringSlot('identity');
+  const tokenParityDriftSamples: number[] = [];
+  const originalSystem = extractInlineContent(slots.system);
+  if (typeof originalSystem === 'string' && restoredSystem !== undefined) {
+    tokenParityDriftSamples.push(
+      computeRelativeTokenDrift(estimateTextTokens(originalSystem), estimateTextTokens(restoredSystem)),
+    );
+  }
+  const originalIdentity = extractInlineContent(slots.identity);
+  if (typeof originalIdentity === 'string' && restoredIdentity !== undefined) {
+    tokenParityDriftSamples.push(
+      computeRelativeTokenDrift(estimateTextTokens(originalIdentity), estimateTextTokens(restoredIdentity)),
+    );
+  }
+  for (let i = 0; i < history.length && i < quoted.history.length; i++) {
+    tokenParityDriftSamples.push(
+      computeRelativeTokenDrift(
+        estimateStoredMessageTokens(history[i]),
+        estimateStoredMessageTokens(quoted.history[i]),
+      ),
+    );
+  }
+
   return {
-    system: restoreStringSlot('system'),
-    identity: restoreStringSlot('identity'),
+    system: restoredSystem,
+    identity: restoredIdentity,
     history: quoted.history.map(message => ({
       ...message,
       metadata: { ...(message.metadata || {}), _warmed: true },
@@ -231,6 +287,9 @@ export function restoreWarmSnapshotState(
       quotedAssistantTurns: quoted.quotedAssistantTurns,
       continuityCriticalBoundaryTransformCount,
       continuityCriticalBoundaryTransformRate,
+      tokenParityDriftSampleCount: tokenParityDriftSamples.length,
+      tokenParityDriftP95: computePercentile(tokenParityDriftSamples, 0.95),
+      tokenParityDriftP99: computePercentile(tokenParityDriftSamples, 0.99),
     },
   };
 }

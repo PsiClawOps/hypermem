@@ -55,7 +55,11 @@ import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
 import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
 import { formatToolChainStub, parseToolChainStub, formatArtifactRef, isArtifactRef, type ArtifactRef, type DegradationReason } from './degradation.js';
 import { ToolArtifactStore } from './tool-artifact-store.js';
-import { insertCompositionSnapshot, getLatestValidCompositionSnapshot } from './composition-snapshot-store.js';
+import {
+  insertCompositionSnapshot,
+  getLatestValidCompositionSnapshot,
+  listCompositionSnapshots,
+} from './composition-snapshot-store.js';
 import {
   buildCompositionSnapshotSlots,
   restoreWarmSnapshotState,
@@ -3459,7 +3463,15 @@ export class Compositor {
     };
 
     if (activeContext) {
+      const warnSnapshotVerifyFallback = (reason: string, detail?: string) => {
+        const detailSuffix = detail ? ` ${detail}` : '';
+        console.warn(
+          `[hypermem:compositor] warm snapshot verify fallback session=${sessionKey} reason=${reason} verify_fallback_count=1 cold_rewarm_count=1${detailSuffix}`,
+        );
+      };
+
       try {
+        const snapshotCandidates = listCompositionSnapshots(db, activeContext.id, 2);
         const latestSnapshot = getLatestValidCompositionSnapshot(db, activeContext.id);
         if (latestSnapshot?.verification.slots) {
           const targetModel = opts?.model ?? conversation.model ?? 'unknown';
@@ -3471,6 +3483,12 @@ export class Compositor {
             targetProvider,
           });
           if (restored) {
+            if (latestSnapshot.fallbackUsed) {
+              console.warn(
+                `[hypermem:compositor] warm snapshot verify fallback session=${sessionKey} restored_snapshot=${latestSnapshot.snapshot.id} verify_fallback_count=1 cold_rewarm_count=0 reason=latest_snapshot_invalid_or_unverifiable`,
+              );
+            }
+
             const repairNoticeLines = [
               `Repair notice: this session is a repaired continuation from snapshot ${latestSnapshot.snapshot.id}.`,
               `Source model: ${sourceModel}. Target model: ${targetModel}.`,
@@ -3480,6 +3498,9 @@ export class Compositor {
               'Repair depth: 1.',
             ];
 
+            if (latestSnapshot.fallbackUsed) {
+              repairNoticeLines.push('Snapshot verify fallback count: 1.');
+            }
             if (restored.diagnostics.quotedAssistantTurns > 0) {
               repairNoticeLines.push(
                 `Quoted foreign-provider assistant turns: ${restored.diagnostics.quotedAssistantTurns}.`,
@@ -3495,14 +3516,19 @@ export class Compositor {
                 `Required-slot gaps flagged: ${restored.diagnostics.requiredSlotDrops.join(', ')}.`,
               );
             }
+
+            const tokenParityDriftExceeded =
+              restored.diagnostics.tokenParityDriftP95 > WARM_RESTORE_MEASUREMENT_GATES.tokenParityDriftP95Max
+              || restored.diagnostics.tokenParityDriftP99 > WARM_RESTORE_MEASUREMENT_GATES.tokenParityDriftP99Max;
             if (
-              restored.diagnostics.requiredSlotDropRate > WARM_RESTORE_MEASUREMENT_GATES.requiredSlotDropRateMax
+              tokenParityDriftExceeded
+              || restored.diagnostics.requiredSlotDropRate > WARM_RESTORE_MEASUREMENT_GATES.requiredSlotDropRateMax
               || restored.diagnostics.stablePrefixBoundaryViolations > WARM_RESTORE_MEASUREMENT_GATES.stablePrefixBoundaryViolationsMax
               || restored.diagnostics.toolPairParityViolations > WARM_RESTORE_MEASUREMENT_GATES.toolPairParityViolationsMax
               || restored.diagnostics.continuityCriticalBoundaryTransformRate > WARM_RESTORE_MEASUREMENT_GATES.continuityCriticalBoundaryTransformRateMax
             ) {
               repairNoticeLines.push(
-                `Warm-restore instrumentation gap: stable_prefix violations=${restored.diagnostics.stablePrefixBoundaryViolations}, continuity-critical transform rate=${restored.diagnostics.continuityCriticalBoundaryTransformRate.toFixed(4)}.`,
+                `Warm-restore instrumentation gap: token parity drift p95=${restored.diagnostics.tokenParityDriftP95.toFixed(4)}, p99=${restored.diagnostics.tokenParityDriftP99.toFixed(4)}, stable_prefix violations=${restored.diagnostics.stablePrefixBoundaryViolations}, continuity-critical transform rate=${restored.diagnostics.continuityCriticalBoundaryTransformRate.toFixed(4)}.`,
               );
             }
             const repairNoticeContent = repairNoticeLines.join(' ');
@@ -3516,13 +3542,17 @@ export class Compositor {
               meta: warmMeta,
             });
             console.info(
-              `[hypermem:compositor] warm snapshot restore session=${sessionKey} snapshot=${latestSnapshot.snapshot.id} fallback=${latestSnapshot.fallbackUsed} cross_provider=${restored.diagnostics.crossProviderBoundary} quoted_assistant_turns=${restored.diagnostics.quotedAssistantTurns} tool_pair_gaps=${restored.diagnostics.toolPairParityViolations}`,
+              `[hypermem:compositor] warm snapshot restore session=${sessionKey} snapshot=${latestSnapshot.snapshot.id} fallback=${latestSnapshot.fallbackUsed} cross_provider=${restored.diagnostics.crossProviderBoundary} quoted_assistant_turns=${restored.diagnostics.quotedAssistantTurns} tool_pair_gaps=${restored.diagnostics.toolPairParityViolations} token_parity_drift_p95=${restored.diagnostics.tokenParityDriftP95.toFixed(4)} token_parity_drift_p99=${restored.diagnostics.tokenParityDriftP99.toFixed(4)}`,
             );
             return;
           }
+
+          warnSnapshotVerifyFallback('restore_unusable', `snapshot_count=${snapshotCandidates.length}`);
+        } else if (snapshotCandidates.length > 0) {
+          warnSnapshotVerifyFallback('no_valid_snapshot', `snapshot_count=${snapshotCandidates.length}`);
         }
-      } catch {
-        // Snapshot restore is best-effort — fall through to cold rewarm
+      } catch (error) {
+        warnSnapshotVerifyFallback('restore_exception', `error=${JSON.stringify((error as Error).message)}`);
       }
     }
 

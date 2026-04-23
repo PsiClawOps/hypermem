@@ -92,6 +92,9 @@ describe('composition snapshot runtime wiring', () => {
   it('warmSession restores from the previous valid snapshot when the latest snapshot is tampered', async () => {
     const { hm, compositor, agentId, sessionKey, msgDb, libDb, convId, now } = await createHarness();
     const context = getOrCreateActiveContext(msgDb, agentId, sessionKey, convId);
+    const warned = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => { warned.push(args.join(' ')); };
 
     insertCompositionSnapshot(msgDb, {
       contextId: context.id,
@@ -159,11 +162,15 @@ describe('composition snapshot runtime wiring', () => {
       .run('{"history":{"kind":"inline","content":[{"role":"user","textContent":"tampered"}]}}', latest.id);
 
     await hm.cache.evictSession(agentId, sessionKey);
-    await compositor.warmSession(agentId, sessionKey, msgDb, {
-      systemPrompt: 'cold system fallback',
-      identity: 'cold identity fallback',
-      model: 'claude-opus-4-6',
-    });
+    try {
+      await compositor.warmSession(agentId, sessionKey, msgDb, {
+        systemPrompt: 'cold system fallback',
+        identity: 'cold identity fallback',
+        model: 'claude-opus-4-6',
+      });
+    } finally {
+      console.warn = origWarn;
+    }
 
     const restoredSystem = await hm.cache.getSlot(agentId, sessionKey, 'system');
     const restoredIdentity = await hm.cache.getSlot(agentId, sessionKey, 'identity');
@@ -173,9 +180,13 @@ describe('composition snapshot runtime wiring', () => {
     assert.equal(restoredSystem, 'restored system from snapshot');
     assert.equal(restoredIdentity, 'restored identity from snapshot');
     assert.match(repairedNotice ?? '', /Repair notice: this session is a repaired continuation/);
+    assert.match(repairedNotice ?? '', /Snapshot verify fallback count: 1\./);
     assert.equal(restoredHistory.length, 1);
     assert.equal(restoredHistory[0].textContent, 'history restored from previous valid snapshot');
     assert.equal(restoredHistory[0].metadata._warmed, true);
+    assert.ok(warned.some(line => /warm snapshot verify fallback/.test(line)));
+    assert.ok(warned.some(line => /verify_fallback_count=1/.test(line)));
+    assert.ok(warned.some(line => /cold_rewarm_count=0/.test(line)));
 
     const repairedResult = await compositor.compose({
       agentId,
@@ -313,11 +324,17 @@ describe('composition snapshot runtime wiring', () => {
     assert.equal(restored.diagnostics.requiredSlotDropRate, 0);
     assert.equal(restored.diagnostics.stablePrefixBoundaryViolations, 0);
     assert.equal(restored.diagnostics.quotedAssistantTurns, 1);
+    assert.equal(restored.diagnostics.tokenParityDriftSampleCount, 3);
+    assert.equal(restored.diagnostics.tokenParityDriftP95, 1.75);
+    assert.equal(restored.diagnostics.tokenParityDriftP99, 1.75);
   });
 
   it('warmSession falls back to cold rewarm when no valid snapshot is usable', async () => {
     const { hm, compositor, agentId, sessionKey, msgDb, convId } = await createHarness();
     const context = getOrCreateActiveContext(msgDb, agentId, sessionKey, convId);
+    const warned = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => { warned.push(args.join(' ')); };
 
     const broken = insertCompositionSnapshot(msgDb, {
       contextId: context.id,
@@ -338,11 +355,15 @@ describe('composition snapshot runtime wiring', () => {
       .run('{"system":{"kind":"inline","content":"broken"}}', broken.id);
 
     await hm.cache.evictSession(agentId, sessionKey);
-    await compositor.warmSession(agentId, sessionKey, msgDb, {
-      systemPrompt: 'cold system fallback',
-      identity: 'cold identity fallback',
-      model: 'claude-opus-4-6',
-    });
+    try {
+      await compositor.warmSession(agentId, sessionKey, msgDb, {
+        systemPrompt: 'cold system fallback',
+        identity: 'cold identity fallback',
+        model: 'claude-opus-4-6',
+      });
+    } finally {
+      console.warn = origWarn;
+    }
 
     const restoredSystem = await hm.cache.getSlot(agentId, sessionKey, 'system');
     const restoredIdentity = await hm.cache.getSlot(agentId, sessionKey, 'identity');
@@ -352,5 +373,8 @@ describe('composition snapshot runtime wiring', () => {
     assert.equal(restoredIdentity, 'cold identity fallback');
     assert.ok(restoredHistory.some(message => message.textContent === 'User asks for snapshot capture'));
     assert.ok(restoredHistory.every(message => message.metadata?._warmed === true));
+    assert.ok(warned.some(line => /warm snapshot verify fallback/.test(line)));
+    assert.ok(warned.some(line => /verify_fallback_count=1/.test(line)));
+    assert.ok(warned.some(line => /cold_rewarm_count=1/.test(line)));
   });
 });
