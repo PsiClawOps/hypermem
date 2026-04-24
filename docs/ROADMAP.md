@@ -86,7 +86,7 @@ Rule going forward: do not reopen warm restore from historical planning notes. N
 ## 2. HyperMem 0.9.0 adaptive context lifecycle
 Status: **OPEN, active.**
 
-The first slices have landed: the pure adaptive lifecycle policy kernel and compose diagnostics wiring. The remaining work is runtime behavior, not more planning archaeology.
+The first slices have landed: the pure adaptive lifecycle policy kernel, compose diagnostics wiring, and afterTurn Redis gradient-cap wiring. The remaining work is runtime behavior, not more planning archaeology.
 
 The lifecycle policy makes compose, afterTurn, recall, trim, compaction, and eviction share one pressure-band decision source instead of growing independent heuristics:
 - tiered warming — policy bands: bootstrap, warmup, steady, elevated, high, critical
@@ -99,9 +99,9 @@ The lifecycle policy makes compose, afterTurn, recall, trim, compaction, and evi
 Done in this stream:
 - adaptive lifecycle policy kernel
 - compose diagnostics wiring
+- afterTurn Redis gradient-cap wiring
 
 Remaining slices:
-- afterTurn refresh integration
 - recall breadth adjustment
 - eviction order tuning
 - runtime telemetry/tuning based on observed pressure behavior
@@ -141,7 +141,7 @@ Phase 5 stays important, but it is not the next sprint until the higher-priority
 | Item | Status | Notes |
 |---|---|---|
 | Runtime diagnostics API allowlist defect | 🟡 OPEN | Doctor memory repair and recall audit cannot reach `memory-core/runtime-api.js`; fix before treating doctor recall output as authoritative. |
-| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Active lifecycle work; kernel and diagnostics are landed, runtime behavior slices remain. |
+| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Active lifecycle work; kernel, diagnostics, and afterTurn gradient cap are landed; recall/eviction/telemetry slices remain. |
 | Contradiction-aware decay | 🟡 OPEN | Prevents stale-fact poisoning after architectural pivots. |
 | Turn DAG Phase 5 storage/perf | 🟡 OPEN | Important, but later than the items above. |
 | Warm-restore gate closeout | ✅ DONE | Tracked gate-closeout scope is complete; reopen only for a new concrete defect or measurement gap. |
