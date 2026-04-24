@@ -9,6 +9,7 @@
  */
 
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import { existsSync } from 'node:fs';
 import type { DocChunk } from './doc-chunker.js';
 
 // ─── Types ──────────────────────────────────────────────────────
@@ -49,6 +50,15 @@ export interface IndexResult {
   reindexed: boolean;
   /** Whether this source was already up-to-date */
   skipped: boolean;
+}
+
+export interface GarbageCollectResult {
+  /** Number of stale doc_chunks rows deleted */
+  chunksDeleted: number;
+  /** Number of stale doc_sources rows deleted */
+  sourcesDeleted: number;
+  /** Distinct missing source paths removed */
+  missingSources: string[];
 }
 
 export interface ChunkQuery {
@@ -343,6 +353,60 @@ export class DocChunkStore {
       this.db.exec('ROLLBACK');
       throw err;
     }
+  }
+
+  /**
+   * Remove doc chunks and source tracker rows whose source files no longer exist.
+   *
+   * This is intentionally limited by an optional source path prefix so workspace
+   * seeding can clean its own stale rows without sweeping unrelated agents.
+   * Rebuilds the external-content FTS table after deletes because this schema
+   * does not install row-level FTS maintenance triggers.
+   */
+  garbageCollectMissingSources(opts: { sourcePathPrefix?: string } = {}): GarbageCollectResult {
+    const prefix = opts.sourcePathPrefix?.replace(/\/+$/, '');
+    const prefixClause = prefix ? 'WHERE source_path = ? OR source_path LIKE ?' : '';
+    const chunkParams: SQLInputValue[] = prefix ? [prefix, `${prefix}/%`] : [];
+    const sourceParams: SQLInputValue[] = prefix ? [prefix, `${prefix}/%`] : [];
+
+    const rows = this.db
+      .prepare(`
+        SELECT DISTINCT source_path FROM (
+          SELECT source_path FROM doc_chunks ${prefixClause}
+          UNION
+          SELECT source_path FROM doc_sources ${prefixClause}
+        )
+      `)
+      .all(...chunkParams, ...sourceParams) as Array<{ source_path: string }>;
+
+    const missingSources = rows
+      .map(r => r.source_path)
+      .filter(sourcePath => !existsSync(sourcePath))
+      .sort();
+
+    if (missingSources.length === 0) {
+      return { chunksDeleted: 0, sourcesDeleted: 0, missingSources: [] };
+    }
+
+    let chunksDeleted = 0;
+    let sourcesDeleted = 0;
+
+    this.db.exec('BEGIN');
+    try {
+      const deleteChunks = this.db.prepare('DELETE FROM doc_chunks WHERE source_path = ?');
+      const deleteSources = this.db.prepare('DELETE FROM doc_sources WHERE source_path = ?');
+      for (const sourcePath of missingSources) {
+        chunksDeleted += deleteChunks.run(sourcePath).changes as number;
+        sourcesDeleted += deleteSources.run(sourcePath).changes as number;
+      }
+      this.db.prepare("INSERT INTO doc_chunks_fts(doc_chunks_fts) VALUES('rebuild')").run();
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+
+    return { chunksDeleted, sourcesDeleted, missingSources };
   }
 
   /**

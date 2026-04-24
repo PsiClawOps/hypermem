@@ -89,6 +89,9 @@ export class WorkspaceSeeder {
       errors: [],
     };
 
+    const gcResult = this.chunkStore.garbageCollectMissingSources({ sourcePathPrefix: workspaceDir });
+    result.totalDeleted += gcResult.chunksDeleted;
+
     const filesToProcess = this.discoverFiles(workspaceDir, opts);
 
     for (const { filePath, collectionDef } of filesToProcess) {

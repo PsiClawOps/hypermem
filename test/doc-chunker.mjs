@@ -495,6 +495,45 @@ console.log('\n─── DocChunkStore: needsReindex ───');
   assert(store.needsReindex('/workspace/POLICY.md', 'governance/policy', 'differenthash'), 'Needs reindex with different hash');
 }
 
+
+console.log('\n─── DocChunkStore: Garbage Collect Missing Sources ───');
+
+{
+  const db = makeDb();
+  const store = new DocChunkStore(db);
+  const tmpDir = makeTempDir();
+  const sourcePath = path.join(tmpDir, 'POLICY.md');
+  const outsidePath = path.join(os.tmpdir(), `hm-outside-${Date.now()}.md`);
+
+  try {
+    writeFileSync(sourcePath, POLICY_LIKE);
+    writeFileSync(outsidePath, POLICY_LIKE);
+
+    const scopedChunks = chunkFile(sourcePath, {
+      collection: 'governance/policy',
+      scope: 'shared-fleet',
+    });
+    const outsideChunks = chunkFile(outsidePath, {
+      collection: 'governance/policy',
+      scope: 'shared-fleet',
+    });
+    store.indexChunks(scopedChunks);
+    store.indexChunks(outsideChunks);
+
+    rmSync(sourcePath);
+
+    const result = store.garbageCollectMissingSources({ sourcePathPrefix: tmpDir });
+    assert(result.chunksDeleted === scopedChunks.length, `Deleted missing scoped chunks (${result.chunksDeleted})`);
+    assert(result.sourcesDeleted === 1, 'Deleted missing scoped source tracker row');
+    assert(result.missingSources.includes(sourcePath), 'Reports missing source path');
+    assert(store.listSources({ collection: 'governance/policy' }).some(s => s.sourcePath === outsidePath), 'Unrelated source preserved');
+    assert(store.keywordSearch('escalation', { collection: 'governance/policy' }).every(c => c.sourcePath !== sourcePath), 'FTS no longer returns deleted source');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(outsidePath, { force: true });
+  }
+}
+
 // ─── Suite 3: WorkspaceSeeder ────────────────────────────────────
 
 console.log('\n─── WorkspaceSeeder: Seed Workspace ───');
