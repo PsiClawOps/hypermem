@@ -34,6 +34,14 @@ export interface WarmSnapshotRestoreDiagnostics {
   tokenParityDriftSampleCount: number;
   tokenParityDriftP95: number;
   tokenParityDriftP99: number;
+  rolloutGatePassed: boolean;
+  rolloutGateViolations: WarmRestoreRolloutGateViolation[];
+}
+
+export interface WarmRestoreRolloutGateViolation {
+  gate: keyof typeof WARM_RESTORE_MEASUREMENT_GATES;
+  actual: number;
+  max: number;
 }
 
 export interface RestoreWarmSnapshotOptions {
@@ -49,6 +57,32 @@ export const WARM_RESTORE_MEASUREMENT_GATES = Object.freeze({
   toolPairParityViolationsMax: 0,
   continuityCriticalBoundaryTransformRateMax: 0.005,
 });
+
+export function evaluateWarmRestoreRolloutGate(
+  diagnostics: Pick<WarmSnapshotRestoreDiagnostics,
+    | 'tokenParityDriftP95'
+    | 'tokenParityDriftP99'
+    | 'requiredSlotDropRate'
+    | 'stablePrefixBoundaryViolations'
+    | 'toolPairParityViolations'
+    | 'continuityCriticalBoundaryTransformRate'
+  >,
+): { passed: boolean; violations: WarmRestoreRolloutGateViolation[] } {
+  const violations: WarmRestoreRolloutGateViolation[] = [];
+  const check = (gate: keyof typeof WARM_RESTORE_MEASUREMENT_GATES, actual: number) => {
+    const max = WARM_RESTORE_MEASUREMENT_GATES[gate];
+    if (actual > max) violations.push({ gate, actual, max });
+  };
+
+  check('tokenParityDriftP95Max', diagnostics.tokenParityDriftP95);
+  check('tokenParityDriftP99Max', diagnostics.tokenParityDriftP99);
+  check('requiredSlotDropRateMax', diagnostics.requiredSlotDropRate);
+  check('stablePrefixBoundaryViolationsMax', diagnostics.stablePrefixBoundaryViolations);
+  check('toolPairParityViolationsMax', diagnostics.toolPairParityViolations);
+  check('continuityCriticalBoundaryTransformRateMax', diagnostics.continuityCriticalBoundaryTransformRate);
+
+  return { passed: violations.length === 0, violations };
+}
 
 function toSnapshotInlineContent(content: SnapshotJsonValue): { kind: 'inline'; content: SnapshotJsonValue } {
   return { kind: 'inline', content };
@@ -269,6 +303,23 @@ export function restoreWarmSnapshotState(
     );
   }
 
+  const baseDiagnostics = {
+    sourceProvider,
+    targetProvider,
+    crossProviderBoundary: Boolean(sourceProvider && targetProvider && sourceProvider !== targetProvider),
+    requiredSlotDrops,
+    requiredSlotDropRate: requiredSlotDrops.length / 3,
+    stablePrefixBoundaryViolations,
+    toolPairParityViolations: quoted.toolPairParityViolations,
+    quotedAssistantTurns: quoted.quotedAssistantTurns,
+    continuityCriticalBoundaryTransformCount,
+    continuityCriticalBoundaryTransformRate,
+    tokenParityDriftSampleCount: tokenParityDriftSamples.length,
+    tokenParityDriftP95: computePercentile(tokenParityDriftSamples, 0.95),
+    tokenParityDriftP99: computePercentile(tokenParityDriftSamples, 0.99),
+  };
+  const rolloutGate = evaluateWarmRestoreRolloutGate(baseDiagnostics);
+
   return {
     system: restoredSystem,
     identity: restoredIdentity,
@@ -277,19 +328,9 @@ export function restoreWarmSnapshotState(
       metadata: { ...(message.metadata || {}), _warmed: true },
     })),
     diagnostics: {
-      sourceProvider,
-      targetProvider,
-      crossProviderBoundary: Boolean(sourceProvider && targetProvider && sourceProvider !== targetProvider),
-      requiredSlotDrops,
-      requiredSlotDropRate: requiredSlotDrops.length / 3,
-      stablePrefixBoundaryViolations,
-      toolPairParityViolations: quoted.toolPairParityViolations,
-      quotedAssistantTurns: quoted.quotedAssistantTurns,
-      continuityCriticalBoundaryTransformCount,
-      continuityCriticalBoundaryTransformRate,
-      tokenParityDriftSampleCount: tokenParityDriftSamples.length,
-      tokenParityDriftP95: computePercentile(tokenParityDriftSamples, 0.95),
-      tokenParityDriftP99: computePercentile(tokenParityDriftSamples, 0.99),
+      ...baseDiagnostics,
+      rolloutGatePassed: rolloutGate.passed,
+      rolloutGateViolations: rolloutGate.violations,
     },
   };
 }

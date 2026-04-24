@@ -247,9 +247,12 @@ describe('composition snapshot runtime wiring', () => {
     assert.ok(result.warnings.some(warning => /repair notice exceeded budget/.test(warning)));
   });
 
-  it('cross-provider restore quotes assistant turns and flags tool-pair gaps explicitly', async () => {
+  it('rollout gates block automatic warm restore when parity checks fail', async () => {
     const { hm, compositor, agentId, sessionKey, msgDb, convId, now } = await createHarness();
     const context = getOrCreateActiveContext(msgDb, agentId, sessionKey, convId);
+    const warned = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => { warned.push(args.join(' ')); };
 
     insertCompositionSnapshot(msgDb, {
       contextId: context.id,
@@ -299,28 +302,28 @@ describe('composition snapshot runtime wiring', () => {
     });
 
     await hm.cache.evictSession(agentId, sessionKey);
-    await compositor.warmSession(agentId, sessionKey, msgDb, {
-      systemPrompt: 'cold system fallback',
-      identity: 'cold identity fallback',
-      model: 'gpt-5.4',
-    });
+    try {
+      await compositor.warmSession(agentId, sessionKey, msgDb, {
+        systemPrompt: 'cold system fallback',
+        identity: 'cold identity fallback',
+        model: 'gpt-5.4',
+      });
+    } finally {
+      console.warn = origWarn;
+    }
 
+    const restoredSystem = await hm.cache.getSlot(agentId, sessionKey, 'system');
+    const restoredIdentity = await hm.cache.getSlot(agentId, sessionKey, 'identity');
     const repairedNotice = await hm.cache.getSlot(agentId, sessionKey, 'repair_notice');
     const restoredHistory = await hm.cache.getHistory(agentId, sessionKey, 10);
 
-    assert.match(repairedNotice ?? '', /Cross-provider boundary: yes/);
-    assert.match(repairedNotice ?? '', /Quoted foreign-provider assistant turns: 1/);
-    assert.match(repairedNotice ?? '', /Tool-pair parity gaps flagged: 1/);
-
-    assert.equal(restoredHistory.length, 2);
-    const quotedAssistant = restoredHistory[1];
-    assert.equal(quotedAssistant.role, 'user');
-    assert.match(quotedAssistant.textContent ?? '', /Historical assistant turn from anthropic provider/);
-    assert.equal(quotedAssistant.toolCalls, null);
-    assert.equal(quotedAssistant.toolResults, null);
-    assert.equal(quotedAssistant.metadata._historicalQuote, true);
-    assert.equal(quotedAssistant.metadata._quotedSourceProvider, 'anthropic');
-    assert.equal(quotedAssistant.metadata._quotedTargetProvider, 'openai');
+    assert.equal(restoredSystem, 'cold system fallback');
+    assert.equal(restoredIdentity, 'cold identity fallback');
+    assert.equal(repairedNotice, null);
+    assert.ok(restoredHistory.some(message => message.textContent === 'User asks for snapshot capture'));
+    assert.ok(warned.some(line => /warm snapshot rollout gate blocked/.test(line)));
+    assert.ok(warned.some(line => /toolPairParityViolationsMax=1\/0/.test(line)));
+    assert.ok(warned.some(line => /continuityCriticalBoundaryTransformRateMax=0.5\/0.005/.test(line)));
   });
 
   it('pins warm-restore measurement gates and surfaces restore diagnostics', async () => {
@@ -364,6 +367,46 @@ describe('composition snapshot runtime wiring', () => {
     assert.equal(restored.diagnostics.tokenParityDriftSampleCount, 3);
     assert.equal(restored.diagnostics.tokenParityDriftP95, 1.75);
     assert.equal(restored.diagnostics.tokenParityDriftP99, 1.75);
+    assert.equal(restored.diagnostics.rolloutGatePassed, false);
+    assert.ok(restored.diagnostics.rolloutGateViolations.some(violation => violation.gate === 'tokenParityDriftP95Max'));
+    assert.ok(restored.diagnostics.rolloutGateViolations.some(violation => violation.gate === 'continuityCriticalBoundaryTransformRateMax'));
+  });
+
+  it('marks required-slot, stable-prefix, and tool-pair parity violations as rollout blockers', async () => {
+    const restored = restoreWarmSnapshotState({
+      identity: { kind: 'inline', content: 'identity' },
+      stable_prefix: { kind: 'inline', content: 'not-an-array' },
+      history: {
+        kind: 'inline',
+        content: [{
+          id: 8001,
+          conversationId: 8,
+          agentId: 'forge',
+          role: 'assistant',
+          textContent: 'assistant tool turn from prior provider',
+          toolCalls: [{ id: 'tool-1', name: 'lookup', arguments: '{}' }],
+          toolResults: [{ callId: 'tool-1', name: 'lookup', content: 'payload' }],
+          metadata: null,
+          messageIndex: 1,
+          tokenCount: null,
+          isHeartbeat: false,
+          createdAt: new Date(0).toISOString(),
+        }],
+      },
+    }, {
+      sourceProvider: 'anthropic',
+      targetProvider: 'openai',
+    });
+
+    assert.ok(restored, 'restore state returned');
+    assert.equal(restored.diagnostics.rolloutGatePassed, false);
+    assert.deepEqual(restored.diagnostics.requiredSlotDrops, ['system']);
+    assert.equal(restored.diagnostics.stablePrefixBoundaryViolations, 1);
+    assert.equal(restored.diagnostics.toolPairParityViolations, 1);
+    const violationGates = new Set(restored.diagnostics.rolloutGateViolations.map(violation => violation.gate));
+    assert.ok(violationGates.has('requiredSlotDropRateMax'));
+    assert.ok(violationGates.has('stablePrefixBoundaryViolationsMax'));
+    assert.ok(violationGates.has('toolPairParityViolationsMax'));
   });
 
   it('warmSession falls back to cold rewarm when no valid snapshot is usable', async () => {

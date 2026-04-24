@@ -3491,13 +3491,22 @@ export class Compositor {
             targetProvider,
           });
           if (restored) {
-            if (latestSnapshot.fallbackUsed) {
+            if (!restored.diagnostics.rolloutGatePassed) {
+              const gateSummary = restored.diagnostics.rolloutGateViolations
+                .map(violation => `${violation.gate}=${violation.actual}/${violation.max}`)
+                .join(', ');
               console.warn(
-                `[hypermem:compositor] warm snapshot verify fallback session=${sessionKey} restored_snapshot=${latestSnapshot.snapshot.id} verify_fallback_count=1 cold_rewarm_count=0 reason=latest_snapshot_invalid_or_unverifiable`,
+                `[hypermem:compositor] warm snapshot rollout gate blocked session=${sessionKey} snapshot=${latestSnapshot.snapshot.id} violations=${JSON.stringify(gateSummary)} verify_fallback_count=${latestSnapshot.fallbackUsed ? 1 : 0} cold_rewarm_count=1`,
               );
-            }
+              warnSnapshotVerifyFallback('rollout_gate_blocked', `snapshot=${latestSnapshot.snapshot.id} violations=${JSON.stringify(gateSummary)}`);
+            } else {
+              if (latestSnapshot.fallbackUsed) {
+                console.warn(
+                  `[hypermem:compositor] warm snapshot verify fallback session=${sessionKey} restored_snapshot=${latestSnapshot.snapshot.id} verify_fallback_count=1 cold_rewarm_count=0 reason=latest_snapshot_invalid_or_unverifiable`,
+                );
+              }
 
-            const repairNoticeLines = [
+              const repairNoticeLines = [
               `Repair notice: this session is a repaired continuation from snapshot ${latestSnapshot.snapshot.id}.`,
               `Source model: ${sourceModel}. Target model: ${targetModel}.`,
               `Source provider: ${sourceProvider}. Target provider: ${targetProvider}.`,
@@ -3541,18 +3550,19 @@ export class Compositor {
             }
             const repairNoticeContent = repairNoticeLines.join(' ');
 
-            await this.cache.invalidateWindow(agentId, sessionKey);
-            await this.cache.warmSession(agentId, sessionKey, {
-              system: restored.system ?? opts?.systemPrompt,
-              identity: restored.identity ?? opts?.identity,
-              repairNotice: repairNoticeContent,
-              history: restored.history,
-              meta: warmMeta,
-            });
-            console.info(
-              `[hypermem:compositor] warm snapshot restore session=${sessionKey} snapshot=${latestSnapshot.snapshot.id} fallback=${latestSnapshot.fallbackUsed} cross_provider=${restored.diagnostics.crossProviderBoundary} quoted_assistant_turns=${restored.diagnostics.quotedAssistantTurns} tool_pair_gaps=${restored.diagnostics.toolPairParityViolations} token_parity_drift_p95=${restored.diagnostics.tokenParityDriftP95.toFixed(4)} token_parity_drift_p99=${restored.diagnostics.tokenParityDriftP99.toFixed(4)}`,
-            );
-            return;
+              await this.cache.invalidateWindow(agentId, sessionKey);
+              await this.cache.warmSession(agentId, sessionKey, {
+                system: restored.system ?? opts?.systemPrompt,
+                identity: restored.identity ?? opts?.identity,
+                repairNotice: repairNoticeContent,
+                history: restored.history,
+                meta: warmMeta,
+              });
+              console.info(
+                `[hypermem:compositor] warm snapshot restore session=${sessionKey} snapshot=${latestSnapshot.snapshot.id} fallback=${latestSnapshot.fallbackUsed} cross_provider=${restored.diagnostics.crossProviderBoundary} quoted_assistant_turns=${restored.diagnostics.quotedAssistantTurns} tool_pair_gaps=${restored.diagnostics.toolPairParityViolations} rollout_gate_passed=${restored.diagnostics.rolloutGatePassed} token_parity_drift_p95=${restored.diagnostics.tokenParityDriftP95.toFixed(4)} token_parity_drift_p99=${restored.diagnostics.tokenParityDriftP99.toFixed(4)}`,
+              );
+              return;
+            }
           }
 
           warnSnapshotVerifyFallback('restore_unusable', `snapshot_count=${snapshotCandidates.length}`);
