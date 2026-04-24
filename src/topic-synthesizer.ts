@@ -52,6 +52,9 @@ export interface SynthesisResult {
   topicsSynthesized: number;
   topicsSkipped: number;
   knowledgeEntriesWritten: number;
+  topicIdsResolved: number;
+  topicsWithoutResolvedIds: number;
+  topicsWithoutMessages: number;
 }
 
 interface TopicRow {
@@ -175,6 +178,10 @@ function parseStoredMessageCount(sourceRef: string | null): number {
   return match ? parseInt(match[1], 10) : 0;
 }
 
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, match => `\\${match}`);
+}
+
 // ─── TopicSynthesizer ───────────────────────────────────────────
 
 export class TopicSynthesizer {
@@ -206,6 +213,9 @@ export class TopicSynthesizer {
       topicsSynthesized: 0,
       topicsSkipped: 0,
       knowledgeEntriesWritten: 0,
+      topicIdsResolved: 0,
+      topicsWithoutResolvedIds: 0,
+      topicsWithoutMessages: 0,
     };
 
     const cfg = this.effectiveConfig;
@@ -252,17 +262,24 @@ export class TopicSynthesizer {
         continue;
       }
 
+      const resolvedTopicIds = this.resolveMessageTopicIds(messageDb, topic);
+      result.topicIdsResolved += resolvedTopicIds.length;
+      if (resolvedTopicIds.length === 0) {
+        result.topicsWithoutResolvedIds++;
+        result.topicsSkipped++;
+        continue;
+      }
+
       let messages: MessageRow[];
       try {
-        messages = messageDb.prepare(`
-          SELECT * FROM messages WHERE topic_id = ? ORDER BY created_at ASC
-        `).all(String(topic.id)) as unknown as MessageRow[];
+        messages = this.loadTopicMessages(messageDb, topic, resolvedTopicIds);
       } catch {
         result.topicsSkipped++;
         continue;
       }
 
       if (messages.length === 0) {
+        result.topicsWithoutMessages++;
         result.topicsSkipped++;
         continue;
       }
@@ -282,6 +299,113 @@ export class TopicSynthesizer {
     }
 
     return result;
+  }
+
+  /**
+   * Resolve a library topic to message-db topic ids.
+   *
+   * Library topics use integer ids and aggregate per agent/name. Message DBs
+   * use UUID topic ids scoped to sessions. Preserve the legacy direct-id path
+   * for older data, then bridge current data by case-insensitive topic name.
+   */
+  private resolveMessageTopicIds(messageDb: DatabaseSync, topic: TopicRow): string[] {
+    const ids = new Set<string>([String(topic.id)]);
+
+    try {
+      const rows = messageDb.prepare(`
+        SELECT id FROM topics WHERE lower(name) = lower(?) ORDER BY last_active_at ASC
+      `).all(topic.name) as Array<{ id: string }>;
+      for (const row of rows) {
+        if (row.id) ids.add(String(row.id));
+      }
+    } catch {
+      // Older message DBs may not have the per-session topics table. In that
+      // case the legacy direct-id fallback above is the only valid resolver.
+    }
+
+    return [...ids];
+  }
+
+  /**
+   * Load source messages for a library topic.
+   *
+   * Primary path uses session topic ids. Fallback path mirrors the background
+   * indexer's topic detector because library topics are created from message
+   * content, not from SessionTopicMap UUID names.
+   */
+  private loadTopicMessages(
+    messageDb: DatabaseSync,
+    topic: TopicRow,
+    resolvedTopicIds: string[]
+  ): MessageRow[] {
+    const byId = (() => {
+      try {
+        const placeholders = resolvedTopicIds.map(() => '?').join(', ');
+        return messageDb.prepare(`
+          SELECT * FROM messages WHERE topic_id IN (${placeholders}) ORDER BY created_at ASC
+        `).all(...resolvedTopicIds) as unknown as MessageRow[];
+      } catch {
+        return [];
+      }
+    })();
+
+    const byContent = this.loadMessagesByDetectedTopic(messageDb, topic);
+    const seen = new Set<number>();
+    const merged: MessageRow[] = [];
+    for (const msg of [...byId, ...byContent]) {
+      if (seen.has(msg.id)) continue;
+      seen.add(msg.id);
+      merged.push(msg);
+    }
+    return merged.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  }
+
+  private loadMessagesByDetectedTopic(messageDb: DatabaseSync, topic: TopicRow): MessageRow[] {
+    const topicName = topic.name.toLowerCase();
+    const limit = Math.max(topic.message_count * 3, topic.message_count, this.effectiveConfig.SYNTHESIS_MIN_MESSAGES);
+
+    if (topicName === 'infrastructure') {
+      return messageDb.prepare(`
+        SELECT * FROM messages
+        WHERE text_content IS NOT NULL
+          AND (
+            lower(text_content) LIKE '%redis%'
+            OR lower(text_content) LIKE '%sqlite%'
+            OR lower(text_content) LIKE '%database%'
+            OR lower(text_content) LIKE '%migration%'
+            OR lower(text_content) LIKE '%deployment%'
+            OR lower(text_content) LIKE '%docker%'
+            OR lower(text_content) LIKE '%nginx%'
+          )
+        ORDER BY created_at ASC
+        LIMIT ?
+      `).all(limit) as unknown as MessageRow[];
+    }
+
+    if (topicName === 'security') {
+      return messageDb.prepare(`
+        SELECT * FROM messages
+        WHERE text_content IS NOT NULL
+          AND (
+            lower(text_content) LIKE '%security%'
+            OR lower(text_content) LIKE '%auth%'
+            OR lower(text_content) LIKE '%permission%'
+            OR lower(text_content) LIKE '%access%'
+            OR lower(text_content) LIKE '%token%'
+            OR lower(text_content) LIKE '%credential%'
+          )
+        ORDER BY created_at ASC
+        LIMIT ?
+      `).all(limit) as unknown as MessageRow[];
+    }
+
+    return messageDb.prepare(`
+      SELECT * FROM messages
+      WHERE text_content IS NOT NULL
+        AND lower(text_content) LIKE ? ESCAPE '\\'
+      ORDER BY created_at ASC
+      LIMIT ?
+    `).all(`%${escapeLike(topicName)}%`, limit) as unknown as MessageRow[];
   }
 
   /**

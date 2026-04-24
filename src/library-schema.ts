@@ -1431,6 +1431,19 @@ export function migrateLibrary(db: DatabaseSync, engineVersion?: string): void {
       .run(19, nowIso());
   }
 
+  // Always repair knowledge schema drift before runtime writes.
+  // Some long-lived databases reached schema >=7 with the versioned knowledge
+  // table present but without the visibility column. KnowledgeStore writes
+  // require visibility, and synthesis/indexer upserts otherwise fail at runtime
+  // even though schema_version says the migration already ran.
+  const knowledgeCols = new Set(
+    (db.prepare('PRAGMA table_info(knowledge)').all() as Array<{ name: string }>).map(col => col.name)
+  );
+  if (!knowledgeCols.has('visibility')) {
+    db.exec("ALTER TABLE knowledge ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'");
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_knowledge_visibility ON knowledge(visibility, agent_id)');
+
   // Always ensure meta exists before stamping the running engine version.
   // Some legacy/stale DBs reached schema >=10 without the V10 migration having
   // actually created the table, which would make startup fail with

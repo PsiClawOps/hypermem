@@ -115,6 +115,19 @@ Status: **OPEN, defect.**
 
 This is not part of adaptive lifecycle tuning, but it is operationally adjacent: broken diagnostics make pressure and recall work harder to verify. Fix this before relying on doctor output as proof for lifecycle changes.
 
+## 2b. Topic synthesis bridge defect
+Status: **OPEN, defect.**
+
+Health stats on 2026-04-24 showed `knowledge: 0 active` despite eligible topics, indexed facts, and indexed episodes. Investigation found `TopicSynthesizer` still assumes `library.db.topics.id` matches `messages.db.messages.topic_id`. That invariant broke when per-session `SessionTopicMap` introduced UUID topic ids in messages DBs while library topics kept integer ids. The result is silent topic-wiki synthesis loss: eligible global topics cannot resolve their source messages.
+
+Fix before treating the knowledge/wiki layer as operational:
+- bridge library topics to per-agent message topics where names align and fall back to the same content detector that created library topics;
+- preserve a legacy direct-id fallback for any older integer-linked data;
+- emit diagnostics when eligible topics cannot resolve message topic ids or source messages;
+- add regression coverage for UUID topic ids, duplicate same-name session topic fragments, content-detector fallback, no-match skips, legacy direct-id fallback, schema-drift repair, and idempotent upsert.
+
+This is prioritized ahead of forked-context integration because adaptive/forked-context work should not build on a dead synthesis layer. Production-copy verification also exposed a long-lived `knowledge.visibility` schema drift; repair that in the same hotfix because `KnowledgeStore.upsert()` cannot write without it.
+
 ## 3. Contradiction-aware decay
 After 0.9.0 lifecycle work:
 - accelerate decay for superseded facts
@@ -141,6 +154,7 @@ Phase 5 stays important, but it is not the next sprint until the higher-priority
 | Item | Status | Notes |
 |---|---|---|
 | Runtime diagnostics API allowlist defect | 🟡 OPEN | Doctor memory repair and recall audit cannot reach `memory-core/runtime-api.js`; fix before treating doctor recall output as authoritative. |
+| Topic synthesis bridge defect | 🟡 OPEN | `knowledge: 0 active`; `TopicSynthesizer` must bridge library integer topics to messages DB UUID topics after SessionTopicMap. |
 | Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Active lifecycle work; kernel, diagnostics, and afterTurn gradient cap are landed; recall/eviction/telemetry slices remain. |
 | Contradiction-aware decay | 🟡 OPEN | Prevents stale-fact poisoning after architectural pivots. |
 | Turn DAG Phase 5 storage/perf | 🟡 OPEN | Important, but later than the items above. |

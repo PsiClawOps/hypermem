@@ -74,6 +74,21 @@ function insertTopic(h, {
   return row.id;
 }
 
+function insertSessionTopic(h, {
+  id,
+  name,
+  sessionKey = h.sessionKey,
+  createdAt = Date.now() - 2 * 60 * 60 * 1000,
+  lastActiveAt = Date.now() - 60 * 60 * 1000,
+  messageCount = 0,
+}) {
+  h.msgDb.prepare(`
+    INSERT INTO topics (id, session_key, name, created_at, last_active_at, message_count, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, NULL)
+  `).run(id, sessionKey, name, createdAt, lastActiveAt, messageCount);
+  return id;
+}
+
 function insertMessage(h, topicId, {
   text = 'generic synthesis test message with enough body to avoid filters',
   agentId = h.agentId,
@@ -157,6 +172,94 @@ async function testRecentTopicSkipped() {
   const synth = new TopicSynthesizer(h.libDb, () => h.msgDb);
   const result = synth.tick(h.agentId);
   assert(result.topicsSynthesized === 0, 'recent topic is skipped');
+  await h.hm.close();
+}
+
+async function testSessionTopicUuidBridge() {
+  const h = await createHarness('uuid-bridge');
+  const libraryTopicId = insertTopic(h, { name: 'ClawCanvas', updatedAt: isoMinutesAgo(60) });
+  const uuidTopicId = insertSessionTopic(h, {
+    id: '01343c6e-994e-4a82-9cde-7c05e6db0e57',
+    name: 'ClawCanvas',
+    messageCount: 5,
+  });
+  [
+    'We decided that ClawCanvas topic synthesis should bridge UUID session topics.',
+    'The library topic integer id must not be assumed to match messages.topic_id anymore.',
+    'Can the synthesizer merge session topic fragments by matching topic names?',
+    'Yes, it should resolve per-session topic ids and synthesize across those messages.',
+    'This regression test keeps knowledge from staying empty after SessionTopicMap.',
+  ].forEach((text, idx) => insertMessage(h, uuidTopicId, { text, messageIndex: idx + 1 }));
+  h.libDb.prepare('UPDATE topics SET message_count = ?, updated_at = ? WHERE id = ?')
+    .run(5, isoMinutesAgo(60), libraryTopicId);
+
+  const synth = new TopicSynthesizer(h.libDb, () => h.msgDb);
+  const result = synth.tick(h.agentId);
+  const row = fetchKnowledge(h, 'ClawCanvas');
+  assert(result.topicsSynthesized === 1, 'library topic bridges to UUID session topic');
+  assert(result.topicIdsResolved >= 2, 'bridge result includes legacy id plus UUID topic id');
+  assert(!!row, 'knowledge entry exists after UUID bridge synthesis');
+  await h.hm.close();
+}
+
+async function testSessionTopicFragmentsMergeByName() {
+  const h = await createHarness('uuid-fragments');
+  const libraryTopicId = insertTopic(h, { name: 'HyperMem', updatedAt: isoMinutesAgo(70) });
+  const uuidA = insertSessionTopic(h, { id: '11111111-1111-4111-8111-111111111111', name: 'HyperMem', messageCount: 3 });
+  const uuidB = insertSessionTopic(h, { id: '22222222-2222-4222-8222-222222222222', name: 'hypermem', messageCount: 3 });
+  [
+    [uuidA, 'We decided the first HyperMem fragment keeps topic ids scoped to sessions.'],
+    [uuidA, 'The wiki layer should compile multiple same-name fragments together.'],
+    [uuidA, 'This is the third message in fragment A.'],
+    [uuidB, 'Fragment B confirms case-insensitive topic name matching.'],
+    [uuidB, 'The synthesizer should avoid duplicate knowledge rows on one tick.'],
+    [uuidB, 'This is the sixth message across merged fragments.'],
+  ].forEach(([topicId, text], idx) => insertMessage(h, topicId, { text, messageIndex: idx + 1 }));
+  h.libDb.prepare('UPDATE topics SET message_count = ?, updated_at = ? WHERE id = ?')
+    .run(6, isoMinutesAgo(70), libraryTopicId);
+
+  const synth = new TopicSynthesizer(h.libDb, () => h.msgDb);
+  const result = synth.tick(h.agentId);
+  const row = fetchKnowledge(h, 'HyperMem');
+  assert(result.topicsSynthesized === 1, 'same-name UUID session topic fragments synthesize once');
+  assert(result.topicIdsResolved >= 3, 'same-name UUID session topic fragments both resolve with legacy fallback');
+  await h.hm.close();
+}
+
+async function testContentDetectorFallbackWhenSessionTopicNamesDiffer() {
+  const h = await createHarness('content-fallback');
+  const libraryTopicId = insertTopic(h, { name: 'ClawDash', updatedAt: isoMinutesAgo(80) });
+  const uuidTopicId = insertSessionTopic(h, {
+    id: '33333333-3333-4333-8333-333333333333',
+    name: 'Fri 2026-04-24 14 11 MST',
+    messageCount: 5,
+  });
+  [
+    'We decided ClawDash topic synthesis should not depend on the session topic display name.',
+    'ClawDash health messages can live under timestamp-derived SessionTopicMap names.',
+    'The global topic detector still records ClawDash from message content.',
+    'Can synthesis recover when UUID topic names and library topic names diverge?',
+    'Yes, ClawDash content fallback should compile those source messages.',
+  ].forEach((text, idx) => insertMessage(h, uuidTopicId, { text, messageIndex: idx + 1 }));
+  h.libDb.prepare('UPDATE topics SET message_count = ?, updated_at = ? WHERE id = ?')
+    .run(5, isoMinutesAgo(80), libraryTopicId);
+
+  const synth = new TopicSynthesizer(h.libDb, () => h.msgDb);
+  const result = synth.tick(h.agentId);
+  const row = fetchKnowledge(h, 'ClawDash');
+  assert(result.topicsSynthesized === 1, 'content detector fallback synthesizes when session topic names differ');
+  assert(!!row, 'content detector fallback writes a knowledge row');
+  await h.hm.close();
+}
+
+async function testNoResolvedTopicIdsSkipsCleanly() {
+  const h = await createHarness('uuid-no-match');
+  insertTopic(h, { name: 'unmatched-topic', messageCount: 5, updatedAt: isoMinutesAgo(60) });
+  const synth = new TopicSynthesizer(h.libDb, () => h.msgDb);
+  const result = synth.tick(h.agentId);
+  assert(result.topicsSynthesized === 0, 'unmatched topic is not synthesized');
+  assert(result.topicsWithoutMessages === 1, 'unmatched topic is counted as having no source messages');
+  assert(!fetchKnowledge(h, 'unmatched-topic'), 'unmatched topic writes no knowledge row');
   await h.hm.close();
 }
 
@@ -365,6 +468,10 @@ async function run() {
   await testMinMessageThreshold();
   await testStaleTopicSynthesizes();
   await testRecentTopicSkipped();
+  await testSessionTopicUuidBridge();
+  await testSessionTopicFragmentsMergeByName();
+  await testContentDetectorFallbackWhenSessionTopicNamesDiffer();
+  await testNoResolvedTopicIdsSkipsCleanly();
   await testResynthesisThresholds();
   await testContentExtraction();
   await testLintChecks();
