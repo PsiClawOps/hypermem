@@ -6,6 +6,8 @@
  * Provider translators convert to/from provider-specific formats at the boundary.
  */
 
+import type { AdaptiveLifecycleBand } from './adaptive-lifecycle.js';
+
 // ─── Message Types ───────────────────────────────────────────────
 
 export type MessageRole = 'user' | 'assistant' | 'system';
@@ -456,6 +458,27 @@ export interface ComposeDiagnostics {
   trimGrowthThreshold?: number;
   /** Canonical headroom fraction used when steady-state trim does fire. */
   trimHeadroomFraction?: number;
+  // ── 0.9.0: Adaptive context lifecycle ────────────────────────────────────
+  /** Lifecycle band selected by the shared adaptive policy kernel. */
+  adaptiveLifecycleBand?: AdaptiveLifecycleBand;
+  /** Lifecycle pressure percentage used for band selection. */
+  adaptiveLifecyclePressurePct?: number;
+  /** History budget fraction recommended by the lifecycle policy. */
+  adaptiveWarmHistoryBudgetFraction?: number;
+  /** Recall breadth multiplier recommended by the lifecycle policy. */
+  adaptiveSmartRecallMultiplier?: number;
+  /** Trim soft-target fraction recommended by the lifecycle policy. */
+  adaptiveTrimSoftTarget?: number;
+  /** Compaction target fraction recommended by the lifecycle policy. */
+  adaptiveCompactionTargetFraction?: number;
+  /** True when the policy recommends emitting a `/new` breadcrumb package. */
+  adaptiveBreadcrumbPackage?: boolean;
+  /** True when topic-centroid eviction may participate in trimming decisions. */
+  adaptiveTopicCentroidEviction?: boolean;
+  /** True when proactive compaction should be triggered by lifecycle pressure. */
+  adaptiveProactiveCompaction?: boolean;
+  /** Stable reason tags explaining the lifecycle decision. */
+  adaptiveLifecycleReasons?: string[];
   // ── Sprint 4: Prompt placement + budget lanes + provider diagnostics ────────────────────────────────
   /**
    * Sprint 4: Explicit compositor budget lane allocations for this compose pass.

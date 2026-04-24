@@ -52,6 +52,7 @@ import {
   TRIM_GROWTH_THRESHOLD,
   TRIM_HEADROOM_FRACTION,
   resolveTrimBudgets,
+  resolveAdaptiveLifecyclePolicy,
   formatToolChainStub,
   decideReplayRecovery,
   isReplayState,
@@ -3267,6 +3268,7 @@ ${replayRecovery.emittedText}`
 
         // P3.1: Topic detection on the inbound user message
         // Non-fatal: topic detection never blocks afterTurn
+        let adaptiveTopicShiftConfidence: number | undefined;
         try {
           const inboundUserMsg = newMessages
             .map(m => m as unknown as InboundMessage)
@@ -3284,6 +3286,7 @@ ${replayRecovery.emittedText}`
               const topicMap = new SessionTopicMap(db);
               const activeTopic = topicMap.getActiveTopic(sk);
               const signal = detectTopicShift(neutralUser, contextMessages, activeTopic?.id ?? null);
+              adaptiveTopicShiftConfidence = signal.confidence;
 
               if (signal.isNewTopic && signal.topicName) {
                 const newTopicId = topicMap.createTopic(sk, signal.topicName);
@@ -3328,7 +3331,20 @@ ${replayRecovery.emittedText}`
             const modelState = await hm.cache.getModelState(agentId, sk);
             const gradientBudget = modelState?.tokenBudget;
             const gradientDepth = modelState?.historyDepth;
-            await hm.refreshRedisGradient(agentId, sk, gradientBudget, gradientDepth);
+            const inboundUserMsg = newMessages
+              .map(m => m as unknown as InboundMessage)
+              .find(m => m.role === 'user');
+            const inboundUserText = inboundUserMsg
+              ? stripMessageMetadata(extractTextFromInboundContent(inboundUserMsg.content))
+              : '';
+            const lifecyclePolicy = resolveAdaptiveLifecyclePolicy({
+              usedTokens: estimateMessageArrayTokens(messages as unknown[]),
+              effectiveBudget: gradientBudget,
+              userTurnCount: (messages as unknown as InboundMessage[]).filter(m => m.role === 'user').length,
+              explicitNewSession: /^\/new(?:\s|$)/i.test(inboundUserText.trim()),
+              topicShiftConfidence: adaptiveTopicShiftConfidence,
+            });
+            await hm.refreshRedisGradient(agentId, sk, gradientBudget, gradientDepth, lifecyclePolicy.trimSoftTarget);
           } catch (refreshErr) {
             console.warn('[hypermem-plugin] afterTurn: refreshRedisGradient failed (non-fatal):', (refreshErr as Error).message);
           }

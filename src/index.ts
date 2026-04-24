@@ -960,9 +960,9 @@ export class HyperMem {
   /**
    * Recompute the Redis hot history view from SQLite and re-apply tool gradient.
    */
-  async refreshRedisGradient(agentId: string, sessionKey: string, tokenBudget?: number, historyDepth?: number): Promise<void> {
+  async refreshRedisGradient(agentId: string, sessionKey: string, tokenBudget?: number, historyDepth?: number, trimSoftTarget?: number): Promise<void> {
     const db = this.dbManager.getMessageDb(agentId);
-    await this.compositor.refreshRedisGradient(agentId, sessionKey, db, tokenBudget, historyDepth);
+    await this.compositor.refreshRedisGradient(agentId, sessionKey, db, tokenBudget, historyDepth, trimSoftTarget);
   }
 
   /**

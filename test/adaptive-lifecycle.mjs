@@ -9,6 +9,7 @@
 import {
   resolveAdaptiveLifecyclePolicy,
 } from '../dist/adaptive-lifecycle.js';
+import { resolveTrimBudgets } from '../dist/budget-policy.js';
 
 let passed = 0;
 let failed = 0;
@@ -123,6 +124,17 @@ console.log('\n── Scenario 8: invalid budget inputs are safe ──');
   const policy = resolveAdaptiveLifecyclePolicy({ usedTokens: 5_000, effectiveBudget: 0, userTurnCount: 10 });
   assert(policy.pressureFraction === 0, `zero budget pressure clamps to 0 (got ${policy.pressureFraction})`);
   assert(policy.band === 'steady', `zero budget with established session is steady (got ${policy.band})`);
+}
+
+console.log('\n── Scenario 9: lifecycle trim target can drive shared trim budgets ──');
+{
+  const policy = resolveAdaptiveLifecyclePolicy({ userTurnCount: 20, pressureFraction: 0.80 });
+  const budgets = resolveTrimBudgets(100_000, { trimSoftTarget: policy.trimSoftTarget });
+
+  assert(policy.trimSoftTarget === 0.54, `high-pressure lifecycle trim target 0.54 (got ${policy.trimSoftTarget})`);
+  assert(budgets.softBudget === 54_000, `adaptive soft budget 54k (got ${budgets.softBudget})`);
+  assert(budgets.triggerBudget === 56_700, `growth trigger follows adaptive soft budget (got ${budgets.triggerBudget})`);
+  assert(budgets.targetBudget === 48_600, `headroom target follows adaptive soft budget (got ${budgets.targetBudget})`);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

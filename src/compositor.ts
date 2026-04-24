@@ -53,6 +53,7 @@ import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
 import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
 import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
+import { resolveAdaptiveLifecyclePolicy } from './adaptive-lifecycle.js';
 import { formatToolChainStub, parseToolChainStub, formatArtifactRef, isArtifactRef, type ArtifactRef, type DegradationReason } from './degradation.js';
 import { ToolArtifactStore } from './tool-artifact-store.js';
 import {
@@ -1141,6 +1142,10 @@ export function resolveArtifactOversizeThreshold(effectiveBudget: number): numbe
   const { softBudget } = resolveTrimBudgets(effectiveBudget);
   const raw = Math.floor(softBudget * ARTIFACT_BUDGET_FRACTION);
   return Math.min(ARTIFACT_THRESHOLD_CEILING, Math.max(ARTIFACT_THRESHOLD_FLOOR, raw));
+}
+
+function isExplicitNewSessionPrompt(prompt: string | null | undefined): boolean {
+  return /^\/new(?:\s|$)/i.test((prompt ?? '').trim());
 }
 
 /**
@@ -3207,6 +3212,12 @@ export class Compositor {
       // Provider detection is best-effort — never block compose
     }
 
+    const composeLifecyclePolicy = resolveAdaptiveLifecyclePolicy({
+      pressureFraction: s3Pressure.fraction,
+      userTurnCount: sampleMessages.filter(m => m.role === 'user').length,
+      explicitNewSession: isExplicitNewSessionPrompt(request.prompt ?? this.getLastUserMessage(messages)),
+    });
+
     const diagnostics: import('./types.js').ComposeDiagnostics = {
       triggerHits: diagTriggerHits,
       triggerFallbackUsed: diagTriggerFallbackUsed,
@@ -3253,6 +3264,17 @@ export class Compositor {
       trimSoftTarget: TRIM_BUDGET_POLICY.trimSoftTarget,
       trimGrowthThreshold: TRIM_BUDGET_POLICY.trimGrowthThreshold,
       trimHeadroomFraction: TRIM_BUDGET_POLICY.trimHeadroomFraction,
+      // 0.9.0: adaptive lifecycle diagnostics
+      adaptiveLifecycleBand: composeLifecyclePolicy.band,
+      adaptiveLifecyclePressurePct: composeLifecyclePolicy.pressurePct,
+      adaptiveWarmHistoryBudgetFraction: composeLifecyclePolicy.warmHistoryBudgetFraction,
+      adaptiveSmartRecallMultiplier: composeLifecyclePolicy.smartRecallMultiplier,
+      adaptiveTrimSoftTarget: composeLifecyclePolicy.trimSoftTarget,
+      adaptiveCompactionTargetFraction: composeLifecyclePolicy.compactionTargetFraction,
+      adaptiveBreadcrumbPackage: composeLifecyclePolicy.emitBreadcrumbPackage,
+      adaptiveTopicCentroidEviction: composeLifecyclePolicy.enableTopicCentroidEviction,
+      adaptiveProactiveCompaction: composeLifecyclePolicy.triggerProactiveCompaction,
+      adaptiveLifecycleReasons: composeLifecyclePolicy.reasons,
       // C1: tool-chain ejection telemetry
       toolChainCoEjections: c1CoEjections > 0 ? c1CoEjections : undefined,
       toolChainStubReplacements: c1StubReplacements > 0 ? c1StubReplacements : undefined,
@@ -3642,6 +3664,7 @@ export class Compositor {
     db: DatabaseSync,
     tokenBudget?: number,
     historyDepth?: number,
+    trimSoftTarget?: number,
   ): Promise<void> {
     const store = new MessageStore(db);
     const conversation = store.getConversation(sessionKey);
@@ -3687,7 +3710,7 @@ export class Compositor {
     // on the next turn even in the steady-state path. Aligning the gradient cap to
     // the trim target means the rebuilt window already fits within the assemble
     // envelope by construction.
-    const { softBudget: gradientAssembleBudget } = resolveTrimBudgets(tokenBudget ?? 0);
+    const { softBudget: gradientAssembleBudget } = resolveTrimBudgets(tokenBudget ?? 0, { trimSoftTarget });
     const transformedHistory = applyToolGradient(rawHistory, {
       totalWindowTokens: tokenBudget && tokenBudget > 0
         ? gradientAssembleBudget

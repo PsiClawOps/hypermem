@@ -134,6 +134,46 @@ console.log('\n── Scenario 3: Compositor diagnostics carry Sprint 3 pressure
     `sessionPressureFraction is a number (got ${diag.sessionPressureFraction})`);
   assert(typeof diag.pressureSource === 'string',
     `pressureSource is a string (got ${diag.pressureSource})`);
+  assert(typeof diag.adaptiveLifecycleBand === 'string',
+    `adaptive lifecycle band is surfaced (got ${diag.adaptiveLifecycleBand})`);
+  assert(typeof diag.adaptiveTrimSoftTarget === 'number',
+    `adaptive trim soft target is surfaced (got ${diag.adaptiveTrimSoftTarget})`);
+  assert(Array.isArray(diag.adaptiveLifecycleReasons),
+    'adaptive lifecycle reasons are surfaced');
+}
+
+// ════════════════════════════════════════════════════════════
+// Scenario 3b — /new prompt surfaces bootstrap breadcrumb diagnostics
+// ════════════════════════════════════════════════════════════
+console.log('\n── Scenario 3b: /new prompt surfaces bootstrap breadcrumb diagnostics ──');
+{
+  const agentId = 's3-s3b-agent';
+  const sessionKey = `agent:${agentId}:webchat:main`;
+  const msgDb = makeMessageDb('s3b');
+  const libDb = makeLibraryDb('s3b');
+
+  msgDb.prepare(`
+    INSERT INTO conversations (session_key, session_id, agent_id, channel_type, status,
+                               message_count, token_count_in, token_count_out, created_at, updated_at)
+    VALUES (?, 'sess-s3b', ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+  `).run(sessionKey, agentId);
+
+  const cache = new CacheLayer();
+  const compositor = new Compositor({ cache, vectorStore: null, libraryDb: libDb });
+  const result = await compositor.compose({
+    agentId,
+    sessionKey,
+    tokenBudget: 100_000,
+    prompt: '/new start fresh',
+  }, msgDb, libDb);
+  const diag = result.diagnostics;
+
+  assert(diag.adaptiveLifecycleBand === 'bootstrap',
+    `explicit /new selects bootstrap band (got ${diag.adaptiveLifecycleBand})`);
+  assert(diag.adaptiveBreadcrumbPackage === true,
+    `explicit /new emits breadcrumb package (got ${diag.adaptiveBreadcrumbPackage})`);
+  assert(diag.adaptiveLifecycleReasons?.includes('explicit-new-session'),
+    `explicit /new reason is surfaced (got ${diag.adaptiveLifecycleReasons?.join(',')})`);
 }
 
 // ════════════════════════════════════════════════════════════

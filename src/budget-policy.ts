@@ -27,13 +27,21 @@ export const TRIM_BUDGET_POLICY: TrimBudgetPolicy = Object.freeze({
   trimHeadroomFraction: TRIM_HEADROOM_FRACTION,
 });
 
-export function resolveTrimBudgets(effectiveBudget: number): ResolvedTrimBudgets {
+export function resolveTrimBudgets(
+  effectiveBudget: number,
+  policy: Partial<TrimBudgetPolicy> = {},
+): ResolvedTrimBudgets {
   const safeBudget = Math.max(0, Math.floor(effectiveBudget || 0));
-  const softBudget = Math.floor(safeBudget * TRIM_SOFT_TARGET);
-  const triggerBudget = Math.floor(softBudget * (1 + TRIM_GROWTH_THRESHOLD));
-  const targetBudget = Math.floor(softBudget * (1 - TRIM_HEADROOM_FRACTION));
+  const trimSoftTarget = policy.trimSoftTarget ?? TRIM_SOFT_TARGET;
+  const trimGrowthThreshold = policy.trimGrowthThreshold ?? TRIM_GROWTH_THRESHOLD;
+  const trimHeadroomFraction = policy.trimHeadroomFraction ?? TRIM_HEADROOM_FRACTION;
+  const softBudget = Math.floor(safeBudget * trimSoftTarget);
+  const triggerBudget = Math.floor(softBudget * (1 + trimGrowthThreshold));
+  const targetBudget = Math.floor(softBudget * (1 - trimHeadroomFraction));
   return {
-    ...TRIM_BUDGET_POLICY,
+    trimSoftTarget,
+    trimGrowthThreshold,
+    trimHeadroomFraction,
     softBudget,
     triggerBudget,
     targetBudget,
