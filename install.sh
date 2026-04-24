@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# HyperMem Installer
+# HyperMem npm-first installer and upgrader
 # curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 set -euo pipefail
 
-# ─────────────────────────────────────────────
-# Colors
-# ─────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -14,307 +11,144 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-# ─────────────────────────────────────────────
-# Banner
-# ─────────────────────────────────────────────
-banner() {
-  echo ""
-  echo -e "${CYAN}${BOLD}"
-  echo "  ██╗  ██╗██╗   ██╗██████╗ ███████╗██████╗ ███╗   ███╗███████╗███╗   ███╗"
-  echo "  ██║  ██║╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗████╗ ████║██╔════╝████╗ ████║"
-  echo "  ███████║ ╚████╔╝ ██████╔╝█████╗  ██████╔╝██╔████╔██║█████╗  ██╔████╔██║"
-  echo "  ██╔══██║  ╚██╔╝  ██╔═══╝ ██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ██║╚██╔╝██║"
-  echo "  ██║  ██║   ██║   ██║     ███████╗██║  ██║██║ ╚═╝ ██║███████╗██║ ╚═╝ ██║"
-  echo "  ╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚═╝     ╚═╝"
-  echo -e "${NC}"
-  echo -e "  ${DIM}The memory layer for OpenClaw agents${NC}"
-  echo ""
+PACKAGE="${HYPERMEM_PACKAGE:-@psiclawops/hypermem@latest}"
+INSTALL_DIR="${HYPERMEM_INSTALL_DIR:-$HOME/.hypermem}"
+RUNTIME_DIR="${HYPERMEM_RUNTIME_DIR:-$HOME/.openclaw/plugins/hypermem}"
+CONFIG_FILE="$HOME/.openclaw/hypermem/config.json"
+ASSUME_YES=false
+SKIP_NPM=false
+SKIP_STAGE=false
+
+usage() {
+  cat <<EOF
+HyperMem installer
+
+Usage: install.sh [options]
+
+Options:
+  --yes              non-interactive defaults
+  --package <spec>   npm package spec, default: @psiclawops/hypermem@latest
+  --install-dir <p>  npm install directory, default: ~/.hypermem
+  --runtime-dir <p>  staged OpenClaw runtime dir, default: ~/.openclaw/plugins/hypermem
+  --skip-npm         use existing package in install dir
+  --skip-stage       install package only, do not run hypermem-install
+  --help             show this help
+
+Environment overrides:
+  HYPERMEM_PACKAGE, HYPERMEM_INSTALL_DIR, HYPERMEM_RUNTIME_DIR
+
+This script stages HyperMem. It does not edit OpenClaw config and does not restart the gateway.
+EOF
 }
 
-# ─────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────
-info()    { echo -e "  ${CYAN}→${NC} $*"; }
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yes|-y) ASSUME_YES=true; shift ;;
+    --package) PACKAGE="$2"; shift 2 ;;
+    --install-dir) INSTALL_DIR="$2"; shift 2 ;;
+    --runtime-dir) RUNTIME_DIR="$2"; shift 2 ;;
+    --skip-npm) SKIP_NPM=true; shift ;;
+    --skip-stage) SKIP_STAGE=true; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo -e "${RED}Unknown option:${NC} $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+info() { echo -e "  ${CYAN}→${NC} $*"; }
 success() { echo -e "  ${GREEN}✓${NC} $*"; }
-warn()    { echo -e "  ${YELLOW}⚠${NC}  $*"; }
-error()   { echo -e "  ${RED}✗${NC} $*" >&2; }
-die()     { error "$*"; exit 1; }
-
-prompt() {
-  # prompt <var_name> <question> [default]
-  local var="$1" question="$2" default="${3:-}"
-  if [[ -n "$default" ]]; then
-    echo -ne "  ${BOLD}${question}${NC} ${DIM}[${default}]${NC} "
-  else
-    echo -ne "  ${BOLD}${question}${NC} "
-  fi
-  read -r reply </dev/tty || { [[ -n "$default" ]] && reply="$default" || die "Cannot read input (not a terminal?). Run: bash <(curl -fsSL ...) instead."; }
-  [[ -z "$reply" && -n "$default" ]] && reply="$default"
-  printf -v "$var" '%s' "$reply"
-}
+warn() { echo -e "  ${YELLOW}⚠${NC}  $*"; }
+die() { echo -e "  ${RED}✗${NC} $*" >&2; exit 1; }
 
 confirm() {
-  # confirm <question> — returns 0 for yes, 1 for no
+  if $ASSUME_YES; then return 0; fi
   echo -ne "  ${BOLD}$1${NC} ${DIM}[y/N]${NC} "
   read -r reply </dev/tty || return 1
   [[ "$reply" =~ ^[Yy] ]]
 }
 
-# ─────────────────────────────────────────────
-# Preflight
-# ─────────────────────────────────────────────
+banner() {
+  echo ""
+  echo -e "${CYAN}${BOLD}  HyperMem installer${NC}"
+  echo -e "  ${DIM}npm package install + OpenClaw runtime staging${NC}"
+  echo ""
+}
+
 preflight() {
-  echo -e "\n${BOLD}  Preflight checks${NC}"
+  echo -e "${BOLD}  Preflight${NC}"
+  command -v node >/dev/null 2>&1 || die "Node.js v22+ is required"
+  local node_version node_major
+  node_version="$(node --version | sed 's/^v//')"
+  node_major="${node_version%%.*}"
+  [[ "$node_major" =~ ^[0-9]+$ ]] || die "Cannot parse Node.js version: $node_version"
+  (( node_major >= 22 )) || die "Node.js v22+ required, found v$node_version"
+  success "node v$node_version"
 
-  # bash version
-  if (( BASH_VERSINFO[0] < 4 )); then
-    die "bash 4+ required (you have $BASH_VERSION)"
-  fi
-  success "bash $BASH_VERSION"
-
-  # curl
-  command -v curl &>/dev/null || die "curl is required"
-  success "curl $(curl --version | head -1 | awk '{print $2}')"
-
-  # git (optional — only needed for dev installs)
-
-  # node
-  command -v node &>/dev/null || die "Node.js is required (v22+)"
-  NODE_VERSION=$(node --version | sed 's/v//')
-  NODE_MAJOR=$(echo "$NODE_VERSION" | cut -d. -f1)
-  (( NODE_MAJOR >= 22 )) || die "Node.js v22+ required (you have v$NODE_VERSION — HyperMem requires v22+)"
-  success "node v$NODE_VERSION"
-
-  # npm
-  command -v npm &>/dev/null || die "npm is required"
+  command -v npm >/dev/null 2>&1 || die "npm is required"
   success "npm $(npm --version)"
-}
 
-# ─────────────────────────────────────────────
-# Hardware detection
-# ─────────────────────────────────────────────
-detect_hardware() {
-  echo -e "\n${BOLD}  Detecting hardware${NC}"
-
-  HAS_NVIDIA=false
-  HAS_AMD=false
-  HAS_OLLAMA=false
-  HAS_API_KEY=false
-  DETECTED_TIER=1
-
-  # NVIDIA GPU
-  if command -v nvidia-smi &>/dev/null; then
-    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
-    HAS_NVIDIA=true
-    success "NVIDIA GPU: $GPU_NAME"
+  if command -v openclaw >/dev/null 2>&1; then
+    success "openclaw CLI found"
+    openclaw gateway status >/dev/null 2>&1 || warn "OpenClaw gateway is not running or not onboarded yet. Complete OpenClaw setup before activation."
   else
-    info "No NVIDIA GPU detected"
-  fi
-
-  # AMD GPU
-  if command -v rocm-smi &>/dev/null || lspci 2>/dev/null | grep -qi 'amd.*display\|radeon'; then
-    HAS_AMD=true
-    success "AMD GPU detected"
-  fi
-
-  # Ollama
-  if command -v ollama &>/dev/null; then
-    OLLAMA_VERSION=$(ollama --version 2>/dev/null || echo "unknown")
-    HAS_OLLAMA=true
-    success "Ollama: $OLLAMA_VERSION"
-  else
-    info "Ollama not found"
-  fi
-
-  # API key (OpenRouter or OpenAI-compatible) — informational only, does NOT affect recommendation
-  if [[ -n "${OPENROUTER_API_KEY:-}" || -n "${HYPERMEM_EMBED_API_KEY:-}" ]]; then
-    HAS_API_KEY=true
-    info "Embedding API key detected (Tier 4 available)"
-  else
-    info "No embedding API key in environment"
-  fi
-
-  # Recommend tier based on hardware only — operator opts into Tier 4 explicitly
-  if $HAS_OLLAMA && ($HAS_NVIDIA || $HAS_AMD); then
-    DETECTED_TIER=3
-  elif $HAS_NVIDIA || $HAS_AMD; then
-    # GPU present but no Ollama — recommend Tier 2, note Tier 3 needs Ollama
-    DETECTED_TIER=2
-  else
-    # CPU-only or unknown — Tier 2 runs everywhere via WASM, no Ollama needed
-    DETECTED_TIER=2
+    warn "openclaw CLI not found. HyperMem can be staged now, but activation requires OpenClaw."
   fi
 }
 
-# ─────────────────────────────────────────────
-# Tier selection
-# ─────────────────────────────────────────────
-select_tier() {
-  echo -e "\n${BOLD}  Memory tier selection${NC}\n"
-
-  echo -e "  ${DIM}Choose how HyperMem handles semantic memory retrieval:${NC}\n"
-
-  echo -e "  ${BOLD}1)${NC} ${GREEN}FTS5 + BM25${NC} ${DIM}(Tier 1 — keyword search only)${NC}"
-  echo -e "     No embedder. Fast, zero extra dependencies."
-  echo -e "     Best for: minimal setups, very low spec hardware.\n"
-
-  echo -e "  ${BOLD}2)${NC} ${GREEN}MiniLM-L6-v2${NC} ${DIM}(Tier 2 — lightweight semantic)${NC}"
-  echo -e "     384-dimension embedder, runs in Node via WASM. No GPU, no Ollama."
-  echo -e "     Best for: CPU-only servers, Raspberry Pi, low-memory VMs.\n"
-
-  echo -e "  ${BOLD}3)${NC} ${GREEN}nomic-embed-text${NC} ${DIM}(Tier 3 — GPU-accelerated local)${NC}"
-  echo -e "     768-dimension embedder via Ollama. GPU strongly recommended."
-  echo -e "     Best for: local workstations with a GPU, self-hosted setups.\n"
-
-  echo -e "  ${BOLD}4)${NC} ${GREEN}qwen3-embedding:8b${NC} ${DIM}(Tier 4 — API, top quality)${NC}"
-  echo -e "     4096-dimension embedder via OpenRouter (or any OpenAI-compatible API)."
-  echo -e "     Best for: production deployments, highest retrieval quality.\n"
-
-  echo -e "  ${DIM}Recommended for your hardware: ${NC}${BOLD}Tier ${DETECTED_TIER}${NC}"
-  $HAS_API_KEY && echo -e "  ${DIM}(Tier 4 also available — API key detected in environment)${NC}"
-  echo ""
-
-  while true; do
-    prompt TIER_INPUT "Select tier (1-4):" "$DETECTED_TIER"
-    if [[ "$TIER_INPUT" =~ ^[1-4]$ ]]; then
-      SELECTED_TIER="$TIER_INPUT"
-      break
-    fi
-    warn "Enter a number between 1 and 4"
-  done
-
-  echo ""
-  case "$SELECTED_TIER" in
-    1) success "Tier 1: FTS5+BM25 — no embedder needed" ;;
-    2) success "Tier 2: MiniLM-L6-v2 via @huggingface/transformers" ;;
-    3) success "Tier 3: nomic-embed-text via Ollama" ;;
-    4) success "Tier 4: qwen3-embedding:8b via OpenRouter" ;;
-  esac
-}
-
-# ─────────────────────────────────────────────
-# Install HyperMem
-# ─────────────────────────────────────────────
-INSTALL_DIR="${HYPERMEM_INSTALL_DIR:-$HOME/.hypermem}"
-
-install_hypermem() {
-  echo -e "\n${BOLD}  Installing HyperMem${NC}"
-
+install_package() {
+  echo -e "\n${BOLD}  Package install${NC}"
   mkdir -p "$INSTALL_DIR"
-
-  # Initialize package.json if this is a fresh install
   if [[ ! -f "$INSTALL_DIR/package.json" ]]; then
-    info "Initializing install directory..."
-    npm --prefix "$INSTALL_DIR" init -y --silent 2>/dev/null
+    info "initializing $INSTALL_DIR"
+    npm --prefix "$INSTALL_DIR" init -y --silent >/dev/null
   fi
 
-  if [[ -d "$INSTALL_DIR/node_modules/@psiclawops/hypermem" ]]; then
-    if confirm "HyperMem already found at $INSTALL_DIR — update it?"; then
-      info "Updating packages..."
-      npm --prefix "$INSTALL_DIR" install --silent @psiclawops/hypermem@latest @psiclawops/hypercompositor@latest @psiclawops/hypermem-memory@latest
-    else
-      info "Using existing installation"
-    fi
-  else
-    info "Installing @psiclawops/hypermem..."
-    npm --prefix "$INSTALL_DIR" install --silent @psiclawops/hypermem@latest
-
-    info "Installing @psiclawops/hypercompositor..."
-    npm --prefix "$INSTALL_DIR" install --silent @psiclawops/hypercompositor@latest
-
-    info "Installing @psiclawops/hypermem-memory..."
-    npm --prefix "$INSTALL_DIR" install --silent @psiclawops/hypermem-memory@latest
+  if $SKIP_NPM; then
+    [[ -d "$INSTALL_DIR/node_modules/@psiclawops/hypermem" ]] || die "--skip-npm requested but package is missing in $INSTALL_DIR"
+    success "using existing package in $INSTALL_DIR"
+    return
   fi
 
-  # Convenience vars for plugin registration
-  PLUGIN_DIR="$INSTALL_DIR/node_modules/@psiclawops/hypercompositor"
-  MEMORY_PLUGIN_DIR="$INSTALL_DIR/node_modules/@psiclawops/hypermem-memory"
-
-  success "HyperMem installed at $INSTALL_DIR"
+  info "installing $PACKAGE"
+  npm --prefix "$INSTALL_DIR" install --silent "$PACKAGE"
+  success "package installed in $INSTALL_DIR"
 }
 
-# ─────────────────────────────────────────────
-# Tier-specific setup
-# ─────────────────────────────────────────────
-setup_tier() {
-  echo -e "\n${BOLD}  Setting up Tier ${SELECTED_TIER}${NC}"
-
-  case "$SELECTED_TIER" in
-    1)
-      # Nothing to install
-      EMBED_PROVIDER="none"
-      EMBED_MODEL="none"
-      EMBED_DIMS=0
-      success "No embedder required"
-      ;;
-
-    2)
-      info "Installing @huggingface/transformers (WASM embedder)..."
-      npm --prefix "$INSTALL_DIR" install --silent @huggingface/transformers@3
-      EMBED_PROVIDER="transformers"
-      EMBED_MODEL="Xenova/all-MiniLM-L6-v2"
-      EMBED_DIMS=384
-      success "MiniLM-L6-v2 will download on first use (~90MB)"
-      ;;
-
-    3)
-      if ! command -v ollama &>/dev/null; then
-        die "Ollama is required for Tier 3. Install it from https://ollama.com then re-run."
-      fi
-      info "Pulling nomic-embed-text via Ollama..."
-      ollama pull nomic-embed-text
-      EMBED_PROVIDER="ollama"
-      EMBED_MODEL="nomic-embed-text"
-      EMBED_DIMS=768
-      success "nomic-embed-text ready"
-      ;;
-
-    4)
-      # Get API key
-      API_KEY="${OPENROUTER_API_KEY:-${HYPERMEM_EMBED_API_KEY:-}}"
-      if [[ -z "$API_KEY" ]]; then
-        echo ""
-        echo -e "  ${DIM}Get a key at https://openrouter.ai/keys${NC}"
-        prompt API_KEY "OpenRouter API key:"
-        [[ -z "$API_KEY" ]] && die "API key required for Tier 4"
-      else
-        success "Using API key from environment"
-      fi
-      EMBED_PROVIDER="openai"
-      EMBED_MODEL="qwen/qwen3-embedding:8b"
-      EMBED_DIMS=4096
-      EMBED_API_KEY="$API_KEY"
-      EMBED_BASE_URL="https://openrouter.ai/api/v1"
-      success "Tier 4 configured — qwen3-embedding:8b via OpenRouter"
-      ;;
-  esac
+backup_runtime() {
+  [[ -e "$RUNTIME_DIR" ]] || return 0
+  local backup
+  backup="${RUNTIME_DIR}.backup.$(date +%Y%m%d-%H%M%S)"
+  if confirm "Existing runtime found at $RUNTIME_DIR. Back it up before replacing?"; then
+    cp -a "$RUNTIME_DIR" "$backup"
+    success "backup written to $backup"
+  else
+    warn "continuing without runtime backup"
+  fi
 }
 
-# ─────────────────────────────────────────────
-# Write config
-# ─────────────────────────────────────────────
-write_config() {
-  echo -e "\n${BOLD}  Writing config${NC}"
-
-  CONFIG_DIR="$HOME/.openclaw/hypermem"
-  mkdir -p "$CONFIG_DIR"
-  CONFIG_FILE="$CONFIG_DIR/config.json"
-
-  # Build embedding block
-  if [[ "$SELECTED_TIER" == "1" ]]; then
-    EMBED_BLOCK='"embedding": { "provider": "none" }'
-  elif [[ "$SELECTED_TIER" == "2" ]]; then
-    EMBED_BLOCK="\"embedding\": { \"provider\": \"transformers\", \"model\": \"$EMBED_MODEL\", \"dimensions\": $EMBED_DIMS }"
-  elif [[ "$SELECTED_TIER" == "3" ]]; then
-    EMBED_BLOCK="\"embedding\": { \"provider\": \"ollama\", \"model\": \"$EMBED_MODEL\", \"dimensions\": $EMBED_DIMS, \"ollamaUrl\": \"http://localhost:11434\" }"
-  else
-    EMBED_BLOCK="\"embedding\": { \"provider\": \"openai\", \"model\": \"$EMBED_MODEL\", \"dimensions\": $EMBED_DIMS, \"openaiBaseUrl\": \"$EMBED_BASE_URL\", \"openaiApiKey\": \"$EMBED_API_KEY\" }"
+stage_runtime() {
+  echo -e "\n${BOLD}  Runtime staging${NC}"
+  if $SKIP_STAGE; then
+    warn "runtime staging skipped"
+    return
   fi
 
-  cat > "$CONFIG_FILE" <<EOF
+  local installer="$INSTALL_DIR/node_modules/@psiclawops/hypermem/scripts/install-runtime.mjs"
+  [[ -f "$installer" ]] || die "missing runtime installer: $installer"
+  backup_runtime
+  node "$installer" "$RUNTIME_DIR"
+  success "runtime staged to $RUNTIME_DIR"
+}
+
+write_minimal_config_if_missing() {
+  echo -e "\n${BOLD}  Config check${NC}"
+  if [[ -f "$CONFIG_FILE" ]]; then
+    success "existing config preserved: $CONFIG_FILE"
+    return
+  fi
+
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+  cat > "$CONFIG_FILE" <<'JSON'
 {
-  "installDir": "$INSTALL_DIR",
-  "tier": $SELECTED_TIER,
   "contextWindowSize": 128000,
   "contextWindowReserve": 0.25,
   "deferToolPruning": false,
@@ -322,6 +156,9 @@ write_config() {
   "contextWindowOverrides": {},
   "warmCacheReplayThresholdMs": 120000,
   "subagentWarming": "light",
+  "embedding": {
+    "provider": "none"
+  },
   "compositor": {
     "budgetFraction": 0.55,
     "reserveFraction": 0.25,
@@ -363,154 +200,68 @@ write_config() {
     "recentConversationCooldownMs": 30000,
     "maxCandidatesPerPass": 200
   },
-  $EMBED_BLOCK,
   "vectorStore": {
-    "enabled": $([ "$SELECTED_TIER" -gt 1 ] && echo true || echo false)
+    "enabled": false
   }
 }
-EOF
-
-  success "Config written to $CONFIG_FILE"
+JSON
+  success "lightweight starter config written: $CONFIG_FILE"
 }
 
-# ─────────────────────────────────────────────
-# OpenClaw plugin registration
-# ─────────────────────────────────────────────
-register_plugin() {
-  if ! command -v openclaw &>/dev/null; then
-    warn "OpenClaw CLI not found, skipping plugin registration"
-    echo -e "  ${DIM}Run these manually after installing OpenClaw:${NC}"
-    echo -e "  ${DIM}  openclaw plugins install file:$PLUGIN_DIR${NC}"
-    echo -e "  ${DIM}  openclaw plugins install file:$MEMORY_PLUGIN_DIR${NC}"
-    return
-  fi
-
-  echo ""
-  if confirm "Register HyperMem plugins with OpenClaw?"; then
-    # Context engine plugin (hypercompositor)
-    info "Registering context engine plugin (hypercompositor)..."
-    if openclaw plugins install "file:$PLUGIN_DIR" 2>/dev/null; then
-      success "hypercompositor registered"
-    else
-      warn "Context engine registration failed — run: openclaw plugins install file:$PLUGIN_DIR"
-    fi
-
-    # Memory plugin (hypermem)
-    info "Registering memory plugin (hypermem)..."
-    if openclaw plugins install "file:$MEMORY_PLUGIN_DIR" 2>/dev/null; then
-      success "hypermem registered"
-    else
-      warn "Memory plugin registration failed — run: openclaw plugins install file:$MEMORY_PLUGIN_DIR"
-    fi
-
-    # Configure plugin slots
-    info "Configuring plugin slots..."
-    local SLOT_OK=true
-    openclaw config set plugins.slots.contextEngine hypercompositor 2>/dev/null || SLOT_OK=false
-    openclaw config set plugins.slots.memory hypermem 2>/dev/null || SLOT_OK=false
-    if $SLOT_OK; then
-      success "Plugin slots configured"
-    else
-      warn "Slot config failed — set manually:"
-      echo -e "  ${DIM}  openclaw config set plugins.slots.contextEngine hypercompositor${NC}"
-      echo -e "  ${DIM}  openclaw config set plugins.slots.memory hypermem${NC}"
-    fi
-
-    success "Restart OpenClaw to activate: openclaw gateway restart"
-  fi
+verify_stage() {
+  echo -e "\n${BOLD}  Stage verification${NC}"
+  [[ -d "$RUNTIME_DIR/dist" ]] || die "missing $RUNTIME_DIR/dist"
+  [[ -d "$RUNTIME_DIR/plugin/dist" ]] || die "missing $RUNTIME_DIR/plugin/dist"
+  [[ -d "$RUNTIME_DIR/memory-plugin/dist" ]] || die "missing $RUNTIME_DIR/memory-plugin/dist"
+  [[ -f "$RUNTIME_DIR/bin/hypermem-status.mjs" ]] || die "missing hypermem-status bin"
+  [[ -f "$RUNTIME_DIR/bin/hypermem-model-audit.mjs" ]] || die "missing hypermem-model-audit bin"
+  success "runtime payload complete"
 }
 
-# ─────────────────────────────────────────────
-# Smoke test
-# ─────────────────────────────────────────────
-smoke_test() {
-  echo -e "\n${BOLD}  Smoke test${NC}"
-
-  # Verify config parses and has required fields
-  node --input-type=module <<EOF 2>/dev/null && success "Config loads cleanly" || warn "Config load failed — check $HOME/.openclaw/hypermem/config.json"
-import { readFileSync, existsSync } from 'fs';
-const cfg = JSON.parse(readFileSync('$HOME/.openclaw/hypermem/config.json', 'utf8'));
-if (!cfg.tier) throw new Error('missing tier');
-if (!cfg.installDir) throw new Error('missing installDir');
-if (!existsSync(cfg.installDir)) throw new Error('installDir does not exist: ' + cfg.installDir);
-EOF
-
-  # Verify HyperMem core module loads
-  node --input-type=module <<EOF 2>/dev/null \
-    && success "HyperMem core module loads" \
-    || warn "HyperMem core module load failed — check $INSTALL_DIR/node_modules/@psiclawops/hypermem"
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-require('$INSTALL_DIR/node_modules/@psiclawops/hypermem/dist/index.js');
-EOF
-
-  # Verify context engine plugin dist exists
-  [[ -f "$PLUGIN_DIR/dist/index.js" ]] \
-    && success "hypercompositor plugin built" \
-    || warn "hypercompositor plugin not built — reinstall: npm --prefix $INSTALL_DIR install @psiclawops/hypercompositor@latest"
-
-  # Verify memory plugin dist exists
-  [[ -f "$MEMORY_PLUGIN_DIR/dist/index.js" ]] \
-    && success "hypermem memory plugin built" \
-    || warn "hypermem memory plugin not built — reinstall: npm --prefix $INSTALL_DIR install @psiclawops/hypermem-memory@latest"
-
-  # Tier 2: verify transformers package is present
-  if [[ "$SELECTED_TIER" == "2" ]]; then
-    [[ -d "$INSTALL_DIR/node_modules/@huggingface/transformers" ]] \
-      && success "@huggingface/transformers present" \
-      || warn "@huggingface/transformers missing — run: npm --prefix $INSTALL_DIR install @huggingface/transformers@3"
-  fi
-
-  # Tier 3: verify nomic model is available in Ollama
-  if [[ "$SELECTED_TIER" == "3" ]] && command -v ollama &>/dev/null; then
-    ollama list 2>/dev/null | grep -q 'nomic-embed-text' \
-      && success "nomic-embed-text present in Ollama" \
-      || warn "nomic-embed-text not found in Ollama — run: ollama pull nomic-embed-text"
-  fi
-}
-
-# ─────────────────────────────────────────────
-# Summary
-# ─────────────────────────────────────────────
-summary() {
+next_steps() {
   echo ""
-  echo -e "${CYAN}${BOLD}  ─────────────────────────────────────────${NC}"
-  echo -e "${CYAN}${BOLD}  HyperMem installed${NC}"
-  echo -e "${CYAN}${BOLD}  ─────────────────────────────────────────${NC}"
+  echo -e "${CYAN}${BOLD}  HyperMem staged${NC}"
   echo ""
-  echo -e "  ${BOLD}Tier:${NC}    $SELECTED_TIER"
+  echo -e "  ${BOLD}Package:${NC}  $PACKAGE"
   echo -e "  ${BOLD}Install:${NC}  $INSTALL_DIR"
-  echo -e "  ${BOLD}Config:${NC}   $HOME/.openclaw/hypermem/config.json"
-  echo -e "  ${BOLD}Plugins:${NC}  hypercompositor (context-engine) + hypermem (memory)"
+  echo -e "  ${BOLD}Runtime:${NC}  $RUNTIME_DIR"
+  echo -e "  ${BOLD}Config:${NC}   $CONFIG_FILE"
   echo ""
+  echo -e "  ${BOLD}Activation commands:${NC}"
+  cat <<EOF
+    openclaw config get plugins.load.paths
+    openclaw config get plugins.allow
 
-  case "$SELECTED_TIER" in
-    1) echo -e "  ${DIM}FTS5+BM25 keyword search active. No embedder.${NC}" ;;
-    2) echo -e "  ${DIM}MiniLM-L6-v2 will download on first embedding call.${NC}" ;;
-    3) echo -e "  ${DIM}nomic-embed-text ready via Ollama.${NC}" ;;
-    4) echo -e "  ${DIM}qwen3-embedding:8b via OpenRouter. API key stored in config.${NC}" ;;
-  esac
+    HYPERMEM_PATHS="[\"${RUNTIME_DIR}/plugin\",\"${RUNTIME_DIR}/memory-plugin\"]"
+    openclaw config set plugins.load.paths "\$HYPERMEM_PATHS" --strict-json
+    openclaw config set plugins.slots.contextEngine hypercompositor
+    openclaw config set plugins.slots.memory hypermem
 
+    # Only if plugins.allow already contains an array, append hypercompositor and hypermem to that existing array.
+    # If plugins.allow is unset, null, or empty, skip the allowlist step.
+
+    openclaw gateway restart
+EOF
   echo ""
-  echo -e "  ${DIM}Upgrade tier anytime: re-run this installer and select a higher tier.${NC}"
-  echo -e "  ${DIM}Docs: https://github.com/psiclawops/hypermem${NC}"
+  echo -e "  ${BOLD}Verify:${NC}"
+  cat <<EOF
+    openclaw plugins list
+    openclaw logs --limit 100 | grep -E 'hypermem|context-engine|falling back'
+    node ${RUNTIME_DIR}/bin/hypermem-status.mjs --health
+    node ${RUNTIME_DIR}/bin/hypermem-model-audit.mjs --strict
+EOF
   echo ""
+  echo -e "  ${DIM}A staged runtime is not active until OpenClaw is wired and restarted.${NC}"
 }
 
-# ─────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────
 main() {
   banner
   preflight
-  detect_hardware
-  select_tier
-  install_hypermem
-  setup_tier
-  write_config
-  register_plugin
-  smoke_test
-  summary
+  install_package
+  stage_runtime
+  write_minimal_config_if_missing
+  verify_stage
+  next_steps
 }
 
 main "$@"

@@ -1,5 +1,8 @@
 # Turn DAG Migration Spec
 
+> Historical migration spec. Priority and sequencing authority now live in `docs/ROADMAP.md`.
+> If this file conflicts with the roadmap, the roadmap wins.
+
 **Status:** Phases 0–4 and B2 implemented; Phase 5 next
 **Priority:** P0 (correctness + productivity)
 **Filed:** 2026-04-13

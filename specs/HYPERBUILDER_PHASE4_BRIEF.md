@@ -1,5 +1,8 @@
 # HyperBuilder Task Brief — Turn DAG Phase 4: Archived Mining Separation
 
+> Historical phase brief. Priority and sequencing authority now live in `docs/ROADMAP.md`.
+> If this file conflicts with the roadmap, the roadmap wins.
+
 **Project:** HyperMem
 **Root:** `/home/lumadmin/.openclaw/workspace/repo/hypermem`
 **Phase:** 4 of 5 (Turn DAG Migration)

@@ -1,6 +1,6 @@
 {
   "name": "@psiclawops/hypermem",
-  "version": "0.8.6",
+  "version": "0.8.8",
   "description": "Agent-centric memory and context composition engine for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
@@ -36,7 +36,8 @@
     "smoke": "node scripts/smoke-test.mjs",
     "sync-public": "node scripts/sync-public.mjs",
     "validate:docs": "node scripts/validate-docs.mjs",
-    "validate:config": "node scripts/validate-config-surface.mjs"
+    "validate:config": "node scripts/validate-config-surface.mjs",
+    "validate:version-parity": "node scripts/validate-version-parity.mjs"
   },
   "dependencies": {
     "sqlite-vec": "^0.1.9",

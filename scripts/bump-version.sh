@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bump-version.sh — Bump version across all 3 packages atomically
+# bump-version.sh — Bump version across all 3 packages and package-locks atomically
 # Usage: ./scripts/bump-version.sh <version>
 # Example: ./scripts/bump-version.sh 0.9.0
 
@@ -12,40 +12,76 @@ if [ -z "$VERSION" ]; then
   echo "Usage: $0 <version>"
   echo "Current versions:"
   for pkg in package.json plugin/package.json memory-plugin/package.json; do
-    echo "  $pkg: $(grep '"version"' "$REPO_ROOT/$pkg" | head -1 | sed 's/.*: "//;s/".*//')"
+    echo "  $pkg: $(python3 - <<'PY' "$REPO_ROOT/$pkg"
+import json, sys
+print(json.load(open(sys.argv[1]))['version'])
+PY
+)"
   done
   exit 1
 fi
 
-# Validate semver-ish format
 if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
   echo "Error: '$VERSION' doesn't look like a valid version (expected X.Y.Z or X.Y.Z-tag)"
   exit 1
 fi
 
-PACKAGES=(
-  "package.json"
-  "plugin/package.json"
-  "memory-plugin/package.json"
-)
+python3 - <<'PY' "$REPO_ROOT" "$VERSION"
+from pathlib import Path
+import json
+import sys
 
-echo "Bumping all packages to $VERSION..."
-for pkg in "${PACKAGES[@]}"; do
-  FILE="$REPO_ROOT/$pkg"
-  if [ ! -f "$FILE" ]; then
-    echo "  SKIP $pkg (not found)"
-    continue
-  fi
-  OLD=$(grep '"version"' "$FILE" | head -1 | sed 's/.*: "//;s/".*//')
-  sed -i "0,/\"version\": \"[^\"]*\"/s//\"version\": \"$VERSION\"/" "$FILE"
-  echo "  $pkg: $OLD -> $VERSION"
-done
+root = Path(sys.argv[1])
+version = sys.argv[2]
+packages = [
+    'package.json',
+    'plugin/package.json',
+    'memory-plugin/package.json',
+]
+locks = [
+    'package-lock.json',
+    'plugin/package-lock.json',
+    'memory-plugin/package-lock.json',
+]
+
+print(f'Bumping all packages to {version}...')
+for rel in packages:
+    path = root / rel
+    data = json.loads(path.read_text())
+    old = data['version']
+    data['version'] = version
+    path.write_text(json.dumps(data, indent=2) + '\n')
+    print(f'  {rel}: {old} -> {version}')
+
+print('\nSyncing package-lock.json files...')
+for rel in locks:
+    path = root / rel
+    if not path.exists():
+        print(f'  SKIP {rel} (not found)')
+        continue
+    data = json.loads(path.read_text())
+    old = data.get('version')
+    data['version'] = version
+    packages_block = data.get('packages')
+    if isinstance(packages_block, dict) and '' in packages_block and isinstance(packages_block[''], dict):
+        packages_block['']['version'] = version
+    path.write_text(json.dumps(data, indent=2) + '\n')
+    print(f'  {rel}: {old} -> {version}')
+PY
+
+echo ""
+echo "Validating version parity..."
+node "$REPO_ROOT/scripts/validate-version-parity.mjs"
 
 echo ""
 echo "Versions bumped. Next steps:"
-echo "  git add package.json plugin/package.json memory-plugin/package.json"
+echo "  git add package.json plugin/package.json memory-plugin/package.json package-lock.json plugin/package-lock.json memory-plugin/package-lock.json src/version.ts scripts/validate-version-parity.mjs"
 echo "  git commit -m 'release: v$VERSION'"
 echo "  git push"
+
+echo ""
+echo "To also publish to npm, re-run with --publish:"
+echo "  $0 $VERSION --publish"
 
 if [ "${2:-}" = "--publish" ]; then
   echo ""
@@ -53,14 +89,14 @@ if [ "${2:-}" = "--publish" ]; then
   for dir in "." "plugin" "memory-plugin"; do
     PKG="$REPO_ROOT/$dir"
     if [ -f "$PKG/package.json" ]; then
-      NAME=$(grep '"name"' "$PKG/package.json" | head -1 | sed 's/.*: "//;s/".*//')
+      NAME=$(python3 - <<'PY' "$PKG/package.json"
+import json, sys
+print(json.load(open(sys.argv[1]))['name'])
+PY
+)
       echo "  Publishing $NAME@$VERSION..."
       (cd "$PKG" && npm publish --access public 2>&1 | tail -1)
     fi
   done
   echo "Done."
-else
-  echo ""
-  echo "To also publish to npm, re-run with --publish:"
-  echo "  $0 $VERSION --publish"
 fi

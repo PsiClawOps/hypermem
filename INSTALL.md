@@ -30,6 +30,16 @@ npx hypermem-install
 
 `hypermem-install` stages the plugin runtime into `~/.openclaw/plugins/hypermem`. It does **not** modify your OpenClaw config and does **not** restart the gateway. That means a successful `npx hypermem-install` is **not** a completed install. It is only a completed staging step.
 
+The shell installer is now a thin npm-first wrapper around this same path:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
+```
+
+It installs the npm package into `~/.hypermem`, backs up any existing staged runtime when confirmed, stages the runtime with `hypermem-install`, writes a lightweight starter config only if no config exists, and prints merge-safe OpenClaw activation commands. It does not edit OpenClaw config and does not restart the gateway.
+
+Release validation details live in [docs/INTEGRATION_VALIDATION.md](./docs/INTEGRATION_VALIDATION.md). Diagnostic surfaces live in [docs/DIAGNOSTICS.md](./docs/DIAGNOSTICS.md).
+
 > **Prerequisites:** OpenClaw must be installed and onboarded. Run `openclaw gateway status` to confirm. If the gateway is not configured, complete OpenClaw setup first.
 >
 > **Config merge warning:** if you already have values in `plugins.load.paths` or `plugins.allow`, merge them instead of overwriting blindly.
@@ -164,6 +174,44 @@ Walk the install state machine explicitly:
    - `[hypermem:compose]`
 
 If you see a fallback like `falling back to default engine "legacy"`, the install is **not** fully active yet even if staging and wiring succeeded.
+
+---
+
+## Upgrade Path
+
+Upgrades preserve the HyperMem data directory and existing config. The runtime staging directory is replaceable.
+
+```bash
+cp -a ~/.openclaw/plugins/hypermem ~/.openclaw/plugins/hypermem.backup.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+npm install @psiclawops/hypermem@latest
+npx hypermem-install
+openclaw gateway restart
+```
+
+Then validate:
+
+```bash
+openclaw plugins list
+openclaw logs --limit 100 | grep -E 'hypermem|context-engine|falling back'
+hypermem-status --health
+hypermem-model-audit --strict
+```
+
+Pass criteria:
+
+- `~/.openclaw/hypermem/config.json` is preserved unless the operator edits it intentionally.
+- existing `~/.openclaw/hypermem/agents/*/messages.db` files remain present.
+- `openclaw plugins list` shows both `hypercompositor` and `hypermem`.
+- logs do not show `falling back to default engine "legacy"`.
+- health output is clean, or reports only healthy-empty state on unused installs.
+
+Rollback disables HyperMem without deleting data:
+
+```bash
+openclaw config set plugins.slots.contextEngine legacy
+openclaw config set plugins.slots.memory none
+openclaw gateway restart
+```
 
 ---
 

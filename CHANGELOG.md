@@ -2,6 +2,16 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.8.8 - release hardening, diagnostics, lifecycle visibility
+
+- **Release packaging aligned across packages.** Core, hypercompositor, and memory plugin versions align at 0.8.8, with version parity validation and bump-script hardening to prevent stale plugin dependencies or lockfile drift.
+- **Installer path simplified.** The shell installer now follows the npm-first path, stages the runtime with `hypermem-install`, preserves existing config/data, backs up existing staged runtime when confirmed, and prints merge-safe OpenClaw activation commands.
+- **Integration validation documented.** `docs/INTEGRATION_VALIDATION.md` defines the install state machine, fresh install checks, upgrade checks, package dry-run validation, and common integration failure signatures.
+- **Diagnostics documented.** `docs/DIAGNOSTICS.md` covers `hypermem-status`, `hypermem-model-audit`, compose/trim reports, version parity, release-path checks, runtime logs, warm restore diagnostics, adaptive lifecycle diagnostics, and the runtime diagnostics API allowlist blocker.
+- **Adaptive lifecycle visibility landed.** The pure lifecycle policy kernel, compose diagnostics, and afterTurn gradient cap are wired while leaving recall breadth, eviction tuning, and telemetry tuning deferred to 0.9.0.
+- **Warm restore hardening is included.** Snapshot integrity, repaired restore paths, provider/parity gates, repair notices, and repair-depth caps are covered by validation guidance and release tests.
+- **Reranker and embedding fixes are included.** Reranker wiring, ZeroEntropy endpoint handling, sqlite-vec native runtime packaging, and provider/model diagnostics are part of the 0.8.8 operational release train.
+
 ## 0.8.6 — docs cleanup, model audit config parsing, validator fix
 
 - **`hypermem-model-audit` now understands object-shaped OpenClaw model config.** It correctly reads `model.primary` plus fallback arrays from modern agent config instead of reporting an empty model set.

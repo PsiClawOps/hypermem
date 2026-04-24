@@ -1,5 +1,8 @@
 # HyperMem 0.8.0 Release Hardening Plan
 
+> Historical release-hardening document. Priority and sequencing authority now live in `docs/ROADMAP.md`.
+> If this file conflicts with the roadmap, the roadmap wins.
+
 **Project:** HyperMem  
 **Root:** `/home/lumadmin/.openclaw/workspace/repo/hypermem`  
 **Author:** Forge  

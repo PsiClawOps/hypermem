@@ -20,8 +20,15 @@ Or via the shell installer:
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-Or install manually via `npm install @psiclawops/hypermem` — see [Installation](#installation) for the full declarative plugin path, verification checkpoints, and setup variants.
+Or install manually via `npm install @psiclawops/hypermem` - see [Installation](#installation) for the full declarative plugin path, verification checkpoints, and setup variants.
 
+Release operators should also read:
+
+- [INSTALL.md](./INSTALL.md) - canonical fresh install and upgrade guide
+- [docs/INTEGRATION_VALIDATION.md](./docs/INTEGRATION_VALIDATION.md) - end-to-end integration validation contract
+- [docs/DIAGNOSTICS.md](./docs/DIAGNOSTICS.md) - status, model audit, compose, trim, and release diagnostics
+
+A successful `hypermem-install` only stages the runtime. HyperMem is active only after OpenClaw config is wired, the gateway restarts, and logs show compose activity.
 
 ---
 
@@ -595,7 +602,7 @@ If you see `falling back to default engine "legacy"` in the logs, the install is
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-Interactive: detects hardware, selects embedding tier, writes config, registers plugins.
+Shell installer: installs the npm package, backs up and stages the OpenClaw runtime, preserves existing config, and prints merge-safe activation commands. It does not edit OpenClaw config or restart the gateway.
 
 Full guide with installation states, merge-safe config wiring, embedding tiers, reranker setup, fleet config, and tuning: **[INSTALL.md](./INSTALL.md)**
 
