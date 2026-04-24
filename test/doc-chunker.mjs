@@ -360,6 +360,37 @@ console.log('\n─── DocChunkStore: FTS5 Keyword Search ───');
   assert(results[0].content.toLowerCase().includes('escalat'), 'Returned chunk contains "escalat"');
 }
 
+console.log('\n─── DocChunkStore: Collection Filter Before FTS Limit ───');
+
+{
+  const db = makeDb();
+  const store = new DocChunkStore(db);
+
+  const policy = chunkMarkdown(`# POLICY.md\n\n## Red Lines\n\nPOLICY red lines external public secrets destructive credentials approval. Canonical doctrine lives here.`, {
+    collection: 'governance/policy',
+    sourcePath: '/workspace/POLICY.md',
+    scope: 'shared-fleet',
+  });
+  store.indexChunks(policy);
+
+  for (let i = 0; i < 40; i++) {
+    const folklore = chunkMarkdown(`# Daily ${i}\n\n## Folklore ${i}\n\nPOLICY red lines external public secrets destructive credentials approval. Stale daily-memory folklore should not starve canonical policy retrieval.`, {
+      collection: 'memory/daily',
+      sourcePath: `/workspace/memory/2026-04-${String(i + 1).padStart(2, '0')}.md`,
+      scope: 'per-agent',
+      agentId: 'anvil',
+    });
+    store.indexChunks(folklore);
+  }
+
+  const results = store.keywordSearch('POLICY red lines external public secrets destructive credentials approval', {
+    collection: 'governance/policy',
+    limit: 3,
+  });
+  assert(results.length > 0, 'Collection-scoped FTS is not starved by unscoped memory/daily matches');
+  assert(results[0].sourcePath.endsWith('POLICY.md'), `First scoped result is canonical policy (got: ${results[0]?.sourcePath})`);
+}
+
 console.log('\n─── DocChunkStore: Cross-Source Isolation ───');
 
 {

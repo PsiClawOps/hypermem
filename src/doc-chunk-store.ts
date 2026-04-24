@@ -227,21 +227,21 @@ export class DocChunkStore {
   keywordSearch(keyword: string, query: Omit<ChunkQuery, 'keyword'>): DocChunkRow[] {
     const { collection, agentId, tier, limit = 20 } = query;
 
-    const hasFilters = !!(agentId || tier);
-    const innerLimit = hasFilters ? limit * 4 : limit;
-
-    // Two-phase: FTS in subquery, metadata filter on small result set.
+    // Two-phase: FTS first, then metadata filters before applying the final limit.
+    // Do not cap the FTS subquery before collection filtering. If memory/daily or
+    // another broad collection dominates the raw BM25 top N, a pre-filter LIMIT can
+    // starve the canonical collection and make scoped doctrine retrieval look empty.
     let sql = `
       SELECT c.id, c.collection, c.section_path, c.depth, c.content, c.token_estimate,
              c.source_hash, c.source_path, c.scope, c.tier, c.agent_id, c.parent_path,
              c.created_at, c.updated_at
       FROM (
-        SELECT rowid, rank FROM doc_chunks_fts WHERE doc_chunks_fts MATCH ? ORDER BY rank LIMIT ?
+        SELECT rowid, rank FROM doc_chunks_fts WHERE doc_chunks_fts MATCH ?
       ) sub
       JOIN doc_chunks c ON c.rowid = sub.rowid
       WHERE c.collection = ?
     `;
-    const params: SQLInputValue[] = [keyword, innerLimit, collection];
+    const params: SQLInputValue[] = [keyword, collection];
 
     if (agentId) {
       sql += ' AND (c.agent_id = ? OR c.agent_id IS NULL)';
@@ -254,7 +254,7 @@ export class DocChunkStore {
     }
 
     sql += ' ORDER BY sub.rank LIMIT ?';
-    params.push(limit * 3); // over-fetch to allow dedup
+    params.push(limit * 10); // over-fetch to allow dedup across shared-fleet copies
 
     const rows = this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
 

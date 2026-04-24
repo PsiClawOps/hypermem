@@ -17,8 +17,10 @@
 
 import { definePluginEntry, emptyPluginConfigSchema } from 'openclaw/plugin-sdk/plugin-entry';
 import type { OpenClawConfig } from 'openclaw/plugin-sdk';
+import { matchTriggers, TRIGGER_REGISTRY } from '@psiclawops/hypermem';
 import type {
   HyperMem as HyperMemClass,
+  DocChunkRow,
 } from '@psiclawops/hypermem';
 import path from 'path';
 import fs from 'fs/promises';
@@ -105,6 +107,30 @@ type MemoryProviderStatus = {
   custom?: Record<string, unknown>;
 };
 
+const DOCTRINE_COLLECTIONS = new Set([
+  'governance/policy',
+  'governance/charter',
+  'governance/comms',
+  'operations/agents',
+]);
+
+function doctrineScore(chunk: DocChunkRow, rank: number): number {
+  const collectionBoost = chunk.collection.startsWith('governance/') ? 1.25 : 1.1;
+  return collectionBoost - Math.min(rank, 9) * 0.03;
+}
+
+function docChunkToMemoryResult(chunk: DocChunkRow, rank: number): MemorySearchResult {
+  return {
+    path: chunk.sourcePath,
+    startLine: 0,
+    endLine: 0,
+    score: doctrineScore(chunk, rank),
+    snippet: chunk.content.slice(0, 500),
+    source: 'memory',
+    citation: `[doc:${chunk.collection}:${chunk.sectionPath}]`,
+  };
+}
+
 /**
  * Create a MemorySearchManager backed by HyperMem's retrieval pipeline.
  *
@@ -130,6 +156,35 @@ function createMemorySearchManager(
       const maxResults = opts?.maxResults ?? 10;
       const minScore = opts?.minScore ?? 0;
       const results: MemorySearchResult[] = [];
+      const seenDocChunks = new Set<string>();
+
+      // 0. Canonical doctrine search. Explicit governance queries should surface
+      // policy, charter, comms, and AGENTS chunks before stale daily-memory folklore.
+      try {
+        const triggers = matchTriggers(query, TRIGGER_REGISTRY)
+          .filter(trigger => DOCTRINE_COLLECTIONS.has(trigger.collection))
+          .slice(0, 4);
+
+        for (const trigger of triggers) {
+          const chunks = hm.queryDocChunks({
+            collection: trigger.collection,
+            agentId,
+            keyword: query,
+            limit: Math.max(3, Math.ceil(maxResults / Math.max(1, triggers.length))),
+          }) as DocChunkRow[];
+
+          chunks.forEach((chunk, rank) => {
+            const key = `${chunk.sourcePath}:${chunk.sectionPath}:${chunk.sourceHash}`;
+            if (seenDocChunks.has(key)) return;
+            seenDocChunks.add(key);
+
+            const result = docChunkToMemoryResult(chunk, rank);
+            if (result.score >= minScore) results.push(result);
+          });
+        }
+      } catch {
+        // Doctrine search is a precision boost, not a hard dependency.
+      }
 
       // 1. Fact search (FTS5 + BM25 from library.db)
       try {
