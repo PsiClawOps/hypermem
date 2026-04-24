@@ -83,7 +83,13 @@ Four SQLite-backed memory databases, sub-millisecond retrieval, no external data
 
 Durable context is retained in SQLite and remains queryable across session boundaries. The retry logic decision from last week, the deployment preferences from last month, and the architecture choices from day one can be retrieved when they are relevant to the next prompt.
 
-**Session warming.** Before the first turn fires, hypermem pre-loads the agent's active working state from SQLite and the hot `:memory:` cache: recent history, facts ranked by confidence and recency, active topic context, and cached embeddings for fast semantic recall. The first reply starts from the last relevant working state instead of a blank transcript.
+What this adds to OpenClaw:
+
+- **Warm starts instead of blank restarts.** Before the first turn fires, hypermem pre-loads recent history, ranked facts, active topic context, and cached semantic state. The first reply starts from the last relevant working state instead of an empty transcript.
+- **Shared fleet memory.** Facts, knowledge, episodes, topics, preferences, docs, fleet registry, desired state, output standards, and audits live in `library.db` with private/org/council/fleet visibility controls.
+- **Recall across wording changes.** Exact FTS5 search, sqlite-vec semantic search, RRF fusion, and an optional reranker let the agent find relevant memory even when the user does not reuse the old phrasing.
+- **Temporal grounding.** Facts with time markers enter a temporal index, so questions like “last week” or “before the release” can use time-range retrieval instead of generic keyword search.
+- **Trigger-aware doctrine.** Chunked workspace and governance docs can be pulled when the current turn activates a trigger, instead of spending prompt budget every turn.
 
 ---
 
@@ -94,6 +100,14 @@ Every memory system stores. Almost none compose.
 Your agent has four layers of stored context, but what shows up in the prompt? How much of the token budget goes to stale content? Who decides what's relevant to this specific turn?
 
 The hypercompositor queries all four layers in parallel on every turn and composes context within a fixed token budget. No transcript accumulates. No lossy transcript summarization. Amnesia isn't a storage problem; the memories exist, but nobody composed them into a coherent prompt. Compaction isn't inevitable; content that doesn't fit this turn stays in storage instead of being destroyed.
+
+What this adds to OpenClaw:
+
+- **Selection instead of loss.** When the window is tight, old content remains in storage and loses the slot competition for this turn. It is not destroyed just because it was not selected.
+- **Tool output that stays useful.** Tool calls and results are clustered atomically. Recent tool turns stay full, older results are capped or stubbed, and call/result pairs survive or drop together.
+- **Topic continuity.** Quiet topics compile into structured wiki pages with decisions, open questions, artifacts, and participants. When the topic returns, the compositor can inject the summary instead of replaying raw history.
+- **No duplicate prompt spend.** Facts, temporal hits, open-domain hits, doc chunks, semantic recall, and bootstrap content are fingerprinted before insertion so the same material does not arrive through 3 retrieval paths.
+- **Subagents with context.** Spawned agents receive a bounded handoff: recent parent turns, session-scoped documents, and relevant facts, with isolated scope and cleanup after completion.
 
 **Bigger context windows don't help if you fill them with stale history.**
 128k tokens of stale history and irrelevant memory is worse than 32k of precisely selected content. 10 budget categories, priority-ordered, greedy-fill. Every token in the prompt earned its spot.
@@ -167,6 +181,12 @@ Raw model output has two problems. It drifts from your standards (sycophancy, he
 
 Consistent output is not just aesthetic. A model that paginates short answers, preambles with filler, or inflates lists uses more output tokens per turn. Over hundreds of turns, that compounds into real cost. hyperform profiles reduce that pressure by steering the model before generation, not by rewriting arbitrary output after the fact.
 
+What this adds to OpenClaw:
+
+- **Fleet-wide writing standards.** Behavior rules are injected as prompt context, so every model sees the same output contract before generation.
+- **Model-specific correction.** Optional model directives adjust known provider habits, such as verbosity, hedging, or list inflation.
+- **Claim discipline before memory writeback.** Confabulation resistance checks stored claims against existing facts before new entries are recorded, then surfaces contradictions in diagnostics.
+
 ### Behavior standards
 
 Behavior standards define how your agents write. Anti-sycophancy rules prevent filler openings. Density targets compress answers. Anti-pattern bans remove common AI markers (em dashes, AI vocabulary, inflated significance). These rules apply to all models equally.
@@ -221,27 +241,6 @@ automatically. Set `reserveFraction` to your preferred floor and let the composi
 **Confabulation resistance** checks stored claims against existing facts before new memory entries are recorded. No LLM call. Pattern matching against the fact corpus, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
 
 Set `compositor.hyperformProfile` to `light`, `standard`, or `full`. For tier selection guidance, configuration details, and custom entry creation, see **[Tuning](#tuning)** below and **[docs/TUNING.md](./docs/TUNING.md)**.
-
----
-
-## What it solves
-
-Every problem below maps to a specific HyperMem subsystem. This is not one omnibus memory bucket. Storage, retrieval, composition, pressure control, and output shaping are separate components with separate failure modes.
-
-| Problem | Component that solves it | How it works |
-|---|---|---|
-| New sessions forget prior decisions | **L2 History + L4 Library DB + session warming** | Turns are recorded to per-agent SQLite, durable facts/episodes/knowledge are written to `library.db`, and startup warming reloads recent history, active facts, topics, and cached semantic state before the first reply. |
-| Context windows fill with stale transcript | **hypercompositor budget allocator** | Each turn is freshly composed from 10 slots instead of appending forever. Old content stays in storage when it does not fit this turn, so pressure becomes a selection problem instead of a data-loss event. |
-| Tool output crowds out reasoning | **Tool gradient + pair-integrity guard** | Tool calls and results are clustered atomically. Recent tool turns stay full, older results are capped or stubbed, and call/result pairs survive or drop together. |
-| Topic work disappears after the conversation moves on | **Topic tracker + topic synthesizer** | Quiet topics compile into structured wiki pages with decisions, open questions, artifacts, and participants. When the topic returns, the compositor can inject the summary instead of replaying raw history. |
-| Retrieval repeats the same fact through multiple paths | **Compose-time fingerprint dedup** | Facts, temporal hits, open-domain hits, doc chunks, semantic recall, and bootstrap content are normalized into fingerprints before insertion. Duplicates are skipped before they spend prompt budget. |
-| Relevant memory uses different words than the user | **L3 vectors + hybrid retrieval + reranker** | FTS5 finds exact matches, sqlite-vec finds semantic matches, RRF fuses both result sets, and an optional reranker reorders fused candidates with graceful fallback. |
-| Time-sensitive questions need temporal grounding | **Temporal index** | Facts with temporal markers are indexed separately, so “last week,” “before the release,” and similar queries use time-range retrieval rather than generic keyword search. |
-| Governance and doctrine should appear on triggers, not every turn | **Doc chunks + trigger registry** | Chunked docs are linked to trigger phrases. The compositor pulls the relevant doctrine or workspace guidance only when the current turn activates it. |
-| Subagents start cold | **Spawn context builder** | Subagents receive a bounded handoff: recent parent turns, session-scoped documents, and relevant facts. The scope is isolated and cleaned up after completion. |
-| Shared fleet knowledge needs visibility controls | **L4 Library DB + cross-agent visibility policy + secret scanner** | Facts, knowledge, episodes, topics, preferences, fleet registry, desired state, output standards, and audits live in shared SQLite with private/org/council/fleet visibility. Shared-visible writes are scanned for secrets and downgraded if needed. |
-| Output drifts across models | **HyperForm output profiles** | Prompt-time output directives inject fleet writing standards and optional per-model corrections. This steers generation; it is not a deterministic post-generation rewrite engine. |
-| Memory corruption should not cascade | **Background indexer integrity gate** | Startup integrity checks validate `library.db`. If schema or index damage is detected, indexing enters circuit-breaker mode and avoids writing into a broken database. |
 
 ---
 
