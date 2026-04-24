@@ -28,6 +28,7 @@ export interface WarmSnapshotRestoreDiagnostics {
   requiredSlotDropRate: number;
   stablePrefixBoundaryViolations: number;
   toolPairParityViolations: number;
+  crossProviderAssistantTurns: number;
   quotedAssistantTurns: number;
   continuityCriticalBoundaryTransformCount: number;
   continuityCriticalBoundaryTransformRate: number;
@@ -55,6 +56,7 @@ export const WARM_RESTORE_MEASUREMENT_GATES = Object.freeze({
   requiredSlotDropRateMax: 0,
   stablePrefixBoundaryViolationsMax: 0,
   toolPairParityViolationsMax: 0,
+  crossProviderAssistantTurnsMax: 0,
   continuityCriticalBoundaryTransformRateMax: 0.005,
 });
 
@@ -65,6 +67,7 @@ export function evaluateWarmRestoreRolloutGate(
     | 'requiredSlotDropRate'
     | 'stablePrefixBoundaryViolations'
     | 'toolPairParityViolations'
+    | 'crossProviderAssistantTurns'
     | 'continuityCriticalBoundaryTransformRate'
   >,
 ): { passed: boolean; violations: WarmRestoreRolloutGateViolation[] } {
@@ -79,6 +82,7 @@ export function evaluateWarmRestoreRolloutGate(
   check('requiredSlotDropRateMax', diagnostics.requiredSlotDropRate);
   check('stablePrefixBoundaryViolationsMax', diagnostics.stablePrefixBoundaryViolations);
   check('toolPairParityViolationsMax', diagnostics.toolPairParityViolations);
+  check('crossProviderAssistantTurnsMax', diagnostics.crossProviderAssistantTurns);
   check('continuityCriticalBoundaryTransformRateMax', diagnostics.continuityCriticalBoundaryTransformRate);
 
   return { passed: violations.length === 0, violations };
@@ -311,6 +315,7 @@ export function restoreWarmSnapshotState(
     requiredSlotDropRate: requiredSlotDrops.length / 3,
     stablePrefixBoundaryViolations,
     toolPairParityViolations: quoted.toolPairParityViolations,
+    crossProviderAssistantTurns: quoted.quotedAssistantTurns,
     quotedAssistantTurns: quoted.quotedAssistantTurns,
     continuityCriticalBoundaryTransformCount,
     continuityCriticalBoundaryTransformRate,

@@ -62,9 +62,9 @@ Closed in warm-restore gate closeout:
 - `slots_json` integrity-hash verification end to end: composed snapshots are verified after write, persisted hash mismatches are rejected, and restore resolution falls back to the previous valid snapshot.
 - parity telemetry and rollout gates for automatic restore: restore diagnostics now surface rollout-gate pass/fail state and automatic warm restore falls back to cold rewarm when measurement gates fail.
 - explicit zero-tolerance checks for required-slot loss, stable-prefix violations, and tool-pair parity: all three conditions are rollout blockers.
+- cross-provider assistant-turn policy: foreign-provider assistant turns are explicitly counted and block automatic warm restore with a zero-tolerance rollout gate. User turns may restore cross-provider only when all measurement gates pass.
 
 Remaining closeout work:
-- cross-provider assistant-turn policy
 - CI commit-data review for every failing warm-restore-related GitHub Actions run before sprint scope is finalized. The review must map failing workflow run, head commit SHA, commit title, failing step, and failing assertion back to a roadmap gate or triage item.
 
 Rule: no new warm-restore expansion before these gates are closed. Failing CI tied to warm restore is a closeout blocker, not generic backlog.

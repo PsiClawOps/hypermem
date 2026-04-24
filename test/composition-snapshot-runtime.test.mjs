@@ -323,6 +323,7 @@ describe('composition snapshot runtime wiring', () => {
     assert.ok(restoredHistory.some(message => message.textContent === 'User asks for snapshot capture'));
     assert.ok(warned.some(line => /warm snapshot rollout gate blocked/.test(line)));
     assert.ok(warned.some(line => /toolPairParityViolationsMax=1\/0/.test(line)));
+    assert.ok(warned.some(line => /crossProviderAssistantTurnsMax=1\/0/.test(line)));
     assert.ok(warned.some(line => /continuityCriticalBoundaryTransformRateMax=0.5\/0.005/.test(line)));
   });
 
@@ -359,20 +360,23 @@ describe('composition snapshot runtime wiring', () => {
     assert.equal(WARM_RESTORE_MEASUREMENT_GATES.requiredSlotDropRateMax, 0);
     assert.equal(WARM_RESTORE_MEASUREMENT_GATES.stablePrefixBoundaryViolationsMax, 0);
     assert.equal(WARM_RESTORE_MEASUREMENT_GATES.toolPairParityViolationsMax, 0);
+    assert.equal(WARM_RESTORE_MEASUREMENT_GATES.crossProviderAssistantTurnsMax, 0);
     assert.equal(WARM_RESTORE_MEASUREMENT_GATES.continuityCriticalBoundaryTransformRateMax, 0.005);
     assert.equal(restored.diagnostics.crossProviderBoundary, true);
     assert.equal(restored.diagnostics.requiredSlotDropRate, 0);
     assert.equal(restored.diagnostics.stablePrefixBoundaryViolations, 0);
+    assert.equal(restored.diagnostics.crossProviderAssistantTurns, 1);
     assert.equal(restored.diagnostics.quotedAssistantTurns, 1);
     assert.equal(restored.diagnostics.tokenParityDriftSampleCount, 3);
     assert.equal(restored.diagnostics.tokenParityDriftP95, 1.75);
     assert.equal(restored.diagnostics.tokenParityDriftP99, 1.75);
     assert.equal(restored.diagnostics.rolloutGatePassed, false);
     assert.ok(restored.diagnostics.rolloutGateViolations.some(violation => violation.gate === 'tokenParityDriftP95Max'));
+    assert.ok(restored.diagnostics.rolloutGateViolations.some(violation => violation.gate === 'crossProviderAssistantTurnsMax'));
     assert.ok(restored.diagnostics.rolloutGateViolations.some(violation => violation.gate === 'continuityCriticalBoundaryTransformRateMax'));
   });
 
-  it('marks required-slot, stable-prefix, and tool-pair parity violations as rollout blockers', async () => {
+  it('marks required-slot, stable-prefix, tool-pair, and cross-provider assistant-turn violations as rollout blockers', async () => {
     const restored = restoreWarmSnapshotState({
       identity: { kind: 'inline', content: 'identity' },
       stable_prefix: { kind: 'inline', content: 'not-an-array' },
@@ -403,10 +407,12 @@ describe('composition snapshot runtime wiring', () => {
     assert.deepEqual(restored.diagnostics.requiredSlotDrops, ['system']);
     assert.equal(restored.diagnostics.stablePrefixBoundaryViolations, 1);
     assert.equal(restored.diagnostics.toolPairParityViolations, 1);
+    assert.equal(restored.diagnostics.crossProviderAssistantTurns, 1);
     const violationGates = new Set(restored.diagnostics.rolloutGateViolations.map(violation => violation.gate));
     assert.ok(violationGates.has('requiredSlotDropRateMax'));
     assert.ok(violationGates.has('stablePrefixBoundaryViolationsMax'));
     assert.ok(violationGates.has('toolPairParityViolationsMax'));
+    assert.ok(violationGates.has('crossProviderAssistantTurnsMax'));
   });
 
   it('warmSession falls back to cold rewarm when no valid snapshot is usable', async () => {
