@@ -45,13 +45,15 @@ After any migration, the background indexer picks up imported content and builds
 
 Run this before any migration path.
 
+> **Script status:** this guide contains source-specific adapter snippets. The repo does not ship a unified migration dispatcher yet. If a section says "save as", create that file in a temporary migration directory or repo checkout, run the dry-run first, then run with `--apply`.
+
 **1. Confirm hypermem is installed and has initialized:**
 ```bash
 openclaw plugins list | grep hypermem
 ls ~/.openclaw/hypermem/library.db   # must exist — send one message first if not
 ```
 
-If `library.db` doesn't exist yet, start the gateway with hypermem enabled, send one message to any agent, then come back. See [INSTALL.md](../INSTALL.md) for the full installation steps (git clone, build, wire both plugins), then restart and continue.
+If `library.db` doesn't exist yet, start the gateway with hypermem enabled, send one message to any agent, then come back. See [INSTALL.md](../INSTALL.md) for the npm-first staging, wiring, restart, and verification path, then continue.
 
 **2. Back up your existing data:**
 ```bash
@@ -74,7 +76,7 @@ cp -r ~/.cognee ~/.cognee.pre-hypermem 2>/dev/null || true
 
 ## Fresh install
 
-Nothing to migrate. Follow the [INSTALL.md](../INSTALL.md) guide (clone, build, wire plugins, restart). hypermem begins building context from your first conversation. The background indexer starts automatically.
+Nothing to migrate. Follow the [INSTALL.md](../INSTALL.md) npm-first guide (stage runtime, wire plugins, restart, verify runtime active). hypermem begins building context from your first conversation. The background indexer starts automatically.
 
 ---
 
@@ -90,30 +92,37 @@ OpenClaw's built-in memory system stores facts, preferences, and context entries
 | Preferences | `facts` table with `domain: preference` |
 | Context entries | `facts` table with `domain: general` |
 
-**Step 1: Dry run**
+**Step 1: Inspect the source schema**
 ```bash
-node scripts/migrate-memory-db.mjs --agent main
+sqlite3 ~/.openclaw/memory.db '.tables'
+sqlite3 ~/.openclaw/memory.db 'SELECT name, sql FROM sqlite_master WHERE type = "table";'
 ```
 
-Review output — it will show fact counts by type.
+OpenClaw's legacy memory schema has varied across releases and plugins. Do not run a blind importer until you know which table names and content columns your deployment uses.
 
-**Step 2: Import**
-```bash
-node scripts/migrate-memory-db.mjs --agent main --apply
+**Step 2: Export facts to normalized JSON**
+
+Create a JSON array shaped like this:
+
+```json
+[
+  {
+    "agentId": "main",
+    "content": "User prefers concise release status updates",
+    "domain": "preference",
+    "confidence": 0.85,
+    "source": "openclaw-memory-db"
+  }
+]
 ```
 
-**Step 3: Restart**
+**Step 3: Import through the custom importer pattern**
+
+Use the [custom system](#from-a-custom-system) importer below. Start with a dry run and import only after the counts and sample content look right.
+
+**Step 4: Restart**
 ```bash
 openclaw gateway restart
-```
-
-**Options:**
-```
---agent <id>          Agent to import facts for (default: main)
---memory-db <path>    Path to memory.db (default: ~/.openclaw/memory.db)
---hypermem-dir <path> hypermem data directory (default: ~/.openclaw/hypermem)
---limit <n>           Import only first N facts (useful for testing)
---apply               Actually write data (default is dry-run)
 ```
 
 > **Note:** The built-in memory.db is not agent-scoped. All entries go to the agent you specify with `--agent`. If multiple agents share the same memory.db, run the script once per agent.
@@ -135,7 +144,7 @@ QMD is the OpenClaw local-first memory sidecar — it runs behind `plugins.slots
 | BM25 + vector hybrid search | FTS5 + nomic-embed-text hybrid search |
 | Extra indexed paths (`memory.qmd.paths`) | Not yet supported — see capability gaps below |
 | Session transcript indexing | Covered natively — all message history is indexed |
-| Reranking (QMD cross-encoder) | Not implemented — hypermem uses MMR diversification |
+| Reranking (QMD cross-encoder) | Supported as optional post-fusion reranking when configured; otherwise hypermem falls back to RRF/MMR ordering |
 
 **Pre-flight:**
 
@@ -184,7 +193,7 @@ if (!extraDir) {
   process.exit(1);
 }
 
-const hm = await HyperMem.create({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await HyperMem.create({ dataDir: join(homedir(), '.openclaw/hypermem') });
 let imported = 0;
 const files = [];
 for await (const f of glob('**/*.md', { cwd: extraDir })) files.push(f);
@@ -198,7 +207,8 @@ for (const file of files) {
     } else {
       await hm.addFact(agentId, chunk.trim(), {
         domain: 'general',
-        source: `qmd-extra-migration:${file}`,
+        sourceType: 'migration',
+        sourceRef: `qmd-extra:${file}`,
         confidence: 0.8,
       });
     }
@@ -214,8 +224,8 @@ if (dryRun) console.log('Run with --apply to write data.');
 
 | QMD feature | Status in hypermem |
 |---|---|
-| Reranking (cross-encoder) | Not implemented. Tracked for future release. |
-| Extra path indexing | Not implemented. Use manual fact import as workaround. |
+| Reranking (cross-encoder) | Supported as optional reranker. Validate with compose diagnostics; fallback is RRF/MMR ordering. |
+| Extra path indexing | No automatic QMD path watcher. Use the manual fact import workaround. |
 | Session transcript search | Covered natively. |
 | BM25 hybrid search | Covered — FTS5 + vector hybrid with configurable weights. |
 | Automatic fallback to builtin | Not applicable — hypermem does not fall back. |
@@ -234,31 +244,30 @@ ClawText stores full conversation history in `session-intelligence.db`. This scr
 | Identity anchors | Used to route messages to correct agent DB |
 | Optimization `.jsonl` logs | Not imported (operational data, not conversation history) |
 
-**Step 1: Dry run**
+**Step 1: Inspect the source DB**
 ```bash
-node scripts/migrate-clawtext.mjs
+sqlite3 ~/.openclaw/workspace/.clawtext/session-intelligence.db '.tables'
+sqlite3 ~/.openclaw/workspace/.clawtext/session-intelligence.db 'SELECT name, sql FROM sqlite_master WHERE type = "table";'
 ```
 
-**Step 2: Import**
-```bash
-node scripts/migrate-clawtext.mjs --apply
+**Step 2: Export conversations to normalized JSONL**
+
+Recommended shape, one record per line:
+
+```json
+{"agentId":"main","sessionKey":"clawtext:session-1","role":"user","content":"...","createdAt":"2026-04-24T00:00:00Z"}
 ```
 
-**Step 3: Restart**
+**Step 3: Import through the custom importer pattern**
+
+Use `recordUserMessage()` and `recordAssistantMessage()` from the [custom system](#from-a-custom-system) section. Dry-run by printing counts per agent/session before writing.
+
+**Step 4: Restart**
 ```bash
 openclaw gateway restart
 ```
 
-**Options:**
-```
---apply               Actually write data (default is dry-run)
---limit <n>           Import only first N conversations
---clawtext-db <path>  Path to session-intelligence.db
-                      (default: ~/.openclaw/workspace/.clawtext/session-intelligence.db)
---hypermem-dir <path> hypermem data directory (default: ~/.openclaw/hypermem)
-```
-
-Conversations without a detectable agent identity are routed to `main`.
+Conversations without a detectable agent identity should be routed to `main` or reviewed manually before import.
 
 ---
 
@@ -320,7 +329,7 @@ const exportPath = process.argv[3] ?? 'cognee_export.json';
 const dryRun = !process.argv.includes('--apply');
 
 const entries = JSON.parse(readFileSync(exportPath, 'utf-8'));
-const hm = await HyperMem.create({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await HyperMem.create({ dataDir: join(homedir(), '.openclaw/hypermem') });
 
 let imported = 0;
 let skipped = 0;
@@ -338,7 +347,8 @@ for (const entry of entries) {
 
   await hm.addFact(agentId, text, {
     domain: entry.type ?? 'general',
-    source: 'cognee-migration',
+    sourceType: 'migration',
+    sourceRef: entry.source ?? 'cognee-export',
     confidence: 0.85,
   });
   imported++;
@@ -450,12 +460,12 @@ print(f"Exported {result['count']} memories")
 
 **Step 2: Dry run**
 ```bash
-node scripts/migrate-mem0.mjs --agent main mem0_export.json
+node ./migrate-mem0.mjs main mem0_export.json
 ```
 
-Save this as `scripts/migrate-mem0.mjs`:
+Save this as `migrate-mem0.mjs` in your migration working directory:
 ```js
-// scripts/migrate-mem0.mjs
+// migrate-mem0.mjs
 import { HyperMem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -469,7 +479,7 @@ const raw = JSON.parse(readFileSync(exportPath, 'utf-8'));
 // handle both export job format {memories: [...]} and get_all format {results: [...]}
 const entries = raw.memories ?? raw.results ?? raw;
 
-const hm = await HyperMem.create({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await HyperMem.create({ dataDir: join(homedir(), '.openclaw/hypermem') });
 let imported = 0, skipped = 0;
 
 for (const entry of entries) {
@@ -487,9 +497,9 @@ for (const entry of entries) {
 
   await hm.addFact(agentId, text, {
     domain,
-    source: 'mem0-migration',
+    sourceType: 'migration',
+    sourceRef: entry.id ? `mem0:${entry.id}` : 'mem0-export',
     confidence: 0.9,
-    createdAt: entry.created_at,
   });
   imported++;
 }
@@ -500,7 +510,7 @@ if (dryRun) console.log('Run with --apply to write data.');
 
 **Step 3: Import**
 ```bash
-node scripts/migrate-mem0.mjs --agent main mem0_export.json --apply
+node ./migrate-mem0.mjs main mem0_export.json --apply
 ```
 
 **Step 4: Restart**
@@ -585,9 +595,9 @@ print(f"Exported {len(export['sessions'])} sessions, {len(export['facts'])} fact
 
 **Step 2: Import**
 
-Save as `scripts/migrate-zep.mjs`:
+Save as `migrate-zep.mjs` in your migration working directory:
 ```js
-// scripts/migrate-zep.mjs
+// migrate-zep.mjs
 import { HyperMem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -598,7 +608,7 @@ const exportPath = process.argv[3] ?? 'zep_export.json';
 const dryRun = !process.argv.includes('--apply');
 
 const { sessions = [], facts = [] } = JSON.parse(readFileSync(exportPath, 'utf-8'));
-const hm = await HyperMem.create({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await HyperMem.create({ dataDir: join(homedir(), '.openclaw/hypermem') });
 
 let msgCount = 0, factCount = 0;
 
@@ -626,9 +636,9 @@ for (const fact of facts) {
   if (dryRun) { console.log(`[dry-run] fact: ${fact.text.slice(0, 80)}`); factCount++; continue; }
   await hm.addFact(agentId, fact.text, {
     domain: 'general',
-    source: 'zep-migration',
+    sourceType: 'migration',
+    sourceRef: fact.uuid ? `zep:${fact.uuid}` : 'zep-export',
     confidence: 0.85,
-    createdAt: fact.created_at,
   });
   factCount++;
 }
@@ -639,10 +649,10 @@ if (dryRun) console.log('Run with --apply to write data.');
 
 ```bash
 # Dry run
-node scripts/migrate-zep.mjs main zep_export.json
+node ./migrate-zep.mjs main zep_export.json
 
 # Apply
-node scripts/migrate-zep.mjs main zep_export.json --apply
+node ./migrate-zep.mjs main zep_export.json --apply
 
 openclaw gateway restart
 ```
@@ -702,9 +712,9 @@ print(f"Exported {len(export['conclusions'])} conclusions")
 
 **Step 2: Import conclusions as facts**
 
-Save as `scripts/migrate-honcho.mjs`:
+Save as `migrate-honcho.mjs` in your migration working directory:
 ```js
-// scripts/migrate-honcho.mjs
+// migrate-honcho.mjs
 import { HyperMem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -715,7 +725,7 @@ const exportPath = process.argv[3] ?? 'honcho_export.json';
 const dryRun = !process.argv.includes('--apply');
 
 const { conclusions = [] } = JSON.parse(readFileSync(exportPath, 'utf-8'));
-const hm = await HyperMem.create({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await HyperMem.create({ dataDir: join(homedir(), '.openclaw/hypermem') });
 let imported = 0, skipped = 0;
 
 for (const c of conclusions) {
@@ -724,9 +734,9 @@ for (const c of conclusions) {
   if (dryRun) { console.log(`[dry-run] conclusion: ${text.slice(0, 80)}`); imported++; continue; }
   await hm.addFact(agentId, text, {
     domain: 'general',
-    source: 'honcho-migration',
+    sourceType: 'migration',
+    sourceRef: c.id ? `honcho:${c.id}` : 'honcho-export',
     confidence: 0.9,
-    createdAt: c.created_at,
   });
   imported++;
 }
@@ -737,10 +747,10 @@ if (dryRun) console.log('Run with --apply to write data.');
 
 ```bash
 # Dry run
-node scripts/migrate-honcho.mjs main honcho_export.json
+node ./migrate-honcho.mjs main honcho_export.json
 
 # Apply
-node scripts/migrate-honcho.mjs main honcho_export.json --apply
+node ./migrate-honcho.mjs main honcho_export.json --apply
 ```
 
 **Step 3: Uninstall Honcho plugin and enable hypermem**
@@ -811,9 +821,9 @@ Install lancedb if needed: `pip install lancedb`
 
 **Step 3: Import**
 
-Save as `scripts/migrate-lancedb.mjs`:
+Save as `migrate-lancedb.mjs` in your migration working directory:
 ```js
-// scripts/migrate-lancedb.mjs
+// migrate-lancedb.mjs
 import { HyperMem } from '@psiclawops/hypermem';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -825,7 +835,7 @@ const exportPath = process.argv.find(a => a.endsWith('.json')) ?? 'lancedb_expor
 const dryRun = !process.argv.includes('--apply');
 
 const entries = JSON.parse(readFileSync(exportPath, 'utf-8'));
-const hm = await HyperMem.create({ dir: join(homedir(), '.openclaw/hypermem') });
+const hm = await HyperMem.create({ dataDir: join(homedir(), '.openclaw/hypermem') });
 let imported = 0, skipped = 0;
 
 for (const entry of entries) {
@@ -835,7 +845,8 @@ for (const entry of entries) {
   if (dryRun) { console.log(`[dry-run] [${agentId}] ${text.slice(0, 80)}`); imported++; continue; }
   await hm.addFact(agentId, text, {
     domain: 'general',
-    source: 'lancedb-migration',
+    sourceType: 'migration',
+    sourceRef: entry.id ? `lancedb:${entry.id}` : 'lancedb-export',
     confidence: 0.85,
   });
   imported++;
@@ -847,13 +858,13 @@ if (dryRun) console.log('Run with --apply to write data.');
 
 ```bash
 # Dry run (all agents from export)
-node scripts/migrate-lancedb.mjs lancedb_export.json
+node ./migrate-lancedb.mjs main lancedb_export.json
 
 # Or target a specific agent
-node scripts/migrate-lancedb.mjs main lancedb_export.json
+node ./migrate-lancedb.mjs main lancedb_export.json
 
 # Apply
-node scripts/migrate-lancedb.mjs lancedb_export.json --apply
+node ./migrate-lancedb.mjs main lancedb_export.json --apply
 ```
 
 **Step 4: Disable memory-lancedb and enable hypermem**
@@ -875,36 +886,27 @@ If your agents use the standard OpenClaw MEMORY.md + daily checkpoint pattern (`
 
 > **If you are coming from QMD**, use the [QMD path](#from-qmd) instead — it covers MEMORY.md files and handles the slot change correctly.
 
-**Step 1: Dry run (all agents)**
-```bash
-node scripts/migrate-memory-md.mjs
+**Step 1: Decide whether you need an import**
+
+Current HyperMem bootstraps workspace `MEMORY.md` and daily memory files during normal context assembly. If your files are still present in the agent workspace, you usually do **not** need a data import. Enable HyperMem and verify recall first.
+
+**Step 2: If you need durable fact rows, export daily entries**
+
+Create a normalized JSON array from substantive daily-memory bullets only. Skip pointer-only `MEMORY.md` index lines and `memory_search(...)` references.
+
+```json
+[
+  {"agentId":"forge","content":"HyperMem 0.8.8 release path requires npm-first staging validation","domain":"operations","confidence":0.8}
+]
 ```
 
-Review output — shows workspaces found, fact counts per agent, and a sample of what would be imported.
+**Step 3: Import through the custom importer pattern**
 
-**Step 2: Import**
-```bash
-node scripts/migrate-memory-md.mjs --apply
-```
+Use the [custom system](#from-a-custom-system) fact importer. Start with one agent and a small sample before bulk import.
 
-Or for a single agent:
-```bash
-node scripts/migrate-memory-md.mjs --agent my-agent --apply
-```
-
-**Step 3: Restart**
+**Step 4: Restart**
 ```bash
 openclaw gateway restart
-```
-
-**Options:**
-```
---agent <id>             Only import for this agent (default: all detected)
---workspace-root <path>  Scan workspace directories under this path
-                         (default: ~/.openclaw)
---hypermem-dir <path>    hypermem data directory (default: ~/.openclaw/hypermem)
---limit <n>              Import only first N facts
---apply                  Actually write data (default is dry-run)
 ```
 
 **Parsing rules:** Imports bullet list items from daily files (`memory/YYYY-MM-DD.md`) only. `MEMORY.md` index files are intentionally skipped — they're pointers, not content. Lines under 40 characters, `→ memory_search(...)` pointers, and code-like lines are also skipped.
@@ -919,11 +921,11 @@ Use hypermem's programmatic API to import directly.
 ```js
 import { HyperMem } from '@psiclawops/hypermem';
 
-const hm = await HyperMem.create({ dir: '~/.openclaw/hypermem' });
+const hm = await HyperMem.create({ dataDir: `${process.env.HOME}/.openclaw/hypermem` });
 
 await hm.addFact('your-agent-id', 'User prefers dark mode in all UIs', {
   domain: 'preference',
-  source: 'migration',
+  sourceType: 'migration',
   confidence: 0.9,
 });
 ```
@@ -940,7 +942,7 @@ await hm.recordAssistantMessage('your-agent-id', 'session-key:your-session', {
 });
 ```
 
-For bulk imports, write a script modeled on `scripts/migrate-clawtext.mjs` — direct SQLite writes are faster than the API for large datasets.
+For bulk imports, write a one-off importer using the API examples above. If you need to preserve original timestamps exactly, use a direct SQLite importer against the current schema after taking a backup; `addFact()` stamps imported facts with current `created_at` and tracks source through `sourceType`/`sourceRef`.
 
 After import:
 ```bash
@@ -951,15 +953,22 @@ openclaw gateway restart
 
 ## Enabling hypermem
 
-Once your data is imported, enable both plugins:
+Once your data is imported, enable both plugins. Merge existing config arrays instead of overwriting them.
 
 ```bash
+openclaw config get plugins.load.paths
+openclaw config get plugins.allow
+
+HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
+openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
 openclaw gateway restart
 ```
 
-If you were on memory-core or QMD, the `slots.memory hypermem` line above already replaces the old memory provider. No separate disable step needed.
+If `plugins.allow` is already a non-empty array, append `hypercompositor` and `hypermem`. If it is unset or null, do not create a restrictive allowlist just for HyperMem.
+
+If you were on memory-core, QMD, or memory-lancedb, the `slots.memory hypermem` line above replaces the old memory provider. No separate disable step is needed.
 
 ---
 
@@ -994,6 +1003,21 @@ for (const agent of fs.readdirSync(agentsDir)) {
 "
 ```
 
+**Verify runtime wiring and diagnostics:**
+```bash
+openclaw plugins list | grep -E 'hypercompositor|hypermem'
+hypermem-status --health
+hypermem-model-audit --strict
+openclaw logs --limit 100 | grep -E 'hypermem:compose|falling back to default engine'
+```
+
+Pass criteria:
+- both `hypercompositor` and `hypermem` are loaded
+- `hypermem-status --health` can read the data directory
+- model audit reports the active provider/model/dimensions without silent defaults
+- logs show `[hypermem:compose]` after a test message
+- logs do **not** show fallback to `legacy` context engine
+
 **Ask your agent to recall something** from the imported history. If recall seems patchy in the first session, the background indexer is still building embeddings — send one message and wait one turn. It runs automatically after ingest.
 
 ---
@@ -1024,11 +1048,11 @@ Original data (memory.db, ClawText database, QMD collections, Cognee data direct
 
 **"library.db not found" during migration**
 
-hypermem hasn't initialized yet. Start the gateway with the plugin enabled, send one message, then re-run:
+hypermem hasn't initialized yet. Start the gateway with the plugin enabled, send one message, then re-run your dry-run importer:
 ```bash
 openclaw gateway restart
 # wait a few seconds, send one message
-node scripts/migrate-memory-db.mjs --agent main
+node ./your-migration-importer.mjs main export.json
 ```
 
 **Facts imported but agent doesn't recall them**
@@ -1039,9 +1063,9 @@ openclaw gateway restart
 ```
 Send one message and wait one turn — the indexer runs after the first ingest.
 
-**Duplicate facts after re-running a script**
+**Duplicate facts after re-running an importer**
 
-All scripts check for duplicates before inserting. Re-running is safe. If you see unexpected duplicates, check whether the same data exists under a different `original_id` in the migration metadata — this can happen if source IDs changed between runs.
+Example snippets are intentionally simple and may not deduplicate across changed source IDs. Keep dry-run output, import logs, and source export IDs. If you need repeatable bulk migration, add a stable source reference such as `sourceRef` or include an external-ID marker in the fact content before re-running with `--apply`.
 
 **Agent routed to wrong database**
 

@@ -793,7 +793,7 @@ Full troubleshooting: **[INSTALL.md § Troubleshooting](./INSTALL.md#troubleshoo
 
 hypermem doesn't touch your existing memory data. Install it, switch the context engine, and migrate historical data on your own timeline.
 
-The migration guide includes worked examples showing how to bring data from OpenClaw built-in memory, Mem0, Honcho, QMD session exports, and Engram. Each example walks through the data model mapping, transformation steps, and validation. Adapt them to your setup.
+The migration guide includes worked examples showing how to bring data from OpenClaw built-in memory, QMD, ClawText, Cognee, Mem0, Zep, Honcho, memory-lancedb, MEMORY.md files, and custom engines. Each path documents source mapping, dry-run expectations, activation, rollback, and post-migration validation. Adapter snippets are examples unless explicitly shipped as package binaries.
 
 All examples default to dry-run. Nothing is written until you add `--apply`.
 
