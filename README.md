@@ -34,7 +34,9 @@ A successful `hypermem-install` only stages the runtime. HyperMem is active only
 
 ## The problem
 
-Every LLM conversation is composed at runtime. The model sees only what's in the prompt. It has no memory of prior sessions, no access to decisions made last week, no awareness of work that happened before this context window opened.
+Your agent can feel sharp on day one, then start slipping as the work accumulates.
+
+Not because the model got worse. Because each turn is composed at runtime, and the model only sees what made it into this prompt. It has no native memory of prior sessions, no direct access to last week's decisions, and no awareness of work that happened before this context window opened.
 
 Two questions make this concrete:
 
@@ -43,19 +45,19 @@ Two questions make this concrete:
 | *"What was Caesar's greatest military victory?"* | Training data | ✅ Answered correctly, no session context needed |
 | *"What did we decide about the retry logic last week?"* | Nothing (prior session is gone) | ❌ The decision existed only in that session |
 
-The difference isn't intelligence. It's what was in the prompt. Two failure modes follow:
+The difference is not intelligence. It is prompt access. Three failure modes follow:
 
-**New-session amnesia.** The agent restarts and everything is gone. Decisions, preferences, work in progress: erased at the session boundary. Operators re-explain context. Agents re-ask questions already answered.
+**New-session amnesia.** The agent restarts and the work disappears with the session. Decisions, preferences, and work in progress vanish at the boundary. Operators re-explain context. Agents re-ask questions that were already settled.
 
-**Compaction crunch.** Long sessions fill the context window. The runtime summarizes to make room. Specifics (tool output, exact decisions, file paths) are lost in the summary. The agent keeps running, but degraded.
+**Compaction crunch.** Long sessions fill the context window. The runtime summarizes to make room. Specifics like tool output, exact decisions, and file paths are the first things to get flattened. The agent keeps running, but with less ground truth than it had a few turns ago.
 
-**Bloated context.** 128k tokens doesn't mean 128k of useful prompt. Without active curation, agents fill the window with stale history, redundant instructions, and memory that isn't relevant to this turn. A bigger context window just means more room to waste. The information is in the prompt somewhere, buried under content irrelevant to this turn.
+**Bloated context.** 128k tokens does not mean 128k of useful prompt. Without active selection, agents fill the window with stale history, repeated instructions, and memory that does not matter to this turn. A bigger window just gives you more room to waste.
 
 ---
 
 ## What OpenClaw provides today
 
-OpenClaw addresses both failure modes with structured guidance files injected into every session:
+OpenClaw already gives agents a stronger baseline than most stacks. It injects structured guidance into every session:
 
 | File | What it contributes | Survives session restart? |
 |---|---|---|
@@ -64,9 +66,9 @@ OpenClaw addresses both failure modes with structured guidance files injected in
 | Task/workspace instructions | `AGENTS.md`, job files, and related guidance | ✅ always injected |
 | `MEMORY.md` | Hand-curated decisions, facts, patterns | ✅ if manually maintained |
 
-These are powerful for identity and preferences. But the retry logic decision from last week? If nobody manually captured it into `MEMORY.md`, that session boundary erased it. The system is only as strong as its last manual update.
+These files are strong at identity, user fit, and working style. They are not a durable memory system by themselves. If nobody copied the retry-logic decision into `MEMORY.md`, the next session does not know it happened.
 
-OpenClaw also ships compaction safeguards and hybrid file search. That's a solid baseline. It has limits. hypermem closes both gaps.
+OpenClaw also ships compaction safeguards and hybrid file search. That is a solid baseline. What is still missing is durable recall across sessions, active prompt selection under pressure, and writing discipline that holds across long-running work. hypermem adds those layers.
 
 ---
 
