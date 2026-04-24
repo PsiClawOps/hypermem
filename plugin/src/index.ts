@@ -1006,12 +1006,14 @@ async function getHyperMem(): Promise<HyperMemInstance> {
     verboseLog(`[hypermem-plugin] warmCacheReplayThresholdMs=${_cacheReplayThresholdMs}`);
     verboseLog(`[hypermem-plugin] contextWindowOverrides keys=${Object.keys(_contextWindowOverrides).join(', ') || '(none)'}`);
 
+    const cacheConfig = (userConfig as { cache?: { keyPrefix?: string; sessionTTL?: number; historyTTL?: number } }).cache;
+
     const instance = await HyperMem.create({
       dataDir: _pluginConfig.dataDir ?? path.join(os.homedir(), '.openclaw/hypermem'),
       cache: {
-        keyPrefix: 'hm:',
-        sessionTTL: 14400,     // 4h for system/identity/meta slots
-        historyTTL: 86400,     // 24h for history — ages out, not count-trimmed
+        keyPrefix: cacheConfig?.keyPrefix ?? 'hm:',
+        sessionTTL: cacheConfig?.sessionTTL ?? 14400,     // 4h default for system/identity/meta slots
+        historyTTL: cacheConfig?.historyTTL ?? 86400,     // 24h default for history/cursor hot cache
       },
       ...(userConfig.compositor ? { compositor: userConfig.compositor } : {}),
       ...(_embeddingConfig ? { embedding: _embeddingConfig } : {}),
