@@ -17,6 +17,36 @@ openclaw config get gateway # should return gateway config, not an error
 
 If `gateway status` shows "disabled" or "not configured", complete OpenClaw onboarding first. `openclaw gateway restart` only works when the gateway service is already set up. On a brand-new OpenClaw install that has never been started, you need `openclaw gateway start` (or the full onboarding flow) before installing plugins.
 
+## Non-OpenClaw usage
+
+HyperMem can also be used as a normal Node.js library without OpenClaw plugins. This mode is useful for tests, custom agents, migration tooling, and experiments with the memory/composition API.
+
+```bash
+npm install @psiclawops/hypermem
+```
+
+```typescript
+import { HyperMem } from '@psiclawops/hypermem';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+const hm = await HyperMem.create({
+  dataDir: join(homedir(), '.openclaw', 'hypermem'),
+  embedding: { provider: 'none' },
+});
+
+await hm.recordUserMessage('my-agent', 'session-1', 'Hello');
+const composed = await hm.compose({
+  agentId: 'my-agent',
+  sessionKey: 'session-1',
+  prompt: 'Hello',
+  tokenBudget: 4000,
+  provider: 'anthropic',
+});
+```
+
+No gateway, plugin load path, or OpenClaw config is required in library mode. OpenClaw-specific setup starts below.
+
 ## Quick Start
 
 This guide is deliberately declarative. Follow the steps in order and verify each install state before moving on.

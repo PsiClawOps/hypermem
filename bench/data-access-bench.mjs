@@ -5,16 +5,21 @@
  * Tests all critical data paths against REAL production data.
  * No synthetic fixtures — this measures what the system actually does.
  *
- * Usage: node bench/data-access-bench.mjs [--iterations N] [--agent AGENT]
+ * Usage: node bench/data-access-bench.mjs [--iterations N] [--warmup N] [--agent AGENT] [--data-dir DIR]
  */
 
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import fs from 'node:fs';
 
-const DATA_DIR = path.join(process.env.HOME || '/home/user', '.openclaw', 'hypermem');
-const ITERATIONS = parseInt(process.argv.find((a, i) => process.argv[i - 1] === '--iterations') || '100');
-const TARGET_AGENT = process.argv.find((a, i) => process.argv[i - 1] === '--agent') || null;
+function argValue(name, fallback = null) {
+  return process.argv.find((a, i) => process.argv[i - 1] === name) ?? fallback;
+}
+
+const DATA_DIR = argValue('--data-dir', process.env.HYPERMEM_DATA_DIR ?? path.join(process.env.HOME || '/home/user', '.openclaw', 'hypermem'));
+const ITERATIONS = parseInt(argValue('--iterations', '100'), 10);
+const WARMUP = parseInt(argValue('--warmup', '3'), 10);
+const TARGET_AGENT = argValue('--agent', null);
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -27,8 +32,8 @@ function openDb(dbPath) {
 }
 
 function bench(label, fn, iterations = ITERATIONS) {
-  // Warm up (3 runs, discard)
-  for (let i = 0; i < 3; i++) fn();
+  // Warm up, discard
+  for (let i = 0; i < WARMUP; i++) fn();
 
   const times = [];
   for (let i = 0; i < iterations; i++) {
@@ -66,10 +71,16 @@ console.log(`\n${'═'.repeat(60)}`);
 console.log(`  HyperMem Data Access Benchmark`);
 console.log(`  Data: ${DATA_DIR}`);
 console.log(`  Iterations: ${ITERATIONS}`);
+console.log(`  Warmup: ${WARMUP}`);
 console.log(`${'═'.repeat(60)}\n`);
 
 // Discover agents
 const agentsDir = path.join(DATA_DIR, 'agents');
+if (!fs.existsSync(agentsDir)) {
+  console.error(`No HyperMem agent data found at ${agentsDir}`);
+  console.error('Run an OpenClaw agent turn with HyperMem active, or pass --data-dir /path/to/hypermem.');
+  process.exit(2);
+}
 const agents = fs.readdirSync(agentsDir).filter(a => {
   if (TARGET_AGENT && a !== TARGET_AGENT) return false;
   return fs.existsSync(path.join(agentsDir, a, 'messages.db'));
@@ -202,7 +213,8 @@ if (libDb) {
     ORDER BY confidence DESC, updated_at DESC
     LIMIT ?
   `);
-  for (const agent of ['agent1', 'main', 'director1']) {
+  const libraryAgents = agents.length > 0 ? agents : ['main'];
+  for (const agent of libraryAgents.slice(0, 3)) {
     allResults.push(bench(`library: activeFacts(${agent}, limit=50)`, () => {
       stmtFacts.all(agent, 50);
     }));
@@ -216,7 +228,7 @@ if (libDb) {
     ORDER BY created_at DESC
     LIMIT ?
   `);
-  for (const agent of ['agent1', 'main']) {
+  for (const agent of libraryAgents.slice(0, 2)) {
     allResults.push(bench(`library: recentEpisodes(${agent}, limit=20)`, () => {
       stmtEpisodes.all(agent, 20);
     }));
@@ -228,15 +240,16 @@ if (libDb) {
     SELECT * FROM topics WHERE agent_id = ? AND status = 'active'
     ORDER BY updated_at DESC LIMIT ?
   `);
-  allResults.push(bench(`library: activeTopics(agent1)`, () => {
-    stmtTopics.all('agent1', 20);
+  const primaryAgent = libraryAgents[0] ?? 'main';
+  allResults.push(bench(`library: activeTopics(${primaryAgent})`, () => {
+    stmtTopics.all(primaryAgent, 20);
   }));
   printResult(allResults[allResults.length - 1]);
 
   // 11. Fleet agent lookup
   const stmtFleet = libDb.prepare('SELECT * FROM fleet_agents WHERE id = ?');
-  allResults.push(bench(`library: fleetAgent lookup`, () => {
-    stmtFleet.get('agent1');
+  allResults.push(bench(`library: fleetAgent lookup(${primaryAgent})`, () => {
+    stmtFleet.get(primaryAgent);
   }));
   printResult(allResults[allResults.length - 1]);
 
@@ -267,8 +280,8 @@ if (libDb) {
   const stmtEpType = libDb.prepare(`
     SELECT * FROM episodes WHERE agent_id = ? AND event_type = ? ORDER BY created_at DESC LIMIT ?
   `);
-  allResults.push(bench(`library: episodes(agent1, type=decision)`, () => {
-    stmtEpType.all('agent1', 'decision', 20);
+  allResults.push(bench(`library: episodes(${primaryAgent}, type=decision)`, () => {
+    stmtEpType.all(primaryAgent, 'decision', 20);
   }));
   printResult(allResults[allResults.length - 1]);
 
@@ -288,8 +301,8 @@ if (libDb) {
       const stmtChunks = libDb.prepare(`
         SELECT * FROM doc_chunks WHERE agent_id = ? AND collection = ? ORDER BY chunk_index LIMIT ?
       `);
-      allResults.push(bench(`library: docChunks(agent1, policy, limit=20) [${chunkCount} total]`, () => {
-        stmtChunks.all('agent1', 'policy', 20);
+      allResults.push(bench(`library: docChunks(${primaryAgent}, policy, limit=20) [${chunkCount} total]`, () => {
+        stmtChunks.all(primaryAgent, 'policy', 20);
       }));
       printResult(allResults[allResults.length - 1]);
     }
@@ -302,7 +315,8 @@ if (libDb) {
 
 // ── Compaction Fence (new module) ────────────────────────────
 
-const agent1Db = openDb(path.join(agentsDir, 'agent1', 'messages.db'));
+const fenceAgent = agents[0] ?? 'main';
+const agent1Db = openDb(path.join(agentsDir, fenceAgent, 'messages.db'));
 if (agent1Db) {
   try {
     const hasFence = agent1Db.prepare("SELECT count(*) as c FROM sqlite_master WHERE type='table' AND name='compaction_fences'").get().c;
@@ -310,7 +324,7 @@ if (agent1Db) {
       const stmtFence = agent1Db.prepare('SELECT * FROM compaction_fences WHERE conversation_id = ?');
       const someConvId = agent1Db.prepare('SELECT id FROM conversations LIMIT 1').get()?.id;
       if (someConvId) {
-        allResults.push(bench(`agent1: compactionFence lookup`, () => {
+        allResults.push(bench(`${fenceAgent}: compactionFence lookup`, () => {
           stmtFence.get(someConvId);
         }));
         printResult(allResults[allResults.length - 1]);

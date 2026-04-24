@@ -10,6 +10,7 @@ HyperMem diagnostics are split into operator CLIs, validation scripts, and runti
 | Operator dashboard | `hypermem-status --master` | concise fleet-facing status summary |
 | JSON status | `hypermem-status --json` | machine-readable database and runtime state |
 | Model audit | `hypermem-model-audit --strict` | active models have known context-window behavior or overrides |
+| Memory benchmark | `hypermem-bench --iterations 1000 --warmup 50 --agent <agent>` | local dataset access latency with p50/p95/p99 timings |
 | Compose report | `node scripts/compose-report.mjs` | direct compositor slot selection, budget decisions, diagnostics fields |
 | Trim report | `node scripts/trim-report.mjs` | trim events, cache invalidation, pressure behavior |
 | Version parity | `npm run validate:version-parity` | package versions and plugin dependencies are release-aligned |
@@ -56,6 +57,19 @@ hypermem-model-audit --models openai-codex/gpt-5.4,ollama/llama-3.3-70b
 ```
 
 Use strict mode in release validation. A strict failure means the model should get an explicit `contextWindowOverrides` entry before treating pressure diagnostics as authoritative.
+
+## Memory access benchmark
+
+`hypermem-bench` measures storage access speed against the operator's local HyperMem dataset, normally `~/.openclaw/hypermem`.
+
+```bash
+hypermem-bench --iterations 1000 --warmup 50 --agent main
+hypermem-bench --iterations 1000 --warmup 50 --data-dir /path/to/hypermem
+```
+
+It reports min, average, p50, p95, p99, and max latency for the data paths present in that install, including message hot-path lookups, session/conversation lookup, message FTS, facts, episodes, topics, fleet records, and doc chunks.
+
+Use this for local validation of README speed claims. Results depend on hardware, database size, selected agent, and which optional surfaces are enabled. Vector embedding generation and hosted reranker latency are not part of these SQLite access timings; they are configured separately and should be measured against the chosen provider.
 
 ## Runtime logs
 

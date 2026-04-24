@@ -61,7 +61,7 @@ OpenClaw addresses both failure modes with structured guidance files injected in
 |---|---|---|
 | `SOUL.md` | Agent identity, voice, principles | ✅ always injected |
 | `USER.md` | User preferences, working style | ✅ always injected |
-| Task and workspace instruction files (for example AGENTS.md, job files, and related guidance) | ✅ always injected |
+| Task/workspace instructions | `AGENTS.md`, job files, and related guidance | ✅ always injected |
 | `MEMORY.md` | Hand-curated decisions, facts, patterns | ✅ if manually maintained |
 
 These are powerful for identity and preferences. But the retry logic decision from last week? If nobody manually captured it into `MEMORY.md`, that session boundary erased it. The system is only as strong as its last manual update.
@@ -81,9 +81,9 @@ Four SQLite-backed memory databases, sub-millisecond retrieval, no external data
 | **L3 Semantic** | Finds related content even when the words don't match. | 0.29ms |
 | **L4 Knowledge** | Facts, wiki pages, episodes, preferences. Shared across agents. | 0.09ms |
 
-Everything is retained. Storage survives session boundaries. The retry logic decision from last week, the deployment preferences from last month, the architecture choices from day one: all queryable, all available for composition.
+Durable context is retained in SQLite and remains queryable across session boundaries. The retry logic decision from last week, the deployment preferences from last month, and the architecture choices from day one can be retrieved when they are relevant to the next prompt.
 
-**Session warming.** Before the first turn fires, hypermem pre-loads the agent's full working state from its SQLite-backed memory stores and hot `:memory:` cache: recent history, facts ranked by confidence and recency, active topic context, cached embeddings for fast semantic recall. The agent's first reply draws from everything that was in scope at the end of the last session. The agent picks up where it left off.
+**Session warming.** Before the first turn fires, hypermem pre-loads the agent's active working state from SQLite and the hot `:memory:` cache: recent history, facts ranked by confidence and recency, active topic context, and cached embeddings for fast semantic recall. The first reply starts from the last relevant working state instead of a blank transcript.
 
 ---
 
@@ -96,7 +96,7 @@ Your agent has four layers of stored context, but what shows up in the prompt? H
 The hypercompositor queries all four layers in parallel on every turn and composes context within a fixed token budget. No transcript accumulates. No lossy transcript summarization. Amnesia isn't a storage problem; the memories exist, but nobody composed them into a coherent prompt. Compaction isn't inevitable; content that doesn't fit this turn stays in storage instead of being destroyed.
 
 **Bigger context windows don't help if you fill them with stale history.**
-128k tokens of stale history and irrelevant memory is worse than 32k of precisely selected content. 9 budget categories, priority-ordered, greedy-fill. Every token in the prompt earned its spot.
+128k tokens of stale history and irrelevant memory is worse than 32k of precisely selected content. 10 budget categories, priority-ordered, greedy-fill. Every token in the prompt earned its spot.
 
 ### What the model actually sees
 
@@ -130,7 +130,7 @@ OpenClaw default                        hypercompositor
 ────────────────────────────────        ────────────────────────────────
 message → append to transcript          message → detect active topic
 transcript full → trim oldest           query 4 storage layers in parallel
-trimmed content → summarize (lossy)     budget allocator: 9 slots, fixed cap
+trimmed content → summarize (lossy)     budget allocator: 10 slots, fixed cap
 send transcript to model                tool compression by turn age
 model responds → append again           keystone guard + hyperform profile
                                         composed prompt → model
@@ -155,7 +155,7 @@ When it fills:                          When budget is exceeded:
 
 High-signal turns are marked as keystones and survive pressure trimming ahead of ordinary history.
 
-The compositor fills 9 slots in priority order (system prompt → identity → hyperform → history → facts → wiki → semantic recall → cross-session → action summary). Each slot consumes tokens from the remaining budget before the next slot runs. Slots that don't fit this turn stay in storage, not destroyed.
+The compositor fills 10 slots in priority order (system prompt → identity → hyperform → history → recent tools → keystones → wiki/knowledge → facts → semantic recall → reserve/action context). Each slot consumes tokens from the remaining budget before the next slot runs. Slots that do not fit this turn stay in storage, not destroyed.
 
 For the full fill order, budget formula, and all configuration knobs, see **[Tuning](#tuning)** below and **[docs/TUNING.md](./docs/TUNING.md)**.
 
@@ -163,9 +163,9 @@ For the full fill order, budget formula, and all configuration knobs, see **[Tun
 
 ## hyperform
 
-Raw model output has two problems. It drifts from your standards (sycophancy, hedging, pagination, formatting) and it drifts from your facts (confabulation, contradiction, stale claims). hyperform handles both: normalization enforces consistency, confabulation resistance checks output against what's actually stored.
+Raw model output has two problems. It drifts from your standards (sycophancy, hedging, pagination, formatting) and it drifts from your facts (confabulation, contradiction, stale claims). hyperform handles both at prompt time: output profiles inject writing standards into composed context, while confabulation resistance checks stored claims against what is actually in memory.
 
-Consistent output isn't just aesthetic. A model that paginates short answers, preambles with filler, or inflates lists uses more output tokens per turn. Over hundreds of turns, that compounds into real cost. hyperform directives compress output at the source: fewer tokens generated means lower API spend per session, and less context pressure for subsequent turns.
+Consistent output is not just aesthetic. A model that paginates short answers, preambles with filler, or inflates lists uses more output tokens per turn. Over hundreds of turns, that compounds into real cost. hyperform profiles reduce that pressure by steering the model before generation, not by rewriting arbitrary output after the fact.
 
 ### Behavior standards
 
@@ -191,14 +191,14 @@ Model adaptation is only active at the `full` tier. At `light` and `standard`, m
 
 The `model_output_directives` table starts empty. You populate it with corrections for the models you run. See [docs/TUNING.md](./docs/TUNING.md#creating-custom-entries) for the schema and SQL examples.
 
-### Before and after
+### Illustrative before and after
 
-The same prompt, GPT-5.4, with and without `hyperformProfile: "light"`:
+The example below shows the intended effect of `hyperformProfile: "light"`. hyperform is prompt-time shaping, not a deterministic post-generation rewrite engine:
 
 ```
 Prompt: "How should I size my context window budget for a long-running agent session?"
 
-WITHOUT normalization (GPT-5.4 default):
+WITHOUT hyperform shaping (GPT-5.4 default):
 Here are the key factors to consider when sizing your context window budget:
 
 **1. Session depth**
@@ -218,7 +218,7 @@ tool context, and leave ~30k as allocator reserve. hypermem handles slot competi
 automatically. Set `reserveFraction` to your preferred floor and let the compositor fill.
 ```
 
-**Confabulation resistance** checks output against stored facts before claims are recorded. No LLM call. Pattern matching against the fact corpus, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
+**Confabulation resistance** checks stored claims against existing facts before new memory entries are recorded. No LLM call. Pattern matching against the fact corpus, with confidence scoring and contradiction detection. Unsupported claims are flagged, contradictions surface in diagnostics, and a confabulation risk score is attached to the stored episode.
 
 Set `compositor.hyperformProfile` to `light`, `standard`, or `full`. For tier selection guidance, configuration details, and custom entry creation, see **[Tuning](#tuning)** below and **[docs/TUNING.md](./docs/TUNING.md)**.
 
@@ -287,7 +287,15 @@ No configuration required for any of these:
 
 ## Speed
 
-Benchmarked against a production database: 5,104 facts, 28,441 episodes, 847 knowledge entries, 42MB. 1,000 iterations, 50 warmup discarded, single-process isolation.
+HyperMem ships a user-facing benchmark so operators can validate local memory access speed against their own dataset:
+
+```bash
+hypermem-bench --iterations 1000 --warmup 50 --agent main
+```
+
+The benchmark reports min, average, p50, p95, p99, and max timings for the storage paths present in the install: message hot-path lookups, session/conversation lookup, message FTS, facts, episodes, topics, fleet records, and doc chunks. It reads from `~/.openclaw/hypermem` by default, or from `HYPERMEM_DATA_DIR` / `--data-dir`.
+
+Reference run, production database: 5,104 facts, 28,441 episodes, 847 knowledge entries, 42MB, 1,000 iterations, 50 warmup discarded, single-process isolation.
 
 | Operation | avg | p50 | p95 |
 |---|---|---|---|
@@ -299,9 +307,10 @@ Benchmarked against a production database: 5,104 facts, 28,441 episodes, 847 kno
 | L4 FTS5 + agentId filter | 0.07ms | 0.06ms | 0.10ms |
 | L4 knowledge query | 0.09ms | 0.08ms | 0.14ms |
 | Recency decay scoring (28 rows, in JS) | 0.003ms | 0.002ms | 0.005ms |
-> Query planner uses compound indexes on agentId + sort key; FTS5 performance improved 25% from baseline after index additions despite a 47% increase in stored data.
 
-L1 and L4 structured retrieval are sub-millisecond. Vector embeddings are computed asynchronously after the assistant replies and cached in the in-memory layer, not on the primary composition call path. Users never wait for an embedding computation.
+L1 and L4 structured retrieval are sub-millisecond on this dataset. Vector embeddings are computed asynchronously after the assistant replies and cached for later recall; hosted reranker latency depends on the chosen provider and is measured separately from SQLite access timings.
+
+For reproducible commands and interpretation notes, see **[docs/DIAGNOSTICS.md](./docs/DIAGNOSTICS.md#memory-access-benchmark)**.
 
 ---
 
@@ -326,13 +335,18 @@ The Plugin column is the npm package name. The ID column is what goes in `plugin
 
 Retrieval follows a fixed pipeline on every compose call:
 
-1. **Trigger registry** fires first. Nine pattern triggers check for exact-match shortcuts. If one hits, scoped FTS5 prefix queries (`word1* OR word2*`) run against L4 collections and return immediately.
-2. **Semantic fallback** fires when no trigger matches. Bounded hybrid retrieval runs FTS5 + KNN in parallel, then merges via Reciprocal Rank Fusion (RRF). BM25 ranks and KNN cosine distances combine into a single ordered result.
-3. **Noise floor** filters anything below RRF 0.008 before it reaches the compositor.
+1. **Active facts** are ranked by confidence and recency.
+2. **Temporal retrieval** runs when the query has time signals.
+3. **Open-domain retrieval** handles broad exploratory queries over indexed memory.
+4. **Knowledge and preference blocks** add structured library context.
+5. **Hybrid semantic recall** runs FTS5 and KNN/vector search, then merges candidates with Reciprocal Rank Fusion (RRF).
+6. **Optional reranking** reorders fused candidates when a reranker is configured. Supported providers include ZeroEntropy, OpenRouter, and Ollama. If the reranker is absent, fails, times out, or has too few candidates, HyperMem keeps the original RRF order.
+7. **Trigger-based doc retrieval** pulls doctrine, policy, and workspace chunks by trigger match, with semantic fallback on misses.
+8. **Session-scoped spawn context** and **cross-session context** are added when relevant.
 
-FTS5 queries use compound indexes on `agentId + sort key` and prefix optimization (3+ chars, capped at 8 terms, OR queries). These indexes yielded a 25% read improvement over baseline despite a 47% increase in stored data.
+Diagnostics expose reranker status, candidate count, and provider, so operators can tell whether a turn used RRF only or reranked retrieval. FTS5 queries use compound indexes on `agentId + sort key` and prefix optimization (3+ chars, capped at 8 terms, OR queries).
 
-### Retrieval pipeline
+### Library and fleet data
 
 **L4: Library DB.** Per-agent storage can't hold shared knowledge. Facts established by one agent, wiki pages synthesized from cross-agent topics, shared registry state: these belong to the system, not one agent. One shared SQLite database:
 
@@ -378,7 +392,7 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
        │
   keystone guard ──► high-signal turns survive pressure
        │
-  hyperform ──► output normalization directives
+  hyperform ──► output profile directives
        │
   composed prompt
        │
@@ -393,20 +407,19 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.8.5.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
+**Current release: hypermem 0.8.8.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
 
 | Requirement | Version | Notes |
 |---|---|---|
 | **Node.js** | `>=22.0.0` | Required for native `node:sqlite` module |
-| **better-sqlite3** | `^11.x` | Installed automatically via npm; powers L1 in-memory and L4 library |
 | **sqlite-vec** | `0.1.9` | Bundled; no separate install needed |
 
-SQLite is a library, not a service. All four layers run in-process with no external daemons. The nomic embedder on Ollama is the heaviest component, and it is lighter than pgvector or any hosted vector database.
+SQLite is a library, not a service. All four layers run in-process with no external database daemon. Embeddings are optional: use no embeddings for FTS-only lightweight mode, Ollama for local embeddings, or a hosted provider such as OpenRouter/Gemini when configured.
 
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.8.5'
+  ENGINE_VERSION,        // '0.8.8'
   MIN_NODE_VERSION,      // '22.0.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
   MAIN_SCHEMA_VERSION,   // 10 (messages.db)
@@ -420,88 +433,36 @@ Schema versions are stamped into each database on startup and checked on open. A
 
 ## Installation
 
-**Requirements:** Node.js 22+, OpenClaw with context engine plugin support. No standalone SQLite install needed (uses Node 22 built-in `node:sqlite`). Embedding provider is optional for first install.
+**Requirements:** Node.js 22+, OpenClaw with context engine plugin support. No standalone SQLite install is needed because HyperMem uses Node 22 `node:sqlite`. Embeddings are optional on first install.
 
-hypermem works two ways:
-- **As a library** — import directly into your own Node.js code. No OpenClaw required.
-- **As an OpenClaw plugin** — replaces the default context engine. Requires a running OpenClaw gateway.
+README is OpenClaw-first. For non-OpenClaw library usage, see **[INSTALL.md § Non-OpenClaw usage](./INSTALL.md#non-openclaw-usage)**.
 
-### Library usage (no OpenClaw required)
-
-```bash
-npm install @psiclawops/hypermem
-```
-
-```typescript
-import { HyperMem } from '@psiclawops/hypermem';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
-
-const hm = await HyperMem.create({
-  dataDir: join(homedir(), '.openclaw', 'hypermem'),
-  embedding: { provider: 'none' },
-});
-
-await hm.recordUserMessage('my-agent', 'session-1', 'Hello');
-const composed = await hm.compose({
-  agentId: 'my-agent',
-  sessionKey: 'session-1',
-  prompt: 'Hello',
-  tokenBudget: 4000,
-  provider: 'anthropic',
-});
-```
-
-That's it. No gateway, no plugins, no config files. See [API](#api) for the full interface.
-
-### OpenClaw plugin install
-
-For the full operator procedure, use `INSTALL.md` as the canonical guide. README keeps the short path and install-state model here so users know what "installed" actually means.
-
-**Install contract:** HyperMem plugin install has 4 distinct states. Treat them separately.
-
-1. **Package installed**: `npm install @psiclawops/hypermem`
-2. **Runtime staged**: `npx hypermem-install` or `npm run install:runtime`
-3. **OpenClaw wired**: plugin paths, slots, and optional allowlist merged into config
-4. **Runtime verified active**: gateway restarted, plugins loaded, compose logs visible
-
-If you only finish step 2, HyperMem is **not installed yet**. It is only staged.
-
-> **Release note:** if the npm package you installed does not contain `hypermem-install`, `install:runtime`, and `hypermem-model-audit`, you are on an older public release. Use the source-clone path below or wait for the next npm release.
-
-#### Path A: npm package, recommended for operators
+### OpenClaw quickstart
 
 ```bash
 npm install @psiclawops/hypermem
 npx hypermem-install
 ```
 
-`hypermem-install` stages the runtime payload into `~/.openclaw/plugins/hypermem`. It does **not** modify OpenClaw config and does **not** restart the gateway.
+`hypermem-install` stages the runtime payload into `~/.openclaw/plugins/hypermem`. It does **not** modify OpenClaw config and does **not** restart the gateway. HyperMem is active only after OpenClaw is wired, restarted, and compose activity appears in logs.
 
-#### Path B: source clone, recommended for contributors
+Install states:
 
-```bash
-git clone https://github.com/PsiClawOps/hypermem.git
-cd hypermem
-npm install && npm run build
-npm --prefix plugin install && npm --prefix plugin run build
-npm --prefix memory-plugin install && npm --prefix memory-plugin run build
-npm run install:runtime
-```
+| State | Meaning |
+|---|---|
+| Package installed | npm package is present |
+| Runtime staged | plugin payload copied into `~/.openclaw/plugins/hypermem` |
+| OpenClaw wired | `plugins.load.paths`, `plugins.slots.contextEngine`, and `plugins.slots.memory` point at HyperMem |
+| Runtime loaded | gateway restarted and both plugins loaded |
+| Runtime active | logs show `hypermem initialized` and compose activity |
 
-Both install paths converge here. The runtime payload is now staged under `~/.openclaw/plugins/hypermem`, but HyperMem is still **not active** until OpenClaw is wired and restarted.
-
-#### Step 1, write the starter config
-
-Before wiring the plugins, create the data directory and write the current recommended starter config:
+Minimal starter config for lightweight FTS-only mode:
 
 ```bash
 mkdir -p ~/.openclaw/hypermem
 cat > ~/.openclaw/hypermem/config.json <<'JSON'
 {
-  "embedding": {
-    "provider": "none"
-  },
+  "embedding": { "provider": "none" },
   "compositor": {
     "budgetFraction": 0.55,
     "contextWindowReserve": 0.25,
@@ -520,81 +481,26 @@ cat > ~/.openclaw/hypermem/config.json <<'JSON'
 JSON
 ```
 
-This keeps a fresh install in lightweight embedding mode while also applying the current recommended lean compositor baseline for OpenClaw operators. Add an embedding provider later for semantic search without losing stored data. See [INSTALL.md](./INSTALL.md#embedding-providers) and [docs/TUNING.md](./docs/TUNING.md) for adjustments.
-
-#### Step 2, inspect current OpenClaw plugin config
+Then merge the staged plugin paths into OpenClaw config and set the slots:
 
 ```bash
 openclaw config get plugins.load.paths
 openclaw config get plugins.allow
-```
 
-Record what is already there. You are going to **merge**, not replace.
-
-#### Step 3, wire the plugins into OpenClaw
-
-> **⚠️  Merge, don't overwrite.** If you already have values in `plugins.load.paths` or `plugins.allow`, check them first and include your existing entries alongside the new ones. Replacing the list drops whatever was there before.
->
-> ```bash
-> openclaw config get plugins.allow
-> openclaw config get plugins.load.paths
-> ```
-
-```bash
-# Use a variable to avoid shell quote-escaping issues with $HOME:
 HYPERMEM_PATHS="[\"${HOME}/.openclaw/plugins/hypermem/plugin\",\"${HOME}/.openclaw/plugins/hypermem/memory-plugin\"]"
 openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
-# If you have existing load paths, merge them into the array in HYPERMEM_PATHS.
-
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
 
-# Only set plugins.allow if your OpenClaw config already uses an allowlist.
-# If `openclaw config get plugins.allow` returns null, empty, or unset, skip this step.
-# If it returns an array, copy that array and append "hypercompositor" and "hypermem".
+# Only if your install already uses plugins.allow: merge, do not replace.
 openclaw config set plugins.allow '["existing-plugin","hypercompositor","hypermem"]' --strict-json
 
 openclaw gateway restart
+openclaw plugins list
+hypermem-status --health
 ```
 
-Do **not** replace a working `plugins.allow` list with only `['hypercompositor','hypermem']`. That can disable bundled CLI surfaces and channel plugins.
-
-If `plugins.allow` is unset, null, or empty, leave it alone. Do **not** create a new allowlist unless your OpenClaw install already uses one.
-
-#### Step 4, restart the gateway
-
-```bash
-openclaw gateway restart
-```
-
-#### Step 5, verify install state
-
-Verification should answer which state you are in, not just whether one command succeeded.
-
-| State | What it means | How to verify |
-|---|---|---|
-| Runtime staged | files copied into plugin runtime dir | `ls ~/.openclaw/plugins/hypermem` |
-| Wired | OpenClaw config points at HyperMem | `openclaw config get plugins.slots.contextEngine`, `openclaw config get plugins.slots.memory` |
-| Loaded | gateway actually loaded both plugins | `openclaw plugins list` |
-| Healthy but empty | plugin active, no real session data yet | `node bin/hypermem-status.mjs --health` may report no sessions ingested |
-| Active | HyperMem is composing live turns | `openclaw logs --limit 50 | grep hypermem` shows compose activity |
-
-Run these commands from the repo clone directory when using `bin/hypermem-status.mjs`, because `bin/` is a relative path:
-
-```bash
-openclaw plugins list                    # hypercompositor and hypermem should show as loaded
-node bin/hypermem-status.mjs --health    # confirms database initialization
-openclaw logs --limit 50 | grep hypermem # should show "hypermem initialized"
-```
-
-Expected first-run outcomes:
-
-- `openclaw plugins list` shows `hypercompositor` and `hypermem` loaded
-- `node bin/hypermem-status.mjs --health` may say `no sessions ingested` on a fresh install, which is normal
-- logs should show `hypermem initialized`
-- logs should show compose activity after you send a real message to any agent
-
-If you see `falling back to default engine "legacy"` in the logs, the install is **not active**. Check [INSTALL.md troubleshooting](./INSTALL.md#troubleshooting-clean-installs).
+Full install, upgrade, source-clone, embedding provider, reranker, fleet config, and rollback guidance lives in **[INSTALL.md](./INSTALL.md)**.
 
 ### One-line installer
 
@@ -602,9 +508,7 @@ If you see `falling back to default engine "legacy"` in the logs, the install is
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-Shell installer: installs the npm package, backs up and stages the OpenClaw runtime, preserves existing config, and prints merge-safe activation commands. It does not edit OpenClaw config or restart the gateway.
-
-Full guide with installation states, merge-safe config wiring, embedding tiers, reranker setup, fleet config, and tuning: **[INSTALL.md](./INSTALL.md)**
+The shell installer stages the runtime and prints merge-safe activation commands. It does not edit OpenClaw config or restart the gateway.
 
 ### Agent-assisted install
 
@@ -675,74 +579,22 @@ Full reference: **[docs/TUNING.md](./docs/TUNING.md)**
 
 ---
 
-## API
+## API and CLI references
 
-> **Note:** The examples below use placeholder agent names (`my-agent`, `agent1`, etc.). Replace these with your actual agent IDs from your OpenClaw config. Single-agent installs typically use `main`. Multi-agent fleets use whatever IDs you've configured. See [INSTALL.md § "Configure your fleet"](./INSTALL.md#step-5--configure-your-fleet-multi-agent-only) for details.
+README keeps the interface surface short. Use the detailed docs for exact examples and release validation commands.
 
-```typescript
-import { HyperMem } from '@psiclawops/hypermem';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
+**Runtime API:** import `HyperMem` from `@psiclawops/hypermem` for direct Node.js use, custom tests, and non-OpenClaw integrations. See **[INSTALL.md § Non-OpenClaw usage](./INSTALL.md#non-openclaw-usage)** and package TypeScript declarations for the current interface.
 
-const hm = await HyperMem.create({
-  dataDir: join(homedir(), '.openclaw', 'hypermem'),
-  cache: { maxEntries: 10000 },
-  // Local (Ollama):
-  embedding: { ollamaUrl: 'http://localhost:11434', model: 'nomic-embed-text' },
-  // Hosted (OpenRouter), recommended for installs without local GPU/CPU:
-  // embedding: { provider: 'openai', openaiApiKey: 'sk-or-...', openaiBaseUrl: 'https://openrouter.ai/api/v1', model: 'qwen/qwen3-embedding-8b', dimensions: 4096, batchSize: 128 },
-});
-
-// Record and compose
-await hm.recordUserMessage('my-agent', 'agent:my-agent:webchat:main', 'How does drift detection work?');
-
-const composed = await hm.compose({
-  agentId: 'my-agent',
-  sessionKey: 'agent:my-agent:webchat:main',
-  prompt: 'How does drift detection work?',
-  tokenBudget: 4000,
-  provider: 'anthropic',
-});
-
-// Refresh tool compression after each turn
-await hm.refreshCacheGradient('my-agent', 'agent:my-agent:webchat:main');
-```
-
-Spawning a subagent with parent context:
-
-```typescript
-import { buildSpawnContext, MessageStore, DocChunkStore } from '@psiclawops/hypermem';
-
-const spawn = await buildSpawnContext(
-  new MessageStore(hm.dbManager.getMessageDb('my-agent')),
-  new DocChunkStore(hm.dbManager.getLibraryDb()),
-  'my-agent',
-  { parentSessionKey: 'agent:my-agent:webchat:main', workingSnapshot: 12 }
-);
-```
-
----
-
-## CLI
-
-`bin/hypermem-status.mjs` provides health checks and metrics from the command line:
+**Operator CLIs:**
 
 ```bash
-node bin/hypermem-status.mjs              # full dashboard
-node bin/hypermem-status.mjs --agent my-agent   # scoped to one agent
-node bin/hypermem-status.mjs --json          # machine-readable output
-node bin/hypermem-status.mjs --health        # health checks only (exit 1 on failure)
+hypermem-status --health
+hypermem-status --master
+hypermem-model-audit --strict
+hypermem-bench --iterations 1000 --warmup 50 --agent main
 ```
 
-By default, `hypermem-status` looks for data in `~/.openclaw/hypermem`. If your data directory is elsewhere (e.g. testing in an isolated environment), set:
-
-```bash
-HYPERMEM_DATA_DIR=/path/to/data node bin/hypermem-status.mjs --health
-```
-
-> **Fresh install note:** If no agent has run a session yet, `--health` will report "no sessions ingested" rather than a database error. This is expected. Send a test message to any agent, then re-run the health check.
-
----
+Diagnostics and validation details: **[docs/DIAGNOSTICS.md](./docs/DIAGNOSTICS.md)** and **[docs/INTEGRATION_VALIDATION.md](./docs/INTEGRATION_VALIDATION.md)**.
 
 ## Pressure management
 
@@ -804,7 +656,7 @@ Operator guide: **[docs/MIGRATION_GUIDE.md](./docs/MIGRATION_GUIDE.md)**
 
 ## Identity layer
 
-hypermem handles context and output normalization. The Agentic Cognitive Architecture handles identity: self-authored SOUL files, structured communication contracts, and identity persistence across sessions. Same team, complementary layers.
+hypermem handles context assembly and output-profile shaping. The Agentic Cognitive Architecture handles identity: self-authored SOUL files, structured communication contracts, and identity persistence across sessions. Same team, complementary layers.
 
 Design guide: [PsiClawOps/AgenticCognitiveArchitecture](https://github.com/PsiClawOps/AgenticCognitiveArchitecture/)
 

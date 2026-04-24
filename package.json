@@ -8,7 +8,8 @@
   "bin": {
     "hypermem-status": "bin/hypermem-status.mjs",
     "hypermem-install": "scripts/install-runtime.mjs",
-    "hypermem-model-audit": "bin/hypermem-model-audit.mjs"
+    "hypermem-model-audit": "bin/hypermem-model-audit.mjs",
+    "hypermem-bench": "bin/hypermem-bench.mjs"
   },
   "exports": {
     ".": {
@@ -37,7 +38,8 @@
     "sync-public": "node scripts/sync-public.mjs",
     "validate:docs": "node scripts/validate-docs.mjs",
     "validate:config": "node scripts/validate-config-surface.mjs",
-    "validate:version-parity": "node scripts/validate-version-parity.mjs"
+    "validate:version-parity": "node scripts/validate-version-parity.mjs",
+    "bench:memory": "node bench/data-access-bench.mjs --iterations 1000 --warmup 50"
   },
   "dependencies": {
     "sqlite-vec": "^0.1.9",
@@ -60,6 +62,9 @@
     "dist/**/*.d.ts.map",
     "bin/hypermem-status.mjs",
     "bin/hypermem-model-audit.mjs",
+    "bench/README.md",
+    "bench/data-access-bench.mjs",
+    "bin/hypermem-bench.mjs",
     "plugin/dist/**",
     "plugin/package.json",
     "plugin/openclaw.plugin.json",
