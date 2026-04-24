@@ -56,6 +56,15 @@ export {
   resolveTrimBudgets,
 } from './budget-policy.js';
 
+export {
+  resolveAdaptiveLifecyclePolicy,
+} from './adaptive-lifecycle.js';
+export type {
+  AdaptiveLifecycleBand,
+  AdaptiveLifecycleInput,
+  AdaptiveLifecyclePolicy,
+} from './adaptive-lifecycle.js';
+
 // ── Phase C0.2: Canonical degradation contracts ───────────────────────────────
 export {
   // Reason enum + all values

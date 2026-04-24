@@ -70,15 +70,15 @@ Remaining closeout work:
 Rule: no new warm-restore expansion before these gates are closed. Failing CI tied to warm restore is a closeout blocker, not generic backlog.
 
 ## 2. HyperMem 0.9.0 adaptive context lifecycle
-Once warm-restore gates are closed, the next major workstream is 0.9.0 adaptive context lifecycle:
-- tiered warming
-- T0 `/new` breadcrumb package
-- smart-recall surge
-- adaptive trim and compaction bands
-- topic-centroid-guided eviction
-- telemetry and tuning pass
+Now active. The first slice lands the pure adaptive lifecycle policy kernel so compose, afterTurn, recall, trim, compaction, and eviction can share one pressure-band decision source instead of growing independent heuristics:
+- tiered warming — policy bands: bootstrap, warmup, steady, elevated, high, critical
+- T0 `/new` breadcrumb package — bootstrap policy emits the package trigger
+- smart-recall surge — `/new` and confident topic shifts widen recall; high/critical pressure gates it down
+- adaptive trim and compaction bands — trim and compaction targets resolve from the same lifecycle band
+- topic-centroid-guided eviction — enabled only once pressure reaches elevated or worse
+- telemetry and tuning pass — policy returns stable band, pressure, and reason fields for later runtime instrumentation
 
-This remains the next major roadmap block, but it is no longer competing with reranker or Sprint 1-4 work. Those are already done.
+Next slices wire this policy into compose diagnostics, afterTurn refresh, recall breadth, and eviction order.
 
 ## 3. Contradiction-aware decay
 After 0.9.0 lifecycle work:
