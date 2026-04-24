@@ -56,9 +56,11 @@ Warm restore moved ahead of the earlier draft order and is now a partially lande
 ## 1. Validate and close remaining warm-restore gates
 Warm restore is the highest-priority unfinished stream because code is already in the tree.
 
+Closed in warm-restore gate closeout:
+- repair notice placement and non-suppressibility: repair notices are emitted as system context above restored/history content even when budget is exhausted.
+- repair-depth cap enforcement: repaired snapshots are capped at depth 1 and cannot become restore sources.
+
 Remaining closeout work:
-- repair notice placement and non-suppressibility
-- repair-depth cap enforcement
 - cross-provider assistant-turn policy
 - `slots_json` integrity-hash verification end to end
 - parity telemetry and rollout gates for automatic restore

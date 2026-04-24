@@ -9,6 +9,7 @@ import {
   listCompositionSnapshots,
   verifyCompositionSnapshot,
   getLatestValidCompositionSnapshot,
+  MAX_WARM_RESTORE_REPAIR_DEPTH,
 } from '../dist/composition-snapshot-store.js';
 
 function createDb() {
@@ -108,6 +109,25 @@ describe('composition snapshot store', () => {
     assert.deepEqual(snapshots.map(s => s.model), ['m3', 'm2']);
   });
 
+
+  it('rejects snapshots above the warm-restore repair-depth cap', () => {
+    const db = createDb();
+    const convId = insertConversation(db, 'forge', 'agent:forge:webchat:repair-depth-cap');
+    const ctx = getOrCreateActiveContext(db, 'forge', 'agent:forge:webchat:repair-depth-cap', convId);
+
+    assert.equal(MAX_WARM_RESTORE_REPAIR_DEPTH, 1);
+    assert.throws(() => {
+      insertCompositionSnapshot(db, {
+        contextId: ctx.id,
+        model: 'm1',
+        contextWindow: 1000,
+        totalTokens: 100,
+        fillPct: 0.1,
+        repairDepth: MAX_WARM_RESTORE_REPAIR_DEPTH + 1,
+        slots: { stable_prefix: { source: 'hydrated', refs: ['identity'] } },
+      });
+    }, /repair_depth must be an integer between 0 and 1/);
+  });
 
   it('skips repaired snapshots when resolving the latest valid snapshot', () => {
     const db = createDb();

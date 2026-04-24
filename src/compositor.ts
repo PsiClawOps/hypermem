@@ -59,6 +59,7 @@ import {
   insertCompositionSnapshot,
   getLatestValidCompositionSnapshot,
   listCompositionSnapshots,
+  MAX_WARM_RESTORE_REPAIR_DEPTH,
 } from './composition-snapshot-store.js';
 import {
   buildCompositionSnapshotSlots,
@@ -1882,6 +1883,34 @@ export class Compositor {
       remaining -= tokens;
     }
 
+    const repairNoticeContent = await this.getSlotContent(
+      request.agentId,
+      request.sessionKey,
+      'repair_notice',
+      db
+    );
+
+    // ─── Warm-Restore Repair Notice (never suppressed) ─────────
+    // If a session was reconstructed from a snapshot, the repair notice must
+    // stay above restored conversation content even under budget pressure.
+    // This mirrors the system/identity invariant: history and memory slots may
+    // be trimmed, but the provenance notice is not optional operational state.
+    if (repairNoticeContent) {
+      const tokens = estimateTokens(repairNoticeContent);
+      messages.push({
+        role: 'system',
+        textContent: repairNoticeContent,
+        toolCalls: null,
+        toolResults: null,
+        metadata: { warmRestoreRepairNotice: true },
+      });
+      slots.system += tokens;
+      remaining -= tokens;
+      if (remaining < 0) {
+        warnings.push('Warm-restore repair notice exceeded budget but was retained as non-suppressible system context');
+      }
+    }
+
     // ─── Stable Output Profile Prefix ──────────────────────────
     // Keep deterministic output instructions on the static side of the cache
     // boundary so Anthropic and OpenAI warm-prefix caching can reuse them.
@@ -1929,27 +1958,6 @@ export class Compositor {
           slots.system += stableOutputTokens;
           remaining -= stableOutputTokens;
         }
-      }
-    }
-
-    const repairNoticeContent = await this.getSlotContent(
-      request.agentId,
-      request.sessionKey,
-      'repair_notice',
-      db
-    );
-
-    if (repairNoticeContent) {
-      const tokens = estimateTokens(repairNoticeContent);
-      if (tokens <= remaining) {
-        messages.push({
-          role: 'system',
-          textContent: repairNoticeContent,
-          toolCalls: null,
-          toolResults: null,
-        });
-        slots.system += tokens;
-        remaining -= tokens;
       }
     }
 
@@ -3379,7 +3387,7 @@ export class Compositor {
           totalTokens,
           fillPct: totalWindow > 0 ? Math.round((totalTokens / totalWindow) * 10000) / 10000 : 0,
           snapshotKind: 'composed_window',
-          repairDepth: repairNoticeContent ? 1 : 0,
+          repairDepth: repairNoticeContent ? MAX_WARM_RESTORE_REPAIR_DEPTH : 0,
           slots: buildCompositionSnapshotSlots({
             system: systemContent,
             identity: identityContent,
@@ -3495,7 +3503,7 @@ export class Compositor {
               `Source provider: ${sourceProvider}. Target provider: ${targetProvider}.`,
               `Cross-model boundary: ${sourceModel !== targetModel ? 'yes' : 'no'}.`,
               `Cross-provider boundary: ${restored.diagnostics.crossProviderBoundary ? 'yes' : 'no'}.`,
-              'Repair depth: 1.',
+              `Repair depth: ${MAX_WARM_RESTORE_REPAIR_DEPTH}.`
             ];
 
             if (latestSnapshot.fallbackUsed) {

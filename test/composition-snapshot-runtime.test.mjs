@@ -210,6 +210,40 @@ describe('composition snapshot runtime wiring', () => {
     assert.match(repairedSnapshots[0].slotsJson, /"repair_notice"/);
   });
 
+  it('compose keeps the repair notice above restored content even when budget is exhausted', async () => {
+    const { hm, compositor, agentId, sessionKey, msgDb, libDb } = await createHarness();
+    const repairNotice = 'Repair notice: non-suppressible repaired continuation provenance.';
+
+    await hm.cache.setSlot(agentId, sessionKey, 'system', 'budget-filling system prompt '.repeat(40));
+    await hm.cache.setSlot(agentId, sessionKey, 'identity', 'budget-filling identity '.repeat(20));
+    await hm.cache.setSlot(agentId, sessionKey, 'repair_notice', repairNotice);
+
+    const result = await compositor.compose({
+      agentId,
+      sessionKey,
+      tokenBudget: 60,
+      model: 'claude-opus-4-6',
+      provider: 'anthropic',
+      includeHistory: true,
+      includeFacts: false,
+      includeContext: false,
+      includeLibrary: false,
+      includeSemanticRecall: false,
+      includeDocChunks: false,
+      skipProviderTranslation: true,
+      skipWindowCache: true,
+    }, msgDb, libDb);
+
+    const repairIndex = result.messages.findIndex(message => message.textContent === repairNotice);
+    const firstNonSystemIndex = result.messages.findIndex(message => message.role !== 'system');
+
+    assert.ok(repairIndex >= 0, 'repair notice survives exhausted budget');
+    assert.equal(result.messages[repairIndex].role, 'system');
+    assert.equal(result.messages[repairIndex].metadata?.warmRestoreRepairNotice, true);
+    assert.ok(firstNonSystemIndex === -1 || repairIndex < firstNonSystemIndex, 'repair notice stays above restored/history content');
+    assert.ok(result.warnings.some(warning => /repair notice exceeded budget/.test(warning)));
+  });
+
   it('cross-provider restore quotes assistant turns and flags tool-pair gaps explicitly', async () => {
     const { hm, compositor, agentId, sessionKey, msgDb, convId, now } = await createHarness();
     const context = getOrCreateActiveContext(msgDb, agentId, sessionKey, convId);

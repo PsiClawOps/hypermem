@@ -49,6 +49,8 @@ export interface LatestValidCompositionSnapshot {
   fallbackUsed: boolean;
 }
 
+export const MAX_WARM_RESTORE_REPAIR_DEPTH = 1;
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -83,12 +85,21 @@ function normalizeSlots(slots: SnapshotSlotsRecord | string): SnapshotSlotsRecor
   return normalized;
 }
 
+function normalizeRepairDepth(repairDepth: number | undefined): number {
+  const normalized = repairDepth ?? 0;
+  if (!Number.isInteger(normalized) || normalized < 0 || normalized > MAX_WARM_RESTORE_REPAIR_DEPTH) {
+    throw new Error(`composition snapshot repair_depth must be an integer between 0 and ${MAX_WARM_RESTORE_REPAIR_DEPTH}`);
+  }
+  return normalized;
+}
+
 export function insertCompositionSnapshot(
   db: DatabaseSync,
   input: InsertCompositionSnapshotInput,
 ): CompositionSnapshotRecord {
   const capturedAt = input.capturedAt ?? nowIso();
   const createdAt = input.createdAt ?? capturedAt;
+  const repairDepth = normalizeRepairDepth(input.repairDepth);
   const normalizedSlots = normalizeSlots(input.slots);
   const slotsJson = canonicalizeSnapshotJson(normalizedSlots);
   const slotsIntegrityHash = computeSlotsIntegrityHash(normalizedSlots);
@@ -119,7 +130,7 @@ export function insertCompositionSnapshot(
     input.totalTokens,
     input.fillPct,
     input.snapshotKind ?? 'full',
-    input.repairDepth ?? 0,
+    repairDepth,
     slotsJson,
     slotsIntegrityHash,
     createdAt,
@@ -182,7 +193,8 @@ export function getLatestValidCompositionSnapshot(
   db: DatabaseSync,
   contextId: number,
 ): LatestValidCompositionSnapshot | null {
-  const candidates = listCompositionSnapshots(db, contextId, 2).filter(snapshot => snapshot.repairDepth <= 0);
+  const candidates = listCompositionSnapshots(db, contextId, 2)
+    .filter(snapshot => snapshot.repairDepth < MAX_WARM_RESTORE_REPAIR_DEPTH);
   for (let i = 0; i < candidates.length; i++) {
     const snapshot = candidates[i];
     const verification = verifyCompositionSnapshot(snapshot);
