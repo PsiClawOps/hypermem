@@ -6,15 +6,19 @@
  *
  * Collections:
  *   1. Library entries (versioned docs, specs, reference material)
- *   2. Facts (agent-learned truths)
+ *   2. Facts (agent-learned truths with confidence, visibility, temporal validity)
  *   3. Preferences (behavioral patterns)
- *   4. Knowledge (structured domain knowledge, supersedable)
- *   5. Episodes (significant events)
- *   6. Fleet registry (agents, orgs)
- *   7. System registry (server state, config)
- *   8. Session registry (lifecycle tracking)
- *   9. Work items (fleet kanban)
- *  10. Topics (cross-session thread tracking)
+ *   4. Knowledge/wiki (structured domain knowledge, supersedable topic syntheses)
+ *   5. Episodes (significant events, decisions, discoveries)
+ *   6. Topics (cross-session thread tracking)
+ *   7. Knowledge graph links (relationships between facts, knowledge, topics, episodes)
+ *   8. Fleet registry (agents, orgs, capabilities)
+ *   9. Desired state and config events (drift detection)
+ *  10. System registry and work items (server state, work queues, events)
+ *  11. Session registry and lifecycle events
+ *  12. Document sources/chunks and trigger retrieval metadata
+ *  13. Output standards, model directives, and output metrics
+ *  14. Temporal index, expertise patterns, contradiction audits, and indexer watermarks
  */
 
 import { DatabaseSync } from 'node:sqlite';

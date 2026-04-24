@@ -226,35 +226,22 @@ Set `compositor.hyperformProfile` to `light`, `standard`, or `full`. For tier se
 
 ## What it solves
 
-### Tool output that doesn't take over
+Every problem below maps to a specific HyperMem subsystem. This is not one omnibus memory bucket. Storage, retrieval, composition, pressure control, and output shaping are separate components with separate failure modes.
 
-Agentic sessions generate massive tool output. Left unmanaged, old results crowd out current reasoning. hypermem compresses tool history by age: recent clusters stay full, older clusters are capped, and the oldest collapse to short stubs while preserving tool call/result integrity. The budget goes to current work, not last hour's npm test output.
-
-### Knowledge that outlasts the conversation
-
-Most memory systems store what was said. hypermem synthesizes what was learned.
-
-When a topic goes quiet, hypermem compiles the thread into a structured wiki page: decisions, open questions, artifacts, participants. When the topic resurfaces, the agent gets a compact structured summary rather than a raw history replay.
-
-OpenClaw 2026.4.7 ships memory wiki for structured storage. hypermem goes further: wiki pages are synthesized automatically and injected by the compositor within token budget, backed by SQLite memory databases instead of an external cache service.
-
-### Subagents that hit the ground running
-
-Spawned subagents inherit a bounded context block: recent parent turns, session-scoped documents, and relevant facts. Scope is isolated from the shared library. Documents are cleaned up on completion.
-
-### Context that doesn't repeat itself
-
-Retrieval paths pull from four layers, trigger shortcuts, temporal indexes, open-domain FTS5, semantic recall, and cross-session summaries. Without dedup, the same fact surfaces through multiple paths and wastes budget on repetition.
-
-hypermem runs content fingerprint dedup across all compose-time retrieval. Every fact, temporal result, open-domain hit, and semantic recall entry is normalized and fingerprinted on a 120-char prefix. O(1) lookup in a shared set catches duplicates regardless of which retrieval path produced them, including rephrased near-duplicates that substring matching missed. Diagnostics track dedup counts and fingerprint collisions per compose call.
-
-Identity content (SOUL.md, USER.md, IDENTITY.md) and doc chunks already injected by OpenClaw's bootstrap are fingerprinted before retrieval runs, so the compositor never double-injects content the runtime already placed in the prompt.
-
-### Integrity under failure
-
-The background indexer runs a startup integrity check against `library.db` on every boot. If the schema is corrupt, tables are missing, or critical indexes are damaged, the indexer enters circuit-breaker mode: it logs the failure, skips indexing for the session, and avoids cascading writes into a broken database. The agent still runs with cached and in-memory data while the operator is notified.
-
-SQL queries that interpolate datetime values are fully parameterized. FTS5 trigger terms are quoted to prevent injection through crafted content. These aren't theoretical: agentic sessions ingest arbitrary user and tool output into the fact store, and unparameterized queries on that path were a real attack surface.
+| Problem | Component that solves it | How it works |
+|---|---|---|
+| New sessions forget prior decisions | **L2 History + L4 Library DB + session warming** | Turns are recorded to per-agent SQLite, durable facts/episodes/knowledge are written to `library.db`, and startup warming reloads recent history, active facts, topics, and cached semantic state before the first reply. |
+| Context windows fill with stale transcript | **hypercompositor budget allocator** | Each turn is freshly composed from 10 slots instead of appending forever. Old content stays in storage when it does not fit this turn, so pressure becomes a selection problem instead of a data-loss event. |
+| Tool output crowds out reasoning | **Tool gradient + pair-integrity guard** | Tool calls and results are clustered atomically. Recent tool turns stay full, older results are capped or stubbed, and call/result pairs survive or drop together. |
+| Topic work disappears after the conversation moves on | **Topic tracker + topic synthesizer** | Quiet topics compile into structured wiki pages with decisions, open questions, artifacts, and participants. When the topic returns, the compositor can inject the summary instead of replaying raw history. |
+| Retrieval repeats the same fact through multiple paths | **Compose-time fingerprint dedup** | Facts, temporal hits, open-domain hits, doc chunks, semantic recall, and bootstrap content are normalized into fingerprints before insertion. Duplicates are skipped before they spend prompt budget. |
+| Relevant memory uses different words than the user | **L3 vectors + hybrid retrieval + reranker** | FTS5 finds exact matches, sqlite-vec finds semantic matches, RRF fuses both result sets, and an optional reranker reorders fused candidates with graceful fallback. |
+| Time-sensitive questions need temporal grounding | **Temporal index** | Facts with temporal markers are indexed separately, so “last week,” “before the release,” and similar queries use time-range retrieval rather than generic keyword search. |
+| Governance and doctrine should appear on triggers, not every turn | **Doc chunks + trigger registry** | Chunked docs are linked to trigger phrases. The compositor pulls the relevant doctrine or workspace guidance only when the current turn activates it. |
+| Subagents start cold | **Spawn context builder** | Subagents receive a bounded handoff: recent parent turns, session-scoped documents, and relevant facts. The scope is isolated and cleaned up after completion. |
+| Shared fleet knowledge needs visibility controls | **L4 Library DB + cross-agent visibility policy + secret scanner** | Facts, knowledge, episodes, topics, preferences, fleet registry, desired state, output standards, and audits live in shared SQLite with private/org/council/fleet visibility. Shared-visible writes are scanned for secrets and downgraded if needed. |
+| Output drifts across models | **HyperForm output profiles** | Prompt-time output directives inject fleet writing standards and optional per-model corrections. This steers generation; it is not a deterministic post-generation rewrite engine. |
+| Memory corruption should not cascade | **Background indexer integrity gate** | Startup integrity checks validate `library.db`. If schema or index damage is detected, indexing enters circuit-breaker mode and avoids writing into a broken database. |
 
 ---
 
@@ -352,16 +339,19 @@ Diagnostics expose reranker status, candidate count, and provider, so operators 
 
 | Collection | What it holds |
 |---|---|
-| Facts | Claims with confidence scoring, domain, expiry, supersedes chains |
-| Knowledge | Domain/key/value structured data with full-text search |
-| Episodes | Significant events with impact scores and participant tracking |
-| Topics | Cross-session thread tracking and synthesized wiki pages |
-| Preferences | Operator behavioral patterns |
-| Fleet Registry | Agent registry with tier, org, and capability metadata |
-| System Registry | Service state and lifecycle |
-| Work Items | Work queue with status transitions and FTS5 |
-| Session Registry | Session lifecycle tracking |
-| Desired State | Per-agent config targets; compares running config against desired at gateway startup and surfaces drift for operator review |
+| Facts | Claims with confidence, visibility, decay, temporal validity, and supersession chains |
+| Knowledge / wiki | Domain knowledge and synthesized topic pages with full-text search |
+| Episodes | Significant events, decisions, discoveries, participants, and source links |
+| Topics | Cross-session thread tracking and topic lifecycle state |
+| Preferences | Operator and agent behavior patterns |
+| Documents | Chunked workspace/governance docs, doc sources, and trigger retrieval metadata |
+| Knowledge graph | Links between facts, knowledge, topics, episodes, agents, and preferences |
+| Fleet registry | Agents, orgs, tiers, capabilities, and fleet topology |
+| Desired state | Per-agent config targets, config events, and drift detection |
+| System / work state | Service state, system events, work items, and work events |
+| Sessions | Session registry, lifecycle events, and extraction counters |
+| Output standards | Fleet output standards, model directives, and output metrics |
+| Temporal / expertise / audits | Temporal index, expertise patterns, contradiction audits, and indexer watermarks |
 
 Facts are ranked by `confidence × recencyDecay`, where decay is exponential with a configurable half-life: recent, high-confidence facts float to the top while stale entries yield budget to newer knowledge.
 
