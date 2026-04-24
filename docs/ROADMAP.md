@@ -63,8 +63,9 @@ Remaining closeout work:
 - `slots_json` integrity-hash verification end to end
 - parity telemetry and rollout gates for automatic restore
 - explicit zero-tolerance checks for required-slot loss, stable-prefix violations, and tool-pair parity
+- CI commit-data review for every failing warm-restore-related GitHub Actions run before sprint scope is finalized. The review must map failing workflow run, head commit SHA, commit title, failing step, and failing assertion back to a roadmap gate or triage item.
 
-Rule: no new warm-restore expansion before these gates are closed.
+Rule: no new warm-restore expansion before these gates are closed. Failing CI tied to warm restore is a closeout blocker, not generic backlog.
 
 ## 2. HyperMem 0.9.0 adaptive context lifecycle
 Once warm-restore gates are closed, the next major workstream is 0.9.0 adaptive context lifecycle:
@@ -144,3 +145,44 @@ The following overlapping roadmap/spec files were consolidated into this roadmap
 - `specs/CONTRADICTION_AWARE_DECAY.md`
 
 Their useful content is now represented here.
+
+---
+
+## Historical triage appendix
+
+This appendix is the cleanup pass for older improvement lists that were still floating around in the repo and workspace.
+
+### Triage legend
+- **SHIPPED**: landed in release code or on `main`
+- **OPEN**: still active in the canonical roadmap above
+- **BACKLOG**: valid idea, but not in the current active execution order
+- **SUPERSEDED**: replaced by a later implementation or a narrower canonical item above
+
+### Historical improvement triage
+
+| Historical item | First appeared in | Disposition | Canonical location / note |
+|---|---|---|---|
+| End-to-end integration verification | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **SHIPPED** | Closed by the 0.8.0 release-hardening verification work. |
+| Real gateway integration test | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **SHIPPED** | Closed by the 0.8.0 release-hardening verification work. |
+| Fact contradiction handling | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **SHIPPED** | Landed as V19 tiered contradiction resolution in 0.8.0. |
+| Post-retrieval reranking | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **SHIPPED** | Already landed on `main`; no longer roadmap future work. |
+| Oversized-payload artifact handling | workspace `active/hypermem-prioritized-improvements-2026-04-14.md`, workspace `specs/HYPERMEM_PLAN_2026-04-16.md` | **SHIPPED** | Landed in the 0.8.0 correctness cluster. |
+| Model-aware compositor budgeting | workspace `active/hypermem-prioritized-improvements-2026-04-14.md`, workspace `specs/HYPERMEM_PLAN_2026-04-16.md` | **SHIPPED** | Landed as B4 model-aware budgeting in 0.8.0. |
+| Benchmark suite completion | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **BACKLOG** | Still valid, but not part of the current active execution order. |
+| Trust-aware composition / prompt-boundary hygiene | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **SUPERSEDED** | Survives only as narrower work inside warm-restore gates and future lifecycle tuning. |
+| Fleet agent seeding on startup | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **SHIPPED** | Closed in 0.8.0 startup completeness work. |
+| Governance and workspace doc ingestion | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **BACKLOG** | Not an active HyperMem improvement priority right now. |
+| Prompt-cache validation | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **SUPERSEDED** | Replaced by shipped cache-boundary work and current warm-restore parity gates. |
+| Cross-seat and org-visible fact sharing | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **BACKLOG** | Still deferred pending stronger write-auth and provenance rules. |
+| Knowledge extraction expansion | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **BACKLOG** | Valid future work, not in the current active sequence. |
+| memory-core deprecation path | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **BACKLOG** | Deferred until the current roadmap blocks are complete. |
+| ACA kernel reduction | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **BACKLOG** | Deferred. |
+| Phase A stability block (duplicate compose, trim ownership, rescue-trim loop, history depth) | workspace `specs/HYPERMEM_PLAN_2026-04-16.md` | **SUPERSEDED** | Historical restructuring plan. Remaining active work is tracked only through the canonical sections above. |
+| Phase B compositor restructure | workspace `specs/HYPERMEM_PLAN_2026-04-16.md` | **SUPERSEDED** | Do not treat as a second roadmap. Re-open only by adding a new item above. |
+| Phase C correctness guards | workspace `specs/HYPERMEM_PLAN_2026-04-16.md`, `specs/RELEASE_HARDENING_0.8.0.md` | **SHIPPED** | Landed in 0.8.0. |
+| Phase D graph semantics follow-on | workspace `specs/HYPERMEM_PLAN_2026-04-16.md` | **SUPERSEDED** | Turn DAG follow-on now lives only as item 4 in the canonical roadmap. |
+| Turn DAG Phase 5 storage/perf | `specs/TURN_DAG_MIGRATION_SPEC.md`, `specs/HYPERBUILDER_PHASE4_BRIEF.md` | **OPEN** | Canonical roadmap item 4. |
+
+### Rule after this cleanup
+
+If an older workspace note or historical spec lists future work that does not also appear in the main roadmap sections above, treat it as historical context only, not an active plan.
