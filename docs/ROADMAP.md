@@ -25,6 +25,18 @@ In the order work actually landed:
 7. `27046b7` composition snapshot integrity helpers
 8. `748c418` composition snapshot store and schema
 9. `1bf4785` repaired warm restore snapshot path
+10. `99b2e61` CI commit-data review for warm-restore gate closeout
+11. `7acec79` stable-prefix CI regression test stabilization
+12. `ef37137` missing doc-chunk source pruning during seeding
+13. `2c0fd7a` legacy keystone preservation under active context
+14. `e931524` warm-restore repair gates
+15. `87a4be9` snapshot slot integrity verification
+16. `31d07a6` warm-restore auto-rollout parity gates
+17. `eeedccf` cross-provider warm-restore policy
+18. `a03dc01` HyperMem governance trigger coverage
+19. `c94def0` adaptive lifecycle policy kernel
+20. `0d33286` doctrine-first retrieval over stale memory folklore
+21. `322a416` adaptive lifecycle diagnostics wiring
 
 ### What changed in planning
 We had overlapping planning streams for:
@@ -53,8 +65,10 @@ These are complete enough to stop planning around as future work:
 
 Warm restore moved ahead of the earlier draft order and is now a partially landed capability, not a hypothetical future-only item.
 
-## 1. Validate and close remaining warm-restore gates
-Warm restore is the highest-priority unfinished stream because code is already in the tree.
+## 1. Warm-restore gate closeout
+Status: **DONE for the tracked gate-closeout scope.**
+
+Warm restore moved ahead of the earlier draft order and became a partially landed capability. The gate-closeout stream is no longer the highest-priority unfinished work.
 
 Closed in warm-restore gate closeout:
 - repair notice placement and non-suppressibility: repair notices are emitted as system context above restored/history content even when budget is exhausted.
@@ -64,13 +78,17 @@ Closed in warm-restore gate closeout:
 - explicit zero-tolerance checks for required-slot loss, stable-prefix violations, and tool-pair parity: all three conditions are rollout blockers.
 - cross-provider assistant-turn policy: foreign-provider assistant turns are explicitly counted and block automatic warm restore with a zero-tolerance rollout gate. User turns may restore cross-provider only when all measurement gates pass.
 
-Remaining closeout work:
-- CI commit-data review for every failing warm-restore-related GitHub Actions run before sprint scope is finalized. The review must map failing workflow run, head commit SHA, commit title, failing step, and failing assertion back to a roadmap gate or triage item.
+Final closeout work now complete:
+- CI commit-data review for every failing warm-restore-related GitHub Actions run before sprint scope is finalized. The review maps failing workflow run, head commit SHA, commit title, failing step, and failing assertion back to a roadmap gate or triage item.
 
-Rule: no new warm-restore expansion before these gates are closed. Failing CI tied to warm restore is a closeout blocker, not generic backlog.
+Rule going forward: do not reopen warm restore from historical planning notes. New warm-restore work needs a fresh defect, measurement gap, or roadmap item.
 
 ## 2. HyperMem 0.9.0 adaptive context lifecycle
-Now active. The first slice lands the pure adaptive lifecycle policy kernel so compose, afterTurn, recall, trim, compaction, and eviction can share one pressure-band decision source instead of growing independent heuristics:
+Status: **OPEN, active.**
+
+The first slices have landed: the pure adaptive lifecycle policy kernel and compose diagnostics wiring. The remaining work is runtime behavior, not more planning archaeology.
+
+The lifecycle policy makes compose, afterTurn, recall, trim, compaction, and eviction share one pressure-band decision source instead of growing independent heuristics:
 - tiered warming — policy bands: bootstrap, warmup, steady, elevated, high, critical
 - T0 `/new` breadcrumb package — bootstrap policy emits the package trigger
 - smart-recall surge — `/new` and confident topic shifts widen recall; high/critical pressure gates it down
@@ -78,7 +96,24 @@ Now active. The first slice lands the pure adaptive lifecycle policy kernel so c
 - topic-centroid-guided eviction — enabled only once pressure reaches elevated or worse
 - telemetry and tuning pass — policy returns stable band, pressure, and reason fields for later runtime instrumentation
 
-Next slices wire this policy into compose diagnostics, afterTurn refresh, recall breadth, and eviction order.
+Done in this stream:
+- adaptive lifecycle policy kernel
+- compose diagnostics wiring
+
+Remaining slices:
+- afterTurn refresh integration
+- recall breadth adjustment
+- eviction order tuning
+- runtime telemetry/tuning based on observed pressure behavior
+
+Do not confuse this with the shipped governance-retrieval work. Governance trigger retrieval is closed unless a new regression appears.
+
+## 2a. Runtime diagnostics API allowlist defect
+Status: **OPEN, defect.**
+
+`openclaw doctor --non-interactive` after the doctrine-retrieval rollout exposed that doctor memory repair and recall audit cannot reach `memory-core/runtime-api.js` because the bundled plugin public surface blocks it by allowlist.
+
+This is not part of adaptive lifecycle tuning, but it is operationally adjacent: broken diagnostics make pressure and recall work harder to verify. Fix this before relying on doctor output as proof for lifecycle changes.
 
 ## 3. Contradiction-aware decay
 After 0.9.0 lifecycle work:
@@ -105,10 +140,11 @@ Phase 5 stays important, but it is not the next sprint until the higher-priority
 ### High priority
 | Item | Status | Notes |
 |---|---|---|
-| Warm-restore gate closeout | 🟡 OPEN | Highest-priority unfinished stream because implementation already landed partially. |
-| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Next major feature block after warm-restore closeout. |
+| Runtime diagnostics API allowlist defect | 🟡 OPEN | Doctor memory repair and recall audit cannot reach `memory-core/runtime-api.js`; fix before treating doctor recall output as authoritative. |
+| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Active lifecycle work; kernel and diagnostics are landed, runtime behavior slices remain. |
 | Contradiction-aware decay | 🟡 OPEN | Prevents stale-fact poisoning after architectural pivots. |
 | Turn DAG Phase 5 storage/perf | 🟡 OPEN | Important, but later than the items above. |
+| Warm-restore gate closeout | ✅ DONE | Tracked gate-closeout scope is complete; reopen only for a new concrete defect or measurement gap. |
 
 ### Medium priority
 | Item | Status | Notes |
@@ -123,8 +159,8 @@ Phase 5 stays important, but it is not the next sprint until the higher-priority
 |---|---|---|
 | Plugin type unification | 🟡 DEFERRED | Structural cleanup, not urgent product work. |
 | Strict topic mode legacy NULL backfill | 🟡 DEFERRED | Wait for stable topic coverage before running the migration/backfill. |
-| ACA Step 4 retrieval stubs replace static files | 🔲 PENDING | Future governance/context assembly work. |
-| ACA Step 5 governance context assembly | 🔲 PENDING | Depends on Step 4. |
+| ACA Step 4 retrieval stubs replace static files | 🔲 PENDING | Still relevant, but downstream of lifecycle/diagnostics stability. Do not start from older ACA notes. |
+| ACA Step 5 governance context assembly | 🔲 PENDING | Still relevant, but depends on Step 4. Do not start until Step 4 has an accepted implementation contract. |
 
 ---
 
@@ -173,17 +209,19 @@ This appendix is the cleanup pass for older improvement lists that were still fl
 | Benchmark suite completion | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **BACKLOG** | Still valid, but not part of the current active execution order. |
 | Trust-aware composition / prompt-boundary hygiene | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **SUPERSEDED** | Survives only as narrower work inside warm-restore gates and future lifecycle tuning. |
 | Fleet agent seeding on startup | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **SHIPPED** | Closed in 0.8.0 startup completeness work. |
-| Governance and workspace doc ingestion | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **BACKLOG** | Not an active HyperMem improvement priority right now. |
+| Governance and workspace doc ingestion | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **SUPERSEDED** | Broad ingestion work was replaced by scoped governance trigger retrieval, doctrine-first ranking, and later ACA Step 4/5 items. Do not reopen the broad item. |
 | Prompt-cache validation | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **SUPERSEDED** | Replaced by shipped cache-boundary work and current warm-restore parity gates. |
 | Cross-seat and org-visible fact sharing | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **BACKLOG** | Still deferred pending stronger write-auth and provenance rules. |
 | Knowledge extraction expansion | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **BACKLOG** | Valid future work, not in the current active sequence. |
 | memory-core deprecation path | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **BACKLOG** | Deferred until the current roadmap blocks are complete. |
-| ACA kernel reduction | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **BACKLOG** | Deferred. |
+| ACA kernel reduction | workspace `active/hypermem-prioritized-improvements-2026-04-14.md` | **SUPERSEDED** | Broad kernel-reduction framing is replaced by adaptive lifecycle 0.9.0 and later ACA Step 4/5 work. |
 | Phase A stability block (duplicate compose, trim ownership, rescue-trim loop, history depth) | workspace `specs/HYPERMEM_PLAN_2026-04-16.md` | **SUPERSEDED** | Historical restructuring plan. Remaining active work is tracked only through the canonical sections above. |
 | Phase B compositor restructure | workspace `specs/HYPERMEM_PLAN_2026-04-16.md` | **SUPERSEDED** | Do not treat as a second roadmap. Re-open only by adding a new item above. |
 | Phase C correctness guards | workspace `specs/HYPERMEM_PLAN_2026-04-16.md`, `specs/RELEASE_HARDENING_0.8.0.md` | **SHIPPED** | Landed in 0.8.0. |
 | Phase D graph semantics follow-on | workspace `specs/HYPERMEM_PLAN_2026-04-16.md` | **SUPERSEDED** | Turn DAG follow-on now lives only as item 4 in the canonical roadmap. |
 | Turn DAG Phase 5 storage/perf | `specs/TURN_DAG_MIGRATION_SPEC.md`, `specs/HYPERBUILDER_PHASE4_BRIEF.md` | **OPEN** | Canonical roadmap item 4. |
+| ACA governance trigger retrieval | direct roadmap follow-up, commits `a03dc01` and `0d33286` | **SHIPPED** | Governance trigger coverage and doctrine-first retrieval are done. Reopen only for a new failing query or regression test. |
+| Adaptive lifecycle diagnostics | direct roadmap follow-up, commits `c94def0` and `322a416` | **SHIPPED** | Kernel and compose diagnostics wiring landed. Remaining lifecycle behavior stays under roadmap item 2, not a separate historical activity. |
 
 ### Rule after this cleanup
 
