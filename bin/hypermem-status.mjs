@@ -259,6 +259,7 @@ function collectMasterHealth(libraryDb, vectorDb, mainDb) {
   const factsTotal = safeGet(libraryDb, `SELECT COUNT(*) AS count FROM facts WHERE 1=1 ${agentClause}`, params)?.count ?? 0;
   const factsActive = safeGet(libraryDb, `SELECT COUNT(*) AS count FROM facts WHERE superseded_by IS NULL AND decay_score < 0.8 ${agentClause}`, params)?.count ?? 0;
   const episodesTotal = safeGet(libraryDb, `SELECT COUNT(*) AS count FROM episodes WHERE 1=1 ${agentClause}`, params)?.count ?? 0;
+  const episodesEligible = safeGet(libraryDb, `SELECT COUNT(*) AS count FROM episodes WHERE significance >= 0.5 ${agentClause}`, params)?.count ?? 0;
   const knowledgeActive = safeGet(libraryDb, `SELECT COUNT(*) AS count FROM knowledge WHERE superseded_by IS NULL ${agentClause}`, params)?.count ?? 0;
   const docChunks = safeGet(libraryDb, `SELECT COUNT(*) AS count FROM doc_chunks WHERE 1=1 ${agentClause}`, params)?.count ?? 0;
 
@@ -296,6 +297,7 @@ function collectMasterHealth(libraryDb, vectorDb, mainDb) {
         FROM vec_index_map m
         JOIN library.episodes e ON e.id = m.source_id
         WHERE m.source_table = 'episodes'
+          AND e.significance >= 0.5
           AND e.agent_id = ?`, params)?.count ?? 0;
       knowledgeIndexed = safeGet(vectorDb, `
         SELECT COUNT(*) AS count
@@ -340,7 +342,8 @@ function collectMasterHealth(libraryDb, vectorDb, mainDb) {
         SELECT COUNT(*) AS count
         FROM vec_index_map m
         JOIN library.episodes e ON e.id = m.source_id
-        WHERE m.source_table = 'episodes'`)?.count ?? 0;
+        WHERE m.source_table = 'episodes'
+          AND e.significance >= 0.5`)?.count ?? 0;
       knowledgeIndexed = safeGet(vectorDb, `
         SELECT COUNT(*) AS count
         FROM vec_index_map m
@@ -351,7 +354,7 @@ function collectMasterHealth(libraryDb, vectorDb, mainDb) {
   }
 
   const factCoverage = pct(factsIndexed, factsActive);
-  const episodeCoverage = pct(episodesIndexed, episodesTotal);
+  const episodeCoverage = pct(episodesIndexed, episodesEligible);
   const knowledgeCoverage = pct(knowledgeIndexed, knowledgeActive);
   const factStatus = statusForCoverage(factCoverage, 80);
   const episodeStatus = statusForCoverage(episodeCoverage, 80);
@@ -410,7 +413,7 @@ function collectMasterHealth(libraryDb, vectorDb, mainDb) {
     },
     memory: {
       facts: { total: factsTotal, active: factsActive },
-      episodes: { total: episodesTotal },
+      episodes: { total: episodesTotal, eligible: episodesEligible },
       knowledge: { active: knowledgeActive },
       docChunks: { total: docChunks },
       messages: messageStats,
@@ -420,7 +423,7 @@ function collectMasterHealth(libraryDb, vectorDb, mainDb) {
       byTable: vectorByTable,
       coverage: {
         facts: { indexed: factsIndexed, total: factsActive, percent: factCoverage, status: factStatus },
-        episodes: { indexed: episodesIndexed, total: episodesTotal, percent: episodeCoverage, status: episodeStatus },
+        episodes: { indexed: episodesIndexed, total: episodesEligible, percent: episodeCoverage, status: episodeStatus },
         knowledge: { indexed: knowledgeIndexed, total: knowledgeActive, percent: knowledgeCoverage, status: knowledgeStatus },
       },
       oldestIndexedAt,
@@ -469,7 +472,7 @@ function formatMasterHealth(h) {
   lines.push('');
   lines.push('## Memory data');
   lines.push(`  facts:    ${h.memory.facts.active.toLocaleString()} retrieval-eligible / ${h.memory.facts.total.toLocaleString()} total`);
-  lines.push(`  episodes: ${h.memory.episodes.total.toLocaleString()}`);
+  lines.push(`  episodes: ${h.memory.episodes.eligible.toLocaleString()} significant / ${h.memory.episodes.total.toLocaleString()} total`);
   lines.push(`  knowledge:${String(h.memory.knowledge.active.toLocaleString()).padStart(7)} active`);
   lines.push(`  chunks:   ${h.memory.docChunks.total.toLocaleString()}`);
   lines.push(`  messages: ${h.memory.messages.totalMessages.toLocaleString()} across ${h.memory.messages.agentsWithMessages} agent DBs${h.memory.messages.newestMessageAt ? `, newest ${h.memory.messages.newestMessageAt}` : ''}`);

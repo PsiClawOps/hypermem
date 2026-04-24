@@ -28,6 +28,14 @@ function assert(condition, msg) {
   }
 }
 
+function composedText(result) {
+  const contextBlock = result.contextBlock || '';
+  const messageText = (result.messages || [])
+    .map(m => typeof m.content === 'string' ? m.content : (m.textContent || ''))
+    .join('\n');
+  return `${contextBlock}\n${messageText}`;
+}
+
 async function run() {
   console.log('═══════════════════════════════════════════════════');
   console.log('  HyperMem Phase 1 Compose Validation');
@@ -74,7 +82,7 @@ async function run() {
       assert(result.diagnostics !== undefined, 'F1: diagnostics present');
       assert((result.diagnostics?.factsIncluded ?? 0) >= 1,
         `F1: factsIncluded >= 1 (got ${result.diagnostics?.factsIncluded})`);
-      const ctx = result.contextBlock || '';
+      const ctx = composedText(result);
       assert(ctx.includes('COMPOSE_VAL_FACT_1') || ctx.includes('rollback'),
         'F1: rollback fact appears in context');
     }
@@ -89,7 +97,7 @@ async function run() {
       });
 
       assert(result.diagnostics !== undefined, 'F2: diagnostics present');
-      const ctx = result.contextBlock || '';
+      const ctx = composedText(result);
       const hasKnowledge = ctx.includes('COMPOSE_VAL_KNOWLEDGE') || ctx.includes('ops-lead sign-off');
       assert(hasKnowledge || (result.diagnostics?.factsIncluded ?? 0) >= 1,
         `F2: knowledge or facts surfaced (facts=${result.diagnostics?.factsIncluded})`);

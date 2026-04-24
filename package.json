@@ -22,6 +22,8 @@
   },
   "scripts": {
     "build": "tsc",
+    "health": "node bin/hypermem-status.mjs --master",
+    "health:master": "node bin/hypermem-status.mjs --master",
     "install:runtime": "node scripts/install-runtime.mjs",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",

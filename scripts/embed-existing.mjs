@@ -1,12 +1,12 @@
 /**
  * embed-existing.mjs — One-time bulk embedding migration
  *
- * Embeds all existing clean facts and high-significance episodes
+ * Embeds all existing clean facts and significant episodes
  * into vectors.db. Supports Ollama (local) and OpenAI-compatible
  * providers (OpenRouter, OpenAI) via hypermem config.
  *
  * Usage:
- *   node scripts/embed-existing.mjs [--dry-run] [--batch-size 32] [--table facts|episodes|all]
+ *   node scripts/embed-existing.mjs [--dry-run] [--batch-size 32] [--table facts|episodes|all] [--limit N]
  *
  * Safe to re-run: skips items already embedded (content hash check).
  * NOTE: If switching providers/models, clear vectors.db first —
@@ -258,8 +258,7 @@ if (TABLE === 'all' || TABLE === 'facts') {
 if (TABLE === 'all' || TABLE === 'episodes') {
   const episodes = libDb.prepare(`
     SELECT id, summary as content, event_type as domain FROM episodes
-    WHERE decay_score < 0.8
-    AND significance >= 0.7
+    WHERE significance >= 0.5
     ORDER BY significance DESC, id ASC
   `).all();
   await indexItems(episodes, 'episodes', 'vec_episodes');
