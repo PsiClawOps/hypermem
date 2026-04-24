@@ -57,7 +57,10 @@ export const TRIGGER_REGISTRY: CollectionTrigger[] = [
     keywords: [
       'escalat', 'policy', 'decision state', 'green', 'yellow', 'red',
       'council procedure', 'naming', 'mandate', 'compliance', 'governance',
-      'override', 'human review', 'irreversible',
+      'override', 'human review', 'irreversible', 'turn protocol',
+      'response contract', 'red lines', 'external action', 'public action',
+      'approval', 'authorization', 'single-name', 'single name',
+      'config change', 'infra change', 'backup', 'rollback', 'credential',
     ],
     maxTokens: 1500,
     maxChunks: 3,
@@ -69,7 +72,9 @@ export const TRIGGER_REGISTRY: CollectionTrigger[] = [
     collection: 'governance/charter',
     keywords: [
       'charter', 'mission', 'director', 'org', 'reporting', 'boundary',
-      'delegation', 'authority', 'jurisdiction',
+      'delegation', 'authority', 'jurisdiction', 'authority ceiling',
+      'scope ceiling', 'cross-charter', 'scaffolding', 'new agent',
+      'new role', 'operator authority',
     ],
     maxTokens: 1000,
     maxChunks: 2,
@@ -82,6 +87,7 @@ export const TRIGGER_REGISTRY: CollectionTrigger[] = [
     keywords: [
       'message', 'send', 'tier 1', 'tier 2', 'tier 3', 'async', 'dispatch',
       'sessions_send', 'inter-agent', 'protocol', 'comms', 'ping', 'notify',
+      'communication tiers', 'reply_to', 'steer', 'broadcast', 'no reply needed',
     ],
     maxTokens: 800,
     maxChunks: 2,
@@ -94,6 +100,8 @@ export const TRIGGER_REGISTRY: CollectionTrigger[] = [
     keywords: [
       'boot', 'startup', 'bootstrap', 'heartbeat', 'workqueue', 'checkpoint',
       'session start', 'roll call', 'memory recall', 'dispatch inbox',
+      'static context', 'dynamic context', 'prompt file', 'context split',
+      'hypermem context',
     ],
     maxTokens: 800,
     maxChunks: 2,
