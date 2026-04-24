@@ -72,7 +72,9 @@ OpenClaw also ships compaction safeguards and hybrid file search. That's a solid
 
 ## hypermem
 
-Four SQLite-backed memory databases, sub-millisecond retrieval, no external database services required. Runs in-process with local SQLite storage and local Nomic embeddings by default, with optional hosted embeddings for L3.
+OpenClaw gives agents a strong starting shape: identity files, user guidance, task framing, compaction safeguards, and hybrid file search. What it does not add by default is durable recall across session boundaries. When a useful decision falls out of the prompt and nobody hand-copied it into `MEMORY.md`, it is gone.
+
+hypermem closes that gap with four SQLite-backed memory layers that stay local, run in-process, and remain queryable across sessions. No external database service. No retrieval stack to babysit.
 
 | Layer | What it holds | Speed |
 |---|---|---|
@@ -81,36 +83,24 @@ Four SQLite-backed memory databases, sub-millisecond retrieval, no external data
 | **L3 Semantic** | Finds related content even when the words don't match. | 0.29ms |
 | **L4 Knowledge** | Facts, wiki pages, episodes, preferences. Shared across agents. | 0.09ms |
 
-Durable context is retained in SQLite and remains queryable across session boundaries. The retry logic decision from last week, the deployment preferences from last month, and the architecture choices from day one can be retrieved when they are relevant to the next prompt.
+Durable context stays in SQLite and remains queryable across session boundaries. The retry logic decision from last week, the deployment preferences from last month, and the architecture choices from day one can be pulled back in when they matter.
 
-What this adds to OpenClaw:
-
-- **Warm starts instead of blank restarts.** Before the first turn fires, hypermem pre-loads recent history, ranked facts, active topic context, and cached semantic state. The first reply starts from the last relevant working state instead of an empty transcript.
-- **Shared fleet memory.** Facts, knowledge, episodes, topics, preferences, docs, fleet registry, desired state, output standards, and audits live in `library.db` with private/org/council/fleet visibility controls.
-- **Recall across wording changes.** Exact FTS5 search, sqlite-vec semantic search, RRF fusion, and an optional reranker let the agent find relevant memory even when the user does not reuse the old phrasing.
-- **Temporal grounding.** Facts with time markers enter a temporal index, so questions like “last week” or “before the release” can use time-range retrieval instead of generic keyword search.
-- **Trigger-aware doctrine.** Chunked workspace and governance docs can be pulled when the current turn activates a trigger, instead of spending prompt budget every turn.
+That changes OpenClaw in a few concrete ways. Starts are warm instead of blank because recent history, ranked facts, active topics, and cached semantic state are loaded before the first turn. Recall survives wording drift because FTS5, sqlite-vec, RRF fusion, and an optional reranker can recover the same idea through different phrasing. Time-aware facts can answer “last week” and “before the release” as retrieval problems instead of vague prompt guessing. Shared knowledge stops living in one agent’s scratchpad because `library.db` holds facts, docs, episodes, preferences, fleet state, and output standards with visibility controls.
 
 ---
 
 ## hypercompositor
 
-Every memory system stores. Almost none compose.
+Storage is only half the problem. The harder question is what actually reaches the model.
 
-Your agent has four layers of stored context, but what shows up in the prompt? How much of the token budget goes to stale content? Who decides what's relevant to this specific turn?
+Most memory systems can save useful state. Far fewer can decide, turn by turn, what belongs in the prompt right now and what should stay on disk. Without that layer, long sessions bloat, tool output crowds out current work, and a larger context window just gives you more room to waste tokens.
 
-The hypercompositor queries all four layers in parallel on every turn and composes context within a fixed token budget. No transcript accumulates. No lossy transcript summarization. Amnesia isn't a storage problem; the memories exist, but nobody composed them into a coherent prompt. Compaction isn't inevitable; content that doesn't fit this turn stays in storage instead of being destroyed.
+hypercompositor queries all four memory layers in parallel, scores what matters for the current turn, and composes a fresh prompt inside a fixed budget. Content that does not fit is not destroyed. It stays in storage and can win its way back in when the topic returns.
 
-What this adds to OpenClaw:
+That changes OpenClaw at the prompt boundary. Selection replaces loss. Tool calls and results stay paired, recent turns stay readable, and older payloads compress by age instead of being flattened blindly. Quiet topics compile into structured wiki pages so the next turn can inject the decision trail without replaying raw transcript. Duplicate prompt spend drops because facts, doc chunks, semantic hits, and bootstrap content are fingerprinted before insertion. Subagents inherit a bounded handoff instead of a random slice of parent history.
 
-- **Selection instead of loss.** When the window is tight, old content remains in storage and loses the slot competition for this turn. It is not destroyed just because it was not selected.
-- **Tool output that stays useful.** Tool calls and results are clustered atomically. Recent tool turns stay full, older results are capped or stubbed, and call/result pairs survive or drop together.
-- **Topic continuity.** Quiet topics compile into structured wiki pages with decisions, open questions, artifacts, and participants. When the topic returns, the compositor can inject the summary instead of replaying raw history.
-- **No duplicate prompt spend.** Facts, temporal hits, open-domain hits, doc chunks, semantic recall, and bootstrap content are fingerprinted before insertion so the same material does not arrive through 3 retrieval paths.
-- **Subagents with context.** Spawned agents receive a bounded handoff: recent parent turns, session-scoped documents, and relevant facts, with isolated scope and cleanup after completion.
-
-**Bigger context windows don't help if you fill them with stale history.**
-128k tokens of stale history and irrelevant memory is worse than 32k of precisely selected content. 10 budget categories, priority-ordered, greedy-fill. Every token in the prompt earned its spot.
+**A bigger context window does not fix bad composition.**
+128k tokens of stale history is worse than 32k of selected context. hypercompositor treats prompt space as a constrained resource, not a dumping ground.
 
 ### What the model actually sees
 
@@ -177,15 +167,13 @@ For the full fill order, budget formula, and all configuration knobs, see **[Tun
 
 ## hyperform
 
-Raw model output has two problems. It drifts from your standards (sycophancy, hedging, pagination, formatting) and it drifts from your facts (confabulation, contradiction, stale claims). hyperform handles both at prompt time: output profiles inject writing standards into composed context, while confabulation resistance checks stored claims against what is actually in memory.
+Good memory is wasted if the model still writes like it has no standards.
 
-Consistent output is not just aesthetic. A model that paginates short answers, preambles with filler, or inflates lists uses more output tokens per turn. Over hundreds of turns, that compounds into real cost. hyperform profiles reduce that pressure by steering the model before generation, not by rewriting arbitrary output after the fact.
+OpenClaw can preserve identity and instruction. That does not guarantee consistent delivery. Models still drift into filler openings, hedging, bloated lists, pagination, and stale claims. Over long sessions that is not just annoying copy. It is token waste, weaker signal, and lower trust in what gets written back into memory.
 
-What this adds to OpenClaw:
+hyperform adds a writing contract at prompt time. Output profiles inject shared standards before generation. Model directives correct known provider habits. Confabulation resistance checks candidate claims against stored facts before new memory is recorded.
 
-- **Fleet-wide writing standards.** Behavior rules are injected as prompt context, so every model sees the same output contract before generation.
-- **Model-specific correction.** Optional model directives adjust known provider habits, such as verbosity, hedging, or list inflation.
-- **Claim discipline before memory writeback.** Confabulation resistance checks stored claims against existing facts before new entries are recorded, then surfaces contradictions in diagnostics.
+That gives OpenClaw something it does not get from raw prompting alone: fleet-wide writing discipline, model-aware correction, and tighter claim hygiene at the memory boundary. The point is not to post-process prose into something artificial. The point is to make the first draft cleaner, shorter, and harder to contaminate with unsupported claims.
 
 ### Behavior standards
 
