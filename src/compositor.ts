@@ -4366,8 +4366,11 @@ export class Compositor {
       };
 
       const fenceClause = fenceMessageId != null ? 'AND m.id >= ?' : '';
-      // Phase 3 (Turn DAG): prefer context_id scoping over conversation_id+fence
-      const contextClause = activeContext ? 'AND m.context_id = ?' : '';
+      // Phase 3 (Turn DAG): prefer context_id scoping, but keep legacy NULL
+      // rows eligible. Warmed or migrated sessions can have an active context
+      // while older messages predate context_id backfill; excluding NULL rows
+      // disables within-session keystone recall for those conversations.
+      const contextClause = activeContext ? 'AND (m.context_id = ? OR m.context_id IS NULL)' : '';
       const baseParams: (string | number | null)[] = [conversationId, cutoffId];
       if (fenceMessageId != null) baseParams.push(fenceMessageId);
       if (activeContext) baseParams.push(activeContext.id);
