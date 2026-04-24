@@ -178,6 +178,21 @@ export async function runCachePrefixStabilitySuite(assert) {
     assert(typeof b2Meta?.prefixInputHash === 'string' && b2Meta.prefixInputHash.length === 64,
       `B2: WindowCacheMeta.prefixInputHash is stored (${b2Meta?.prefixInputHash})`);
 
+    // Stamp cursor so getFreshWindowBundle sees the cache as fresh.
+    // The compose above may only include a subset of DB messages (e.g. warm
+    // snapshot restore), so cursor.lastSentId can fall behind the newest
+    // message ID. getFreshWindowBundle rejects bundles where
+    // cursor.lastSentId < newestMsgId, so we must align the cursor with
+    // the actual DB state.
+    const b2CursorRow = msgDb.prepare('SELECT MAX(id) AS maxId FROM messages WHERE agent_id = ?').get(agentId);
+    await hm.cache.setCursor(agentId, sessionKey, {
+      lastSentId: b2CursorRow.maxId,
+      lastSentIndex: b2First.messages.length,
+      lastSentAt: b2Meta.composedAt,
+      windowSize: b2First.messages.length,
+      tokenCount: b2First.tokenCount,
+    });
+
     // C4 fast-exit: with same inputs, volatile-only change should use cache
     // (adds a new message so cursor.lastSentId advances, which invalidates C4
     // via getFreshWindowBundle — this tests that cache IS invalidated correctly
