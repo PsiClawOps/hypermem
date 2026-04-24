@@ -192,4 +192,44 @@ describe('composition snapshot store', () => {
     assert.equal(resolved.snapshot.model, 'm1');
     assert.equal(resolved.fallbackUsed, true);
   });
+
+  it('rejects a snapshot when the persisted slots_integrity_hash no longer matches slots_json', () => {
+    const db = createDb();
+    const convId = insertConversation(db, 'forge', 'agent:forge:webchat:persisted-hash');
+    const ctx = getOrCreateActiveContext(db, 'forge', 'agent:forge:webchat:persisted-hash', convId);
+
+    const previous = insertCompositionSnapshot(db, {
+      contextId: ctx.id,
+      model: 'm1',
+      contextWindow: 1000,
+      totalTokens: 100,
+      fillPct: 0.1,
+      capturedAt: '2026-04-22T10:00:00.000Z',
+      slots: { stable_prefix: { source: 'hydrated', refs: ['identity'] } },
+    });
+    const latest = insertCompositionSnapshot(db, {
+      contextId: ctx.id,
+      model: 'm2',
+      contextWindow: 1000,
+      totalTokens: 110,
+      fillPct: 0.11,
+      capturedAt: '2026-04-22T10:01:00.000Z',
+      slots: { stable_prefix: { source: 'hydrated', refs: ['identity', 'policy'] } },
+    });
+
+    db.prepare('UPDATE composition_snapshots SET slots_integrity_hash = ? WHERE id = ?')
+      .run('0'.repeat(64), latest.id);
+
+    const latestVerification = verifyCompositionSnapshot({
+      ...latest,
+      slotsIntegrityHash: '0'.repeat(64),
+    });
+    assert.equal(latestVerification.ok, false);
+    assert.equal(latestVerification.failures[0]?.reason, 'slots_hash_mismatch');
+
+    const resolved = getLatestValidCompositionSnapshot(db, ctx.id);
+    assert.ok(resolved);
+    assert.equal(resolved.snapshot.id, previous.id);
+    assert.equal(resolved.fallbackUsed, true);
+  });
 });

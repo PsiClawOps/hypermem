@@ -7,7 +7,7 @@ import path from 'node:path';
 import { HyperMem } from '../dist/index.js';
 import { Compositor } from '../dist/compositor.js';
 import { getActiveContext, getOrCreateActiveContext } from '../dist/context-store.js';
-import { insertCompositionSnapshot, listCompositionSnapshots } from '../dist/composition-snapshot-store.js';
+import { insertCompositionSnapshot, listCompositionSnapshots, verifyCompositionSnapshot } from '../dist/composition-snapshot-store.js';
 import {
   restoreWarmSnapshotState,
   WARM_RESTORE_MEASUREMENT_GATES,
@@ -84,6 +84,9 @@ describe('composition snapshot runtime wiring', () => {
     assert.equal(snapshots[0].snapshotKind, 'composed_window');
     assert.equal(snapshots[0].model, 'claude-opus-4-6');
     assert.ok(snapshots[0].totalTokens > 0);
+    const verification = verifyCompositionSnapshot(snapshots[0]);
+    assert.equal(verification.ok, true);
+    assert.equal(verification.actualSlotsHash, snapshots[0].slotsIntegrityHash);
     assert.match(snapshots[0].slotsJson, /"history"/);
     assert.match(snapshots[0].slotsJson, /"system"/);
     assert.match(snapshots[0].slotsJson, /"identity"/);
