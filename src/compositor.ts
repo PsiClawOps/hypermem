@@ -441,6 +441,8 @@ export function computeAdaptiveHistoryDepth(
 export const PRESSURE_SOURCE = {
   /** Compose path: pressure derived from (budget - remaining) after full slot assembly. */
   COMPOSE_POST_ASSEMBLY: 'compose:post-assembly',
+  /** Compose path: pressure measured immediately before semantic recall runs. */
+  COMPOSE_PRE_RECALL: 'compose:pre-recall',
   /** Compaction path: pressure from Redis token estimate / effectiveBudget. */
   COMPACT_REDIS_ESTIMATE: 'compact:redis-estimate',
   /** Compaction path: pressure from runtime-reported currentTokenCount / effectiveBudget. */
@@ -472,6 +474,56 @@ export function computeUnifiedPressure(
   const fraction = budgetTokens > 0 ? usedTokens / budgetTokens : 0;
   const pct = Math.round(fraction * 100);
   return { fraction, pct, source };
+}
+
+/**
+ * 0.9.0: adaptive lifecycle scales semantic-recall breadth in compose.
+ *
+ * Base fractions match the historical compositor constants so that a steady
+ * (multiplier=1.0) call reproduces prior behavior exactly. Candidate limit is
+ * clamped so even a critical-pressure pass keeps a usable retrieval window
+ * and a /new surge does not blow up hybrid search cost.
+ */
+export const RECALL_BREADTH_BASE = Object.freeze({
+  mainBudgetFraction: 0.12,
+  fallbackBudgetFraction: 0.10,
+  candidateLimit: 10,
+  candidateLimitMin: 6,
+  candidateLimitMax: 16,
+});
+
+export interface ScaledRecallBreadth {
+  mainBudgetTokens: number;
+  fallbackBudgetTokens: number;
+  candidateLimit: number;
+  multiplier: number;
+}
+
+/**
+ * Apply the adaptive lifecycle smartRecallMultiplier to recall breadth.
+ * Pure helper — does not read state or mutate anything. Steady multiplier=1
+ * preserves the historical (0.12, 0.10, limit=10) recall envelope.
+ */
+export function scaleRecallBreadth(
+  remainingTokens: number,
+  multiplier: number,
+): ScaledRecallBreadth {
+  const safeMultiplier = Number.isFinite(multiplier) && multiplier > 0 ? multiplier : 1;
+  const remaining = Math.max(0, Math.floor(remainingTokens || 0));
+  const mainBudgetTokens = Math.max(
+    0,
+    Math.floor(remaining * RECALL_BREADTH_BASE.mainBudgetFraction * safeMultiplier),
+  );
+  const fallbackBudgetTokens = Math.max(
+    0,
+    Math.floor(remaining * RECALL_BREADTH_BASE.fallbackBudgetFraction * safeMultiplier),
+  );
+  const limitRaw = Math.ceil(RECALL_BREADTH_BASE.candidateLimit * safeMultiplier);
+  const candidateLimit = Math.min(
+    RECALL_BREADTH_BASE.candidateLimitMax,
+    Math.max(RECALL_BREADTH_BASE.candidateLimitMin, limitRaw),
+  );
+  return { mainBudgetTokens, fallbackBudgetTokens, candidateLimit, multiplier: safeMultiplier };
 }
 
 const DEFAULT_CONFIG: CompositorConfig = {
@@ -2576,6 +2628,28 @@ export class Compositor {
     // Use request.prompt as the retrieval query when available — it is the
     // live current-turn text. Falling back to getLastUserMessage(messages)
     // reads from the already-assembled history, which is one turn stale.
+    // 0.9.0: resolve adaptive lifecycle policy immediately before semantic recall
+    // so smartRecallMultiplier scales the recall token budget and candidate limit
+    // from the same policy object that compose diagnostics later report.
+    const composePreRecallPressure = computeUnifiedPressure(
+      contextTokens,
+      budget,
+      PRESSURE_SOURCE.COMPOSE_PRE_RECALL,
+    );
+    const composeLifecyclePolicy = resolveAdaptiveLifecyclePolicy({
+      pressureFraction: composePreRecallPressure.fraction,
+      userTurnCount: sampleMessages.filter(m => m.role === 'user').length,
+      explicitNewSession: isExplicitNewSessionPrompt(
+        request.prompt ?? this.getLastUserMessage(messages),
+      ),
+    });
+    const recallBreadth = scaleRecallBreadth(
+      remaining,
+      composeLifecyclePolicy.smartRecallMultiplier,
+    );
+    let diagAdaptiveRecallBudgetTokens: number | undefined;
+    let diagAdaptiveRecallCandidateLimit: number | undefined;
+
     if (request.includeSemanticRecall !== false && remaining > 500 && (this.vectorStore || libDb)) {
       const lastUserMsg = request.prompt?.trim() || this.getLastUserMessage(messages);
       if (lastUserMsg) {
@@ -2589,10 +2663,14 @@ export class Compositor {
             // Redis lookup is best-effort — fall through to Ollama
           }
 
+          diagAdaptiveRecallBudgetTokens = recallBreadth.mainBudgetTokens;
+          diagAdaptiveRecallCandidateLimit = recallBreadth.candidateLimit;
+
           const semanticContent = await this.buildSemanticRecall(
             lastUserMsg,
             request.agentId,
-            Math.floor(remaining * 0.12), // Cap at 12% of remaining (W4: was 0.15)
+            // 0.9.0: recall token budget = base 0.12 of remaining * lifecycle multiplier.
+            recallBreadth.mainBudgetTokens,
             libDb || undefined,
             precomputedEmbedding,
             contextFingerprints,  // C2: skip results already in Active Facts
@@ -2602,6 +2680,7 @@ export class Compositor {
               diagRerankerCandidates = ev.candidates;
               diagRerankerProvider = ev.provider;
             },
+            recallBreadth.candidateLimit,
           );
           if (semanticContent) {
             const tokens = estimateTokens(semanticContent);
@@ -2762,20 +2841,28 @@ export class Compositor {
         if (docParts.length > 0) {
           volatileContextParts.push(docParts.join('\n\n'));
         }
-      } else if (remaining > 400 && (this.vectorStore || libDb)) {
+      } else if (request.includeSemanticRecall !== false && remaining > 400 && (this.vectorStore || libDb)) {
         // Trigger-miss fallback: no trigger fired — attempt bounded semantic retrieval
         // so there is never a silent zero-memory path on doc chunks.
         // INVARIANT: this block is mutually exclusive with triggered-retrieval above.
         // If refactored to run both paths, cap combined semantic budget to avoid double-recall.
         try {
+          // 0.9.0: trigger-miss fallback uses the same lifecycle-scaled breadth so
+          // a /new surge widens fallback recall and high/critical pressure narrows it.
+          if (diagAdaptiveRecallBudgetTokens === undefined) {
+            diagAdaptiveRecallBudgetTokens = recallBreadth.fallbackBudgetTokens;
+            diagAdaptiveRecallCandidateLimit = recallBreadth.candidateLimit;
+          }
           const fallbackContent = await Promise.race([
             this.buildSemanticRecall(
               lastMsg,
               request.agentId,
-              Math.floor(remaining * 0.10),
+              recallBreadth.fallbackBudgetTokens,
               libDb || undefined,
               undefined,
-              contextFingerprints  // C2: skip results already in Active Facts
+              contextFingerprints,  // C2: skip results already in Active Facts
+              undefined,
+              recallBreadth.candidateLimit,
             ),
             new Promise<null>((_, reject) =>
               setTimeout(() => reject(new Error('fallback_knn_timeout')), 3000)
@@ -3212,11 +3299,9 @@ export class Compositor {
       // Provider detection is best-effort — never block compose
     }
 
-    const composeLifecyclePolicy = resolveAdaptiveLifecyclePolicy({
-      pressureFraction: s3Pressure.fraction,
-      userTurnCount: sampleMessages.filter(m => m.role === 'user').length,
-      explicitNewSession: isExplicitNewSessionPrompt(request.prompt ?? this.getLastUserMessage(messages)),
-    });
+    // 0.9.0: lifecycle policy was resolved pre-recall and used to scale recall
+    // breadth. Diagnostics surface the same object so reported band/multiplier
+    // matches what actually controlled retrieval this compose pass.
 
     const diagnostics: import('./types.js').ComposeDiagnostics = {
       triggerHits: diagTriggerHits,
@@ -3275,6 +3360,8 @@ export class Compositor {
       adaptiveTopicCentroidEviction: composeLifecyclePolicy.enableTopicCentroidEviction,
       adaptiveProactiveCompaction: composeLifecyclePolicy.triggerProactiveCompaction,
       adaptiveLifecycleReasons: composeLifecyclePolicy.reasons,
+      adaptiveRecallBudgetTokens: diagAdaptiveRecallBudgetTokens,
+      adaptiveRecallCandidateLimit: diagAdaptiveRecallCandidateLimit,
       // C1: tool-chain ejection telemetry
       toolChainCoEjections: c1CoEjections > 0 ? c1CoEjections : undefined,
       toolChainStubReplacements: c1StubReplacements > 0 ? c1StubReplacements : undefined,
@@ -4065,9 +4152,28 @@ export class Compositor {
     precomputedEmbedding?: Float32Array,
     existingFingerprints?: Set<string>,  // C2: skip results already in Active Facts
     onRerankerTelemetry?: (ev: RerankerTelemetry) => void,  // Sprint 1: surface reranker status at assemble level
+    resultLimit?: number,  // 0.9.0: lifecycle-scaled candidate limit for hybrid + KNN-only fallback
   ): Promise<string | null> {
     const libDb = libraryDb || this.libraryDb;
     if (!libDb && !this.vectorStore) return null;
+
+    // 0.9.0: clamp the lifecycle-scaled candidate limit. Caller already clamps
+    // via scaleRecallBreadth; this is a defensive floor so direct callers (none
+    // outside compose today) cannot accidentally request 0 results.
+    const hybridLimit = Math.max(
+      RECALL_BREADTH_BASE.candidateLimitMin,
+      Math.min(
+        RECALL_BREADTH_BASE.candidateLimitMax,
+        Math.floor(resultLimit && resultLimit > 0 ? resultLimit : RECALL_BREADTH_BASE.candidateLimit),
+      ),
+    );
+    // KNN-only legacy fallback historically used 8 — keep it slightly below the
+    // hybrid limit to preserve prior behavior at multiplier=1, while still
+    // scaling with the same adaptive limit.
+    const knnFallbackLimit = Math.max(
+      RECALL_BREADTH_BASE.candidateLimitMin,
+      Math.min(RECALL_BREADTH_BASE.candidateLimitMax, hybridLimit - 2),
+    );
 
     // Inline fingerprint helper (mirrors compose-scope version; C2 dedup only used here)
     const fpCheck = existingFingerprints
@@ -4078,7 +4184,7 @@ export class Compositor {
     if (libDb) {
       const results = await hybridSearch(libDb, this.vectorStore, userMessage, {
         tables: ['facts', 'knowledge', 'episodes'],
-        limit: 10,
+        limit: hybridLimit,
         agentId,
         maxKnnDistance: 1.2,
         precomputedEmbedding,
@@ -4153,7 +4259,7 @@ export class Compositor {
 
     const results = await this.vectorStore.search(userMessage, {
       tables: ['facts', 'knowledge', 'episodes'],
-      limit: 8,
+      limit: knnFallbackLimit,
       maxDistance: 1.2,
       precomputedEmbedding,
     });

@@ -479,6 +479,10 @@ export interface ComposeDiagnostics {
   adaptiveProactiveCompaction?: boolean;
   /** Stable reason tags explaining the lifecycle decision. */
   adaptiveLifecycleReasons?: string[];
+  /** Token budget passed into the main semantic recall pass after lifecycle scaling. */
+  adaptiveRecallBudgetTokens?: number;
+  /** Hybrid candidate limit passed into semantic recall after lifecycle scaling. */
+  adaptiveRecallCandidateLimit?: number;
   // ── Sprint 4: Prompt placement + budget lanes + provider diagnostics ────────────────────────────────
   /**
    * Sprint 4: Explicit compositor budget lane allocations for this compose pass.
