@@ -1,12 +1,12 @@
 /**
  * embed-existing.mjs — One-time bulk embedding migration
  *
- * Embeds all existing clean facts and significant episodes
+ * Embeds all existing clean facts, active knowledge, and significant episodes
  * into vectors.db. Supports Ollama (local) and OpenAI-compatible
  * providers (OpenRouter, OpenAI) via hypermem config.
  *
  * Usage:
- *   node scripts/embed-existing.mjs [--dry-run] [--batch-size 32] [--table facts|episodes|all] [--limit N]
+ *   node scripts/embed-existing.mjs [--dry-run] [--coverage-report] [--batch-size 32] [--table facts|knowledge|episodes|all] [--limit N]
  *
  * Safe to re-run: skips items already embedded (content hash check).
  * NOTE: If switching providers/models, clear vectors.db first —
@@ -23,9 +23,16 @@ const require = createRequire(import.meta.url);
 // ── Args ──────────────────────────────────────────────────────
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes('--dry-run');
+const COVERAGE_REPORT = args.includes('--coverage-report');
 const TABLE = args.find((_, i) => args[i - 1] === '--table') ?? 'all';
 const BATCH_SIZE_ARG = parseInt(args.find((_, i) => args[i - 1] === '--batch-size') ?? '0') || 0;
 const LIMIT = parseInt(args.find((_, i) => args[i - 1] === '--limit') ?? '0') || 0;
+
+const VALID_TABLES = new Set(['facts', 'knowledge', 'episodes', 'all']);
+if (!VALID_TABLES.has(TABLE)) {
+  console.error(`[embed-existing] ERROR: unsupported --table ${TABLE}. Use facts, knowledge, episodes, or all.`);
+  process.exit(1);
+}
 
 const DATA_DIR = path.join(process.env.HOME || '/home/user', '.openclaw', 'hypermem');
 const LIBRARY_DB_PATH = path.join(DATA_DIR, 'library.db');
@@ -91,6 +98,7 @@ console.log(`  Library DB: ${LIBRARY_DB_PATH}`);
 console.log(`  Vectors DB: ${VECTORS_DB_PATH}`);
 console.log(`  Tables:     ${TABLE}`);
 console.log(`  Batch size: ${BATCH_SIZE}`);
+console.log(`  Coverage:   ${COVERAGE_REPORT ? 'report enabled' : 'report disabled'}`);
 
 const libDb = new DatabaseSync(LIBRARY_DB_PATH);
 
@@ -180,6 +188,68 @@ function simpleHash(str) {
   return Math.abs(h).toString(16);
 }
 
+function scalar(sql, params = []) {
+  return Number(libDb.prepare(sql).get(...params)?.cnt ?? 0);
+}
+
+function indexedCount(tableName, eligibleIds) {
+  if (eligibleIds.length === 0) return 0;
+  const placeholders = eligibleIds.map(() => '?').join(',');
+  return Number(
+    vecDb.prepare(`
+      SELECT COUNT(*) AS cnt FROM vec_index_map
+      WHERE source_table = ?
+        AND source_id IN (${placeholders})
+    `).get(tableName, ...eligibleIds)?.cnt ?? 0
+  );
+}
+
+function ids(sql) {
+  return libDb.prepare(sql).all().map(row => Number(row.id));
+}
+
+function tableCoverage() {
+  const factsTotal = scalar('SELECT COUNT(*) AS cnt FROM facts');
+  const factEligibleIds = ids(`
+    SELECT id FROM facts
+    WHERE superseded_by IS NULL
+      AND decay_score < 1.0
+      AND confidence >= 0.5
+      AND trim(content) <> ''
+  `);
+  const knowledgeTotal = scalar('SELECT COUNT(*) AS cnt FROM knowledge WHERE superseded_by IS NULL');
+  const knowledgeEligibleIds = ids(`
+    SELECT id FROM knowledge
+    WHERE superseded_by IS NULL
+      AND trim(content) <> ''
+  `);
+  const episodesTotal = scalar('SELECT COUNT(*) AS cnt FROM episodes');
+  const episodeEligibleIds = ids(`
+    SELECT id FROM episodes
+    WHERE significance >= 0.5
+      AND trim(summary) <> ''
+  `);
+
+  return [
+    { table: 'facts', total: factsTotal, eligible: factEligibleIds.length, indexed: indexedCount('facts', factEligibleIds) },
+    { table: 'knowledge', total: knowledgeTotal, eligible: knowledgeEligibleIds.length, indexed: indexedCount('knowledge', knowledgeEligibleIds) },
+    { table: 'episodes', total: episodesTotal, eligible: episodeEligibleIds.length, indexed: indexedCount('episodes', episodeEligibleIds) },
+  ].map(row => ({ ...row, intentionallySkipped: Math.max(0, row.total - row.eligible) }));
+}
+
+function printCoverageReport(label) {
+  if (!COVERAGE_REPORT) return;
+  console.log(`\n[embed-existing] Vector coverage ${label}`);
+  for (const row of tableCoverage()) {
+    if (TABLE !== 'all' && TABLE !== row.table) continue;
+    const pct = row.eligible === 0 ? 'n/a' : `${((row.indexed / row.eligible) * 100).toFixed(1)}%`;
+    const missing = Math.max(0, row.eligible - row.indexed);
+    console.log(
+      `  ${row.table}: total=${row.total} eligible=${row.eligible} indexed=${row.indexed} missing=${missing} intentionally_skipped=${row.intentionallySkipped} coverage=${pct}`
+    );
+  }
+}
+
 async function indexItems(items, tableName, vecTable) {
   const alreadyDone = new Set(
     vecDb.prepare('SELECT source_id FROM vec_index_map WHERE source_table = ?')
@@ -187,9 +257,10 @@ async function indexItems(items, tableName, vecTable) {
       .map(r => r.source_id)
   );
 
+  const alreadyEmbeddedEligible = items.filter(r => alreadyDone.has(r.id)).length;
   let pending = items.filter(r => !alreadyDone.has(r.id));
   if (LIMIT > 0) pending = pending.slice(0, LIMIT);
-  console.log(`  ${tableName}: ${items.length} total, ${alreadyDone.size} already embedded, ${pending.length} to embed${LIMIT ? ` (limited to ${LIMIT})` : ''}`);
+  console.log(`  ${tableName}: ${items.length} eligible, ${alreadyEmbeddedEligible} already embedded, ${pending.length} to embed${LIMIT ? ` (limited to ${LIMIT})` : ''}`);
 
   if (DRY_RUN || pending.length === 0) return;
 
@@ -249,9 +320,21 @@ if (TABLE === 'all' || TABLE === 'facts') {
     WHERE superseded_by IS NULL
     AND decay_score < 1.0
     AND confidence >= 0.5
+    AND trim(content) <> ''
     ORDER BY confidence DESC, id ASC
   `).all();
   await indexItems(facts, 'facts', 'vec_facts');
+}
+
+// ── Knowledge ─────────────────────────────────────────────────
+if (TABLE === 'all' || TABLE === 'knowledge') {
+  const knowledge = libDb.prepare(`
+    SELECT id, content, domain FROM knowledge
+    WHERE superseded_by IS NULL
+    AND trim(content) <> ''
+    ORDER BY updated_at DESC, id ASC
+  `).all();
+  await indexItems(knowledge, 'knowledge', 'vec_knowledge');
 }
 
 // ── Episodes ──────────────────────────────────────────────────
@@ -259,6 +342,7 @@ if (TABLE === 'all' || TABLE === 'episodes') {
   const episodes = libDb.prepare(`
     SELECT id, summary as content, event_type as domain FROM episodes
     WHERE significance >= 0.5
+    AND trim(summary) <> ''
     ORDER BY significance DESC, id ASC
   `).all();
   await indexItems(episodes, 'episodes', 'vec_episodes');
@@ -266,6 +350,7 @@ if (TABLE === 'all' || TABLE === 'episodes') {
 
 // ── Summary ───────────────────────────────────────────────────
 const vecCount = vecDb.prepare('SELECT COUNT(*) as cnt FROM vec_index_map').get().cnt;
+printCoverageReport('after run');
 console.log(`\n[embed-existing] Complete. Total indexed: ${vecCount} items in vec_index_map`);
 
 libDb.close();
