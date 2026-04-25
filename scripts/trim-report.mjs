@@ -77,6 +77,72 @@ function increment(map, key) {
   map[k] = (map[k] ?? 0) + 1;
 }
 
+function enumValue(value, allowed, fallback = 'unknown') {
+  return typeof value === 'string' && allowed.includes(value) ? value : fallback;
+}
+
+function pct(part, total) {
+  if (typeof part !== 'number' || typeof total !== 'number' || !Number.isFinite(part) || !Number.isFinite(total) || total <= 0) {
+    return null;
+  }
+  return Math.round((part / total) * 100000) / 1000;
+}
+
+function classifyTopicSignal(meta) {
+  const source = enumValue(meta?.composeTopicSource, ['request-topic-id', 'session-topic-map', 'none']);
+  const state = enumValue(meta?.composeTopicState, [
+    'no-active-topic',
+    'active-topic-ready',
+    'active-topic-missing-stamped-history',
+    'history-disabled',
+  ]);
+  const telemetryStatus = enumValue(meta?.composeTopicTelemetryStatus, ['emitted', 'intentionally-omitted']);
+  const messageCount = finiteNumber(meta?.composeTopicMessageCount);
+  const stampedMessageCount = finiteNumber(meta?.composeTopicStampedMessageCount);
+  const hasTopicMetadata = source !== 'unknown' || state !== 'unknown' || telemetryStatus !== 'unknown' ||
+    messageCount != null || stampedMessageCount != null;
+
+  let classification = 'unknown';
+  let reason = 'missing-topic-metadata';
+  if (telemetryStatus === 'intentionally-omitted') {
+    classification = 'intentionally-suppressed';
+    reason = 'topic-telemetry-intentionally-omitted';
+  } else if (state === 'history-disabled') {
+    classification = 'intentionally-suppressed';
+    reason = 'history-disabled';
+  } else if (state === 'active-topic-ready') {
+    classification = 'present';
+    reason = 'active-topic-stamped-history';
+  } else if (state === 'no-active-topic') {
+    classification = 'absent-no-active-topic';
+    reason = 'no-active-topic';
+  } else if (state === 'active-topic-missing-stamped-history') {
+    classification = 'absent-stamping-incomplete';
+    reason = 'active-topic-missing-stamped-history';
+  } else if (source === 'none') {
+    classification = 'absent-no-active-topic';
+    reason = 'no-active-topic';
+  } else if ((messageCount ?? 0) > 0 && (stampedMessageCount ?? 0) === 0) {
+    classification = 'absent-stamping-incomplete';
+    reason = 'history-present-without-topic-stamps';
+  } else if ((stampedMessageCount ?? 0) > 0) {
+    classification = 'present';
+    reason = 'stamped-history-observed';
+  }
+
+  return {
+    observed: hasTopicMetadata,
+    classification,
+    reason,
+    source,
+    state,
+    telemetryStatus,
+    messageCount,
+    stampedMessageCount,
+    stampedCoveragePct: pct(stampedMessageCount, messageCount),
+  };
+}
+
 function lifecycleDiverged(turn) {
   if (turn.adaptiveLifecycleBandDiverged === true) return true;
   const composeEviction = turn.lifecyclePolicies.find(ev => ev.path === 'compose.eviction');
@@ -119,6 +185,7 @@ function buildReport(events) {
       adaptiveEvictionTopicAwareDroppedClusters: finiteNumber(meta?.adaptiveEvictionTopicAwareDroppedClusters),
       adaptiveEvictionProtectedClusters: finiteNumber(meta?.adaptiveEvictionProtectedClusters),
       adaptiveEvictionBypassReason: meta?.adaptiveEvictionBypassReason ?? null,
+      topicSignal: classifyTopicSignal(meta),
       churn: false,
     };
   };
@@ -176,11 +243,17 @@ function buildReport(events) {
   const lifecyclePolicyPaths = {};
   const lifecycleBandCounts = {};
   const adaptiveBypassReasons = {};
+  const topicSignalClassifications = {};
+  const topicSignalReasons = {};
+  const topicSignalSources = {};
   let topicCoverageTotal = 0;
   let topicCoverageSamples = 0;
   let topicAwareEligibleClusters = 0;
   let topicAwareDroppedClusters = 0;
   let topicAwareProtectedClusters = 0;
+  let topicSignalSamples = 0;
+  let topicSignalCoverageTotal = 0;
+  let topicSignalCoverageSamples = 0;
 
   for (const t of turns) {
     for (const ev of t.lifecyclePolicies) {
@@ -195,6 +268,16 @@ function buildReport(events) {
     topicAwareEligibleClusters += t.adaptiveEvictionTopicAwareEligibleClusters ?? 0;
     topicAwareDroppedClusters += t.adaptiveEvictionTopicAwareDroppedClusters ?? 0;
     topicAwareProtectedClusters += t.adaptiveEvictionProtectedClusters ?? 0;
+    if (t.topicSignal?.observed) {
+      topicSignalSamples++;
+      increment(topicSignalClassifications, t.topicSignal.classification);
+      increment(topicSignalReasons, t.topicSignal.reason);
+      increment(topicSignalSources, t.topicSignal.source);
+      if (t.topicSignal.stampedCoveragePct != null) {
+        topicSignalCoverageSamples++;
+        topicSignalCoverageTotal += t.topicSignal.stampedCoveragePct;
+      }
+    }
   }
 
   const totals = {
@@ -215,6 +298,13 @@ function buildReport(events) {
     topicAwareEligibleClusters,
     topicAwareDroppedClusters,
     topicAwareProtectedClusters,
+    topicSignalSamples,
+    topicSignalClassifications,
+    topicSignalReasons,
+    topicSignalSources,
+    averageTopicSignalStampedCoveragePct: topicSignalCoverageSamples > 0
+      ? Math.round((topicSignalCoverageTotal / topicSignalCoverageSamples) * 1000) / 1000
+      : null,
   };
   return { turns, totals };
 }
@@ -241,6 +331,11 @@ function renderText(report, inputPath) {
     lines.push(`Topic-aware clusters: eligible=${report.totals.topicAwareEligibleClusters}  ` +
                `dropped=${report.totals.topicAwareDroppedClusters}  protected=${report.totals.topicAwareProtectedClusters}`);
   }
+  if (report.totals.topicSignalSamples > 0) {
+    lines.push(`Topic signal: ${Object.entries(report.totals.topicSignalClassifications).map(([k, v]) => `${k}=${v}`).join('  ')}  ` +
+               `avgStampedCoverage=${report.totals.averageTopicSignalStampedCoveragePct ?? 'n/a'}`);
+    lines.push(`Topic signal reasons: ${Object.entries(report.totals.topicSignalReasons).map(([k, v]) => `${k}=${v}`).join('  ')}`);
+  }
   lines.push('');
   lines.push('Per-turn summary:');
   lines.push('  # | path      | tL | trims | pre→post | removed | churn | turnId');
@@ -265,6 +360,12 @@ function renderText(report, inputPath) {
       lines.push(`       ↳ adaptive compose.eviction band=${t.adaptiveEvictionLifecycleBand ?? '-'} ` +
         `preRecall=${t.adaptiveLifecycleBand ?? '-'} diverged=${Boolean(t.adaptiveLifecycleBandDiverged)} ` +
         `coverage=${t.adaptiveEvictionTopicIdCoveragePct ?? 'n/a'} bypass=${t.adaptiveEvictionBypassReason ?? '-'}`);
+    }
+    if (t.topicSignal?.observed) {
+      lines.push(`       ↳ topicSignal class=${t.topicSignal.classification} reason=${t.topicSignal.reason} ` +
+        `source=${t.topicSignal.source} state=${t.topicSignal.state} ` +
+        `stamped=${t.topicSignal.stampedMessageCount ?? 'n/a'}/${t.topicSignal.messageCount ?? 'n/a'} ` +
+        `coverage=${t.topicSignal.stampedCoveragePct ?? 'n/a'} telemetry=${t.topicSignal.telemetryStatus}`);
     }
     if (t.lifecyclePolicies.length > 0) {
       for (const ev of t.lifecyclePolicies) {

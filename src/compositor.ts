@@ -2037,6 +2037,10 @@ export class Compositor {
     let adaptiveEvictionProtectedClusters = 0;
     let adaptiveEvictionTopicIdCoveragePct = 0;
     let adaptiveEvictionBypassReason: AdaptiveEvictionBypassReason | undefined;
+    let composeTopicSource: import('./types.js').ComposeDiagnostics['composeTopicSource'] = 'none';
+    let composeTopicState: import('./types.js').ComposeDiagnostics['composeTopicState'] = 'history-disabled';
+    let composeTopicMessageCount = 0;
+    let composeTopicStampedMessageCount = 0;
 
     // Phase 0 fence enforcement: resolve the compaction fence for this conversation.
     // All downstream message queries use this as a lower bound to exclude zombie
@@ -2209,12 +2213,16 @@ export class Compositor {
         try {
           const topicMap = new SessionTopicMap(db);
           activeTopic = topicMap.getActiveTopic(request.sessionKey) || undefined;
-          if (activeTopic) activeTopicId = activeTopic.id;
+          if (activeTopic) {
+            activeTopicId = activeTopic.id;
+            composeTopicSource = 'session-topic-map';
+          }
         } catch {
           // Topic lookup is best-effort — fall back to full history
         }
       } else {
         activeTopicId = request.topicId;
+        composeTopicSource = 'request-topic-id';
         try {
           activeTopic = db.prepare(`
             SELECT id, name
@@ -2256,6 +2264,8 @@ export class Compositor {
         s09ObservedUserTurnCount,
         historyMessages.filter(m => m.role === 'user').length,
       );
+      composeTopicMessageCount = historyMessages.length;
+      composeTopicStampedMessageCount = historyMessages.filter(m => typeof m.topicId === 'string').length;
 
       // ── Transform-first: apply gradient tool treatment BEFORE budget math ──
       // All tool payloads are in their final form before any token estimation.
@@ -2301,6 +2311,9 @@ export class Compositor {
       adaptiveEvictionProtectedClusters = adaptiveOrdering.telemetry.protectedClusters;
       adaptiveEvictionTopicIdCoveragePct = adaptiveOrdering.telemetry.topicIdCoveragePct;
       adaptiveEvictionBypassReason = adaptiveOrdering.telemetry.bypassReason;
+      if (!activeTopicId) composeTopicState = 'no-active-topic';
+      else if (composeTopicStampedMessageCount === 0) composeTopicState = 'active-topic-missing-stamped-history';
+      else composeTopicState = 'active-topic-ready';
       const evictedByPlan = new Set<number>();
       let projectedTokens = budgetClusters.reduce((s, c) => s + c.tokenCost, 0);
       if (adaptiveOrdering.preferTopicAwareDrop
@@ -3598,6 +3611,11 @@ export class Compositor {
       adaptiveEvictionProtectedClusters,
       adaptiveEvictionTopicIdCoveragePct,
       adaptiveEvictionBypassReason,
+      composeTopicSource,
+      composeTopicState,
+      composeTopicMessageCount,
+      composeTopicStampedMessageCount,
+      composeTopicTelemetryStatus: 'emitted',
       adaptiveLifecycleBandDiverged: evictionLifecyclePolicy.band !== composeLifecyclePolicy.band,
       adaptiveForkedContext: s09ForkedContextSeed ? true : undefined,
       adaptiveForkedParentPressurePct: s09ForkedParentPressure != null

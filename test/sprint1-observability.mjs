@@ -325,6 +325,11 @@ async function run() {
         adaptiveEvictionTopicAwareEligibleClusters: 3,
         adaptiveEvictionTopicAwareDroppedClusters: 1,
         adaptiveEvictionProtectedClusters: 2,
+        composeTopicSource: 'session-topic-map',
+        composeTopicState: 'active-topic-ready',
+        composeTopicMessageCount: 8,
+        composeTopicStampedMessageCount: 6,
+        composeTopicTelemetryStatus: 'emitted',
       },
       {
         event: 'lifecycle-policy',
@@ -378,6 +383,11 @@ async function run() {
         adaptiveEvictionTopicAwareDroppedClusters: 0,
         adaptiveEvictionProtectedClusters: 0,
         adaptiveEvictionBypassReason: 'band-not-topic-aware',
+        composeTopicSource: 'none',
+        composeTopicState: 'no-active-topic',
+        composeTopicMessageCount: 4,
+        composeTopicStampedMessageCount: 0,
+        composeTopicTelemetryStatus: 'emitted',
       },
       {
         event: 'lifecycle-policy',
@@ -407,6 +417,13 @@ async function run() {
     assert(report.totals.adaptiveBandDivergenceTurns >= 1, `adaptive divergence counted (got ${report.totals.adaptiveBandDivergenceTurns})`);
     assert(report.totals.averageTopicIdCoveragePct === 37.5, `topicId coverage averaged from aggregate samples (got ${report.totals.averageTopicIdCoveragePct})`);
     assert(report.totals.adaptiveBypassReasons['band-not-topic-aware'] === 1, 'adaptive bypass reason counted');
+    assert(report.totals.topicSignalSamples === 2, `topic signal metadata samples counted (got ${report.totals.topicSignalSamples})`);
+    assert(report.totals.topicSignalClassifications.present === 1, 'topic signal present classification counted');
+    assert(report.totals.topicSignalClassifications['absent-no-active-topic'] === 1, 'topic signal no-active-topic absence counted');
+    assert(report.turns.find(t => t.turnId === 'turn1')?.topicSignal?.classification === 'present',
+      'topic signal present/propagated path survives Sprint 1 mixed fixture');
+    assert(report.turns.find(t => t.turnId === 'turn2')?.topicSignal?.reason === 'no-active-topic',
+      'topic signal absent path explains no active topic');
     const reportText = JSON.stringify(report);
     for (const pat of [/What is the/, /governance constraints/, /release policy/]) {
       assert(!pat.test(reportText), `trim-report lifecycle summary has no user/doc content (pattern: ${pat})`);

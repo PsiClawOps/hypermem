@@ -221,6 +221,77 @@ async function run() {
   assert(report2.totals.churnTurns === 0,
     `no-churn fixture: churnTurns=0 (got ${report2.totals.churnTurns})`);
 
+  // ── Topic-signal classification fixture: no live DB mutation ─────────
+  const topicSignalPath = path.join(tmpDir, 'topic-signal.jsonl');
+  const topicSignalEvents = [
+    {
+      event: 'assemble', ts: '2026-01-01T00:10:00Z', agentId, sessionKey: sk, turnId: 'topic-none',
+      path: 'cold', toolLoop: false, msgCount: 12,
+      composeTopicSource: 'none',
+      composeTopicState: 'no-active-topic',
+      composeTopicMessageCount: 12,
+      composeTopicStampedMessageCount: 0,
+      composeTopicTelemetryStatus: 'emitted',
+      adaptiveEvictionBypassReason: 'no-active-topic',
+    },
+    {
+      event: 'assemble', ts: '2026-01-01T00:11:00Z', agentId, sessionKey: sk, turnId: 'topic-present',
+      path: 'cold', toolLoop: false, msgCount: 10,
+      composeTopicSource: 'session-topic-map',
+      composeTopicState: 'active-topic-ready',
+      composeTopicMessageCount: 10,
+      composeTopicStampedMessageCount: 8,
+      composeTopicTelemetryStatus: 'emitted',
+    },
+    {
+      event: 'assemble', ts: '2026-01-01T00:12:00Z', agentId, sessionKey: sk, turnId: 'topic-incomplete',
+      path: 'cold', toolLoop: false, msgCount: 6,
+      composeTopicSource: 'request-topic-id',
+      composeTopicState: 'active-topic-missing-stamped-history',
+      composeTopicMessageCount: 6,
+      composeTopicStampedMessageCount: 0,
+      composeTopicTelemetryStatus: 'emitted',
+      adaptiveEvictionBypassReason: 'no-stamped-clusters',
+    },
+    {
+      event: 'assemble', ts: '2026-01-01T00:13:00Z', agentId, sessionKey: sk, turnId: 'topic-suppressed',
+      path: 'cold', toolLoop: false, msgCount: 0,
+      composeTopicSource: 'none',
+      composeTopicState: 'history-disabled',
+      composeTopicMessageCount: 0,
+      composeTopicStampedMessageCount: 0,
+      composeTopicTelemetryStatus: 'intentionally-omitted',
+    },
+  ];
+  fs.writeFileSync(topicSignalPath, topicSignalEvents.map(x => JSON.stringify(x)).join('\n') + '\n');
+
+  const topicReportRun = spawnSync(process.execPath, [scriptPath, '--input', topicSignalPath, '--json'], { encoding: 'utf8' });
+  assert(topicReportRun.status === 0, `topic-signal fixture: trim-report exits 0 (got ${topicReportRun.status})`);
+  const topicReport = JSON.parse(topicReportRun.stdout);
+  assert(topicReport.totals.topicSignalSamples === 4,
+    `topic-signal fixture: four topic metadata samples counted (got ${topicReport.totals.topicSignalSamples})`);
+  assert(topicReport.totals.topicSignalClassifications.present === 1, 'topic-signal fixture: present classification counted');
+  assert(topicReport.totals.topicSignalClassifications['absent-no-active-topic'] === 1,
+    'topic-signal fixture: absent-no-active-topic classification counted');
+  assert(topicReport.totals.topicSignalClassifications['absent-stamping-incomplete'] === 1,
+    'topic-signal fixture: absent-stamping-incomplete classification counted');
+  assert(topicReport.totals.topicSignalClassifications['intentionally-suppressed'] === 1,
+    'topic-signal fixture: intentionally-suppressed classification counted');
+  assert(topicReport.turns.find(t => t.turnId === 'topic-present')?.topicSignal?.reason === 'active-topic-stamped-history',
+    'topic-signal fixture: propagated/present path has active-topic-stamped-history reason');
+  assert(topicReport.turns.find(t => t.turnId === 'topic-none')?.topicSignal?.reason === 'no-active-topic',
+    'topic-signal fixture: no-active-topic absence reason is explicit');
+  assert(topicReport.turns.find(t => t.turnId === 'topic-incomplete')?.topicSignal?.reason === 'active-topic-missing-stamped-history',
+    'topic-signal fixture: missing stamp propagation reason is explicit');
+
+  const topicReportText = spawnSync(process.execPath, [scriptPath, '--input', topicSignalPath], { encoding: 'utf8' });
+  assert(topicReportText.status === 0, `topic-signal text report exits 0 (got ${topicReportText.status})`);
+  assert(/Topic signal:/.test(topicReportText.stdout), 'topic-signal text report renders operator-facing summary');
+  assert(/absent-no-active-topic=1/.test(topicReportText.stdout), 'topic-signal text report explains no-active-topic absence');
+  assert(/absent-stamping-incomplete=1/.test(topicReportText.stdout), 'topic-signal text report explains stamping-incomplete absence');
+  assert(!/What is the|governance constraints|release policy/.test(topicReportText.stdout),
+    'topic-signal text report remains metadata-only');
+
   // ── Cleanup ─────────────────────────────────────────────────────────
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
 

@@ -175,6 +175,11 @@ function assembleTrace(fields: {
   compactionEligibleCount?: number;
   compactionEligibleRatio?: number;
   compactionProcessedCount?: number;
+  composeTopicSource?: 'request-topic-id' | 'session-topic-map' | 'none';
+  composeTopicState?: 'no-active-topic' | 'active-topic-ready' | 'active-topic-missing-stamped-history' | 'history-disabled';
+  composeTopicMessageCount?: number;
+  composeTopicStampedMessageCount?: number;
+  composeTopicTelemetryStatus?: 'emitted' | 'intentionally-omitted';
 }): void {
   if (!telemetryEnabled()) return;
   const stream = getTelemetryStream();
@@ -2775,6 +2780,7 @@ function createHyperMemEngine(): ContextEngine {
                   path: 'replay',
                   toolLoop: isToolLoop,
                   msgCount: messages.length,
+                  composeTopicTelemetryStatus: 'intentionally-omitted',
                 });
               }
             }
@@ -2861,6 +2867,11 @@ function createHyperMemEngine(): ContextEngine {
           compactionEligibleCount: diag?.compactionEligibleCount,
           compactionEligibleRatio: diag?.compactionEligibleRatio,
           compactionProcessedCount: diag?.compactionProcessedCount,
+          composeTopicSource: diag?.composeTopicSource,
+          composeTopicState: diag?.composeTopicState,
+          composeTopicMessageCount: diag?.composeTopicMessageCount,
+          composeTopicStampedMessageCount: diag?.composeTopicStampedMessageCount,
+          composeTopicTelemetryStatus: diag?.composeTopicTelemetryStatus,
         });
 
         if (diag?.adaptiveLifecycleBand) {

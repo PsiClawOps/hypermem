@@ -521,6 +521,22 @@ export interface ComposeDiagnostics {
   adaptiveEvictionTopicIdCoveragePct?: number;
   /** Reason topic-aware eviction did not participate, when applicable. */
   adaptiveEvictionBypassReason?: 'no-active-topic' | 'no-stamped-clusters' | 'band-not-topic-aware' | 'within-budget' | 'no-eligible-inactive-topic-clusters';
+  /** Canonical compose-time topic resolution source used for active-topic scoping. */
+  composeTopicSource?: 'request-topic-id' | 'session-topic-map' | 'none';
+  /**
+   * Content-free compose topic state derived from the canonical active-topic resolution path.
+   * - no-active-topic: no active topic was resolved for this compose pass
+   * - active-topic-ready: active topic resolved and at least one history message carried topicId
+   * - active-topic-missing-stamped-history: active topic resolved but topic-aware eviction/history had no stamped inputs
+   * - history-disabled: compose skipped history, so topic-aware evidence was intentionally unavailable
+   */
+  composeTopicState?: 'no-active-topic' | 'active-topic-ready' | 'active-topic-missing-stamped-history' | 'history-disabled';
+  /** Number of history messages considered for compose-time topic-state coverage. */
+  composeTopicMessageCount?: number;
+  /** Number of history messages carrying topicId for compose-time topic-state coverage. */
+  composeTopicStampedMessageCount?: number;
+  /** Whether compose-topic metadata was emitted or intentionally suppressed in downstream reporting. */
+  composeTopicTelemetryStatus?: 'emitted' | 'intentionally-omitted';
   /** True when compose.eviction and compose.preRecall selected different lifecycle bands. */
   adaptiveLifecycleBandDiverged?: boolean;
   /** True when adaptive lifecycle received forked-context seed metadata. */
@@ -1072,6 +1088,11 @@ export interface AssembleTraceEvent {
   path: 'cold' | 'replay' | 'subagent';
   toolLoop: boolean;          // true when last inbound message is a toolResult
   msgCount: number;           // messages array length at entry
+  composeTopicSource?: 'request-topic-id' | 'session-topic-map' | 'none';
+  composeTopicState?: 'no-active-topic' | 'active-topic-ready' | 'active-topic-missing-stamped-history' | 'history-disabled';
+  composeTopicMessageCount?: number;
+  composeTopicStampedMessageCount?: number;
+  composeTopicTelemetryStatus?: 'emitted' | 'intentionally-omitted';
 }
 
 export interface LifecyclePolicyTelemetryEvent {

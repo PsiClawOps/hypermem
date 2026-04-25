@@ -17,6 +17,55 @@ const args = process.argv.slice(2);
 const dataDir = args.includes('--data-dir') ? args[args.indexOf('--data-dir') + 1] : null;
 const agentId = args.includes('--agent') ? args[args.indexOf('--agent') + 1] : 'report-agent';
 
+function topicSignalCoverage(stamped, total) {
+  return typeof stamped === 'number' && typeof total === 'number' && total > 0
+    ? Math.round((stamped / total) * 100000) / 1000
+    : null;
+}
+
+function classifyTopicSignal(d) {
+  const state = d.composeTopicState ?? 'unknown';
+  const source = d.composeTopicSource ?? 'unknown';
+  const telemetryStatus = d.composeTopicTelemetryStatus ?? 'unknown';
+  let classification = 'unknown';
+  let reason = 'missing-topic-metadata';
+
+  if (telemetryStatus === 'intentionally-omitted') {
+    classification = 'intentionally-suppressed';
+    reason = 'topic-telemetry-intentionally-omitted';
+  } else if (state === 'history-disabled') {
+    classification = 'intentionally-suppressed';
+    reason = 'history-disabled';
+  } else if (state === 'active-topic-ready') {
+    classification = 'present';
+    reason = 'active-topic-stamped-history';
+  } else if (state === 'no-active-topic') {
+    classification = 'absent-no-active-topic';
+    reason = 'no-active-topic';
+  } else if (state === 'active-topic-missing-stamped-history') {
+    classification = 'absent-stamping-incomplete';
+    reason = 'active-topic-missing-stamped-history';
+  } else if (source === 'none') {
+    classification = 'absent-no-active-topic';
+    reason = 'no-active-topic';
+  } else if ((d.composeTopicMessageCount ?? 0) > 0 && (d.composeTopicStampedMessageCount ?? 0) === 0) {
+    classification = 'absent-stamping-incomplete';
+    reason = 'history-present-without-topic-stamps';
+  } else if ((d.composeTopicStampedMessageCount ?? 0) > 0) {
+    classification = 'present';
+    reason = 'stamped-history-observed';
+  }
+
+  return {
+    classification,
+    reason,
+    source,
+    state,
+    telemetryStatus,
+    stampedCoveragePct: topicSignalCoverage(d.composeTopicStampedMessageCount, d.composeTopicMessageCount),
+  };
+}
+
 async function run() {
   console.log('═══════════════════════════════════════════════════');
   console.log('  HyperMem Compose Report');
@@ -92,6 +141,18 @@ async function run() {
       console.log(`    scopeFiltered:          ${d.scopeFiltered ?? 0}`);
       console.log(`    retrievalMode:          ${d.retrievalMode ?? 'n/a'}`);
       console.log(`    dynamicReserveActive:   ${d.dynamicReserveActive ?? false}`);
+      if (d.composeTopicState != null || d.composeTopicTelemetryStatus != null ||
+          d.composeTopicMessageCount != null || d.composeTopicStampedMessageCount != null) {
+        const topicSignal = classifyTopicSignal(d);
+        console.log('    composeTopicSignal:');
+        console.log(`      class:                ${topicSignal.classification}`);
+        console.log(`      reason:               ${topicSignal.reason}`);
+        console.log(`      source:               ${topicSignal.source}`);
+        console.log(`      state:                ${topicSignal.state}`);
+        console.log(`      stampedHistory:       ${d.composeTopicStampedMessageCount ?? 'n/a'}/${d.composeTopicMessageCount ?? 'n/a'} ` +
+                    `coverage=${topicSignal.stampedCoveragePct ?? 'n/a'}`);
+        console.log(`      telemetry:            ${topicSignal.telemetryStatus}`);
+      }
       // Sprint 1: observability fields
       if (d.rerankerStatus != null) {
         console.log(`    rerankerStatus:         ${d.rerankerStatus}`);

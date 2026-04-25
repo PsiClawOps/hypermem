@@ -164,8 +164,24 @@ Expected proof:
 - compose diagnostics expose lifecycle fields
 - telemetry JSONL includes `lifecycle-policy` events for `compose.preRecall` and `compose.eviction`
 - `node scripts/trim-report.mjs <telemetry.jsonl>` reports lifecycle policy counts, band counts, and divergence turns
+- `trim-report.mjs` and `compose-report.mjs` classify compose topic signal with metadata-only fields:
+  - `present`
+  - `absent-no-active-topic`
+  - `absent-stamping-incomplete`
+  - `intentionally-suppressed`
+  - `unknown`
+- topic-signal reports use booleans, enums, counts, percentages, and reason codes only; they must not emit topic names, prompt text, document text, or user content
 - afterTurn gradient cap limits pressure spikes
-- remaining recall breadth and threshold tuning stay deferred until the telemetry baseline is populated
+- threshold tuning remains deferred unless a populated telemetry baseline shows a specific threshold or behavior defect
+
+Topic-signal interpretation:
+
+- `present` means an active topic was resolved and stamped history was available.
+- `absent-no-active-topic` means compose had no active topic source to use.
+- `absent-stamping-incomplete` means an active topic existed but stamped inputs were missing or insufficient.
+- `intentionally-suppressed` means schema or privacy policy intentionally omitted topic telemetry.
+
+This report path closes the ambiguity from a baseline with no usable assemble topic fields. It does not replace the separate release gate for a safe live topic-bearing compose sample before topic-aware tuning claims.
 
 ## Runtime diagnostics API allowlist
 
