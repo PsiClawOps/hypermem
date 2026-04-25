@@ -2,6 +2,15 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.9.0 - adaptive context lifecycle
+
+- **Adaptive lifecycle is now production behavior.** Compose, afterTurn, recall, trim, compaction, and eviction share the same pressure-band policy across bootstrap, warmup, steady, elevated, high, and critical states.
+- **Smart recall and adaptive eviction landed.** `/new` and confident topic shifts widen recall, high-pressure turns gate recall down, and topic-centroid-guided eviction activates only at elevated pressure or worse.
+- **Lifecycle telemetry is release-gated.** Trim and compose reports classify lifecycle bands, divergence, and metadata-only topic signal without exposing topic names, prompt text, document text, or user content.
+- **Deterministic topic evidence replaces live-sample gating.** The 0.9.0 topic-bearing compose gate is covered by deterministic fixtures and report tests, while live topic-bearing samples remain future tuning evidence only.
+- **Forked-context integration is wired.** Forked subagent children inherit bounded parent hot-window context and start warmup or steady instead of cold bootstrap unless `/new` is explicit.
+- **Vector coverage is repaired.** Active facts, knowledge, and eligible episodes reached 100% vector coverage before the release candidate validation pass.
+
 ## 0.8.8 - release hardening, diagnostics, lifecycle visibility
 
 - **Release packaging aligned across packages.** Core, hypercompositor, and memory plugin versions align at 0.8.8, with version parity validation and bump-script hardening to prevent stale plugin dependencies or lockfile drift.

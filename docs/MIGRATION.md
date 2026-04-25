@@ -11,9 +11,9 @@ All migration examples default to **dry-run** where shown. Add `--apply` only wh
 
 ## Multi-operator deployments (breaking change warning)
 
-> ⚠️ **KL-01: No global-scope write gate (still open as of 0.8.8)**
+> ⚠️ **KL-01: No global-scope write gate (still open as of 0.9.0)**
 >
-> hypermem 0.8.8 still ships without a write gate for `scope='global'` facts. In a
+> hypermem 0.9.0 ships without a write gate for `scope='global'` facts. In a
 > **single-operator deployment** (one user, one fleet sharing `library.db`), this
 > is acceptable — agents share context intentionally.
 >
@@ -37,7 +37,7 @@ Older versions below 0.5.0 used Redis, so the table keeps that history explicit.
 
 | hypermem version | Main DB schema | Library DB schema | Min Node | External cache |
 |---|---|---|---|---|
-| 0.8.8 | v11 | v19 | 22.0.0 | none, SQLite `:memory:` hot cache |
+| 0.9.0 | v11 | v19 | 22.0.0 | none, SQLite `:memory:` hot cache |
 | 0.8.0 | v10 | v19 | 22.0.0 | none, SQLite `:memory:` hot cache |
 | 0.7.0 | v7 | v13 | 22.0.0 | none, SQLite `:memory:` hot cache |
 | 0.6.0 | v6 | v12 | 22.0.0 | none, SQLite `:memory:` hot cache |
@@ -47,7 +47,7 @@ Older versions below 0.5.0 used Redis, so the table keeps that history explicit.
 Schema versions are importable for programmatic checks:
 ```ts
 import { SCHEMA_COMPAT, HYPERMEM_COMPAT_VERSION } from 'hypermem';
-// HYPERMEM_COMPAT_VERSION = ENGINE_VERSION, for example '0.8.8'
+// HYPERMEM_COMPAT_VERSION = ENGINE_VERSION, for example '0.9.0'
 // SCHEMA_COMPAT = { compatVersion: ENGINE_VERSION, mainSchema: 11, librarySchema: 19 }
 ```
 

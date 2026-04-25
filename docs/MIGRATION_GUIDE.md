@@ -896,7 +896,7 @@ Create a normalized JSON array from substantive daily-memory bullets only. Skip 
 
 ```json
 [
-  {"agentId":"forge","content":"HyperMem 0.8.8 release path requires npm-first staging validation","domain":"operations","confidence":0.8}
+  {"agentId":"forge","content":"HyperMem 0.9.0 release path requires npm-first staging validation","domain":"operations","confidence":0.8}
 ]
 ```
 

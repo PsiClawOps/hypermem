@@ -149,7 +149,7 @@ node test/repair-tool-pairs.mjs
 
 ## Adaptive lifecycle diagnostics
 
-0.8.8 ships the lifecycle kernel and diagnostics visibility, not the full 0.9.0 behavior set.
+0.9.0 ships the adaptive lifecycle behavior set: shared pressure-band policy, adaptive recall breadth, adaptive eviction ordering, lifecycle telemetry, and metadata-only topic-signal reporting.
 
 Validate:
 
@@ -181,7 +181,7 @@ Topic-signal interpretation:
 - `absent-stamping-incomplete` means an active topic existed but stamped inputs were missing or insufficient.
 - `intentionally-suppressed` means schema or privacy policy intentionally omitted topic telemetry.
 
-This report path closes the ambiguity from a baseline with no usable assemble topic fields. It does not replace the separate release gate for a safe live topic-bearing compose sample before topic-aware tuning claims.
+This report path closes the ambiguity from a baseline with no usable assemble topic fields. The 0.9.0 release gate is covered by deterministic metadata-only topic evidence; safe live topic-bearing compose samples remain future tuning evidence before topic-aware threshold changes.
 
 ## Runtime diagnostics API allowlist
 

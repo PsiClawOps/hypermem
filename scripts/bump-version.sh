@@ -50,6 +50,9 @@ for rel in packages:
     data = json.loads(path.read_text())
     old = data['version']
     data['version'] = version
+    deps = data.get('dependencies')
+    if isinstance(deps, dict) and deps.get('@psiclawops/hypermem') and rel != 'package.json':
+        deps['@psiclawops/hypermem'] = version
     path.write_text(json.dumps(data, indent=2) + '\n')
     print(f'  {rel}: {old} -> {version}')
 
@@ -65,6 +68,12 @@ for rel in locks:
     packages_block = data.get('packages')
     if isinstance(packages_block, dict) and '' in packages_block and isinstance(packages_block[''], dict):
         packages_block['']['version'] = version
+        deps = packages_block[''].get('dependencies')
+        if isinstance(deps, dict) and deps.get('@psiclawops/hypermem') and rel != 'package-lock.json':
+            deps['@psiclawops/hypermem'] = version
+    deps = data.get('dependencies')
+    if isinstance(deps, dict) and isinstance(deps.get('@psiclawops/hypermem'), dict) and rel != 'package-lock.json':
+        deps['@psiclawops/hypermem']['version'] = version
     path.write_text(json.dumps(data, indent=2) + '\n')
     print(f'  {rel}: {old} -> {version}')
 PY
