@@ -9,12 +9,41 @@ const hypermemConfig = path.join(tempDir, 'config.json');
 const script = path.resolve('bin/hypermem-model-audit.mjs');
 
 writeFileSync(openclawConfig, JSON.stringify({
+  models: {
+    providers: {
+      openai: {
+        models: ['gpt-4o-mini']
+      },
+      localproxy: {
+        models: [{ id: 'mystery-large' }]
+      }
+    }
+  },
   agents: {
-    defaults: { model: 'openai-codex/gpt-5.4' },
+    defaults: {
+      model: 'openai-codex/gpt-5.4',
+      models: {
+        'ollama/qwen3-custom': {}
+      }
+    },
     list: [
       { id: 'local', model: 'foo/bar' },
       { id: 'safe', model: 'anthropic/claude-sonnet-4-6' }
     ]
+  },
+  channels: {
+    modelByChannel: {
+      discord: {
+        '123': 'openai-codex/GPT-5.4'
+      }
+    }
+  },
+  tools: {
+    media: {
+      models: [
+        { provider: 'openai', model: 'gpt-image-2' }
+      ]
+    }
   }
 }, null, 2));
 
@@ -52,6 +81,37 @@ if (byModel.get('foo/bar')?.status !== 'fail') {
 
 if (byModel.get('anthropic/claude-sonnet-4-6')?.status !== 'ok') {
   throw new Error('expected known safe model family to pass autodetect');
+}
+
+if (byModel.get('openai/gpt-4o-mini')?.status !== 'warn') {
+  throw new Error('expected registered OpenAI provider catalog model to warn without override');
+}
+
+if (byModel.get('ollama/qwen3-custom')?.status !== 'warn') {
+  throw new Error('expected registered agents.defaults.models entry to be audited');
+}
+
+if (byModel.get('localproxy/mystery-large')?.status !== 'fail') {
+  throw new Error('expected unknown registered provider catalog model to fail');
+}
+
+if (!byModel.get('openai/gpt-4o-mini')?.validationActions?.length) {
+  throw new Error('expected high-risk models to include validation actions');
+}
+
+const configuredOnly = spawnSync(process.execPath, [
+  script,
+  '--openclaw-config', openclawConfig,
+  '--hypermem-config', hypermemConfig,
+  '--json',
+  '--configured-only'
+], { encoding: 'utf8' });
+
+const configuredOnlyReport = JSON.parse(configuredOnly.stdout);
+const configuredOnlyModels = new Map(configuredOnlyReport.models.map(item => [item.model, item]));
+
+if (configuredOnlyModels.has('localproxy/mystery-large')) {
+  throw new Error('expected --configured-only to omit provider catalog-only models');
 }
 
 rmSync(tempDir, { recursive: true, force: true });

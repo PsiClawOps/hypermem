@@ -54,6 +54,8 @@ Options:
   --hypermem-config <path>   HyperMem config to inspect
                             default: ~/.openclaw/hypermem/config.json
   --models <list>            Comma-separated provider/model keys to audit directly
+  --configured-only           Only audit actively configured agent/default models
+                            default: also audits registered provider catalog models
   --json                     Output machine-readable JSON
   --strict                   Exit 1 when any model is not ready
   -h, --help                 Show this help
@@ -78,6 +80,7 @@ function getArg(flag) {
 const flags = {
   json: args.includes('--json'),
   strict: args.includes('--strict'),
+  configuredOnly: args.includes('--configured-only'),
   openclawConfig: path.resolve(getArg('--openclaw-config') || path.join(os.homedir(), '.openclaw', 'openclaw.json')),
   hypermemConfig: path.resolve(getArg('--hypermem-config') || path.join(os.homedir(), '.openclaw', 'hypermem', 'config.json')),
   models: (getArg('--models') || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
@@ -92,10 +95,38 @@ function normalizeModelKey(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
+function addModelKey(out, value) {
+  const normalized = normalizeModelKey(value);
+  if (normalized.includes('/')) out.add(normalized);
+}
+
+function joinProviderModel(providerId, modelId) {
+  const provider = normalizeModelKey(providerId);
+  const model = normalizeModelKey(modelId);
+  if (!provider || !model) return '';
+  return model.includes('/') ? model : `${provider}/${model}`;
+}
+
+function addRegisteredModel(out, providerId, value) {
+  if (typeof value === 'string') {
+    addModelKey(out, joinProviderModel(providerId, value));
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) addRegisteredModel(out, providerId, item);
+    return;
+  }
+
+  if (!value || typeof value !== 'object') return;
+
+  const modelId = value.model || value.id || value.name;
+  addModelKey(out, joinProviderModel(value.provider || providerId, modelId));
+}
+
 function addModelishValue(out, value) {
   if (typeof value === 'string') {
-    const normalized = normalizeModelKey(value);
-    if (normalized.includes('/')) out.add(normalized);
+    addModelKey(out, value);
     return;
   }
 
@@ -134,6 +165,38 @@ function collectConfiguredModels(config) {
 
   addModelishValue(out, config?.agents?.defaults?.model);
   addModelishValue(out, config?.agents?.defaults?.fallbacks);
+  addModelishValue(out, config?.agents?.defaults?.heartbeat?.model);
+  addModelishValue(out, config?.agents?.defaults?.subagents?.model);
+  addModelishValue(out, config?.agents?.defaults?.imageModel);
+
+  if (config?.channels?.modelByChannel && typeof config.channels.modelByChannel === 'object') {
+    for (const channelModels of Object.values(config.channels.modelByChannel)) {
+      if (!channelModels || typeof channelModels !== 'object') continue;
+      for (const model of Object.values(channelModels)) addModelishValue(out, model);
+    }
+  }
+
+  return [...out].sort();
+}
+
+function collectRegisteredModels(config) {
+  const out = new Set();
+
+  const defaultsModels = config?.agents?.defaults?.models;
+  if (defaultsModels && typeof defaultsModels === 'object' && !Array.isArray(defaultsModels)) {
+    for (const model of Object.keys(defaultsModels)) addModelKey(out, model);
+  }
+
+  const providers = config?.models?.providers;
+  if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
+    for (const [providerId, provider] of Object.entries(providers)) {
+      addRegisteredModel(out, providerId, provider?.models);
+    }
+  }
+
+  if (Array.isArray(config?.tools?.media?.models)) {
+    for (const item of config.tools.media.models) addRegisteredModel(out, item?.provider, item);
+  }
 
   return [...out].sort();
 }
@@ -154,26 +217,31 @@ function inspectModel(model, overrides) {
   let status = 'ok';
   const reasons = [];
   const recommendations = [];
+  const validationActions = [];
 
   if (!detected && !hasOverride) {
     status = 'fail';
     reasons.push('model does not match HyperMem autodetect patterns and has no explicit override');
     recommendations.push('add compositor.contextWindowOverrides["provider/model"] with contextTokens and contextWindow');
+    validationActions.push('validate the real usable context window empirically, then add an explicit override');
   } else if (highRisk && !hasOverride) {
     status = 'warn';
     reasons.push('provider family is frequently missing or misreporting runtime token budgets');
     recommendations.push('prefer an explicit override even if pattern autodetect matches');
     recommendations.push('verify runtime logs show `budget source: runtime tokenBudget=...` for this exact model');
+    validationActions.push('treat OpenAI-compatible/runtime-tokenBudget-missing APIs as untrusted until a live context-window probe confirms the limit');
   } else if (hasOverride && !hasBothOverrideNumbers) {
     status = 'warn';
     reasons.push('override exists but only one of contextTokens/contextWindow is set');
     recommendations.push('declare both numbers so usable budget and advertised window are explicit');
+    validationActions.push('fill the missing override field from provider docs or an empirical context-window probe');
   }
 
   if (hasOverride && Number.isInteger(contextTokens) && Number.isInteger(contextWindow) && contextTokens > contextWindow) {
     status = 'fail';
     reasons.push('override is invalid: contextTokens exceeds contextWindow');
     recommendations.push('fix the override so contextTokens <= contextWindow');
+    validationActions.push('correct the override before trusting HyperMem budgeting for this model');
   }
 
   if (status === 'ok') {
@@ -190,6 +258,7 @@ function inspectModel(model, overrides) {
     override: hasOverride ? { contextTokens, contextWindow } : null,
     reasons,
     recommendations,
+    validationActions,
   };
 }
 
@@ -207,6 +276,9 @@ try {
 const overrides = getOverrides(hypermemConfig);
 const modelSet = new Set(flags.models);
 for (const model of collectConfiguredModels(openclawConfig)) modelSet.add(model);
+if (!flags.configuredOnly) {
+  for (const model of collectRegisteredModels(openclawConfig)) modelSet.add(model);
+}
 for (const model of Object.keys(overrides)) modelSet.add(normalizeModelKey(model));
 
 const models = [...modelSet].filter(Boolean).sort();
@@ -235,6 +307,7 @@ if (flags.json) {
   console.log(JSON.stringify({
     openclawConfig: existsSync(flags.openclawConfig) ? flags.openclawConfig : null,
     hypermemConfig: existsSync(flags.hypermemConfig) ? flags.hypermemConfig : null,
+    scope: flags.configuredOnly ? 'configured' : 'configured+registered',
     counts,
     models: report,
   }, null, 2));
@@ -247,6 +320,9 @@ if (existsSync(flags.openclawConfig)) console.log(`OpenClaw config: ${flags.open
 if (existsSync(flags.hypermemConfig)) console.log(`HyperMem config: ${flags.hypermemConfig}`);
 console.log('');
 
+console.log(`Scope: ${flags.configuredOnly ? 'configured models only' : 'configured + registered provider catalog models'}`);
+console.log('');
+
 for (const item of report) {
   const icon = item.status === 'ok' ? '✅' : item.status === 'warn' ? '⚠️' : '❌';
   console.log(`${icon} ${item.model}`);
@@ -255,6 +331,7 @@ for (const item of report) {
     console.log(`   - override: contextTokens=${item.override.contextTokens ?? 'unset'}, contextWindow=${item.override.contextWindow ?? 'unset'}`);
   }
   for (const recommendation of item.recommendations) console.log(`   - action: ${recommendation}`);
+  for (const action of item.validationActions) console.log(`   - validate: ${action}`);
   console.log('');
 }
 
