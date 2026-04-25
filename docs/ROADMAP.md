@@ -86,7 +86,7 @@ Rule going forward: do not reopen warm restore from historical planning notes. N
 ## 2. HyperMem 0.9.0 adaptive context lifecycle
 Status: **OPEN, active.**
 
-The core runtime slices have landed: the pure adaptive lifecycle policy kernel, compose diagnostics wiring, afterTurn Redis gradient-cap wiring, adaptive recall breadth, adaptive eviction ordering, lifecycle telemetry, report tooling, and forked-context lifecycle integration. The remaining work is real telemetry baseline evidence and then any deliberately chosen tuning, not more planning archaeology.
+The core runtime slices have landed: the pure adaptive lifecycle policy kernel, compose diagnostics wiring, afterTurn Redis gradient-cap wiring, adaptive recall breadth, adaptive eviction ordering, lifecycle telemetry, report tooling, and forked-context lifecycle integration. The first live telemetry baseline is populated; it shows steady/warmup behavior with zero lifecycle-band divergence, so no threshold tuning is warranted from the current evidence.
 
 The lifecycle policy makes compose, afterTurn, recall, trim, compaction, and eviction share one pressure-band decision source instead of growing independent heuristics:
 - tiered warming — policy bands: bootstrap, warmup, steady, elevated, high, critical
@@ -106,11 +106,12 @@ Done in this stream:
 - forked-context lifecycle integration — `85b5e3c`, CI `24921417908`
 
 Remaining slices:
-- real telemetry baseline evidence for topic-stamp coverage, lifecycle-band divergence, adaptive-drop bypass reasons, topic-aware eligible/drop/protected counts, and afterTurn gradient observations
-- runtime tuning only after the evidence pass shows a specific threshold or behavior change is warranted
+- gather a topic-bearing compose sample before making topic-aware eviction or recall tuning claims; the first baseline had no assemble topic fields to interpret
+- runtime tuning only after evidence shows a specific threshold or behavior change is warranted
 
-Closed release-readiness gate:
+Closed release-readiness gates:
 - vector coverage repair: `scripts/embed-existing.mjs` now supports active `knowledge` backfill, eligibility-aware coverage reporting, and a regression covering knowledge coverage. Production backfill reached 100% eligible coverage for facts, knowledge, and episodes on 2026-04-24.
+- lifecycle telemetry baseline: the 2026-04-25 live one-hour window reported 222 lifecycle-policy records across `compose.preRecall`, `compose.eviction`, and `afterTurn.gradient`; bands were steady/warmup only, lifecycle divergence was zero, pressure p95 was 18%, and no threshold tuning was indicated.
 
 Do not confuse this with the shipped governance-retrieval work. Governance trigger retrieval is closed unless a new regression appears.
 
@@ -161,7 +162,7 @@ Phase 5 stays important, but it is not the next sprint until the higher-priority
 |---|---|---|
 | Runtime diagnostics API allowlist defect | ✅ CLOSED | Verified installed OpenClaw runtime can reach `memory-core/runtime-api.js`; re-open only with a fresh public-surface failure trace. |
 | Topic synthesis bridge defect | ✅ CLOSED | Fixed in `8b9f928`; CI `24917765384` passed. |
-| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Kernel, compose diagnostics, afterTurn gradient cap, recall breadth, eviction order, lifecycle telemetry, report tooling, and forked-context integration are landed; runtime telemetry is enabled; next gate is vector coverage repair before interpreting baseline data. |
+| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Kernel, compose diagnostics, afterTurn gradient cap, recall breadth, eviction order, lifecycle telemetry, report tooling, and forked-context integration are landed; vector coverage and first live lifecycle baseline are closed; remaining gate is topic-bearing compose evidence before topic-aware tuning. |
 | Vector coverage repair gate | ✅ CLOSED | `embed-existing` now supports knowledge and eligibility-aware coverage reporting; production vectors reached facts 113/113, knowledge 85/85, episodes 30,121/30,121 eligible coverage on 2026-04-24. |
 | Contradiction-aware decay | 🟡 OPEN | Prevents stale-fact poisoning after architectural pivots. |
 | Turn DAG Phase 5 storage/perf | 🟡 OPEN | Important, but later than the items above. |
