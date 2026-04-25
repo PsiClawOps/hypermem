@@ -42,7 +42,10 @@ export class KnowledgeStore {
    *
    * Versioning semantics:
    * - If no active entry exists: insert as version 1
-   * - If same content: refresh confidence + timestamp only (no new version)
+   * - If same content: refresh confidence + timestamp + source_ref/expiry
+   *   metadata only (no new version). Refreshing source_ref advances
+   *   synthesis watermarks (e.g. "topic:<id>:mc:<count>") so callers that
+   *   re-run with identical compiled content do not loop forever.
    * - If different content: insert as new version (max_version + 1), mark
    *   previous active row as superseded_by = new_id
    *
@@ -84,11 +87,38 @@ export class KnowledgeStore {
     `).get(agentId, domain, key) as Record<string, unknown> | undefined;
 
     if (existing && (existing.content as string) === content) {
-      // Same content — refresh confidence and timestamp only, no new version
+      // Same content — refresh confidence/timestamp and synthesis metadata
+      // (source_ref, source_type, expires_at) so watermark-style refs advance
+      // without minting a new version row.
+      const nextSourceRef = opts?.sourceRef !== undefined
+        ? opts.sourceRef
+        : ((existing.source_ref as string) ?? null);
+      const nextSourceType = opts?.sourceType !== undefined
+        ? sourceType
+        : ((existing.source_type as string) ?? sourceType);
+      const nextExpiresAt = opts?.expiresAt !== undefined
+        ? opts.expiresAt
+        : ((existing.expires_at as string) ?? null);
       this.db.prepare(
-        'UPDATE knowledge SET confidence = ?, updated_at = ? WHERE id = ?'
-      ).run(confidence, now, existing.id as number);
-      return parseKnowledgeRow({ ...existing, confidence, updated_at: now });
+        `UPDATE knowledge
+           SET confidence = ?, updated_at = ?, source_ref = ?, source_type = ?, expires_at = ?
+         WHERE id = ?`
+      ).run(
+        confidence,
+        now,
+        nextSourceRef,
+        nextSourceType,
+        nextExpiresAt,
+        existing.id as number,
+      );
+      return parseKnowledgeRow({
+        ...existing,
+        confidence,
+        updated_at: now,
+        source_ref: nextSourceRef,
+        source_type: nextSourceType,
+        expires_at: nextExpiresAt,
+      });
     }
 
     // Determine next version number

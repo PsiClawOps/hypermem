@@ -2,7 +2,8 @@
  * Topic synthesis tests.
  */
 
-import { HyperMem, TopicSynthesizer, lintKnowledge } from '../dist/index.js';
+import { HyperMem, TopicSynthesizer, KnowledgeStore, lintKnowledge } from '../dist/index.js';
+import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -459,6 +460,120 @@ async function testLintMultiAgentIsolation() {
   await h.hm.close();
 }
 
+async function testIdempotentUnchangedContentAdvancesWatermark() {
+  const h = await createHarness('idempotent-watermark');
+  const store = new KnowledgeStore(h.libDb);
+
+  const content = '# stable wiki\nbody that does not change between ticks';
+  const first = store.upsert(h.agentId, 'topic-synthesis', 'watermark-topic', content, {
+    sourceType: 'synthesizer',
+    sourceRef: 'topic:42:mc:5',
+  });
+  const second = store.upsert(h.agentId, 'topic-synthesis', 'watermark-topic', content, {
+    sourceType: 'synthesizer',
+    sourceRef: 'topic:42:mc:11',
+  });
+  const third = store.upsert(h.agentId, 'topic-synthesis', 'watermark-topic', content, {
+    sourceType: 'synthesizer',
+    sourceRef: 'topic:42:mc:17',
+  });
+
+  assert(first.id === second.id && second.id === third.id, 'unchanged content reuses the same knowledge row id');
+  assert(second.sourceRef === 'topic:42:mc:11', 'second upsert advances source_ref watermark');
+  assert(third.sourceRef === 'topic:42:mc:17', 'third upsert advances source_ref watermark again');
+
+  const versionRows = h.libDb.prepare(
+    'SELECT COUNT(*) AS n FROM knowledge WHERE agent_id = ? AND domain = ? AND key = ?'
+  ).get(h.agentId, 'topic-synthesis', 'watermark-topic');
+  assert(Number(versionRows.n) === 1, 'unchanged content does not mint a new version row');
+
+  const stored = h.libDb.prepare(
+    'SELECT source_ref, source_type FROM knowledge WHERE id = ?'
+  ).get(third.id);
+  assert(stored.source_ref === 'topic:42:mc:17', 'persisted source_ref reflects latest watermark');
+  assert(stored.source_type === 'synthesizer', 'persisted source_type preserved on unchanged-content path');
+
+  await h.hm.close();
+}
+
+async function testLegacyDirectIdFallbackWithoutSessionTopic() {
+  const h = await createHarness('legacy-direct-id');
+  // Insert library topic with a name that will NOT match any message text and
+  // no session-topic row in the message DB. The only resolution path is the
+  // legacy direct-id fallback (String(topic.id)).
+  const libraryTopicId = insertTopic(h, { name: 'zzz-legacy-only-marker', updatedAt: isoMinutesAgo(60) });
+  // No insertSessionTopic — the per-session topics table has no matching row.
+  // Insert messages whose topic_id is the library integer id stringified, with
+  // content that does not include the topic name (avoids content fallback).
+  [
+    'Generic decision text without the marker token, just enough body to count.',
+    'Second generic message that does not mention the topic name in any form.',
+    'Third generic message body that should still be merged via the legacy id.',
+    'Fourth generic message body that should still be merged via the legacy id.',
+    'Fifth generic message body so we clear the minimum-message threshold.',
+  ].forEach((text, idx) => insertMessage(h, libraryTopicId, { text, messageIndex: idx + 1, createdAt: isoMinutesAgo(90 - idx) }));
+  h.libDb.prepare('UPDATE topics SET message_count = ?, updated_at = ? WHERE id = ?')
+    .run(5, isoMinutesAgo(60), libraryTopicId);
+
+  const synth = new TopicSynthesizer(h.libDb, () => h.msgDb);
+  const result = synth.tick(h.agentId);
+  const row = fetchKnowledge(h, 'zzz-legacy-only-marker');
+  assert(result.topicsSynthesized === 1, 'legacy direct-id fallback synthesizes without session-topic row');
+  assert(!!row, 'legacy direct-id fallback writes a knowledge row');
+  assert(result.topicIdsResolved === 1, 'only the legacy direct id is resolved when no session topic exists');
+  await h.hm.close();
+}
+
+async function testKnowledgeVisibilityRepairOnLegacyDb() {
+  const h = await createHarness('visibility-repair');
+  const dataDir = h.tmpDir;
+  await h.hm.close();
+
+  // Simulate a legacy library.db that reached schema >= 7 but lost the
+  // visibility column (real-world drift). Drop the column, then verify that
+  // re-opening via HyperMem repairs it before the next upsert.
+  const libPath = path.join(dataDir, 'library.db');
+  const raw = new DatabaseSync(libPath);
+  raw.exec('DROP INDEX IF EXISTS idx_knowledge_visibility');
+  raw.exec('ALTER TABLE knowledge DROP COLUMN visibility');
+  const colsBefore = new Set(raw.prepare('PRAGMA table_info(knowledge)').all().map(c => c.name));
+  raw.close();
+  assert(!colsBefore.has('visibility'), 'precondition: legacy db lacks knowledge.visibility column');
+
+  const reopened = await HyperMem.create({ dataDir });
+  const libDb = reopened.dbManager.getLibraryDb();
+  const colsAfter = new Set(libDb.prepare('PRAGMA table_info(knowledge)').all().map(c => c.name));
+  assert(colsAfter.has('visibility'), 'visibility column repaired on next open');
+
+  // Upsert path must not throw on the repaired schema.
+  const store = new KnowledgeStore(libDb);
+  const k = store.upsert('agent1', 'topic-synthesis', 'after-repair', 'compiled wiki body', {
+    sourceType: 'synthesizer',
+    sourceRef: 'topic:1:mc:5',
+  });
+  assert(k && k.id > 0, 'knowledge upsert succeeds on repaired legacy db');
+  const row = libDb.prepare('SELECT visibility FROM knowledge WHERE id = ?').get(k.id);
+  assert(row && typeof row.visibility === 'string', 'repaired row has a visibility value (default applied)');
+
+  await reopened.close();
+}
+
+async function testDiagnosticsWhenEligibleTopicHasNoSourceMessages() {
+  const h = await createHarness('diagnostics-no-messages');
+  // Topic is eligible (>= min messages, stale) but no source messages are
+  // reachable via legacy id, session-topic-name bridge, or content fallback.
+  insertTopic(h, { name: 'zzz-orphan-eligible', messageCount: 6, updatedAt: isoMinutesAgo(60) });
+
+  const synth = new TopicSynthesizer(h.libDb, () => h.msgDb);
+  const result = synth.tick(h.agentId);
+  assert(result.topicsSynthesized === 0, 'eligible topic with no source messages is not synthesized');
+  assert(result.topicsSkipped === 1, 'eligible topic with no source messages is counted as skipped');
+  assert(result.topicsWithoutMessages === 1, 'topicsWithoutMessages diagnostic increments');
+  assert(result.knowledgeEntriesWritten === 0, 'no knowledge row written when there are no source messages');
+  assert(!fetchKnowledge(h, 'zzz-orphan-eligible'), 'no knowledge entry exists for orphan-eligible topic');
+  await h.hm.close();
+}
+
 async function run() {
   console.log('═══════════════════════════════════════════════════');
   console.log('  HyperMem Topic Synthesis Tests');
@@ -479,6 +594,10 @@ async function run() {
   await testLintEmptyDb();
   await testLintAlreadyDecayed();
   await testLintMultiAgentIsolation();
+  await testIdempotentUnchangedContentAdvancesWatermark();
+  await testLegacyDirectIdFallbackWithoutSessionTopic();
+  await testKnowledgeVisibilityRepairOnLegacyDb();
+  await testDiagnosticsWhenEligibleTopicHasNoSourceMessages();
 
   console.log(`\nPassed: ${passed}, Failed: ${failed}`);
   if (failed > 0) process.exit(1);
