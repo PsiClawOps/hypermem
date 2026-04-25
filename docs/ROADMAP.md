@@ -86,7 +86,7 @@ Rule going forward: do not reopen warm restore from historical planning notes. N
 ## 2. HyperMem 0.9.0 adaptive context lifecycle
 Status: **OPEN, active.**
 
-The first slices have landed: the pure adaptive lifecycle policy kernel, compose diagnostics wiring, and afterTurn Redis gradient-cap wiring. The remaining work is runtime behavior, not more planning archaeology.
+The core runtime slices have landed: the pure adaptive lifecycle policy kernel, compose diagnostics wiring, afterTurn Redis gradient-cap wiring, adaptive recall breadth, adaptive eviction ordering, and lifecycle telemetry. The remaining work is evidence/reporting and then any deliberately chosen tuning, not more planning archaeology.
 
 The lifecycle policy makes compose, afterTurn, recall, trim, compaction, and eviction share one pressure-band decision source instead of growing independent heuristics:
 - tiered warming — policy bands: bootstrap, warmup, steady, elevated, high, critical
@@ -97,14 +97,15 @@ The lifecycle policy makes compose, afterTurn, recall, trim, compaction, and evi
 - telemetry and tuning pass — policy returns stable band, pressure, and reason fields for later runtime instrumentation
 
 Done in this stream:
-- adaptive lifecycle policy kernel
-- compose diagnostics wiring
-- afterTurn Redis gradient-cap wiring
+- adaptive lifecycle policy kernel — `c94def0`, CI `24879881852`
+- compose diagnostics wiring + afterTurn Redis gradient-cap wiring — `322a416`
+- adaptive recall breadth adjustment — `5e47fce`, CI `24918184839`
+- adaptive eviction ordering — `a0f6780`, CI `24918940291`
+- adaptive lifecycle telemetry — `61f9b9e`, CI `24919418833`
 
 Remaining slices:
-- recall breadth adjustment
-- eviction order tuning
-- runtime telemetry/tuning based on observed pressure behavior
+- telemetry report tooling and baseline evidence for topic-stamp coverage, lifecycle-band divergence, adaptive-drop bypass reasons, topic-aware eligible/drop/protected counts, and afterTurn gradient observations
+- runtime tuning only after the evidence pass shows a specific threshold or behavior change is warranted
 
 Do not confuse this with the shipped governance-retrieval work. Governance trigger retrieval is closed unless a new regression appears.
 
@@ -116,17 +117,17 @@ Status: **OPEN, defect.**
 This is not part of adaptive lifecycle tuning, but it is operationally adjacent: broken diagnostics make pressure and recall work harder to verify. Fix this before relying on doctor output as proof for lifecycle changes.
 
 ## 2b. Topic synthesis bridge defect
-Status: **OPEN, defect.**
+Status: **CLOSED.** Fixed in `8b9f928`; CI `24917765384` passed.
 
 Health stats on 2026-04-24 showed `knowledge: 0 active` despite eligible topics, indexed facts, and indexed episodes. Investigation found `TopicSynthesizer` still assumes `library.db.topics.id` matches `messages.db.messages.topic_id`. That invariant broke when per-session `SessionTopicMap` introduced UUID topic ids in messages DBs while library topics kept integer ids. The result is silent topic-wiki synthesis loss: eligible global topics cannot resolve their source messages.
 
-Fix before treating the knowledge/wiki layer as operational:
-- bridge library topics to per-agent message topics where names align and fall back to the same content detector that created library topics;
-- preserve a legacy direct-id fallback for any older integer-linked data;
-- emit diagnostics when eligible topics cannot resolve message topic ids or source messages;
-- add regression coverage for UUID topic ids, duplicate same-name session topic fragments, content-detector fallback, no-match skips, legacy direct-id fallback, schema-drift repair, and idempotent upsert.
-
-This is prioritized ahead of forked-context integration because adaptive/forked-context work should not build on a dead synthesis layer. Production-copy verification also exposed a long-lived `knowledge.visibility` schema drift; repair that in the same hotfix because `KnowledgeStore.upsert()` cannot write without it.
+Closed fix summary:
+- bridges library topics to per-agent message topics where names align and falls back to the same content detector that created library topics;
+- preserves legacy direct-id fallback for older integer-linked data;
+- emits diagnostics when eligible topics cannot resolve message topic ids or source messages;
+- refreshes unchanged-content upsert metadata so source-ref watermarks do not silently suppress regenerated pages;
+- repairs long-lived `knowledge.visibility` schema drift;
+- covers UUID topic ids, duplicate same-name session topic fragments, content-detector fallback, no-match skips, legacy direct-id fallback, schema-drift repair, unchanged-content watermark refresh, and idempotent upsert.
 
 ## 3. Contradiction-aware decay
 After 0.9.0 lifecycle work:

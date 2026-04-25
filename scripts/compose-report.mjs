@@ -115,6 +115,24 @@ async function run() {
         const processed = d.compactionProcessedCount != null ? ` processed=${d.compactionProcessedCount}` : '';
         console.log(`    compactionEligible:     ${d.compactionEligibleCount}${ratio}${processed}`);
       }
+      if (d.adaptiveLifecycleBand != null || d.adaptiveEvictionLifecycleBand != null) {
+        console.log('    adaptiveLifecycle:');
+        if (d.adaptiveLifecycleBand != null) {
+          console.log(`      compose.preRecall:    band=${d.adaptiveLifecycleBand} pressure=${d.adaptiveLifecyclePressurePct ?? 'n/a'} ` +
+                      `recallBudget=${d.adaptiveRecallBudgetTokens ?? 'n/a'} candidates=${d.adaptiveRecallCandidateLimit ?? 'n/a'}`);
+          if (Array.isArray(d.adaptiveLifecycleReasons) && d.adaptiveLifecycleReasons.length > 0) {
+            console.log(`      reasons:              ${d.adaptiveLifecycleReasons.join(',')}`);
+          }
+        }
+        if (d.adaptiveEvictionLifecycleBand != null) {
+          console.log(`      compose.eviction:     band=${d.adaptiveEvictionLifecycleBand} pressure=${d.adaptiveEvictionPressurePct ?? 'n/a'} ` +
+                      `diverged=${d.adaptiveLifecycleBandDiverged ?? false}`);
+          console.log(`      topicIdCoveragePct:   ${d.adaptiveEvictionTopicIdCoveragePct ?? 'n/a'}`);
+          console.log(`      topicAwareClusters:   eligible=${d.adaptiveEvictionTopicAwareEligibleClusters ?? 0} ` +
+                      `dropped=${d.adaptiveEvictionTopicAwareDroppedClusters ?? 0} protected=${d.adaptiveEvictionProtectedClusters ?? 0}`);
+          console.log(`      bypassReason:         ${d.adaptiveEvictionBypassReason ?? 'n/a'}`);
+        }
+      }
       if (result.warnings?.length > 0) {
         console.log('  Warnings:');
         for (const w of result.warnings) {

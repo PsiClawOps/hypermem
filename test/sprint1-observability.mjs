@@ -317,6 +317,34 @@ async function run() {
         compactionEligibleCount: 10,
         compactionEligibleRatio: 0.333,
         compactionProcessedCount: 2,
+        // 0.9.0 adaptive lifecycle diagnostics — aggregate fields only
+        adaptiveLifecycleBand: 'high',
+        adaptiveEvictionLifecycleBand: 'elevated',
+        adaptiveLifecycleBandDiverged: true,
+        adaptiveEvictionTopicIdCoveragePct: 75,
+        adaptiveEvictionTopicAwareEligibleClusters: 3,
+        adaptiveEvictionTopicAwareDroppedClusters: 1,
+        adaptiveEvictionProtectedClusters: 2,
+      },
+      {
+        event: 'lifecycle-policy',
+        ts: '2026-04-21T10:00:00.000Z',
+        path: 'compose.eviction',
+        agentId: 'a1',
+        sessionKey: 'sk:a1',
+        band: 'elevated',
+        pressurePct: 71.25,
+        reasons: ['pressure:elevated'],
+      },
+      {
+        event: 'lifecycle-policy',
+        ts: '2026-04-21T10:00:00.000Z',
+        path: 'compose.preRecall',
+        agentId: 'a1',
+        sessionKey: 'sk:a1',
+        band: 'high',
+        pressurePct: 83.5,
+        reasons: ['pressure:high'],
       },
       {
         event: 'trim',
@@ -342,6 +370,25 @@ async function run() {
         prefixChanged: false,
         prefixHash: 'abc',
         rerankerStatus: 'bypass_no_provider',
+        adaptiveLifecycleBand: 'steady',
+        adaptiveEvictionLifecycleBand: 'steady',
+        adaptiveLifecycleBandDiverged: false,
+        adaptiveEvictionTopicIdCoveragePct: 0,
+        adaptiveEvictionTopicAwareEligibleClusters: 0,
+        adaptiveEvictionTopicAwareDroppedClusters: 0,
+        adaptiveEvictionProtectedClusters: 0,
+        adaptiveEvictionBypassReason: 'band-not-topic-aware',
+      },
+      {
+        event: 'lifecycle-policy',
+        ts: '2026-04-21T10:01:00.001Z',
+        path: 'afterTurn.gradient',
+        agentId: 'a1',
+        sessionKey: 'sk:a1',
+        band: 'steady',
+        pressurePct: 42,
+        trimSoftTarget: 0.75,
+        reasons: ['steady'],
       },
     ];
     fs.writeFileSync(s1FixturePath, s1Events.map(e => JSON.stringify(e)).join('\n') + '\n');
@@ -353,6 +400,17 @@ async function run() {
     assert(report.totals.turns >= 2, `report has >= 2 turns (got ${report.totals.turns})`);
     assert(report.totals.trimCount >= 1, `report counted >= 1 trim (got ${report.totals.trimCount})`);
     assert(report.totals.churnTurns === 0, `no churn in fixture without afterTurn.secondary (got ${report.totals.churnTurns})`);
+    assert(report.totals.lifecyclePolicyCount === 3, `lifecycle policy telemetry counted (got ${report.totals.lifecyclePolicyCount})`);
+    assert(report.totals.lifecyclePolicyPaths['compose.eviction'] === 1, 'compose.eviction lifecycle path counted');
+    assert(report.totals.lifecyclePolicyPaths['compose.preRecall'] === 1, 'compose.preRecall lifecycle path counted');
+    assert(report.totals.lifecyclePolicyPaths['afterTurn.gradient'] === 1, 'afterTurn.gradient lifecycle path counted');
+    assert(report.totals.adaptiveBandDivergenceTurns >= 1, `adaptive divergence counted (got ${report.totals.adaptiveBandDivergenceTurns})`);
+    assert(report.totals.averageTopicIdCoveragePct === 37.5, `topicId coverage averaged from aggregate samples (got ${report.totals.averageTopicIdCoveragePct})`);
+    assert(report.totals.adaptiveBypassReasons['band-not-topic-aware'] === 1, 'adaptive bypass reason counted');
+    const reportText = JSON.stringify(report);
+    for (const pat of [/What is the/, /governance constraints/, /release policy/]) {
+      assert(!pat.test(reportText), `trim-report lifecycle summary has no user/doc content (pattern: ${pat})`);
+    }
   }
 
   // ── Cleanup ──────────────────────────────────────────────────────────

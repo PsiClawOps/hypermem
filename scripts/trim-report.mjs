@@ -8,6 +8,7 @@
  *   - trim count     (trimTelemetry events)
  *   - tokens removed (pre - post, summed)
  *   - afterTurn -> next-assemble churn pattern flag
+ *   - lifecycle-policy observations for adaptive lifecycle tuning evidence
  *
  * The churn pattern is defined as: an `afterTurn.secondary` trim event
  * followed (within the same agent/sessionKey) by an `assemble.*` trim event
@@ -67,6 +68,22 @@ function readJsonl(inputPath) {
   return events;
 }
 
+function finiteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function increment(map, key) {
+  const k = key || 'unknown';
+  map[k] = (map[k] ?? 0) + 1;
+}
+
+function lifecycleDiverged(turn) {
+  if (turn.adaptiveLifecycleBandDiverged === true) return true;
+  const composeEviction = turn.lifecyclePolicies.find(ev => ev.path === 'compose.eviction');
+  const composePreRecall = turn.lifecyclePolicies.find(ev => ev.path === 'compose.preRecall');
+  return Boolean(composeEviction?.band && composePreRecall?.band && composeEviction.band !== composePreRecall.band);
+}
+
 /**
  * Group events into per-turn buckets. A "turn" boundary is an assembleTrace
  * event. Every event up to (but not including) the next assembleTrace
@@ -93,6 +110,15 @@ function buildReport(events) {
       trimCount: 0,
       tokensRemoved: 0,
       trims: [],
+      lifecyclePolicies: [],
+      adaptiveLifecycleBand: meta?.adaptiveLifecycleBand ?? null,
+      adaptiveEvictionLifecycleBand: meta?.adaptiveEvictionLifecycleBand ?? null,
+      adaptiveLifecycleBandDiverged: meta?.adaptiveLifecycleBandDiverged ?? false,
+      adaptiveEvictionTopicIdCoveragePct: finiteNumber(meta?.adaptiveEvictionTopicIdCoveragePct),
+      adaptiveEvictionTopicAwareEligibleClusters: finiteNumber(meta?.adaptiveEvictionTopicAwareEligibleClusters),
+      adaptiveEvictionTopicAwareDroppedClusters: finiteNumber(meta?.adaptiveEvictionTopicAwareDroppedClusters),
+      adaptiveEvictionProtectedClusters: finiteNumber(meta?.adaptiveEvictionProtectedClusters),
+      adaptiveEvictionBypassReason: meta?.adaptiveEvictionBypassReason ?? null,
       churn: false,
     };
   };
@@ -112,6 +138,17 @@ function buildReport(events) {
         postTokens: ev.postTokens ?? 0,
         cacheInvalidated: Boolean(ev.cacheInvalidated),
         reason: ev.reason ?? '',
+        agentId: ev.agentId ?? null,
+        sessionKey: ev.sessionKey ?? null,
+      });
+    } else if (ev.event === 'lifecycle-policy') {
+      current.lifecyclePolicies.push({
+        path: ev.path ?? 'unknown',
+        band: ev.band ?? 'unknown',
+        pressurePct: finiteNumber(ev.pressurePct),
+        topicShiftConfidence: finiteNumber(ev.topicShiftConfidence),
+        trimSoftTarget: finiteNumber(ev.trimSoftTarget),
+        reasons: Array.isArray(ev.reasons) ? ev.reasons.filter(r => typeof r === 'string') : [],
         agentId: ev.agentId ?? null,
         sessionKey: ev.sessionKey ?? null,
       });
@@ -136,12 +173,48 @@ function buildReport(events) {
     }
   }
 
+  const lifecyclePolicyPaths = {};
+  const lifecycleBandCounts = {};
+  const adaptiveBypassReasons = {};
+  let topicCoverageTotal = 0;
+  let topicCoverageSamples = 0;
+  let topicAwareEligibleClusters = 0;
+  let topicAwareDroppedClusters = 0;
+  let topicAwareProtectedClusters = 0;
+
+  for (const t of turns) {
+    for (const ev of t.lifecyclePolicies) {
+      increment(lifecyclePolicyPaths, ev.path);
+      increment(lifecycleBandCounts, `${ev.path}:${ev.band}`);
+    }
+    if (t.adaptiveEvictionBypassReason) increment(adaptiveBypassReasons, t.adaptiveEvictionBypassReason);
+    if (t.adaptiveEvictionTopicIdCoveragePct != null) {
+      topicCoverageSamples++;
+      topicCoverageTotal += t.adaptiveEvictionTopicIdCoveragePct;
+    }
+    topicAwareEligibleClusters += t.adaptiveEvictionTopicAwareEligibleClusters ?? 0;
+    topicAwareDroppedClusters += t.adaptiveEvictionTopicAwareDroppedClusters ?? 0;
+    topicAwareProtectedClusters += t.adaptiveEvictionProtectedClusters ?? 0;
+  }
+
   const totals = {
     turns: turns.length,
     composeCount: turns.reduce((s, t) => s + t.composeCount, 0),
     trimCount: turns.reduce((s, t) => s + t.trimCount, 0),
     tokensRemoved: turns.reduce((s, t) => s + t.tokensRemoved, 0),
     churnTurns: turns.filter(t => t.churn).length,
+    lifecyclePolicyCount: turns.reduce((s, t) => s + t.lifecyclePolicies.length, 0),
+    lifecyclePolicyPaths,
+    lifecycleBandCounts,
+    adaptiveBandDivergenceTurns: turns.filter(lifecycleDiverged).length,
+    adaptiveBypassReasons,
+    topicCoverageSamples,
+    averageTopicIdCoveragePct: topicCoverageSamples > 0
+      ? Math.round((topicCoverageTotal / topicCoverageSamples) * 1000) / 1000
+      : null,
+    topicAwareEligibleClusters,
+    topicAwareDroppedClusters,
+    topicAwareProtectedClusters,
   };
   return { turns, totals };
 }
@@ -155,6 +228,19 @@ function renderText(report, inputPath) {
   lines.push(`Turns:   ${report.totals.turns}   Compose: ${report.totals.composeCount}   ` +
              `Trims: ${report.totals.trimCount}   Tokens removed: ${report.totals.tokensRemoved}   ` +
              `Churn turns: ${report.totals.churnTurns}`);
+  lines.push(`Lifecycle policies: ${report.totals.lifecyclePolicyCount}   ` +
+             `Divergence turns: ${report.totals.adaptiveBandDivergenceTurns}   ` +
+             `Avg topicId coverage: ${report.totals.averageTopicIdCoveragePct ?? 'n/a'}`);
+  if (Object.keys(report.totals.lifecyclePolicyPaths).length > 0) {
+    lines.push(`Lifecycle paths: ${Object.entries(report.totals.lifecyclePolicyPaths).map(([k, v]) => `${k}=${v}`).join('  ')}`);
+  }
+  if (Object.keys(report.totals.adaptiveBypassReasons).length > 0) {
+    lines.push(`Adaptive bypass reasons: ${Object.entries(report.totals.adaptiveBypassReasons).map(([k, v]) => `${k}=${v}`).join('  ')}`);
+  }
+  if (report.totals.topicCoverageSamples > 0) {
+    lines.push(`Topic-aware clusters: eligible=${report.totals.topicAwareEligibleClusters}  ` +
+               `dropped=${report.totals.topicAwareDroppedClusters}  protected=${report.totals.topicAwareProtectedClusters}`);
+  }
   lines.push('');
   lines.push('Per-turn summary:');
   lines.push('  # | path      | tL | trims | pre→post | removed | churn | turnId');
@@ -173,6 +259,18 @@ function renderText(report, inputPath) {
     if (t.trims.length > 0) {
       for (const tr of t.trims) {
         lines.push(`       └ ${tr.path.padEnd(22)} removed=${tr.removed} reason=${tr.reason}`);
+      }
+    }
+    if (t.adaptiveEvictionLifecycleBand || t.adaptiveEvictionTopicIdCoveragePct != null || t.adaptiveEvictionBypassReason) {
+      lines.push(`       ↳ adaptive compose.eviction band=${t.adaptiveEvictionLifecycleBand ?? '-'} ` +
+        `preRecall=${t.adaptiveLifecycleBand ?? '-'} diverged=${Boolean(t.adaptiveLifecycleBandDiverged)} ` +
+        `coverage=${t.adaptiveEvictionTopicIdCoveragePct ?? 'n/a'} bypass=${t.adaptiveEvictionBypassReason ?? '-'}`);
+    }
+    if (t.lifecyclePolicies.length > 0) {
+      for (const ev of t.lifecyclePolicies) {
+        const pressure = ev.pressurePct == null ? 'n/a' : ev.pressurePct;
+        const target = ev.trimSoftTarget == null ? 'n/a' : ev.trimSoftTarget;
+        lines.push(`       ↳ lifecycle ${String(ev.path).padEnd(18)} band=${ev.band} pressure=${pressure} trimSoftTarget=${target}`);
       }
     }
   });
