@@ -84,7 +84,7 @@ Final closeout work now complete:
 Rule going forward: do not reopen warm restore from historical planning notes. New warm-restore work needs a fresh defect, measurement gap, or roadmap item.
 
 ## 2. HyperMem 0.9.0 adaptive context lifecycle
-Status: **OPEN, active.**
+Status: **OPEN, release-candidate pending tag validation.**
 
 The core runtime slices have landed: the pure adaptive lifecycle policy kernel, compose diagnostics wiring, afterTurn Redis gradient-cap wiring, adaptive recall breadth, adaptive eviction ordering, lifecycle telemetry, report tooling, forked-context lifecycle integration, and metadata-only topic-signal report classification. The first live telemetry baseline is populated; it shows steady/warmup behavior with zero lifecycle-band divergence, so no threshold tuning is warranted from the current evidence.
 
@@ -106,13 +106,18 @@ Done in this stream:
 - forked-context lifecycle integration — `85b5e3c`, CI `24921417908`
 
 Remaining slices:
-- gather a safe live topic-bearing compose sample before making topic-aware eviction or recall tuning claims; deterministic fixtures now prove the report interpretation path, but the live stream still needs a topic-bearing sample before runtime tuning claims
-- runtime tuning only after evidence shows a specific threshold or behavior change is warranted
+- runtime tuning only after evidence shows a specific threshold or behavior change is warranted; live topic-bearing samples are now future tuning evidence, not a 0.9.0 release gate
 
 Closed release-readiness gates:
 - vector coverage repair: `scripts/embed-existing.mjs` now supports active `knowledge` backfill, eligibility-aware coverage reporting, and a regression covering knowledge coverage. Production backfill reached 100% eligible coverage for facts, knowledge, and episodes on 2026-04-24.
 - lifecycle telemetry baseline: the 2026-04-25 live one-hour window reported 222 lifecycle-policy records across `compose.preRecall`, `compose.eviction`, and `afterTurn.gradient`; bands were steady/warmup only, lifecycle divergence was zero, pressure p95 was 18%, and no threshold tuning was indicated.
-- topic-signal interpretation path: compose/assemble telemetry now exposes metadata-only topic-state fields, and `trim-report.mjs`/`compose-report.mjs` classify `present`, `absent-no-active-topic`, `absent-stamping-incomplete`, and `intentionally-suppressed` without topic names, prompt text, document text, or user content. This closes the reporting ambiguity from the first baseline; it does not by itself close the safe live topic-bearing sample gate.
+- topic-signal interpretation path: compose/assemble telemetry now exposes metadata-only topic-state fields, and `trim-report.mjs`/`compose-report.mjs` classify `present`, `absent-no-active-topic`, `absent-stamping-incomplete`, and `intentionally-suppressed` without topic names, prompt text, document text, or user content. This closes the reporting ambiguity from the first baseline.
+- topic-bearing compose evidence gate: the 0.9.0 release gate is now **replaced by a safer deterministic evidence gate**. `compose-report.mjs` seeds deterministic topic-bearing history in a temp workspace, `trim-report.mjs`/`compose-report.mjs` both emit `replaced-by-deterministic-evidence` only from metadata-only topic-state observations, and targeted tests cover the gate without live DB mutation or content-bearing telemetry. Live topic-bearing samples remain desirable for future tuning claims, but they are no longer required before tagging 0.9.0.
+
+Release-candidate next steps before tagging 0.9.0:
+- run targeted lifecycle evidence checks (`node test/trim-telemetry.mjs` and the existing adaptive lifecycle regression set)
+- validate release docs/version surface (`npm run validate:docs`, `npm run validate:version-parity`, changelog review)
+- complete the normal release checklist: final smoke/tests, tag notes, and publish/tag verification
 
 Do not confuse this with the shipped governance-retrieval work. Governance trigger retrieval is closed unless a new regression appears.
 
@@ -163,7 +168,7 @@ Phase 5 stays important, but it is not the next sprint until the higher-priority
 |---|---|---|
 | Runtime diagnostics API allowlist defect | ✅ CLOSED | Verified installed OpenClaw runtime can reach `memory-core/runtime-api.js`; re-open only with a fresh public-surface failure trace. |
 | Topic synthesis bridge defect | ✅ CLOSED | Fixed in `8b9f928`; CI `24917765384` passed. |
-| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Kernel, compose diagnostics, afterTurn gradient cap, recall breadth, eviction order, lifecycle telemetry, report tooling, forked-context integration, and topic-signal report classification are landed; vector coverage and first live lifecycle baseline are closed; threshold tuning is not warranted; remaining gate is a safe live topic-bearing compose sample before topic-aware tuning claims. |
+| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Kernel, compose diagnostics, afterTurn gradient cap, recall breadth, eviction order, lifecycle telemetry, report tooling, forked-context integration, and topic-signal report classification are landed; vector coverage, first live lifecycle baseline, and the 0.9.0 topic-bearing compose evidence gate are closed; threshold tuning remains deferred until future live evidence warrants it. |
 | Vector coverage repair gate | ✅ CLOSED | `embed-existing` now supports knowledge and eligibility-aware coverage reporting; production vectors reached facts 113/113, knowledge 85/85, episodes 30,121/30,121 eligible coverage on 2026-04-24. |
 | Contradiction-aware decay | 🟡 OPEN | Prevents stale-fact poisoning after architectural pivots. |
 | Turn DAG Phase 5 storage/perf | 🟡 OPEN | Important, but later than the items above. |

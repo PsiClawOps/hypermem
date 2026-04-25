@@ -220,6 +220,8 @@ async function run() {
   const report2 = JSON.parse(r2.stdout);
   assert(report2.totals.churnTurns === 0,
     `no-churn fixture: churnTurns=0 (got ${report2.totals.churnTurns})`);
+  assert(report2.evidenceGate.status === 'blocked-no-topic-bearing-evidence',
+    `no-churn fixture: evidence gate remains blocked without topic-bearing samples (got ${report2.evidenceGate.status})`);
 
   // ── Topic-signal classification fixture: no live DB mutation ─────────
   const topicSignalPath = path.join(tmpDir, 'topic-signal.jsonl');
@@ -277,6 +279,8 @@ async function run() {
     'topic-signal fixture: absent-stamping-incomplete classification counted');
   assert(topicReport.totals.topicSignalClassifications['intentionally-suppressed'] === 1,
     'topic-signal fixture: intentionally-suppressed classification counted');
+  assert(topicReport.evidenceGate.status === 'replaced-by-deterministic-evidence',
+    `topic-signal fixture: evidence gate replaced by deterministic evidence (got ${topicReport.evidenceGate.status})`);
   assert(topicReport.turns.find(t => t.turnId === 'topic-present')?.topicSignal?.reason === 'active-topic-stamped-history',
     'topic-signal fixture: propagated/present path has active-topic-stamped-history reason');
   assert(topicReport.turns.find(t => t.turnId === 'topic-none')?.topicSignal?.reason === 'no-active-topic',
@@ -291,6 +295,36 @@ async function run() {
   assert(/absent-stamping-incomplete=1/.test(topicReportText.stdout), 'topic-signal text report explains stamping-incomplete absence');
   assert(!/What is the|governance constraints|release policy/.test(topicReportText.stdout),
     'topic-signal text report remains metadata-only');
+  assert(/Evidence gate: replaced-by-deterministic-evidence/.test(topicReportText.stdout),
+    'topic-signal text report renders deterministic evidence gate summary');
+
+  // ── Compose-report deterministic evidence fixture ───────────────────
+  const composeScriptPath = path.join(repoRoot, 'scripts', 'compose-report.mjs');
+  const composeJsonRun = spawnSync(process.execPath, [composeScriptPath, '--json'], {
+    encoding: 'utf8',
+    cwd: repoRoot,
+  });
+  assert(composeJsonRun.status === 0,
+    `compose-report --json exits 0 (got ${composeJsonRun.status}); stderr=${composeJsonRun.stderr?.slice(0, 200)}`);
+  const composeReport = JSON.parse(composeJsonRun.stdout);
+  assert(composeReport.evidenceGate.status === 'replaced-by-deterministic-evidence',
+    `compose-report closes release evidence gate via deterministic sample (got ${composeReport.evidenceGate.status})`);
+  assert(composeReport.samples.find(s => s.scenario === 'topic-bearing-deterministic')?.topicSignal?.classification === 'present',
+    'compose-report captures deterministic topic-bearing present classification');
+  assert(composeReport.samples.find(s => s.scenario === 'history-disabled')?.topicSignal?.classification === 'intentionally-suppressed',
+    'compose-report preserves intentionally-suppressed metadata-only path');
+  assert(!/report-seed-user|report-seed-assistant|report-seed-prompt|report-topic-name-alpha/.test(composeJsonRun.stdout),
+    'compose-report JSON output remains metadata-only');
+
+  const composeTextRun = spawnSync(process.execPath, [composeScriptPath], {
+    encoding: 'utf8',
+    cwd: repoRoot,
+  });
+  assert(composeTextRun.status === 0, `compose-report text output exits 0 (got ${composeTextRun.status})`);
+  assert(/Evidence gate: replaced-by-deterministic-evidence/.test(composeTextRun.stdout),
+    'compose-report text output renders deterministic evidence gate summary');
+  assert(!/report-seed-user|report-seed-assistant|report-seed-prompt|report-topic-name-alpha/.test(composeTextRun.stdout),
+    'compose-report text output remains metadata-only');
 
   // ── Cleanup ─────────────────────────────────────────────────────────
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }

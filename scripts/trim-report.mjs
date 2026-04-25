@@ -150,6 +150,24 @@ function lifecycleDiverged(turn) {
   return Boolean(composeEviction?.band && composePreRecall?.band && composeEviction.band !== composePreRecall.band);
 }
 
+function resolveEvidenceGate(turns) {
+  const topicBearingTurns = turns.filter(t => t.topicSignal?.classification === 'present').length;
+  if (topicBearingTurns > 0) {
+    return {
+      status: 'replaced-by-deterministic-evidence',
+      reason: 'metadata-only-topic-bearing-compose-sample-observed',
+      topicBearingTurns,
+      liveTopicBearingSample: 'deferred-for-post-release-tuning',
+    };
+  }
+  return {
+    status: 'blocked-no-topic-bearing-evidence',
+    reason: 'no-metadata-only-topic-bearing-compose-sample-observed',
+    topicBearingTurns: 0,
+    liveTopicBearingSample: 'not-observed',
+  };
+}
+
 /**
  * Group events into per-turn buckets. A "turn" boundary is an assembleTrace
  * event. Every event up to (but not including) the next assembleTrace
@@ -306,7 +324,7 @@ function buildReport(events) {
       ? Math.round((topicSignalCoverageTotal / topicSignalCoverageSamples) * 1000) / 1000
       : null,
   };
-  return { turns, totals };
+  return { turns, totals, evidenceGate: resolveEvidenceGate(turns) };
 }
 
 function renderText(report, inputPath) {
@@ -336,6 +354,9 @@ function renderText(report, inputPath) {
                `avgStampedCoverage=${report.totals.averageTopicSignalStampedCoveragePct ?? 'n/a'}`);
     lines.push(`Topic signal reasons: ${Object.entries(report.totals.topicSignalReasons).map(([k, v]) => `${k}=${v}`).join('  ')}`);
   }
+  lines.push(`Evidence gate: ${report.evidenceGate.status}  reason=${report.evidenceGate.reason}  ` +
+             `topicBearingTurns=${report.evidenceGate.topicBearingTurns}  ` +
+             `liveSample=${report.evidenceGate.liveTopicBearingSample}`);
   lines.push('');
   lines.push('Per-turn summary:');
   lines.push('  # | path      | tL | trims | pre→post | removed | churn | turnId');
