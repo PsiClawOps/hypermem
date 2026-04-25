@@ -106,6 +106,7 @@ Done in this stream:
 - forked-context lifecycle integration — `85b5e3c`, CI `24921417908`
 
 Remaining slices:
+- vector coverage repair gate before baseline interpretation: add knowledge backfill support, audit unindexed eligible episodes, and add reporting/regression coverage so a retrieval lane cannot silently stay at 0%
 - real telemetry baseline evidence for topic-stamp coverage, lifecycle-band divergence, adaptive-drop bypass reasons, topic-aware eligible/drop/protected counts, and afterTurn gradient observations
 - runtime tuning only after the evidence pass shows a specific threshold or behavior change is warranted
 
@@ -158,7 +159,8 @@ Phase 5 stays important, but it is not the next sprint until the higher-priority
 |---|---|---|
 | Runtime diagnostics API allowlist defect | ✅ CLOSED | Verified installed OpenClaw runtime can reach `memory-core/runtime-api.js`; re-open only with a fresh public-surface failure trace. |
 | Topic synthesis bridge defect | ✅ CLOSED | Fixed in `8b9f928`; CI `24917765384` passed. |
-| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Kernel, compose diagnostics, afterTurn gradient cap, recall breadth, eviction order, lifecycle telemetry, report tooling, and forked-context integration are landed; real telemetry baseline is blocked until runtime telemetry is enabled. |
+| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Kernel, compose diagnostics, afterTurn gradient cap, recall breadth, eviction order, lifecycle telemetry, report tooling, and forked-context integration are landed; runtime telemetry is enabled; next gate is vector coverage repair before interpreting baseline data. |
+| Vector coverage repair gate | 🟡 OPEN | Knowledge vectors are 0/84 and episodes are 28,121/30,107 as of 2026-04-24. Add knowledge backfill, eligibility-aware episode audit/backfill, coverage reporting, and regression before 0.9.x tuning/publish. |
 | Contradiction-aware decay | 🟡 OPEN | Prevents stale-fact poisoning after architectural pivots. |
 | Turn DAG Phase 5 storage/perf | 🟡 OPEN | Important, but later than the items above. |
 | Warm-restore gate closeout | ✅ DONE | Tracked gate-closeout scope is complete; reopen only for a new concrete defect or measurement gap. |
