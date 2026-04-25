@@ -103,7 +103,7 @@ Done in this stream:
 - adaptive eviction ordering — `a0f6780`, CI `24918940291`
 - adaptive lifecycle telemetry — `61f9b9e`, CI `24919418833`
 - telemetry report tooling — `a923987`, CI `24920282389`
-- forked-context lifecycle integration — `85b5e3c`, CI pending
+- forked-context lifecycle integration — `85b5e3c`, CI `24921417908`
 
 Remaining slices:
 - real telemetry baseline evidence for topic-stamp coverage, lifecycle-band divergence, adaptive-drop bypass reasons, topic-aware eligible/drop/protected counts, and afterTurn gradient observations
@@ -158,7 +158,7 @@ Phase 5 stays important, but it is not the next sprint until the higher-priority
 |---|---|---|
 | Runtime diagnostics API allowlist defect | ✅ CLOSED | Verified installed OpenClaw runtime can reach `memory-core/runtime-api.js`; re-open only with a fresh public-surface failure trace. |
 | Topic synthesis bridge defect | ✅ CLOSED | Fixed in `8b9f928`; CI `24917765384` passed. |
-| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Kernel, compose diagnostics, afterTurn gradient cap, recall breadth, eviction order, lifecycle telemetry, report tooling, and forked-context integration are landed locally; real telemetry baseline is blocked until runtime telemetry is enabled. |
+| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Kernel, compose diagnostics, afterTurn gradient cap, recall breadth, eviction order, lifecycle telemetry, report tooling, and forked-context integration are landed; real telemetry baseline is blocked until runtime telemetry is enabled. |
 | Contradiction-aware decay | 🟡 OPEN | Prevents stale-fact poisoning after architectural pivots. |
 | Turn DAG Phase 5 storage/perf | 🟡 OPEN | Important, but later than the items above. |
 | Warm-restore gate closeout | ✅ DONE | Tracked gate-closeout scope is complete; reopen only for a new concrete defect or measurement gap. |
