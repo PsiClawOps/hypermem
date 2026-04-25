@@ -177,6 +177,30 @@ async function run() {
     assert(typeof ev.prefixHash === 'string' || ev.prefixHash === undefined, 'prefixHash is string (opaque hash)');
     assert(typeof ev.rerankerCandidates === 'number' || ev.rerankerCandidates === undefined, 'rerankerCandidates is a number');
     assert(typeof ev.compactionEligibleCount === 'number' || ev.compactionEligibleCount === undefined, 'compactionEligibleCount is a number');
+
+    process.env.HYPERMEM_TELEMETRY = '1';
+    process.env.HYPERMEM_TELEMETRY_PATH = telemPath;
+    const mod3 = await import(`file://${pluginDist}?s1c=${Date.now()}`);
+    const T3 = mod3.__telemetryForTests;
+    T3.reset();
+    T3.lifecyclePolicyTelemetry({
+      path: 'afterTurn.gradient',
+      agentId: 'test-agent',
+      sessionKey: 'agent:test-agent:webchat:main',
+      band: 'high',
+      pressurePct: 82,
+      topicShiftConfidence: 0.75,
+      trimSoftTarget: 0.60,
+      reasons: ['pressure-high'],
+    });
+    T3.reset();
+    await new Promise(r => setTimeout(r, 30));
+    const lifecycleRaw = fs.readFileSync(telemPath, 'utf8');
+    const lifecycleEvent = lifecycleRaw.split(/\n/).filter(Boolean).map(line => JSON.parse(line)).find(e => e.event === 'lifecycle-policy');
+    assert(lifecycleEvent !== undefined, 'lifecycle telemetry event emitted');
+    assert(lifecycleEvent?.path === 'afterTurn.gradient', 'lifecycle telemetry path is afterTurn.gradient');
+    assert(typeof lifecycleEvent?.pressurePct === 'number', 'lifecycle telemetry pressurePct is numeric');
+    assert(!contentPatterns.some(pat => pat.test(JSON.stringify(lifecycleEvent))), 'lifecycle telemetry contains no user/doc content');
     console.log('  ✅ Security: no content in telemetry fields');
   }
 

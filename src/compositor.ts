@@ -655,10 +655,26 @@ function clusterNeutralMessages<T extends NeutralMessage>(messages: T[]): Neutra
  *     resolveOversizedArtifacts) handles them upstream.
  *   - `preferTopicAwareDrop`: mirrors `policy.evictionPlan.preferTopicAwareDrop`.
  */
+export type AdaptiveEvictionBypassReason =
+  | 'no-active-topic'
+  | 'no-stamped-clusters'
+  | 'band-not-topic-aware'
+  | 'within-budget'
+  | 'no-eligible-inactive-topic-clusters';
+
+export interface AdaptiveEvictionTelemetry {
+  topicAwareEligibleClusters: number;
+  topicAwareDroppedClusters: number;
+  protectedClusters: number;
+  topicIdCoveragePct: number;
+  bypassReason?: AdaptiveEvictionBypassReason;
+}
+
 export interface AdaptiveEvictionOrdering {
   preferTopicAwareDrop: boolean;
   topicAwareDropOrder: number[];
   protectedIndices: ReadonlySet<number>;
+  telemetry: AdaptiveEvictionTelemetry;
 }
 
 export function orderClustersForAdaptiveEviction<T extends NeutralMessage>(
@@ -691,6 +707,15 @@ export function orderClustersForAdaptiveEviction<T extends NeutralMessage>(
     }
   }
 
+  const totalMessages = clusters.reduce((sum, cluster) => sum + cluster.messages.length, 0);
+  const stampedMessages = clusters.reduce(
+    (sum, cluster) => sum + cluster.messages.filter(m => typeof (m as { topicId?: string }).topicId === 'string').length,
+    0,
+  );
+  const topicIdCoveragePct = totalMessages > 0
+    ? Math.round((stampedMessages / totalMessages) * 10000) / 100
+    : 0;
+
   const topicAwareDropOrder: number[] = [];
   const activeId = opts.activeTopicId;
   if (plan.preferTopicAwareDrop && activeId) {
@@ -714,10 +739,23 @@ export function orderClustersForAdaptiveEviction<T extends NeutralMessage>(
     }
   }
 
+  let bypassReason: AdaptiveEvictionBypassReason | undefined;
+  if (!activeId) bypassReason = 'no-active-topic';
+  else if (stampedMessages === 0) bypassReason = 'no-stamped-clusters';
+  else if (!plan.preferTopicAwareDrop) bypassReason = 'band-not-topic-aware';
+  else if (topicAwareDropOrder.length === 0) bypassReason = 'no-eligible-inactive-topic-clusters';
+
   return {
     preferTopicAwareDrop: plan.preferTopicAwareDrop,
     topicAwareDropOrder,
     protectedIndices,
+    telemetry: {
+      topicAwareEligibleClusters: topicAwareDropOrder.length,
+      topicAwareDroppedClusters: 0,
+      protectedClusters: protectedIndices.size,
+      topicIdCoveragePct,
+      bypassReason,
+    },
   };
 }
 
@@ -1980,6 +2018,11 @@ export class Compositor {
         request.prompt ?? null,
       ),
     });
+    let adaptiveEvictionTopicAwareEligibleClusters = 0;
+    let adaptiveEvictionTopicAwareDroppedClusters = 0;
+    let adaptiveEvictionProtectedClusters = 0;
+    let adaptiveEvictionTopicIdCoveragePct = 0;
+    let adaptiveEvictionBypassReason: AdaptiveEvictionBypassReason | undefined;
 
     // Phase 0 fence enforcement: resolve the compaction fence for this conversation.
     // All downstream message queries use this as a lower bound to exclude zombie
@@ -2236,8 +2279,17 @@ export class Compositor {
         evictionLifecyclePolicy,
         { activeTopicId },
       );
+      adaptiveEvictionTopicAwareEligibleClusters = adaptiveOrdering.telemetry.topicAwareEligibleClusters;
+      adaptiveEvictionProtectedClusters = adaptiveOrdering.telemetry.protectedClusters;
+      adaptiveEvictionTopicIdCoveragePct = adaptiveOrdering.telemetry.topicIdCoveragePct;
+      adaptiveEvictionBypassReason = adaptiveOrdering.telemetry.bypassReason;
       const evictedByPlan = new Set<number>();
       let projectedTokens = budgetClusters.reduce((s, c) => s + c.tokenCost, 0);
+      if (adaptiveOrdering.preferTopicAwareDrop
+        && adaptiveOrdering.topicAwareDropOrder.length > 0
+        && projectedTokens <= historyFillCap) {
+        adaptiveEvictionBypassReason = 'within-budget';
+      }
       if (adaptiveOrdering.preferTopicAwareDrop
         && adaptiveOrdering.topicAwareDropOrder.length > 0
         && projectedTokens > historyFillCap) {
@@ -2247,6 +2299,7 @@ export class Compositor {
           evictedByPlan.add(idx);
           projectedTokens -= budgetClusters[idx].tokenCost;
         }
+        adaptiveEvictionTopicAwareDroppedClusters = evictedByPlan.size;
       }
 
       let truncationCutIndex = -1;
@@ -3499,7 +3552,7 @@ export class Compositor {
       trimSoftTarget: TRIM_BUDGET_POLICY.trimSoftTarget,
       trimGrowthThreshold: TRIM_BUDGET_POLICY.trimGrowthThreshold,
       trimHeadroomFraction: TRIM_BUDGET_POLICY.trimHeadroomFraction,
-      // 0.9.0: adaptive lifecycle diagnostics
+      // 0.9.0: adaptive lifecycle diagnostics for compose.preRecall
       adaptiveLifecycleBand: composeLifecyclePolicy.band,
       adaptiveLifecyclePressurePct: composeLifecyclePolicy.pressurePct,
       adaptiveWarmHistoryBudgetFraction: composeLifecyclePolicy.warmHistoryBudgetFraction,
@@ -3512,6 +3565,14 @@ export class Compositor {
       adaptiveLifecycleReasons: composeLifecyclePolicy.reasons,
       adaptiveRecallBudgetTokens: diagAdaptiveRecallBudgetTokens,
       adaptiveRecallCandidateLimit: diagAdaptiveRecallCandidateLimit,
+      adaptiveEvictionLifecycleBand: evictionLifecyclePolicy.band,
+      adaptiveEvictionPressurePct: evictionLifecyclePolicy.pressurePct,
+      adaptiveEvictionTopicAwareEligibleClusters,
+      adaptiveEvictionTopicAwareDroppedClusters,
+      adaptiveEvictionProtectedClusters,
+      adaptiveEvictionTopicIdCoveragePct,
+      adaptiveEvictionBypassReason,
+      adaptiveLifecycleBandDiverged: evictionLifecyclePolicy.band !== composeLifecyclePolicy.band,
       // C1: tool-chain ejection telemetry
       toolChainCoEjections: c1CoEjections > 0 ? c1CoEjections : undefined,
       toolChainStubReplacements: c1StubReplacements > 0 ? c1StubReplacements : undefined,

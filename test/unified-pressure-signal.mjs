@@ -140,6 +140,20 @@ console.log('\n── Scenario 3: Compositor diagnostics carry Sprint 3 pressure
     `adaptive trim soft target is surfaced (got ${diag.adaptiveTrimSoftTarget})`);
   assert(Array.isArray(diag.adaptiveLifecycleReasons),
     'adaptive lifecycle reasons are surfaced');
+  assert(typeof diag.adaptiveEvictionLifecycleBand === 'string',
+    `adaptive eviction lifecycle band is surfaced (got ${diag.adaptiveEvictionLifecycleBand})`);
+  assert(typeof diag.adaptiveEvictionPressurePct === 'number',
+    `adaptive eviction pressure pct is surfaced (got ${diag.adaptiveEvictionPressurePct})`);
+  assert(typeof diag.adaptiveEvictionTopicAwareEligibleClusters === 'number',
+    `adaptive eviction eligible cluster count is surfaced (got ${diag.adaptiveEvictionTopicAwareEligibleClusters})`);
+  assert(typeof diag.adaptiveEvictionTopicAwareDroppedClusters === 'number',
+    `adaptive eviction dropped cluster count is surfaced (got ${diag.adaptiveEvictionTopicAwareDroppedClusters})`);
+  assert(typeof diag.adaptiveEvictionProtectedClusters === 'number',
+    `adaptive eviction protected cluster count is surfaced (got ${diag.adaptiveEvictionProtectedClusters})`);
+  assert(typeof diag.adaptiveEvictionTopicIdCoveragePct === 'number',
+    `adaptive eviction topicId coverage pct is surfaced (got ${diag.adaptiveEvictionTopicIdCoveragePct})`);
+  assert(typeof diag.adaptiveLifecycleBandDiverged === 'boolean',
+    `adaptive lifecycle divergence flag is surfaced (got ${diag.adaptiveLifecycleBandDiverged})`);
 }
 
 // ════════════════════════════════════════════════════════════

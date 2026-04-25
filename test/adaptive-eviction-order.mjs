@@ -71,6 +71,8 @@ console.log('\n── Scenario 1: steady band keeps baseline (no topic-aware dro
   assert(ord.preferTopicAwareDrop === false, 'steady: preferTopicAwareDrop false');
   assert(ord.topicAwareDropOrder.length === 0,
     `steady: topicAwareDropOrder empty (got ${ord.topicAwareDropOrder.length})`);
+  assert(ord.telemetry.bypassReason === 'band-not-topic-aware',
+    `steady: bypass reason is band-not-topic-aware (got ${ord.telemetry.bypassReason})`);
 }
 
 console.log('\n── Scenario 2: elevated promotes inactive-topic clusters first ──');
@@ -92,6 +94,10 @@ console.log('\n── Scenario 2: elevated promotes inactive-topic clusters firs
     `elevated: two inactive clusters listed for drop (got ${ord.topicAwareDropOrder.length})`);
   assert(ord.topicAwareDropOrder[0] === 0 && ord.topicAwareDropOrder[1] === 1,
     'elevated: inactive-topic clusters ordered oldest→newest at the head of the drop list');
+  assert(ord.telemetry.topicAwareEligibleClusters === 2,
+    `elevated: telemetry eligible clusters=2 (got ${ord.telemetry.topicAwareEligibleClusters})`);
+  assert(ord.telemetry.topicIdCoveragePct === 100,
+    `elevated: topicId coverage is aggregate-only 100% (got ${ord.telemetry.topicIdCoveragePct})`);
   // Active-topic recent clusters are NOT in the topic-aware drop list.
   assert(!ord.topicAwareDropOrder.includes(2) && !ord.topicAwareDropOrder.includes(3),
     'elevated: active-topic recent clusters are NOT in topic-aware drop list');
@@ -170,6 +176,8 @@ console.log('\n── Scenario 5: no activeTopicId → no topic-aware drop list 
   assert(ord.preferTopicAwareDrop === true, 'high band still reports preferTopicAwareDrop=true');
   assert(ord.topicAwareDropOrder.length === 0,
     'no activeTopicId → empty topic-aware drop list (falls through to historical sweep)');
+  assert(ord.telemetry.bypassReason === 'no-active-topic',
+    `no activeTopicId → bypass reason no-active-topic (got ${ord.telemetry.bypassReason})`);
 }
 
 console.log('\n── Scenario 6: missing topicId on messages is NOT promoted to drop ──');
@@ -186,6 +194,8 @@ console.log('\n── Scenario 6: missing topicId on messages is NOT promoted to
   const ord = orderClustersForAdaptiveEviction(clusters, policy, { activeTopicId: ACTIVE });
   assert(!ord.topicAwareDropOrder.includes(0),
     'legacy/unscoped clusters (no topicId) NOT promoted to drop candidates');
+  assert(ord.telemetry.topicIdCoveragePct > 0 && ord.telemetry.topicIdCoveragePct < 100,
+    `missing topicId lowers aggregate coverage without content leakage (got ${ord.telemetry.topicIdCoveragePct})`);
   assert(ord.topicAwareDropOrder.includes(1),
     'explicit inactive-topic cluster IS promoted to drop candidate');
 }
@@ -232,6 +242,41 @@ console.log('\n── Scenario 7: MessageStore round-trips topic_id for runtime 
     'current active-topic user message from MessageStore is not promoted to topic-aware drop');
 
   db.close();
+}
+
+
+console.log('\n── Scenario 8: all clusters stamped active/current → no eligible inactive-topic clusters ──');
+{
+  const policy = resolveAdaptiveLifecyclePolicy({
+    userTurnCount: 20,
+    pressureFraction: 0.80,
+  });
+  const clusters = [
+    cluster([msg('assistant', { topicId: ACTIVE })]),
+    cluster([msg('user', { topicId: ACTIVE })]),
+  ];
+  const ord = orderClustersForAdaptiveEviction(clusters, policy, { activeTopicId: ACTIVE });
+  assert(ord.topicAwareDropOrder.length === 0,
+    'active-only stamped clusters produce no topic-aware drop candidates');
+  assert(ord.telemetry.bypassReason === 'no-eligible-inactive-topic-clusters',
+    `active-only stamped clusters bypass with no-eligible-inactive-topic-clusters (got ${ord.telemetry.bypassReason})`);
+}
+
+console.log('\n── Scenario 9: no stamped clusters → no-stamped-clusters bypass ──');
+{
+  const policy = resolveAdaptiveLifecyclePolicy({
+    userTurnCount: 20,
+    pressureFraction: 0.80,
+  });
+  const clusters = [
+    cluster([msg('assistant')]),
+    cluster([msg('user')]),
+  ];
+  const ord = orderClustersForAdaptiveEviction(clusters, policy, { activeTopicId: ACTIVE });
+  assert(ord.telemetry.topicIdCoveragePct === 0,
+    `unstamped clusters have 0% topicId coverage (got ${ord.telemetry.topicIdCoveragePct})`);
+  assert(ord.telemetry.bypassReason === 'no-stamped-clusters',
+    `unstamped clusters bypass with no-stamped-clusters (got ${ord.telemetry.bypassReason})`);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

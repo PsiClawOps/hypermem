@@ -460,9 +460,9 @@ export interface ComposeDiagnostics {
   /** Canonical headroom fraction used when steady-state trim does fire. */
   trimHeadroomFraction?: number;
   // ── 0.9.0: Adaptive context lifecycle ────────────────────────────────────
-  /** Lifecycle band selected by the shared adaptive policy kernel. */
+  /** Lifecycle band selected for compose.preRecall by the shared adaptive policy kernel. */
   adaptiveLifecycleBand?: AdaptiveLifecycleBand;
-  /** Lifecycle pressure percentage used for band selection. */
+  /** Lifecycle pressure percentage used for compose.preRecall band selection. */
   adaptiveLifecyclePressurePct?: number;
   /** History budget fraction recommended by the lifecycle policy. */
   adaptiveWarmHistoryBudgetFraction?: number;
@@ -484,6 +484,22 @@ export interface ComposeDiagnostics {
   adaptiveRecallBudgetTokens?: number;
   /** Hybrid candidate limit passed into semantic recall after lifecycle scaling. */
   adaptiveRecallCandidateLimit?: number;
+  /** Lifecycle band selected for the compose-window eviction observation. */
+  adaptiveEvictionLifecycleBand?: AdaptiveLifecycleBand;
+  /** Eviction pressure percentage observed before semantic recall. */
+  adaptiveEvictionPressurePct?: number;
+  /** Topic-aware inactive-topic clusters eligible for preferential eviction. */
+  adaptiveEvictionTopicAwareEligibleClusters?: number;
+  /** Topic-aware eligible clusters actually dropped before the historical sweep. */
+  adaptiveEvictionTopicAwareDroppedClusters?: number;
+  /** Clusters protected only from topic-aware preferential eviction. */
+  adaptiveEvictionProtectedClusters?: number;
+  /** Aggregate message topicId coverage percentage for eviction-order input clusters. */
+  adaptiveEvictionTopicIdCoveragePct?: number;
+  /** Reason topic-aware eviction did not participate, when applicable. */
+  adaptiveEvictionBypassReason?: 'no-active-topic' | 'no-stamped-clusters' | 'band-not-topic-aware' | 'within-budget' | 'no-eligible-inactive-topic-clusters';
+  /** True when compose.eviction and compose.preRecall selected different lifecycle bands. */
+  adaptiveLifecycleBandDiverged?: boolean;
   // ── Sprint 4: Prompt placement + budget lanes + provider diagnostics ────────────────────────────────
   /**
    * Sprint 4: Explicit compositor budget lane allocations for this compose pass.
@@ -1029,7 +1045,20 @@ export interface AssembleTraceEvent {
   msgCount: number;           // messages array length at entry
 }
 
-export type HyperMemTelemetryEvent = TrimTelemetryEvent | AssembleTraceEvent;
+export interface LifecyclePolicyTelemetryEvent {
+  event: 'lifecycle-policy';
+  ts: string;
+  path: 'compose.eviction' | 'compose.preRecall' | 'afterTurn.gradient';
+  agentId: string;
+  sessionKey: string;
+  band: AdaptiveLifecycleBand;
+  pressurePct?: number;
+  topicShiftConfidence?: number;
+  trimSoftTarget?: number;
+  reasons?: string[];
+}
+
+export type HyperMemTelemetryEvent = TrimTelemetryEvent | AssembleTraceEvent | LifecyclePolicyTelemetryEvent;
 
 // ─── Archived Mining Types (Phase 4 Sprint 2) ────────────────────
 

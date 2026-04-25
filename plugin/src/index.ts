@@ -207,6 +207,32 @@ function degradationTelemetry(fields: DegradationTelemetryFields): void {
   }
 }
 
+
+function lifecyclePolicyTelemetry(fields: {
+  path: 'compose.eviction' | 'compose.preRecall' | 'afterTurn.gradient';
+  agentId: string;
+  sessionKey: string;
+  band: string;
+  pressurePct?: number;
+  topicShiftConfidence?: number;
+  trimSoftTarget?: number;
+  reasons?: string[];
+}): void {
+  if (!telemetryEnabled()) return;
+  const stream = getTelemetryStream();
+  if (!stream) return;
+  try {
+    const record = {
+      event: 'lifecycle-policy',
+      ts: new Date().toISOString(),
+      ...fields,
+    };
+    stream.write(JSON.stringify(record) + '\n');
+  } catch {
+    // Telemetry must never throw
+  }
+}
+
 function nextTurnId(): string {
   _telemetryTurnCounter = (_telemetryTurnCounter + 1) >>> 0;
   return `${Date.now().toString(36)}-${_telemetryTurnCounter.toString(36)}`;
@@ -397,6 +423,7 @@ export const __telemetryForTests = {
   assembleTrace,
   degradationTelemetry,
   guardTelemetry,
+  lifecyclePolicyTelemetry,
   nextTurnId,
   beginTrimOwnerTurn,
   endTrimOwnerTurn,
@@ -3345,6 +3372,16 @@ ${replayRecovery.emittedText}`
               userTurnCount: (messages as unknown as InboundMessage[]).filter(m => m.role === 'user').length,
               explicitNewSession: /^\/new(?:\s|$)/i.test(inboundUserText.trim()),
               topicShiftConfidence: adaptiveTopicShiftConfidence,
+            });
+            lifecyclePolicyTelemetry({
+              path: 'afterTurn.gradient',
+              agentId,
+              sessionKey: sk,
+              band: lifecyclePolicy.band,
+              pressurePct: lifecyclePolicy.pressurePct,
+              topicShiftConfidence: adaptiveTopicShiftConfidence,
+              trimSoftTarget: lifecyclePolicy.trimSoftTarget,
+              reasons: lifecyclePolicy.reasons,
             });
             await hm.refreshRedisGradient(agentId, sk, gradientBudget, gradientDepth, lifecyclePolicy.trimSoftTarget);
           } catch (refreshErr) {
