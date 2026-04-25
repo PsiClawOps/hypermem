@@ -103,7 +103,7 @@ Done in this stream:
 - adaptive eviction ordering — `a0f6780`, CI `24918940291`
 - adaptive lifecycle telemetry — `61f9b9e`, CI `24919418833`
 - telemetry report tooling — `a923987`, CI `24920282389`
-- forked-context lifecycle integration — pending CI for this slice
+- forked-context lifecycle integration — `85b5e3c`, CI pending
 
 Remaining slices:
 - real telemetry baseline evidence for topic-stamp coverage, lifecycle-band divergence, adaptive-drop bypass reasons, topic-aware eligible/drop/protected counts, and afterTurn gradient observations
