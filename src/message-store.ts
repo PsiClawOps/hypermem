@@ -36,6 +36,9 @@ function parseMessageRow(row: Record<string, unknown>): StoredMessage {
     textContent: (row.text_content as string) || null,
     toolCalls: row.tool_calls ? JSON.parse(row.tool_calls as string) : null,
     toolResults: row.tool_results ? JSON.parse(row.tool_results as string) : null,
+    topicId: typeof row.topic_id === 'string' && row.topic_id.length > 0
+      ? row.topic_id
+      : undefined,
     metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,
     messageIndex: row.message_index as number,
     tokenCount: (row.token_count as number) || null,
@@ -257,8 +260,8 @@ export class MessageStore {
     }
 
     const result = this.db.prepare(`
-      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, metadata, token_count, message_index, is_heartbeat, created_at, context_id, parent_id, depth)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, metadata, token_count, message_index, is_heartbeat, created_at, context_id, parent_id, depth, topic_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       conversationId,
       agentId,
@@ -273,7 +276,8 @@ export class MessageStore {
       now,
       opts?.contextId ?? null,
       parentId,
-      depth
+      depth,
+      message.topicId ?? null
     );
 
     const id = (result as unknown as { lastInsertRowid: number }).lastInsertRowid;
@@ -309,6 +313,7 @@ export class MessageStore {
       textContent: message.textContent,
       toolCalls: message.toolCalls,
       toolResults: message.toolResults,
+      topicId: message.topicId,
       metadata: message.metadata,
       messageIndex,
       tokenCount: opts?.tokenCount || null,

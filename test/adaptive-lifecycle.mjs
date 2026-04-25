@@ -8,6 +8,7 @@
 
 import {
   resolveAdaptiveLifecyclePolicy,
+  resolveAdaptiveEvictionPlan,
 } from '../dist/adaptive-lifecycle.js';
 import { resolveTrimBudgets } from '../dist/budget-policy.js';
 
@@ -135,6 +136,69 @@ console.log('\n── Scenario 9: lifecycle trim target can drive shared trim bu
   assert(budgets.softBudget === 54_000, `adaptive soft budget 54k (got ${budgets.softBudget})`);
   assert(budgets.triggerBudget === 56_700, `growth trigger follows adaptive soft budget (got ${budgets.triggerBudget})`);
   assert(budgets.targetBudget === 48_600, `headroom target follows adaptive soft budget (got ${budgets.targetBudget})`);
+}
+
+console.log('\n── Scenario 10: adaptive eviction plan tracks band, no extra thresholds ──');
+{
+  // bootstrap/warmup/steady preserve historical eviction order.
+  for (const band of ['bootstrap', 'warmup', 'steady']) {
+    const plan = resolveAdaptiveEvictionPlan(band);
+    assert(plan.band === band, `${band}: plan.band matches`);
+    assert(plan.preferTopicAwareDrop === false,
+      `${band}: does NOT prefer topic-aware drop (preserves baseline order)`);
+    assert(plan.steps[plan.steps.length - 1] === 'oldest-cluster-drop',
+      `${band}: ends in oldest-cluster-drop`);
+    assert(!plan.steps.includes('topic-aware-cluster-drop'),
+      `${band}: baseline plan does NOT include topic-aware-cluster-drop`);
+  }
+
+  // elevated/high/critical promote topic-aware drop before oldest-first.
+  for (const band of ['elevated', 'high', 'critical']) {
+    const plan = resolveAdaptiveEvictionPlan(band);
+    assert(plan.band === band, `${band}: plan.band matches`);
+    assert(plan.preferTopicAwareDrop === true,
+      `${band}: prefers topic-aware drop before oldest-first`);
+    const tIdx = plan.steps.indexOf('topic-aware-cluster-drop');
+    const oIdx = plan.steps.indexOf('oldest-cluster-drop');
+    assert(tIdx >= 0 && oIdx >= 0 && tIdx < oIdx,
+      `${band}: topic-aware-cluster-drop ordered before oldest-cluster-drop`);
+    // Ballast steps run first (no parallel pressure brain).
+    assert(plan.steps[0] === 'tool-gradient',
+      `${band}: ballast reduction (tool-gradient) runs first`);
+    assert(plan.preferBallastFirst === true,
+      `${band}: ballast-first remains the default for the cluster-drop pass`);
+  }
+}
+
+console.log('\n── Scenario 11: lifecycle policy carries the eviction plan derived from band ──');
+{
+  const steady = resolveAdaptiveLifecyclePolicy({ userTurnCount: 20, pressureFraction: 0.50 });
+  const elevated = resolveAdaptiveLifecyclePolicy({ userTurnCount: 20, pressureFraction: 0.70 });
+  const high = resolveAdaptiveLifecyclePolicy({ userTurnCount: 20, pressureFraction: 0.80 });
+  const critical = resolveAdaptiveLifecyclePolicy({ userTurnCount: 20, pressureFraction: 0.92 });
+
+  assert(steady.evictionPlan && steady.evictionPlan.band === 'steady',
+    'steady policy attaches band-derived eviction plan');
+  assert(steady.evictionPlan.preferTopicAwareDrop === false,
+    'steady eviction plan keeps historical order');
+  assert(elevated.evictionPlan.preferTopicAwareDrop === true,
+    'elevated eviction plan promotes topic-aware drop');
+  assert(high.evictionPlan.preferTopicAwareDrop === true,
+    'high eviction plan promotes topic-aware drop');
+  assert(critical.evictionPlan.preferTopicAwareDrop === true,
+    'critical eviction plan promotes topic-aware drop');
+
+  // No new pressure constants leak onto the policy: all band-sensitive
+  // decisions stay routed through the existing fields. Spot-check shape.
+  const keys = Object.keys(steady).sort();
+  const expected = [
+    'band', 'compactionTargetFraction', 'emitBreadcrumbPackage',
+    'enableTopicCentroidEviction', 'evictionPlan', 'pressureFraction',
+    'pressurePct', 'reasons', 'smartRecallMultiplier', 'triggerProactiveCompaction',
+    'trimSoftTarget', 'warmHistoryBudgetFraction',
+  ].sort();
+  assert(JSON.stringify(keys) === JSON.stringify(expected),
+    `policy shape unchanged except for evictionPlan addition (got ${keys.join(',')})`);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

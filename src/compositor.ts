@@ -53,7 +53,7 @@ import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
 import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
 import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
-import { resolveAdaptiveLifecyclePolicy } from './adaptive-lifecycle.js';
+import { resolveAdaptiveLifecyclePolicy, type AdaptiveLifecyclePolicy } from './adaptive-lifecycle.js';
 import { formatToolChainStub, parseToolChainStub, formatArtifactRef, isArtifactRef, type ArtifactRef, type DegradationReason } from './degradation.js';
 import { ToolArtifactStore } from './tool-artifact-store.js';
 import {
@@ -635,6 +635,91 @@ function clusterNeutralMessages<T extends NeutralMessage>(messages: T[]): Neutra
   return clusters;
 }
 
+
+/**
+ * Adaptive eviction ordering for the compose-window cluster-drop pass.
+ *
+ * Pure helper: derives drop priority from `policy.evictionPlan` (which is
+ * itself derived from `policy.band`) and an optional `activeTopicId`. Does
+ * not read state, mutate clusters, or introduce a parallel pressure brain.
+ *
+ * Returns:
+ *   - `protectedIndices`: clusters never selected for topic-aware drop
+ *     (system prefix, dynamicBoundary, the latest user-role cluster). The
+ *     existing oldest-first sweep can still drop them as a last resort,
+ *     same as before this helper.
+ *   - `topicAwareDropOrder`: cluster indices (oldest→newest) to drop
+ *     before the oldest-first sweep when the band promotes topic-aware
+ *     drop. Tool-call/result clusters are excluded so they remain atomic
+ *     and ballast reduction (applyToolGradient/evictLargeToolResults/
+ *     resolveOversizedArtifacts) handles them upstream.
+ *   - `preferTopicAwareDrop`: mirrors `policy.evictionPlan.preferTopicAwareDrop`.
+ */
+export interface AdaptiveEvictionOrdering {
+  preferTopicAwareDrop: boolean;
+  topicAwareDropOrder: number[];
+  protectedIndices: ReadonlySet<number>;
+}
+
+export function orderClustersForAdaptiveEviction<T extends NeutralMessage>(
+  clusters: NeutralMessageCluster<T>[],
+  policy: AdaptiveLifecyclePolicy,
+  opts: { activeTopicId?: string } = {},
+): AdaptiveEvictionOrdering {
+  const plan = policy.evictionPlan;
+  const protectedIndices = new Set<number>();
+
+  // Protect the most-recent user-role cluster (current-user-turn proxy when
+  // the prompt is appended via history rather than as a separate message).
+  for (let i = clusters.length - 1; i >= 0; i--) {
+    if (clusters[i].messages.some(m => m.role === 'user')) {
+      protectedIndices.add(i);
+      break;
+    }
+  }
+
+  // Protect dynamicBoundary clusters and pure-system clusters.
+  for (let i = 0; i < clusters.length; i++) {
+    const cluster = clusters[i];
+    const hasDynamicBoundary = cluster.messages.some(m => {
+      const meta = (m.metadata as Record<string, unknown> | undefined);
+      return meta?.dynamicBoundary === true;
+    });
+    if (hasDynamicBoundary) protectedIndices.add(i);
+    if (cluster.messages.length > 0 && cluster.messages.every(m => m.role === 'system')) {
+      protectedIndices.add(i);
+    }
+  }
+
+  const topicAwareDropOrder: number[] = [];
+  const activeId = opts.activeTopicId;
+  if (plan.preferTopicAwareDrop && activeId) {
+    for (let i = 0; i < clusters.length; i++) {
+      if (protectedIndices.has(i)) continue;
+      const cluster = clusters[i];
+      // Tool clusters are handled by ballast reduction; skip from
+      // topic-aware drop preference to keep tool chains atomic.
+      const hasToolContent = cluster.messages.some(m =>
+        (m.toolCalls && m.toolCalls.length > 0)
+        || (m.toolResults && m.toolResults.length > 0));
+      if (hasToolContent) continue;
+      // Inactive-topic predicate: every message in the cluster carries a
+      // topicId distinct from the active topic. Messages without topicId
+      // (legacy/unscoped) are not promoted to drop candidates so we don't
+      // regress sessions that pre-date topic stamping.
+      const tids = cluster.messages.map(m => (m as { topicId?: string }).topicId);
+      if (tids.length === 0) continue;
+      const allInactive = tids.every(tid => typeof tid === 'string' && tid !== activeId);
+      if (allInactive) topicAwareDropOrder.push(i);
+    }
+  }
+
+  return {
+    preferTopicAwareDrop: plan.preferTopicAwareDrop,
+    topicAwareDropOrder,
+    protectedIndices,
+  };
+}
 
 /**
  * Public reshape helper: apply tool gradient then trim to fit within a token budget.
@@ -1874,6 +1959,28 @@ export class Compositor {
       : s4AdaptiveDepth;
     let remaining = budget;
 
+    // 0.9.0: resolve an early adaptive lifecycle posture for the
+    // compose-window cluster-drop pass. Pressure is estimated from the
+    // SQLite sample over the effective budget so the eviction-order
+    // decision routes through the same band classifier the rest of the
+    // 0.9.0 paths already use — no parallel pressure constants here.
+    const s09SampleTokens = sampleMessages.reduce(
+      (sum, m) => sum + estimateMessageTokens(m),
+      0,
+    );
+    const s09EvictionPressure = computeUnifiedPressure(
+      s09SampleTokens,
+      budget,
+      PRESSURE_SOURCE.COMPOSE_PRE_RECALL,
+    );
+    const evictionLifecyclePolicy = resolveAdaptiveLifecyclePolicy({
+      pressureFraction: s09EvictionPressure.fraction,
+      userTurnCount: sampleMessages.filter(m => m.role === 'user').length,
+      explicitNewSession: isExplicitNewSessionPrompt(
+        request.prompt ?? null,
+      ),
+    });
+
     // Phase 0 fence enforcement: resolve the compaction fence for this conversation.
     // All downstream message queries use this as a lower bound to exclude zombie
     // messages below the fence that should have been compacted.
@@ -2120,30 +2227,73 @@ export class Compositor {
       const historyBudget = Math.floor(budget * b4HistoryFraction);
       const historyFillCap = Math.min(historyBudget, remaining);
 
+      // 0.9.0: adaptive eviction ordering. For elevated/high/critical bands,
+      // drop inactive-topic non-tool clusters first when an active topic is
+      // known. Bootstrap/warmup/steady reproduce the historical newest-first
+      // sweep exactly (preferTopicAwareDrop=false → evictedByPlan stays empty).
+      const adaptiveOrdering = orderClustersForAdaptiveEviction(
+        budgetClusters,
+        evictionLifecyclePolicy,
+        { activeTopicId },
+      );
+      const evictedByPlan = new Set<number>();
+      let projectedTokens = budgetClusters.reduce((s, c) => s + c.tokenCost, 0);
+      if (adaptiveOrdering.preferTopicAwareDrop
+        && adaptiveOrdering.topicAwareDropOrder.length > 0
+        && projectedTokens > historyFillCap) {
+        for (const idx of adaptiveOrdering.topicAwareDropOrder) {
+          if (projectedTokens <= historyFillCap) break;
+          if (adaptiveOrdering.protectedIndices.has(idx)) continue;
+          evictedByPlan.add(idx);
+          projectedTokens -= budgetClusters[idx].tokenCost;
+        }
+      }
+
+      let truncationCutIndex = -1;
       for (let i = budgetClusters.length - 1; i >= 0; i--) {
+        if (evictedByPlan.has(i)) continue;
         const cluster = budgetClusters[i];
         if (historyTokens + cluster.tokenCost > historyFillCap && includedClusters.length > 0) {
-          const droppedClusters = budgetClusters.slice(0, i + 1);
-          const droppedMsgCount = droppedClusters.reduce((s, c) => s + c.messages.length, 0);
-          const droppedToolResultCount = droppedClusters.reduce(
-            (sum, c) => sum + c.messages.filter(m => (m.toolResults?.length ?? 0) > 0).length,
-            0,
-          );
-          if (droppedToolResultCount > 0) {
-            c1CoEjections += droppedToolResultCount;
-            console.info(
-              `[hypermem:compositor] tool-chain co-eject reason=budget_cluster_drop count=${droppedToolResultCount} messages dropped`,
-            );
-          }
-          const c1Note = droppedToolResultCount > 0
-            ? ` [C1: ${droppedToolResultCount} co-ejected reason=budget_cluster_drop]`
-            : '';
-          warnings.push(`History truncated at cluster ${i + 1}/${budgetClusters.length} (${droppedMsgCount} messages dropped)${c1Note}`);
-          s4RescueTrimFired = true;
+          truncationCutIndex = i;
           break;
         }
         includedClusters.unshift(cluster);
         historyTokens += cluster.tokenCost;
+      }
+
+      if (truncationCutIndex >= 0 || evictedByPlan.size > 0) {
+        const droppedIndices: number[] = [];
+        if (truncationCutIndex >= 0) {
+          for (let i = 0; i <= truncationCutIndex; i++) {
+            if (!evictedByPlan.has(i)) droppedIndices.push(i);
+          }
+        }
+        for (const idx of evictedByPlan) droppedIndices.push(idx);
+        const droppedClusters = droppedIndices.map(i => budgetClusters[i]);
+        const droppedMsgCount = droppedClusters.reduce((s, c) => s + c.messages.length, 0);
+        const droppedToolResultCount = droppedClusters.reduce(
+          (sum, c) => sum + c.messages.filter(m => (m.toolResults?.length ?? 0) > 0).length,
+          0,
+        );
+        if (droppedToolResultCount > 0) {
+          c1CoEjections += droppedToolResultCount;
+          console.info(
+            `[hypermem:compositor] tool-chain co-eject reason=budget_cluster_drop count=${droppedToolResultCount} messages dropped`,
+          );
+        }
+        if (droppedMsgCount > 0) {
+          const c1Note = droppedToolResultCount > 0
+            ? ` [C1: ${droppedToolResultCount} co-ejected reason=budget_cluster_drop]`
+            : '';
+          const planNote = evictedByPlan.size > 0
+            ? ` [adaptive: band=${evictionLifecyclePolicy.band} topic-aware-dropped=${evictedByPlan.size}]`
+            : '';
+          const cutLabel = truncationCutIndex >= 0
+            ? `${truncationCutIndex + 1}/${budgetClusters.length}`
+            : `0/${budgetClusters.length}`;
+          warnings.push(`History truncated at cluster ${cutLabel} (${droppedMsgCount} messages dropped)${c1Note}${planNote}`);
+          if (truncationCutIndex >= 0) s4RescueTrimFired = true;
+        }
       }
 
       const includedHistory: NeutralMessage[] = includedClusters.flatMap(c => c.messages);

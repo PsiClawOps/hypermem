@@ -41,6 +41,7 @@ export interface NeutralMessage {
   textContent: string | null;
   toolCalls: NeutralToolCall[] | null;
   toolResults: NeutralToolResult[] | null;
+  topicId?: string;                  // maps to messages.topic_id when present
   metadata?: Record<string, unknown>;  // provider-specific data, never sent to LLM
 }
 

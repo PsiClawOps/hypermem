@@ -30,6 +30,33 @@ export interface AdaptiveLifecycleInput {
   topicShiftConfidence?: number;
 }
 
+/**
+ * Eviction-pipeline step labels. The order in `AdaptiveEvictionPlan.steps`
+ * is the order the compose-window cluster-drop path should attempt them.
+ *
+ * `tool-gradient`, `oversized-artifacts`, and `stale-tool-stubs` are
+ * ballast-reduction steps already implemented in the compositor; the plan
+ * just records that they precede cluster drop. `topic-aware-cluster-drop`
+ * and `oldest-cluster-drop` describe how the compositor's existing
+ * cluster-drop pass should be ordered: topic-aware-first when the band
+ * elevates, otherwise the historical newest-first/oldest-drop sweep.
+ */
+export type AdaptiveEvictionStep =
+  | 'tool-gradient'
+  | 'oversized-artifacts'
+  | 'stale-tool-stubs'
+  | 'topic-aware-cluster-drop'
+  | 'oldest-cluster-drop';
+
+export interface AdaptiveEvictionPlan {
+  band: AdaptiveLifecycleBand;
+  steps: readonly AdaptiveEvictionStep[];
+  /** Drop inactive-topic clusters before falling back to oldest-first. */
+  preferTopicAwareDrop: boolean;
+  /** Ballast-reduction steps run before any cluster drop. Always true today. */
+  preferBallastFirst: boolean;
+}
+
 export interface AdaptiveLifecyclePolicy {
   band: AdaptiveLifecycleBand;
   pressureFraction: number;
@@ -41,7 +68,59 @@ export interface AdaptiveLifecyclePolicy {
   emitBreadcrumbPackage: boolean;
   enableTopicCentroidEviction: boolean;
   triggerProactiveCompaction: boolean;
+  evictionPlan: AdaptiveEvictionPlan;
   reasons: string[];
+}
+
+const BASELINE_EVICTION_STEPS: readonly AdaptiveEvictionStep[] = Object.freeze([
+  'tool-gradient',
+  'oversized-artifacts',
+  'stale-tool-stubs',
+  'oldest-cluster-drop',
+]);
+
+const TOPIC_AWARE_EVICTION_STEPS: readonly AdaptiveEvictionStep[] = Object.freeze([
+  'tool-gradient',
+  'oversized-artifacts',
+  'stale-tool-stubs',
+  'topic-aware-cluster-drop',
+  'oldest-cluster-drop',
+]);
+
+/**
+ * Pure helper: derive the eviction plan from band only. No new pressure
+ * constants — every band-sensitive decision routes through the existing
+ * AdaptiveLifecycleBand classification.
+ *
+ * - bootstrap/warmup/steady: preserve the historical eviction order.
+ * - elevated: prefer topic-aware stale cluster drop before generic
+ *   oldest-first cluster drop.
+ * - high/critical: same plan shape as elevated. Ballast-first is already
+ *   the default order in the compositor; topic-aware drop kicks in to
+ *   avoid evicting active-topic recent clusters under saturation.
+ */
+export function resolveAdaptiveEvictionPlan(band: AdaptiveLifecycleBand): AdaptiveEvictionPlan {
+  switch (band) {
+    case 'bootstrap':
+    case 'warmup':
+    case 'steady':
+      return Object.freeze({
+        band,
+        steps: BASELINE_EVICTION_STEPS,
+        preferTopicAwareDrop: false,
+        preferBallastFirst: true,
+      });
+    case 'elevated':
+    case 'high':
+    case 'critical':
+    default:
+      return Object.freeze({
+        band,
+        steps: TOPIC_AWARE_EVICTION_STEPS,
+        preferTopicAwareDrop: true,
+        preferBallastFirst: true,
+      });
+  }
 }
 
 const PRESSURE_BANDS = Object.freeze({
@@ -148,6 +227,7 @@ export function resolveAdaptiveLifecyclePolicy(
     emitBreadcrumbPackage: Boolean(input.explicitNewSession || band === 'bootstrap'),
     enableTopicCentroidEviction: band === 'elevated' || triggerProactiveCompaction,
     triggerProactiveCompaction,
+    evictionPlan: resolveAdaptiveEvictionPlan(band),
     reasons: reasonsFor(input, band, pressureFraction),
   });
 }
