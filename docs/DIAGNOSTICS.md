@@ -162,8 +162,10 @@ Expected proof:
 
 - lifecycle band is computed
 - compose diagnostics expose lifecycle fields
+- telemetry JSONL includes `lifecycle-policy` events for `compose.preRecall` and `compose.eviction`
+- `node scripts/trim-report.mjs <telemetry.jsonl>` reports lifecycle policy counts, band counts, and divergence turns
 - afterTurn gradient cap limits pressure spikes
-- remaining recall breadth, eviction tuning, and telemetry tuning stay deferred to 0.9.0
+- remaining recall breadth and threshold tuning stay deferred until the telemetry baseline is populated
 
 ## Runtime diagnostics API allowlist
 

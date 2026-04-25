@@ -2862,6 +2862,30 @@ function createHyperMemEngine(): ContextEngine {
           compactionEligibleRatio: diag?.compactionEligibleRatio,
           compactionProcessedCount: diag?.compactionProcessedCount,
         });
+
+        if (diag?.adaptiveLifecycleBand) {
+          lifecyclePolicyTelemetry({
+            path: 'compose.preRecall',
+            agentId,
+            sessionKey: sk,
+            band: diag.adaptiveLifecycleBand,
+            pressurePct: diag.adaptiveLifecyclePressurePct,
+            trimSoftTarget: diag.adaptiveTrimSoftTarget,
+            reasons: diag.adaptiveLifecycleReasons,
+          });
+        }
+
+        if (diag?.adaptiveEvictionLifecycleBand) {
+          lifecyclePolicyTelemetry({
+            path: 'compose.eviction',
+            agentId,
+            sessionKey: sk,
+            band: diag.adaptiveEvictionLifecycleBand,
+            pressurePct: diag.adaptiveEvictionPressurePct,
+            trimSoftTarget: diag.adaptiveTrimSoftTarget,
+            reasons: diag.adaptiveLifecycleBandDiverged ? ['diverged-from-preRecall'] : undefined,
+          });
+        }
       }
 
       // Use cached contextBlock if available (cache replay), otherwise use fresh result.
