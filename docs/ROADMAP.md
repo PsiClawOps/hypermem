@@ -110,11 +110,11 @@ Remaining slices:
 Do not confuse this with the shipped governance-retrieval work. Governance trigger retrieval is closed unless a new regression appears.
 
 ## 2a. Runtime diagnostics API allowlist defect
-Status: **OPEN, defect.**
+Status: **CLOSED, upstream verified.** Verified 2026-04-24 against the installed OpenClaw runtime.
 
-`openclaw doctor --non-interactive` after the doctrine-retrieval rollout exposed that doctor memory repair and recall audit cannot reach `memory-core/runtime-api.js` because the bundled plugin public surface blocks it by allowlist.
+`openclaw doctor --non-interactive` no longer reports the public-surface allowlist blocker, and a direct memory-core runtime facade probe can load `memory-core/runtime-api.js` through the installed OpenClaw public-surface loader.
 
-This is not part of adaptive lifecycle tuning, but it is operationally adjacent: broken diagnostics make pressure and recall work harder to verify. Fix this before relying on doctor output as proof for lifecycle changes.
+This remains an upstream OpenClaw surface, not HyperMem-owned code. If the blocker reappears, classify it as `upstream-required` unless HyperMem is failing to expose its own memory plugin diagnostics.
 
 ## 2b. Topic synthesis bridge defect
 Status: **CLOSED.** Fixed in `8b9f928`; CI `24917765384` passed.
@@ -154,9 +154,9 @@ Phase 5 stays important, but it is not the next sprint until the higher-priority
 ### High priority
 | Item | Status | Notes |
 |---|---|---|
-| Runtime diagnostics API allowlist defect | 🟡 OPEN | Doctor memory repair and recall audit cannot reach `memory-core/runtime-api.js`; fix before treating doctor recall output as authoritative. |
-| Topic synthesis bridge defect | 🟡 OPEN | `knowledge: 0 active`; `TopicSynthesizer` must bridge library integer topics to messages DB UUID topics after SessionTopicMap. |
-| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Active lifecycle work; kernel, diagnostics, and afterTurn gradient cap are landed; recall/eviction/telemetry slices remain. |
+| Runtime diagnostics API allowlist defect | ✅ CLOSED | Verified installed OpenClaw runtime can reach `memory-core/runtime-api.js`; re-open only with a fresh public-surface failure trace. |
+| Topic synthesis bridge defect | ✅ CLOSED | Fixed in `8b9f928`; CI `24917765384` passed. |
+| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Kernel, compose diagnostics, afterTurn gradient cap, recall breadth, eviction order, lifecycle telemetry, and report tooling are landed; real telemetry baseline is blocked until runtime telemetry is enabled. |
 | Contradiction-aware decay | 🟡 OPEN | Prevents stale-fact poisoning after architectural pivots. |
 | Turn DAG Phase 5 storage/perf | 🟡 OPEN | Important, but later than the items above. |
 | Warm-restore gate closeout | ✅ DONE | Tracked gate-closeout scope is complete; reopen only for a new concrete defect or measurement gap. |

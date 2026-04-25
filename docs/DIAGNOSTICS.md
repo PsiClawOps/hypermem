@@ -167,11 +167,9 @@ Expected proof:
 
 ## Runtime diagnostics API allowlist
 
-`openclaw doctor --non-interactive` exposed a diagnostics blocker where doctor memory repair and recall audit could not reach `memory-core/runtime-api.js` because the bundled plugin public surface blocked it by allowlist.
+Verified 2026-04-24 against the installed OpenClaw runtime: `openclaw doctor --non-interactive` no longer reports the bundled public-surface allowlist blocker, and the memory-core runtime facade can load `memory-core/runtime-api.js`.
 
-Treat this as an operational diagnostics blocker. It is adjacent to adaptive context work, but not a 0.9.0 feature requirement.
-
-Before relying on doctor memory repair or recall audit as release proof, verify that Anvil's allowlist fix has landed and that doctor can reach the runtime diagnostics API.
+This is an upstream OpenClaw diagnostics surface, not HyperMem-owned runtime behavior. If the blocker returns, do not patch OpenClaw from this repo. Record the exact failing public-surface path and classify it as `upstream-required` unless the failing surface is HyperMem's own memory plugin diagnostics.
 
 ## Release diagnostics checklist
 
