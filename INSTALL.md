@@ -160,7 +160,17 @@ OpenClaw loads the plugin runtime from `~/.openclaw/plugins/hypermem/`.
 
 ### Verification checkpoints
 
-Walk the install state machine explicitly:
+Run the installed-system doctor first:
+
+```bash
+hypermem-doctor --fix-plan
+```
+
+`hypermem-doctor` is read-only. It inspects OpenClaw config, HyperMem config, plugin wiring, recommended OpenClaw runtime settings, data directory shape, runtime plugin load state, and active model context-window risk. It prints exact `openclaw config set ...` commands when something needs review. It does not edit config or restart the gateway.
+
+Expected result after a complete install: no required failures. Recommendation warnings should be reviewed before production use, especially context-window warnings for GPT/OpenAI-compatible/local gateways.
+
+Walk the install state machine explicitly if you need a manual check:
 
 1. **Runtime staged**
    ```bash
@@ -184,24 +194,30 @@ Walk the install state machine explicitly:
    Expected: both `hypercompositor` and `hypermem` show as loaded.
 
 4. **Runtime healthy**
-   Run from the repo clone directory, because `bin/` is a relative path:
    ```bash
-   node bin/hypermem-status.mjs --health
+   hypermem-status --health
    ```
    Expected on fresh installs: the plugin may report `no sessions ingested` or empty counts. That means healthy but unused, not broken.
 
-5. **Runtime active**
+5. **Model budget audited**
+   ```bash
+   hypermem-model-audit --strict
+   ```
+   Expected: every configured model either matches a known context-window pattern or has explicit `contextWindowOverrides`. For GPT/OpenAI-compatible/local gateways, prefer explicit overrides unless logs prove OpenClaw passes a correct runtime `tokenBudget`.
+
+6. **Runtime active**
 
    Send a message to any agent, then verify:
 
    ```bash
-   openclaw logs --limit 100 | grep -E 'hypermem|context-engine'
+   openclaw logs --limit 100 | grep -E 'hypermem|context-engine|budget source'
    ```
 
    Expected lightweight-mode lines:
    - `[hypermem] hypermem initialized`
    - `[hypermem] Embedding provider: none — semantic search disabled, using FTS5 fallback`
    - `[hypermem:compose]`
+   - `budget source: runtime tokenBudget=...` or `budget source: contextWindowOverrides[...]` for the active model
 
 If you see a fallback like `falling back to default engine "legacy"`, the install is **not** fully active yet even if staging and wiring succeeded.
 

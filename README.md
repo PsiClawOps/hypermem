@@ -475,9 +475,12 @@ openclaw config set plugins.slots.memory hypermem
 openclaw config set plugins.allow '["existing-plugin","hypercompositor","hypermem"]' --strict-json
 
 openclaw gateway restart
-openclaw plugins list
+hypermem-doctor --fix-plan
 hypermem-status --health
+hypermem-model-audit --strict
 ```
+
+`hypermem-doctor` is the confidence check: it validates plugin wiring, runtime load state, recommended OpenClaw settings such as `contextPruning.mode=off`, GPT-5 personality overlay off, startup/bootstrap injection sizing, compaction safety settings, HyperMem data files, and model context-window overrides for GPT/OpenAI-compatible/local gateways. It is read-only and prints a reviewable fix plan.
 
 Full install, upgrade, source-clone, embedding provider, reranker, fleet config, and rollback guidance lives in **[INSTALL.md](./INSTALL.md)**.
 

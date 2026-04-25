@@ -9,7 +9,8 @@
     "hypermem-status": "bin/hypermem-status.mjs",
     "hypermem-install": "scripts/install-runtime.mjs",
     "hypermem-model-audit": "bin/hypermem-model-audit.mjs",
-    "hypermem-bench": "bin/hypermem-bench.mjs"
+    "hypermem-bench": "bin/hypermem-bench.mjs",
+    "hypermem-doctor": "bin/hypermem-doctor.mjs"
   },
   "exports": {
     ".": {
@@ -39,7 +40,8 @@
     "validate:docs": "node scripts/validate-docs.mjs",
     "validate:config": "node scripts/validate-config-surface.mjs",
     "validate:version-parity": "node scripts/validate-version-parity.mjs",
-    "bench:memory": "node bench/data-access-bench.mjs --iterations 1000 --warmup 50"
+    "bench:memory": "node bench/data-access-bench.mjs --iterations 1000 --warmup 50",
+    "validate:doctor": "node test/doctor-cli.mjs"
   },
   "dependencies": {
     "sqlite-vec": "^0.1.9",
@@ -62,6 +64,7 @@
     "dist/**/*.d.ts.map",
     "bin/hypermem-status.mjs",
     "bin/hypermem-model-audit.mjs",
+    "bin/hypermem-doctor.mjs",
     "bench/README.md",
     "bench/data-access-bench.mjs",
     "bin/hypermem-bench.mjs",
