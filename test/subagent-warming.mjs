@@ -23,6 +23,13 @@ function assert(label, condition) {
   }
 }
 
+function resultText(result) {
+  return [
+    result.contextBlock || '',
+    ...(result.messages || []).map(m => m.textContent || m.content || ''),
+  ].filter(Boolean).join('\n');
+}
+
 function seedSession(msgDb, sk, agentId, msgCount) {
   msgDb.prepare(`
     INSERT INTO conversations (session_key, session_id, agent_id, channel_type, status,
@@ -96,7 +103,7 @@ async function run() {
     }, msgDb, libDb);
 
     assert('Has messages', result.messages.length > 0);
-    const ctx = result.contextBlock || '';
+    const ctx = resultText(result);
     assert('Facts included', ctx.includes('Redis') || ctx.includes('Active Facts'));
     assert('Knowledge included', ctx.includes('memory-layers') || ctx.includes('Knowledge'));
   }
@@ -115,7 +122,7 @@ async function run() {
     }, msgDb, libDb);
 
     assert('Has messages', result.messages.length > 0);
-    const ctx = result.contextBlock || '';
+    const ctx = resultText(result);
     assert('Facts still included', ctx.includes('Redis') || ctx.includes('Active Facts'));
     assert('Knowledge excluded', !ctx.includes('memory-layers'));
   }
@@ -161,7 +168,7 @@ async function run() {
       includeDocChunks: false,
     }, msgDb, libDb);
 
-    const ctx = result.contextBlock || '';
+    const ctx = resultText(result);
     assert('Facts excluded', !ctx.includes('Redis'));
     assert('Knowledge excluded', !ctx.includes('memory-layers'));
     assert('Still has messages (history preserved)', result.messages.length > 0);
@@ -189,6 +196,64 @@ async function run() {
 
     assert('Explicit undefined = implicit default (same context length)',
       (explicitFull.contextBlock || '').length === (implicitFull.contextBlock || '').length);
+  }
+
+
+  // ── Test 6: Forked-context lifecycle seed ──
+  console.log('\n── Test 6: Forked context starts warm/steady, not bootstrap ──');
+  {
+    const lowForkSk = 'agent:agent1:subagent:fork-low';
+    const steadyForkSk = 'agent:agent1:subagent:fork-steady';
+    seedSession(msgDb, lowForkSk, agentId, 0);
+    seedSession(msgDb, steadyForkSk, agentId, 0);
+
+    const lowFork = await compositor.compose({
+      agentId,
+      sessionKey: lowForkSk,
+      tokenBudget: 50000,
+      historyDepth: 50,
+      includeFacts: false,
+      includeLibrary: false,
+      includeSemanticRecall: false,
+      includeKeystones: false,
+      includeDocChunks: false,
+      forkedContext: {
+        enabled: true,
+        parentSessionKey: parentSk,
+        parentPressureFraction: 0.10,
+        parentUserTurnCount: 1,
+      },
+    }, msgDb, libDb);
+
+    const steadyFork = await compositor.compose({
+      agentId,
+      sessionKey: steadyForkSk,
+      tokenBudget: 50000,
+      historyDepth: 50,
+      includeFacts: false,
+      includeLibrary: false,
+      includeSemanticRecall: false,
+      includeKeystones: false,
+      includeDocChunks: false,
+      forkedContext: {
+        enabled: true,
+        parentSessionKey: parentSk,
+        parentPressureFraction: 0.82,
+        parentUserTurnCount: 12,
+      },
+    }, msgDb, libDb);
+
+    assert('Low-pressure fork band is warmup',
+      lowFork.diagnostics?.adaptiveLifecycleBand === 'warmup');
+    assert('Low-pressure fork does not emit bootstrap breadcrumb',
+      lowFork.diagnostics?.adaptiveBreadcrumbPackage === false);
+    assert('Low-pressure fork records forked context diagnostics',
+      lowFork.diagnostics?.adaptiveForkedContext === true
+      && lowFork.diagnostics?.adaptiveForkedParentPressurePct === 10);
+    assert('Established parent fork band is steady',
+      steadyFork.diagnostics?.adaptiveLifecycleBand === 'steady');
+    assert('Established parent fork does not trigger child compaction',
+      steadyFork.diagnostics?.adaptiveProactiveCompaction === false);
   }
 
   // ── Cleanup ──

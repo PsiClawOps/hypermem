@@ -175,6 +175,32 @@ async function run() {
     assert(tightResult.estimatedTokens <= 8000,
       `tight-budget: estimatedTokens ${tightResult.estimatedTokens} is bounded (ceiling 8000 for 2k budget)`);
 
+    // ── Forked-context prepare proof ───────────────────────────
+    // OpenClaw 2026.4.23 passes contextMode='fork' plus parent/child ids to
+    // context-engine prepareSubagentSpawn(). The plugin should seed the child
+    // hot window from the parent so a forked child is not a cold HyperMem start.
+    const childSessionKey = `agent:${agentId}:subagent:fork-child`;
+    await engine.prepareSubagentSpawn?.({
+      parentSessionKey: sessionKey,
+      childSessionKey,
+      contextMode: 'fork',
+      parentSessionId: 'plugin-pipeline-session',
+      childSessionId: 'plugin-pipeline-child',
+    });
+    const childResult = await engine.assemble({
+      sessionId: 'plugin-pipeline-child',
+      sessionKey: childSessionKey,
+      messages: [],
+      tokenBudget: 12000,
+      model: 'claude-opus-4-6',
+      prompt: 'forked child deployment checklist',
+    });
+    const childContext = `${JSON.stringify(childResult.messages || [])}\n${childResult.systemPromptAddition || ''}`;
+    assert(childContext.includes('deployment checklist'),
+      'forked child sees parent working history after prepareSubagentSpawn');
+    assert(childResult.estimatedTokens > 0,
+      `forked child estimated tokens populated (${childResult.estimatedTokens})`);
+
     await engine.dispose?.();
   } catch (err) {
     console.error('\n💥 Validation error:', err);

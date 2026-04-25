@@ -2011,12 +2011,26 @@ export class Compositor {
       budget,
       PRESSURE_SOURCE.COMPOSE_PRE_RECALL,
     );
+    let s09ObservedUserTurnCount = sampleMessages.filter(m => m.role === 'user').length;
+    const s09ForkedContextSeed = request.forkedContext?.enabled ? request.forkedContext : undefined;
+    const s09ForkedParentPressure = typeof s09ForkedContextSeed?.parentPressureFraction === 'number'
+      && Number.isFinite(s09ForkedContextSeed.parentPressureFraction)
+      ? s09ForkedContextSeed.parentPressureFraction
+      : undefined;
+    const s09EvictionPolicyPressure = s09ForkedContextSeed
+      && s09ObservedUserTurnCount === 0
+      && s09ForkedParentPressure != null
+        ? s09ForkedParentPressure
+        : s09EvictionPressure.fraction;
     const evictionLifecyclePolicy = resolveAdaptiveLifecyclePolicy({
-      pressureFraction: s09EvictionPressure.fraction,
-      userTurnCount: sampleMessages.filter(m => m.role === 'user').length,
+      pressureFraction: s09EvictionPolicyPressure,
+      userTurnCount: s09ObservedUserTurnCount,
       explicitNewSession: isExplicitNewSessionPrompt(
         request.prompt ?? null,
       ),
+      forkedContext: Boolean(s09ForkedContextSeed),
+      forkedParentPressureFraction: s09ForkedParentPressure,
+      forkedParentUserTurnCount: s09ForkedContextSeed?.parentUserTurnCount,
     });
     let adaptiveEvictionTopicAwareEligibleClusters = 0;
     let adaptiveEvictionTopicAwareDroppedClusters = 0;
@@ -2238,6 +2252,10 @@ export class Compositor {
         }
         return true;
       });
+      s09ObservedUserTurnCount = Math.max(
+        s09ObservedUserTurnCount,
+        historyMessages.filter(m => m.role === 'user').length,
+      );
 
       // ── Transform-first: apply gradient tool treatment BEFORE budget math ──
       // All tool payloads are in their final form before any token estimation.
@@ -2839,12 +2857,20 @@ export class Compositor {
       budget,
       PRESSURE_SOURCE.COMPOSE_PRE_RECALL,
     );
+    const s09ComposePolicyPressure = s09ForkedContextSeed
+      && s09ObservedUserTurnCount === 0
+      && s09ForkedParentPressure != null
+        ? s09ForkedParentPressure
+        : composePreRecallPressure.fraction;
     const composeLifecyclePolicy = resolveAdaptiveLifecyclePolicy({
-      pressureFraction: composePreRecallPressure.fraction,
-      userTurnCount: sampleMessages.filter(m => m.role === 'user').length,
+      pressureFraction: s09ComposePolicyPressure,
+      userTurnCount: s09ObservedUserTurnCount,
       explicitNewSession: isExplicitNewSessionPrompt(
         request.prompt ?? this.getLastUserMessage(messages),
       ),
+      forkedContext: Boolean(s09ForkedContextSeed),
+      forkedParentPressureFraction: s09ForkedParentPressure,
+      forkedParentUserTurnCount: s09ForkedContextSeed?.parentUserTurnCount,
     });
     const recallBreadth = scaleRecallBreadth(
       remaining,
@@ -3573,6 +3599,11 @@ export class Compositor {
       adaptiveEvictionTopicIdCoveragePct,
       adaptiveEvictionBypassReason,
       adaptiveLifecycleBandDiverged: evictionLifecyclePolicy.band !== composeLifecyclePolicy.band,
+      adaptiveForkedContext: s09ForkedContextSeed ? true : undefined,
+      adaptiveForkedParentPressurePct: s09ForkedParentPressure != null
+        ? Math.round(s09ForkedParentPressure * 100)
+        : undefined,
+      adaptiveForkedParentUserTurns: s09ForkedContextSeed?.parentUserTurnCount,
       // C1: tool-chain ejection telemetry
       toolChainCoEjections: c1CoEjections > 0 ? c1CoEjections : undefined,
       toolChainStubReplacements: c1StubReplacements > 0 ? c1StubReplacements : undefined,

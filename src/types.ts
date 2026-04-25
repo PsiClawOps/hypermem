@@ -209,6 +209,23 @@ export interface RecentTurn {
   seq: number;
 }
 
+export interface ForkedContextSeed {
+  /** True when this compose call belongs to an OpenClaw forked subagent. */
+  enabled: boolean;
+  /** Parent session key used to prepare the fork, when available. */
+  parentSessionKey?: string;
+  /** Parent runtime session id, when OpenClaw exposes it. */
+  parentSessionId?: string;
+  /** Child runtime session id, when OpenClaw exposes it. */
+  childSessionId?: string;
+  /** Parent-session pressure observed while preparing the fork, 0..1+. */
+  parentPressureFraction?: number;
+  /** Parent-session user-turn count observed while preparing the fork. */
+  parentUserTurnCount?: number;
+  /** Parent history messages copied into the child hot window. */
+  parentHistoryMessages?: number;
+}
+
 export interface ComposeRequest {
   agentId: string;
   sessionKey: string;
@@ -245,6 +262,12 @@ export interface ComposeRequest {
    * compositor can surface them during composition.
    */
   parentSessionKey?: string;
+  /**
+   * OpenClaw forked-context seed metadata. When present, adaptive lifecycle
+   * starts child sessions from warmup/steady instead of treating an empty
+   * HyperMem child store as a cold bootstrap.
+   */
+  forkedContext?: ForkedContextSeed;
   /**
    * When true, skip provider-specific translation and return NeutralMessage[]
    * instead of ProviderMessage[]. Used by the context engine plugin, which
@@ -500,6 +523,12 @@ export interface ComposeDiagnostics {
   adaptiveEvictionBypassReason?: 'no-active-topic' | 'no-stamped-clusters' | 'band-not-topic-aware' | 'within-budget' | 'no-eligible-inactive-topic-clusters';
   /** True when compose.eviction and compose.preRecall selected different lifecycle bands. */
   adaptiveLifecycleBandDiverged?: boolean;
+  /** True when adaptive lifecycle received forked-context seed metadata. */
+  adaptiveForkedContext?: boolean;
+  /** Parent pressure percentage used to seed forked-context lifecycle, when available. */
+  adaptiveForkedParentPressurePct?: number;
+  /** Parent user turns observed when forked-context lifecycle was prepared. */
+  adaptiveForkedParentUserTurns?: number;
   // ── Sprint 4: Prompt placement + budget lanes + provider diagnostics ────────────────────────────────
   /**
    * Sprint 4: Explicit compositor budget lane allocations for this compose pass.

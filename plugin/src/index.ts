@@ -693,6 +693,7 @@ function resolveConfiguredWindow(model?: string): number | null {
 // Subagent warming mode: 'full' | 'light' | 'off'. Default: 'light'.
 // Controls how much HyperMem context is injected into subagent sessions.
 let _subagentWarming: 'full' | 'light' | 'off' = 'light';
+const FORKED_CONTEXT_META_SLOT = 'forkedContextMeta';
 // Cache replay threshold: 15min default. Set to 0 in user config to disable.
 let _cacheReplayThresholdMs: number = 900_000;
 
@@ -2786,6 +2787,18 @@ function createHyperMemEngine(): ContextEngine {
             // Subagent light mode: skip library/wiki/semantic/keystones/doc chunks.
       // Keeps: system, identity, history, active facts, output profile, tool gradient.
       const subagentLight = isSubagent && _subagentWarming === 'light';
+      let forkedContext: ComposeRequest['forkedContext'] | undefined;
+      if (isSubagent) {
+        try {
+          const rawForkedContext = await hm.cache.getSlot(agentId, sk, FORKED_CONTEXT_META_SLOT);
+          if (rawForkedContext) {
+            const parsed = JSON.parse(rawForkedContext) as ComposeRequest['forkedContext'];
+            if (parsed?.enabled === true) forkedContext = parsed;
+          }
+        } catch {
+          // Fork metadata is advisory; fall back to normal subagent lifecycle.
+        }
+      }
 
       const request: ComposeRequest = {
         agentId,
@@ -2801,6 +2814,7 @@ function createHyperMemEngine(): ContextEngine {
         includeSemanticRecall: subagentLight ? false : undefined,  // skip vector/FTS recall
         includeKeystones: subagentLight ? false : undefined,  // skip keystone history injection
         prompt,
+        forkedContext,
         skipProviderTranslation: true,  // runtime handles provider translation
       };
 
@@ -2932,6 +2946,10 @@ ${replayRecovery.emittedText}`
       _overheadCache.set(sk, contextBlockTokens + runtimeSystemTokens);
 
       await persistReplayRecoveryState(hm, agentId, sk, replayRecovery.nextState);
+
+      if (forkedContext) {
+        await hm.cache.setSlot(agentId, sk, FORKED_CONTEXT_META_SLOT, '').catch(() => {});
+      }
 
       // Update model state for downshift detection on next turn
       try {
@@ -3549,7 +3567,16 @@ ${replayRecovery.emittedText}`
      * subagentWarming config ('full' | 'light' | 'off').
      * Returns a rollback handle to clean up if spawn fails.
      */
-    async prepareSubagentSpawn({ parentSessionKey, childSessionKey }): Promise<SubagentSpawnPreparation | undefined> {
+    async prepareSubagentSpawn(params): Promise<SubagentSpawnPreparation | undefined> {
+      const { parentSessionKey, childSessionKey } = params;
+      const forkParams = params as typeof params & {
+        contextMode?: 'isolated' | 'fork';
+        parentSessionId?: string;
+        childSessionId?: string;
+      };
+      const contextMode = forkParams.contextMode;
+      const parentSessionId = forkParams.parentSessionId;
+      const childSessionId = forkParams.childSessionId;
       if (_subagentWarming === 'off') {
         return undefined;
       }
@@ -3558,8 +3585,13 @@ ${replayRecovery.emittedText}`
         const hm = await getHyperMem();
         const parentAgentId = extractAgentId(parentSessionKey);
         const childAgentId = extractAgentId(childSessionKey);
+        const isForkedContext = contextMode === 'fork';
+        let parentHistoryMessages = 0;
+        let parentUserTurnCount = 0;
+        let parentPressureFraction: number | undefined;
 
-        // Seed child with parent's active facts
+        // Seed child with parent's active facts. This preserves the historical
+        // slot for compatibility; facts still primarily come from L4 by agent id.
         const facts = hm.getActiveFacts(parentAgentId, { limit: 50 });
         if (facts && (facts as unknown[]).length > 0) {
           const factBlock = (facts as Array<{ content: string }>)
@@ -3568,23 +3600,53 @@ ${replayRecovery.emittedText}`
           await hm.cache.setSlot(childAgentId, childSessionKey, 'parentFacts', factBlock);
         }
 
-        // For 'full' warming, also seed recent history context
-        if (_subagentWarming === 'full') {
-          const history = await hm.cache.getHistory(parentAgentId, parentSessionKey);
-          if (history && history.length > 0) {
-            const recentHistory = history.slice(-10);
-            await hm.cache.setSlot(
-              childAgentId,
-              childSessionKey,
-              'parentHistory',
-              JSON.stringify(recentHistory)
-            );
+        const history = await hm.cache.getHistory(parentAgentId, parentSessionKey);
+        if (history && history.length > 0) {
+          const maxSeededHistory = _subagentWarming === 'full' ? 25 : 12;
+          const recentHistory = history.slice(-maxSeededHistory);
+          parentHistoryMessages = recentHistory.length;
+          parentUserTurnCount = recentHistory.filter(m => m.role === 'user').length;
+          const parentTokens = estimateMessageArrayTokens(recentHistory as unknown[]);
+          const parentModelState = await hm.cache.getModelState(parentAgentId, parentSessionKey).catch(() => null);
+          const parentBudget = parentModelState?.tokenBudget && parentModelState.tokenBudget > 0
+            ? parentModelState.tokenBudget
+            : undefined;
+          parentPressureFraction = parentBudget ? parentTokens / parentBudget : undefined;
+
+          if (isForkedContext || _subagentWarming === 'full') {
+            await hm.cache.replaceHistory(childAgentId, childSessionKey, recentHistory, maxSeededHistory);
+            await hm.cache.invalidateWindow(childAgentId, childSessionKey).catch(() => {});
           }
+          await hm.cache.setSlot(
+            childAgentId,
+            childSessionKey,
+            'parentHistory',
+            JSON.stringify(recentHistory)
+          );
+        }
+
+        if (isForkedContext) {
+          const forkedMeta: NonNullable<ComposeRequest['forkedContext']> = {
+            enabled: true,
+            parentSessionKey,
+            parentSessionId,
+            childSessionId,
+            parentPressureFraction,
+            parentUserTurnCount,
+            parentHistoryMessages,
+          };
+          await hm.cache.setSlot(
+            childAgentId,
+            childSessionKey,
+            FORKED_CONTEXT_META_SLOT,
+            JSON.stringify(forkedMeta)
+          );
         }
 
         console.log(
           `[hypermem-plugin] prepareSubagentSpawn: seeded ${childSessionKey} ` +
-          `from ${parentSessionKey} (warming=${_subagentWarming})`
+          `from ${parentSessionKey} (warming=${_subagentWarming}, contextMode=${contextMode ?? 'isolated'}, ` +
+          `history=${parentHistoryMessages})`
         );
 
         return {
@@ -3593,6 +3655,9 @@ ${replayRecovery.emittedText}`
               const hm = await getHyperMem();
               await hm.cache.setSlot(childAgentId, childSessionKey, 'parentFacts', '');
               await hm.cache.setSlot(childAgentId, childSessionKey, 'parentHistory', '');
+              await hm.cache.setSlot(childAgentId, childSessionKey, FORKED_CONTEXT_META_SLOT, '');
+              await hm.cache.replaceHistory(childAgentId, childSessionKey, [], 0);
+              await hm.cache.invalidateWindow(childAgentId, childSessionKey).catch(() => {});
             } catch {
               // Rollback is best-effort
             }
@@ -3618,6 +3683,7 @@ ${replayRecovery.emittedText}`
         await Promise.all([
           hm.cache.setSlot(childAgentId, childSessionKey, 'parentFacts', ''),
           hm.cache.setSlot(childAgentId, childSessionKey, 'parentHistory', ''),
+          hm.cache.setSlot(childAgentId, childSessionKey, FORKED_CONTEXT_META_SLOT, ''),
           hm.cache.setSlot(childAgentId, childSessionKey, 'assemblyContextBlock', ''),
           hm.cache.setSlot(childAgentId, childSessionKey, 'assemblyContextAt', '0'),
           hm.cache.invalidateWindow(childAgentId, childSessionKey).catch(() => {}),

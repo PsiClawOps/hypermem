@@ -86,7 +86,7 @@ Rule going forward: do not reopen warm restore from historical planning notes. N
 ## 2. HyperMem 0.9.0 adaptive context lifecycle
 Status: **OPEN, active.**
 
-The core runtime slices have landed: the pure adaptive lifecycle policy kernel, compose diagnostics wiring, afterTurn Redis gradient-cap wiring, adaptive recall breadth, adaptive eviction ordering, and lifecycle telemetry. The remaining work is evidence/reporting and then any deliberately chosen tuning, not more planning archaeology.
+The core runtime slices have landed: the pure adaptive lifecycle policy kernel, compose diagnostics wiring, afterTurn Redis gradient-cap wiring, adaptive recall breadth, adaptive eviction ordering, lifecycle telemetry, report tooling, and forked-context lifecycle integration. The remaining work is real telemetry baseline evidence and then any deliberately chosen tuning, not more planning archaeology.
 
 The lifecycle policy makes compose, afterTurn, recall, trim, compaction, and eviction share one pressure-band decision source instead of growing independent heuristics:
 - tiered warming — policy bands: bootstrap, warmup, steady, elevated, high, critical
@@ -102,9 +102,11 @@ Done in this stream:
 - adaptive recall breadth adjustment — `5e47fce`, CI `24918184839`
 - adaptive eviction ordering — `a0f6780`, CI `24918940291`
 - adaptive lifecycle telemetry — `61f9b9e`, CI `24919418833`
+- telemetry report tooling — `a923987`, CI `24920282389`
+- forked-context lifecycle integration — pending CI for this slice
 
 Remaining slices:
-- telemetry report tooling and baseline evidence for topic-stamp coverage, lifecycle-band divergence, adaptive-drop bypass reasons, topic-aware eligible/drop/protected counts, and afterTurn gradient observations
+- real telemetry baseline evidence for topic-stamp coverage, lifecycle-band divergence, adaptive-drop bypass reasons, topic-aware eligible/drop/protected counts, and afterTurn gradient observations
 - runtime tuning only after the evidence pass shows a specific threshold or behavior change is warranted
 
 Do not confuse this with the shipped governance-retrieval work. Governance trigger retrieval is closed unless a new regression appears.
@@ -156,7 +158,7 @@ Phase 5 stays important, but it is not the next sprint until the higher-priority
 |---|---|---|
 | Runtime diagnostics API allowlist defect | ✅ CLOSED | Verified installed OpenClaw runtime can reach `memory-core/runtime-api.js`; re-open only with a fresh public-surface failure trace. |
 | Topic synthesis bridge defect | ✅ CLOSED | Fixed in `8b9f928`; CI `24917765384` passed. |
-| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Kernel, compose diagnostics, afterTurn gradient cap, recall breadth, eviction order, lifecycle telemetry, and report tooling are landed; real telemetry baseline is blocked until runtime telemetry is enabled. |
+| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Kernel, compose diagnostics, afterTurn gradient cap, recall breadth, eviction order, lifecycle telemetry, report tooling, and forked-context integration are landed locally; real telemetry baseline is blocked until runtime telemetry is enabled. |
 | Contradiction-aware decay | 🟡 OPEN | Prevents stale-fact poisoning after architectural pivots. |
 | Turn DAG Phase 5 storage/perf | 🟡 OPEN | Important, but later than the items above. |
 | Warm-restore gate closeout | ✅ DONE | Tracked gate-closeout scope is complete; reopen only for a new concrete defect or measurement gap. |

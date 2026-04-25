@@ -201,5 +201,53 @@ console.log('\n── Scenario 11: lifecycle policy carries the eviction plan de
     `policy shape unchanged except for evictionPlan addition (got ${keys.join(',')})`);
 }
 
+
+console.log('\n── Scenario 12: forked-context children skip cold bootstrap ──');
+{
+  const lightFork = resolveAdaptiveLifecyclePolicy({
+    forkedContext: true,
+    userTurnCount: 0,
+    pressureFraction: 0.05,
+    forkedParentPressureFraction: 0.10,
+    forkedParentUserTurnCount: 1,
+  });
+  const establishedFork = resolveAdaptiveLifecyclePolicy({
+    forkedContext: true,
+    userTurnCount: 0,
+    pressureFraction: 0.05,
+    forkedParentPressureFraction: 0.82,
+    forkedParentUserTurnCount: 12,
+  });
+  const inheritedHistoryFork = resolveAdaptiveLifecyclePolicy({
+    forkedContext: true,
+    userTurnCount: 12,
+    pressureFraction: 0.91,
+    forkedParentPressureFraction: 0.82,
+    forkedParentUserTurnCount: 12,
+  });
+  const explicitNew = resolveAdaptiveLifecyclePolicy({
+    forkedContext: true,
+    explicitNewSession: true,
+    userTurnCount: 0,
+    forkedParentPressureFraction: 0.82,
+    forkedParentUserTurnCount: 12,
+  });
+
+  assert(lightFork.band === 'warmup', `light parent fork starts warmup (got ${lightFork.band})`);
+  assert(lightFork.emitBreadcrumbPackage === false,
+    'forked warmup does not emit bootstrap breadcrumb package');
+  assert(lightFork.reasons.includes('forked-context'), 'forked-context reason recorded');
+  assert(establishedFork.band === 'steady',
+    `established/high-pressure parent fork starts steady, not bootstrap/high (got ${establishedFork.band})`);
+  assert(establishedFork.triggerProactiveCompaction === false,
+    'forked first turn does not trigger child compaction from parent pressure alone');
+  assert(inheritedHistoryFork.band === 'steady',
+    `forked inherited history is still bounded to steady (got ${inheritedHistoryFork.band})`);
+  assert(inheritedHistoryFork.triggerProactiveCompaction === false,
+    'forked inherited history does not trigger child compaction before post-fork turns');
+  assert(explicitNew.band === 'bootstrap',
+    'explicit /new still wins over forked-context seed');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -256,6 +256,7 @@ export type {
   ComposeRequest,
   ComposeResult,
   ComposeDiagnostics,
+  ForkedContextSeed,
   SlotTokenCounts,
   SessionSlots,
   SessionMeta,

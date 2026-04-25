@@ -28,6 +28,12 @@ export interface AdaptiveLifecycleInput {
   explicitNewSession?: boolean;
   /** Topic-shift confidence from the detector, 0..1. */
   topicShiftConfidence?: number;
+  /** True when this context was forked from a parent OpenClaw session. */
+  forkedContext?: boolean;
+  /** Parent-session pressure observed when the fork was prepared, 0..1+. */
+  forkedParentPressureFraction?: number;
+  /** Parent-session user turns observed when the fork was prepared. */
+  forkedParentUserTurnCount?: number;
 }
 
 /**
@@ -178,7 +184,19 @@ function isTopicShift(input: AdaptiveLifecycleInput): boolean {
 function classifyBand(input: AdaptiveLifecycleInput, pressure: number): AdaptiveLifecycleBand {
   const userTurns = Math.max(0, Math.floor(input.userTurnCount ?? 0));
 
-  if (input.explicitNewSession || userTurns === 0) return 'bootstrap';
+  if (input.explicitNewSession) return 'bootstrap';
+  if (input.forkedContext) {
+    const parentPressure = clampPressure(input.forkedParentPressureFraction ?? pressure);
+    const parentTurns = Math.max(0, Math.floor(input.forkedParentUserTurnCount ?? 0));
+    // A forked child is not cold: it starts with inherited working context.
+    // Keep initial posture conservative and bounded to warmup/steady so a
+    // saturated parent does not immediately trigger child compaction before the
+    // child has produced its own post-fork turns. Callers should only pass this
+    // seed for the initial forked assemble.
+    if (parentTurns >= 5 || parentPressure >= 0.35) return 'steady';
+    return 'warmup';
+  }
+  if (userTurns === 0) return 'bootstrap';
   if (userTurns <= 4 && pressure < PRESSURE_BANDS.elevatedMax) return 'warmup';
   if (pressure < PRESSURE_BANDS.steadyMax) return 'steady';
   if (pressure < PRESSURE_BANDS.elevatedMax) return 'elevated';
@@ -198,6 +216,15 @@ function reasonsFor(input: AdaptiveLifecycleInput, band: AdaptiveLifecycleBand, 
   const reasons: string[] = [`band:${band}`, `pressure:${Math.round(pressure * 100)}%`];
   const turns = Math.max(0, Math.floor(input.userTurnCount ?? 0));
   if (input.explicitNewSession) reasons.push('explicit-new-session');
+  if (input.forkedContext) {
+    reasons.push('forked-context');
+    if (input.forkedParentPressureFraction != null) {
+      reasons.push(`forked-parent-pressure:${Math.round(clampPressure(input.forkedParentPressureFraction) * 100)}%`);
+    }
+    if (input.forkedParentUserTurnCount != null) {
+      reasons.push(`forked-parent-turns:${Math.max(0, Math.floor(input.forkedParentUserTurnCount))}`);
+    }
+  }
   if (turns === 0) reasons.push('cold-start');
   if (turns > 0 && turns <= 4) reasons.push(`early-session:${turns}`);
   if (isTopicShift(input)) reasons.push(`topic-shift:${(input.topicShiftConfidence ?? 0).toFixed(2)}`);
