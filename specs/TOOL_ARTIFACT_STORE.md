@@ -1,8 +1,9 @@
 # Tool Artifact Store
 
-**Status:** Phase 1 (foundation) — building  
+**Status:** Phase 2.1 shipped — active-turn compositor hydration live  
 **Author:** Forge  
-**Date:** 2026-04-17
+**Date:** 2026-04-17  
+**Last updated:** 2026-04-26
 
 ## Problem
 
@@ -24,26 +25,31 @@ assigned a stable `artifactId`. The transcript window keeps a small stub that
 carries the `artifactId`. The stub is all the model sees by default; hydration
 is an explicit compositor decision, not an automatic transcript rewrite.
 
-## Scope — Phase 1
+## Scope — shipped surface
 
-In scope:
+Shipped:
 - `tool_artifacts` SQLite table in per-agent `messages.db` (schema v9)
 - `ToolArtifactStore` CRUD + dedupe by `content_hash`
 - Plugin wave-guard stores full payload before stubbing (no data loss even at
   85%+ pressure)
-- Stub carries `artifactId` so future hydration can resolve it
+- Stub carries `artifactId` so hydration can resolve it
+- Active-turn compositor hydration via `hydrateActiveTurnArtifacts()`:
+  - only hydrates stubs already present in the active turn
+  - injects full payload back into the assembled prompt, not into persisted transcript rows
+  - leaves missing artifacts as stubs and reports hydration misses
+  - touches `last_used_at` for hydrated artifacts in batch
 - Public API:
   - `hm.recordToolArtifact(...)`
   - `hm.getToolArtifact(artifactId)`
   - `hm.listToolArtifactsByTurn(agentId, sessionKey, turnId)`
-- Unit test coverage
+- Unit test coverage, including active-turn hydration regression coverage
 
-Out of scope (Phase 2+):
-- Compositor rehydration logic
+Still out of scope:
 - Retention / GC policy sweep
 - Sensitivity flags, secret redaction
 - Cross-agent artifact sharing
 - File-backed blobs for very large payloads
+- Broad historical rehydration outside the active turn
 
 ## Schema v9
 
@@ -188,12 +194,23 @@ No payload is ever lost after this change.
 - Stub round-trip: `formatToolChainStub` + `parseToolChainStub` preserve
   `artifactId` when present, and stay backwards-compatible when absent
 
-## Phase 2 preview (not in this build)
+## Implemented hydration behavior
 
-1. Compositor hydration: on compose-time, if the most recent tool result stub
-   is within the assembly window and the turn is continuation-shaped, pull
-   the full payload back *into the assembled prompt only*.
-2. Retention policy job: default keep-raw for 30 days after `last_used_at`,
+Compositor hydration is live for active-turn stubs. During compose, HyperMem
+scans active-turn tool results for canonical stubs carrying `artifact=<id>`.
+Matching rows in `tool_artifacts` are loaded and inserted into the assembled
+prompt only. The stored transcript remains stubbed, which keeps compaction and
+history persistence cheap while still allowing the model to recover the payload
+needed for the current continuation.
+
+Failure mode is intentionally conservative: missing artifacts stay as stubs,
+`hydrationMisses` is reported, and prompt assembly continues. This avoids a
+single missing artifact turning compose into a hard outage. That's the boring
+choice, which is usually the right one at 3am.
+
+## Remaining Phase 2+ work
+
+1. Retention policy job: default keep-raw for 30 days after `last_used_at`,
    sensitive artifacts get short TTL + redaction, summaries stay forever.
-3. Secret scanner integration: flag artifacts whose payload tripped the
+2. Secret scanner integration: flag artifacts whose payload tripped the
    secret scanner so retention picks them up early.
