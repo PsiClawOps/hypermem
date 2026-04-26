@@ -66,7 +66,7 @@ export class FactStore {
       console.warn(
         `[hypermem] WARNING: agent '${agentId}' attempted to write a fact with scope='global'. ` +
         `Global-scope facts are not yet gated — this write will succeed but may propagate ` +
-        `to all agents sharing library.db. See KL-01 in KNOWN_LIMITATIONS.md.`
+        `to all agents sharing library.db. Configure fact write authority before enabling global-scope facts.`
       );
     }
 

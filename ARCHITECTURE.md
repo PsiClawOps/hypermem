@@ -152,7 +152,7 @@ Visibility-tiered access model for cross-agent knowledge queries:
 
 `visibilityFilter()` resolves access levels using an `OrgRegistry` — a mapping of agents to tiers, orgs, and capabilities. Currently loaded from a hardcoded `defaultOrgRegistry()` in `cross-agent.ts`.
 
-**Known limitation:** `defaultOrgRegistry()` duplicates fleet structure that lives authoritatively in `fleet_agents` + `fleet_orgs` in library.db. See [docs/ROADMAP.md](docs/ROADMAP.md) for the planned live-load migration.
+**Known limitation:** `defaultOrgRegistry()` duplicates fleet structure that lives authoritatively in `fleet_agents` + `fleet_orgs` in library.db. The planned migration is to live-load the registry from library.db on startup, with the hardcoded registry retained only as a cold-start fallback.
 
 ### Unknown Agent Fallback (Restrictive Default)
 
@@ -229,7 +229,7 @@ Data Flow (current — P0 stabilized, window/cursor active):
 6. `compose()` deduplicates history by `id` before budget assembly.
 7. `getHistory()` honors its `limit` parameter on BOTH hot-cache and SQLite paths.
 
-For open and deferred items, see [docs/ROADMAP.md](docs/ROADMAP.md).
+Open and deferred work is tracked outside this public architecture reference.
 
 ### Runtime Contract
 

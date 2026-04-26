@@ -170,6 +170,7 @@ const EXCLUDE_PATHS = [
   'scripts/migrate-clawtext.mjs',       // Internal migration tool, ClawText refs
   'scripts/sync-public.mjs',            // The sync script itself
   'docs/ROADMAP.md',                    // Internal future work — not for public release
+  'docs/KNOWN_LIMITATIONS.md',          // Internal limitation tracker — not for public release
   'docs/PHASE1-VALIDATION.md',          // Internal validation artifact
   'docs/RELEASE_0.8.0_VALIDATION.md',   // Internal release checklist
   'docs/reviews',                       // Internal review artifacts
