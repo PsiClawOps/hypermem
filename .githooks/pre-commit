@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+expected_name="PsiClawOps"
+expected_email="ops@psiclawops.com"
+name="$(git config user.name || true)"
+email="$(git config user.email || true)"
+if [[ "$name" != "$expected_name" || "$email" != "$expected_email" ]]; then
+  cat >&2 <<MSG
+Commit blocked: repo git identity must be ${expected_name} <${expected_email}>.
+Current: ${name:-<unset>} <${email:-<unset>}>
+Run: git config user.name "${expected_name}" && git config user.email "${expected_email}"
+MSG
+  exit 1
+fi

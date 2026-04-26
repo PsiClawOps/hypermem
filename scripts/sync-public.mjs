@@ -158,6 +158,12 @@ const LEAK_TERMS = [
   'ClawMap',
   'ClawDispatch',
   'workspace-council',
+  'ocplatform',
+  'ROADMAP.md',
+  'KNOWN_LIMITATIONS.md',
+  'Anvil (Antagonist)',
+  'anvil@psiclawops.dev',
+  'forge@psiclawops.dev',
   // Agent names that should have been substituted (check Title case too)
   // Note: 'agent4' is intentionally not here — it's a generic word
 ];
@@ -475,6 +481,15 @@ async function main() {
     console.log('  \u2705 No leaked identity terms found.');
   }
 
+  console.log('\n[2.6/6] Running public surface validation...');
+  try {
+    execSync('node scripts/validate-public-surface.mjs --strict', { cwd: REPO_ROOT, stdio: 'inherit' });
+  } catch {
+    console.error('\n❌ Public surface validation failed. Fix public-only leaks before release.');
+    if (!DRY_RUN) git('checkout main');
+    process.exit(1);
+  }
+
   if (DRY_RUN) {
     console.log('\nDRY RUN complete. No changes written.');
     return;
@@ -512,7 +527,7 @@ async function main() {
     return;
   }
   console.log(diffStat);
-  git(`commit -m "${commitMsg.replace(/"/g, '\\"')}"`);
+  git(`-c user.name=PsiClawOps -c user.email=ops@psiclawops.com commit --author="PsiClawOps <ops@psiclawops.com>" -m "${commitMsg.replace(/"/g, '\\"')}"`);
 
   // 8. Push
   if (!NO_PUSH) {

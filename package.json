@@ -40,6 +40,7 @@
     "validate:docs": "node scripts/validate-docs.mjs",
     "validate:config": "node scripts/validate-config-surface.mjs",
     "validate:version-parity": "node scripts/validate-version-parity.mjs",
+    "validate:public-surface": "node scripts/validate-public-surface.mjs",
     "bench:memory": "node bench/data-access-bench.mjs --iterations 1000 --warmup 50",
     "validate:doctor": "node test/doctor-cli.mjs"
   },
