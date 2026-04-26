@@ -634,6 +634,25 @@ export class HyperMem {
   readonly compositor: Compositor;
   private readonly config: HyperMemConfig;
 
+  // Per-dataDir singleton registry. Multiple plugins (context-engine + memory)
+  // load this package independently, but they must share a single HyperMem
+  // instance per dataDir to avoid dual sqlite-vec init, dual fleet seeding,
+  // and conflicting embedding configs against the same SQLite database.
+  //
+  // Backed by globalThis so the registry survives even if Node ends up loading
+  // this module twice (e.g. via differing symlink/realpath resolution from two
+  // sibling plugin packages). Module-scope state alone would not deduplicate
+  // across two module instances.
+  private static readonly _instances: Map<string, Promise<HyperMem>> = (() => {
+    const key = '__psiclawops_hypermem_instances__';
+    const g = globalThis as Record<string, unknown>;
+    const existing = g[key];
+    if (existing instanceof Map) return existing as Map<string, Promise<HyperMem>>;
+    const fresh = new Map<string, Promise<HyperMem>>();
+    g[key] = fresh;
+    return fresh;
+  })();
+
   private constructor(config: HyperMemConfig) {
     this.config = config;
     this.dbManager = new DatabaseManager({ dataDir: config.dataDir });
@@ -655,6 +674,12 @@ export class HyperMem {
 
   /**
    * Create and initialize a hypermem instance.
+   *
+   * Singleton-per-dataDir: callers that pass the same absolute dataDir share
+   * one instance. The first caller's full config wins; later callers get the
+   * existing instance regardless of what config they passed. Plugins should
+   * load the user config file (~/.openclaw/hypermem/config.json) themselves
+   * so whichever plugin races first still produces a fully-configured instance.
    */
   static async create(config?: Partial<HyperMemConfig>): Promise<HyperMem> {
     const merged: HyperMemConfig = {
@@ -669,6 +694,24 @@ export class HyperMem {
       },
     };
 
+    const dataDirKey = path.resolve(merged.dataDir);
+    const existing = HyperMem._instances.get(dataDirKey);
+    if (existing) {
+      return existing;
+    }
+
+    const initPromise = HyperMem._initializeInstance(merged);
+    HyperMem._instances.set(dataDirKey, initPromise);
+    try {
+      return await initPromise;
+    } catch (err) {
+      // Don't cache failed inits; let the next caller retry.
+      HyperMem._instances.delete(dataDirKey);
+      throw err;
+    }
+  }
+
+  private static async _initializeInstance(merged: HyperMemConfig): Promise<HyperMem> {
     const hm = new HyperMem(merged);
 
     const cacheOk = await hm.cache.connect();
@@ -693,10 +736,15 @@ export class HyperMem {
           const vs = new VectorStore(vectorDb, merged.embedding, hm.dbManager.getLibraryDb());
           vs.ensureTables();
           hm.compositor.setVectorStore(vs);
-          const embeddingDesc = merged.embedding.provider === 'openai'
-            ? `${merged.embedding.openaiBaseUrl?.includes('openrouter') ? 'openrouter' : 'openai'}/${merged.embedding.model ?? 'text-embedding-3-small'}`
-            : `ollama/${merged.embedding.model ?? 'nomic-embed-text'}`;
-          console.log(`[hypermem] Vector store initialized (sqlite-vec + ${embeddingDesc})`);
+          // Provider label: detect openrouter via base URL when provider is the
+          // OpenAI-compatible adapter; otherwise echo the configured provider so
+          // logs never imply ollama/nomic when something else is actually wired.
+          const providerLabel = merged.embedding.provider === 'openai'
+            ? (merged.embedding.openaiBaseUrl?.includes('openrouter') ? 'openrouter' : 'openai')
+            : merged.embedding.provider;
+          const modelLabel = merged.embedding.model ?? '(default)';
+          const dimsLabel = merged.embedding.dimensions ? `${merged.embedding.dimensions}d` : 'unknown-dims';
+          console.log(`[hypermem] Vector store initialized (sqlite-vec + ${providerLabel}/${modelLabel} ${dimsLabel})`);
         } else {
           console.warn('[hypermem] sqlite-vec unavailable — semantic recall in FTS5-only mode');
         }

@@ -2,6 +2,15 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.9.1 - plugin singleton + memory-plugin config patch
+
+- **HyperMem singleton registry is now backed by `globalThis`.** Multiple module instances loaded from `node_modules` would each construct a private singleton, so HyperCompositor and the memory plugin could end up writing to different SQLite/vector stores. The registry now lives on `globalThis`, guaranteeing one instance per `dataDir` regardless of how many copies of the module are resolved.
+- **Memory plugin loads user config.** The memory plugin entrypoint now reads operator config (provider, embedding model, dimensions) instead of falling back to library defaults, so a 768d nomic embedder in OpenClaw config no longer collides with a 4096d default at write time.
+- **Vector store init log shows actual provider/model/dims.** Diagnostic log line at startup now reflects the resolved configuration instead of the static placeholder, so misconfiguration is visible immediately.
+- **Tool artifact API arity + hydration docs aligned.** Doc-only follow-ups; no runtime behavior change.
+
+**operator action:** upgrade from 0.9.0 is recommended. 0.9.0 in production with a configured non-default embedder may have written mismatched vectors; check `hypermem-status` for vector-store init line after upgrade.
+
 ## 0.9.0 - adaptive context lifecycle
 
 - **Adaptive lifecycle is now production behavior.** Compose, afterTurn, recall, trim, compaction, and eviction share the same pressure-band policy across bootstrap, warmup, steady, elevated, high, and critical states.

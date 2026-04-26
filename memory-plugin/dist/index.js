@@ -21,8 +21,12 @@ import fs from 'fs/promises';
 import os from 'os';
 import { fileURLToPath } from 'url';
 // ─── HyperMem singleton ────────────────────────────────────────
-// Reuses the same singleton pattern as the context engine plugin.
-// Both plugins load from the same installed runtime payload and share the instance.
+// HyperMem.create() in the core package now dedupes per absolute dataDir, so
+// whichever of the two plugins (context-engine, memory) calls create() first
+// owns the instance. To avoid a race where this plugin would otherwise win
+// boot with no embedding config and force defaults onto the shared instance,
+// we load the same user config file the context-engine plugin loads and pass
+// the full embedding/reranker config through to create().
 const __pluginDir = path.dirname(fileURLToPath(import.meta.url));
 async function resolveHyperMemPath() {
     try {
@@ -31,6 +35,19 @@ async function resolveHyperMemPath() {
     }
     catch {
         return path.resolve(__pluginDir, '../../dist/index.js');
+    }
+}
+async function loadFileConfig(dataDir) {
+    const configPath = path.join(dataDir, 'config.json');
+    try {
+        const raw = await fs.readFile(configPath, 'utf-8');
+        return JSON.parse(raw);
+    }
+    catch (err) {
+        if (err.code !== 'ENOENT') {
+            console.warn(`[hypermem-memory] Failed to parse config.json (using defaults):`, err.message);
+        }
+        return {};
     }
 }
 let _hm = null;
@@ -44,14 +61,25 @@ async function getHyperMem() {
         const hypermemPath = await resolveHyperMemPath();
         const mod = await import(hypermemPath);
         const HyperMem = mod.HyperMem;
-        const instance = await HyperMem.create({
-            dataDir: path.join(os.homedir(), '.openclaw/hypermem'),
+        const dataDir = path.join(os.homedir(), '.openclaw/hypermem');
+        const fileConfig = await loadFileConfig(dataDir);
+        const createConfig = {
+            dataDir,
             cache: {
                 keyPrefix: 'hm:',
                 sessionTTL: 14400,
                 historyTTL: 86400,
             },
-        });
+        };
+        // Forward embedding + reranker so this plugin's create() call produces
+        // an equivalent instance to the context-engine plugin's. Other config
+        // sections (compositor, indexer, dreaming, etc.) are owned by the
+        // context-engine plugin and only matter when it wins the singleton race.
+        if (fileConfig.embedding)
+            createConfig.embedding = fileConfig.embedding;
+        if (fileConfig.reranker)
+            createConfig.reranker = fileConfig.reranker;
+        const instance = await HyperMem.create(createConfig);
         _hm = instance;
         return instance;
     })();

@@ -143,6 +143,7 @@ export declare class HyperMem {
     readonly cache: CacheLayer;
     readonly compositor: Compositor;
     private readonly config;
+    private static readonly _instances;
     private constructor();
     /**
      * Get the active vector store, if initialized.
@@ -151,8 +152,15 @@ export declare class HyperMem {
     getVectorStore(): VectorStore | null;
     /**
      * Create and initialize a hypermem instance.
+     *
+     * Singleton-per-dataDir: callers that pass the same absolute dataDir share
+     * one instance. The first caller's full config wins; later callers get the
+     * existing instance regardless of what config they passed. Plugins should
+     * load the user config file (~/.openclaw/hypermem/config.json) themselves
+     * so whichever plugin races first still produces a fully-configured instance.
      */
     static create(config?: Partial<HyperMemConfig>): Promise<HyperMem>;
+    private static _initializeInstance;
     /**
      * Record a user message.
      */

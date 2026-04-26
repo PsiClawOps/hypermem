@@ -1,0 +1,64 @@
+# HyperMem Benchmark — Docker Compose
+# Usage: BENCH_HOOK=hypermem docker compose -f compose.yml up -d --wait
+#
+# BENCH_HOOK selects which hook to mount: noop | hypermem | mem0 | letta
+# Everything else is identical between runs.
+
+services:
+  openclaw-bench:
+    image: openclaw-bench:local
+    container_name: openclaw-bench
+    ports:
+      - "18790:18789"
+    environment:
+      - OPENCLAW_GATEWAY_TOKEN=${BENCH_TOKEN:-bench-test-token-do-not-use-in-prod}
+      - NODE_ENV=production
+      # Redis for HyperMem (other hooks ignore it)
+      - HYPERMEM_REDIS_URL=redis://redis-bench:6379/1
+      - HYPERMEM_DATA_DIR=/home/node/.openclaw/bench-data
+      # Mem0 adapter config
+      - MEM0_VENV=/opt/mem0-env
+      - MEM0_QDRANT_URL=http://qdrant-bench:6333
+      # Letta adapter config
+      - LETTA_VENV=/opt/letta-env
+      - LETTA_BASE_URL=http://localhost:8283
+    volumes:
+      # Frozen config — identical for all runs
+      - ../config/openclaw.json:/home/node/.openclaw/openclaw.json:ro
+      - ../agent:/home/node/.openclaw/workspace/bench-agent:ro
+      # Hook selection — the ONLY thing that changes
+      - ../hooks/${BENCH_HOOK:-noop}:/home/node/.openclaw/hooks/bench-memory:ro
+      # Writable data dir (ephemeral, destroyed on down -v)
+      - bench-data:/home/node/.openclaw/bench-data
+    depends_on:
+      redis-bench:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18789/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+  redis-bench:
+    image: redis:7-alpine
+    container_name: redis-bench
+    command: redis-server --appendonly no --save ""
+    # Ephemeral — no persistence, benchmark data only
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  # Qdrant for Mem0 runs (ignored by other hooks, low overhead when idle)
+  qdrant-bench:
+    image: qdrant/qdrant:v1.12.6
+    container_name: qdrant-bench
+    profiles:
+      - mem0
+    # Only started when: docker compose --profile mem0 up
+
+volumes:
+  bench-data:
+    # Destroyed on `docker compose down -v`
