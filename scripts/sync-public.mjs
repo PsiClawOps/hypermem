@@ -180,6 +180,11 @@ const EXCLUDE_PATHS = [
   'docs/PHASE1-VALIDATION.md',          // Internal validation artifact
   'docs/RELEASE_0.8.0_VALIDATION.md',   // Internal release checklist
   'docs/reviews',                       // Internal review artifacts
+  'AGENTS.md',                          // Internal agent instructions — not public release docs
+  '.repo-identity',                     // Local repo identity marker — not public release docs
+  'specs',                              // Internal planning specs — not public release docs
+  'runs',                               // Internal run artifacts — not public release docs
+  'test/redis-integration.mjs.retired', // Retired internal artifact — not public release docs
 ];
 
 // ─── Text file extensions to sanitize ───────────────────────────
