@@ -202,12 +202,12 @@ const SANITIZE_EXTENSIONS = new Set([
 ]);
 
 // ─── Directories to sync ─────────────────────────────────────────
-const SYNC_DIRS = ['src', 'test', 'scripts', 'docs', '.github', 'plugin', 'memory-plugin'];
+const SYNC_DIRS = ['src', 'test', 'scripts', 'docs', '.github', 'plugin', 'memory-plugin', 'bin', 'bench'];
 const SYNC_ROOT_FILES = [
   'package.json', 'package-lock.json', 'tsconfig.json',
   'README.md', 'CHANGELOG.md', 'INSTALL.md',
   'ARCHITECTURE.md', 'MIGRATION_GUIDE.md',
-  'LICENSE', '.npmignore',
+  'LICENSE', '.npmignore', 'install.sh',
 ];
 
 // ─── Sanitization Engine ─────────────────────────────────────────
