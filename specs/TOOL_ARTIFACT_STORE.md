@@ -40,7 +40,7 @@ Shipped:
   - touches `last_used_at` for hydrated artifacts in batch
 - Public API:
   - `hm.recordToolArtifact(...)`
-  - `hm.getToolArtifact(artifactId)`
+  - `hm.getToolArtifact(agentId, artifactId)`
   - `hm.listToolArtifactsByTurn(agentId, sessionKey, turnId)`
 - Unit test coverage, including active-turn hydration regression coverage
 

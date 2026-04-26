@@ -7,7 +7,7 @@
  *    composed prompt containing the FULL original payload for that stub.
  * 2. compose() with a stubbed toolResult in an OLDER turn produces a
  *    composed prompt that still contains the STUB (not hydrated).
- * 3. hm.getToolArtifact(artifactId) returns the stored payload with matching hash.
+ * 3. hm.getToolArtifact(agentId, artifactId) returns the stored payload with matching hash.
  * 4. Diagnostics show artifactsHydrated > 0 when hydration fires.
  * 5. Hydration sets last_used_at forward on each hydrated artifact.
  * 6. Hydration failure (missing artifact) falls back gracefully — no exception.
