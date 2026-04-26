@@ -559,6 +559,18 @@ async function main() {
   for (const generatedPath of ['dist', 'plugin/dist', 'memory-plugin/dist']) {
     rmSync(join(REPO_ROOT, generatedPath), { recursive: true, force: true });
   }
+  // Ensure dependencies are available for tsc; checkout/clean cycles between
+  // internal main and public-sync can leave node_modules empty.
+  for (const pkgDir of ['.', 'plugin', 'memory-plugin']) {
+    const nm = join(REPO_ROOT, pkgDir, 'node_modules');
+    if (!existsSync(nm)) {
+      console.log(`  npm install (${pkgDir})...`);
+      execSync(`npm install --no-audit --no-fund${pkgDir === '.' ? '' : ` --prefix ${pkgDir}`}`, {
+        cwd: REPO_ROOT,
+        stdio: 'inherit',
+      });
+    }
+  }
   execSync('npm run build', { cwd: REPO_ROOT, stdio: 'inherit' });
   execSync('npm --prefix plugin run build', { cwd: REPO_ROOT, stdio: 'inherit' });
   execSync('npm --prefix memory-plugin run build', { cwd: REPO_ROOT, stdio: 'inherit' });
