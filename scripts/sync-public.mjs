@@ -392,6 +392,15 @@ async function main() {
   const internalHead = gitOut('rev-parse --short HEAD');
   console.log(`Internal main HEAD: ${internalHead}`);
 
+  const publicSurfaceValidator = '/tmp/hypermem-validate-public-surface.mjs';
+  if (!DRY_RUN) {
+    writeFileSync(
+      publicSurfaceValidator,
+      execSync(`git -C "${REPO_ROOT}" show ${internalHead}:scripts/validate-public-surface.mjs`, { encoding: 'utf8' }),
+      'utf8'
+    );
+  }
+
   // 2. Add ephemeral public remote
   console.log('\n[1/6] Adding public remote (ephemeral)...');
   try { git(`remote remove ${PUBLIC_REMOTE}`, { silent: true }); } catch { /* didn't exist */ }
@@ -519,7 +528,7 @@ async function main() {
 
   console.log('\n[2.6/6] Running public surface validation...');
   try {
-    execSync('node scripts/validate-public-surface.mjs --strict', { cwd: REPO_ROOT, stdio: 'inherit' });
+    execSync(`node ${publicSurfaceValidator} --strict`, { cwd: REPO_ROOT, stdio: 'inherit' });
   } catch {
     console.error('\n❌ Public surface validation failed. Fix public-only leaks before release.');
     if (!DRY_RUN) git('checkout main');
@@ -553,7 +562,7 @@ async function main() {
 
   console.log('\n[4.5/7] Re-validating public surface after build...');
   try {
-    execSync('node scripts/validate-public-surface.mjs --strict', { cwd: REPO_ROOT, stdio: 'inherit' });
+    execSync(`node ${publicSurfaceValidator} --strict`, { cwd: REPO_ROOT, stdio: 'inherit' });
   } catch {
     console.error('\n❌ Built public artifacts contain blocked internal terms.');
     git('checkout main');
