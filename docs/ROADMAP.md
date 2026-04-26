@@ -12,7 +12,15 @@ For shipped capabilities, see [CHANGELOG.md](../CHANGELOG.md) and [ARCHITECTURE.
 ## Current state
 
 ### Released
-- Current release: **0.8.6**
+- Current release: **0.9.0** — adaptive context lifecycle. Published 2026-04-25.
+  - Internal `main`: `8f805b8`
+  - Public `main`: `25dd469`
+  - Public tag `v0.9.0`: pushed
+  - Public CI: green (`24942512824`)
+  - GitHub Release: https://github.com/PsiClawOps/hypermem/releases/tag/v0.9.0
+  - npm at 0.9.0: `@psiclawops/hypermem`, `@psiclawops/hypercompositor`, `@psiclawops/hypermem-memory`
+  - New install validator shipped: `hypermem-doctor`
+- Previous release: **0.8.6**
 
 ### Landed on `main` after 0.8.6
 In the order work actually landed:
@@ -84,7 +92,7 @@ Final closeout work now complete:
 Rule going forward: do not reopen warm restore from historical planning notes. New warm-restore work needs a fresh defect, measurement gap, or roadmap item.
 
 ## 2. HyperMem 0.9.0 adaptive context lifecycle
-Status: **OPEN, release-candidate pending tag validation.**
+Status: **CLOSED — shipped 2026-04-25.** Public tag `v0.9.0` (`25dd469`), GitHub Release published, all three npm packages at 0.9.0. `hypermem-doctor` shipped as part of this release.
 
 The core runtime slices have landed: the pure adaptive lifecycle policy kernel, compose diagnostics wiring, afterTurn Redis gradient-cap wiring, adaptive recall breadth, adaptive eviction ordering, lifecycle telemetry, report tooling, forked-context lifecycle integration, and metadata-only topic-signal report classification. The first live telemetry baseline is populated; it shows steady/warmup behavior with zero lifecycle-band divergence, so no threshold tuning is warranted from the current evidence.
 
@@ -168,7 +176,7 @@ Phase 5 stays important, but it is not the next sprint until the higher-priority
 |---|---|---|
 | Runtime diagnostics API allowlist defect | ✅ CLOSED | Verified installed OpenClaw runtime can reach `memory-core/runtime-api.js`; re-open only with a fresh public-surface failure trace. |
 | Topic synthesis bridge defect | ✅ CLOSED | Fixed in `8b9f928`; CI `24917765384` passed. |
-| Adaptive context lifecycle (0.9.0) | 🟡 OPEN | Kernel, compose diagnostics, afterTurn gradient cap, recall breadth, eviction order, lifecycle telemetry, report tooling, forked-context integration, and topic-signal report classification are landed; vector coverage, first live lifecycle baseline, and the 0.9.0 topic-bearing compose evidence gate are closed; threshold tuning remains deferred until future live evidence warrants it. |
+| Adaptive context lifecycle (0.9.0) | ✅ SHIPPED | Released 2026-04-25 as 0.9.0. Threshold tuning remains deferred until future live evidence warrants it. |
 | Vector coverage repair gate | ✅ CLOSED | `embed-existing` now supports knowledge and eligibility-aware coverage reporting; production vectors reached facts 113/113, knowledge 85/85, episodes 30,121/30,121 eligible coverage on 2026-04-24. |
 | Contradiction-aware decay | 🟡 OPEN | Prevents stale-fact poisoning after architectural pivots. |
 | Turn DAG Phase 5 storage/perf | 🟡 OPEN | Important, but later than the items above. |
