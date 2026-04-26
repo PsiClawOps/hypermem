@@ -559,19 +559,35 @@ async function main() {
   for (const generatedPath of ['dist', 'plugin/dist', 'memory-plugin/dist']) {
     rmSync(join(REPO_ROOT, generatedPath), { recursive: true, force: true });
   }
-  // Ensure dependencies are available for tsc; checkout/clean cycles between
-  // internal main and public-sync can leave node_modules empty.
-  for (const pkgDir of ['.', 'plugin', 'memory-plugin']) {
+  // Ensure root dependencies are available for tsc; checkout/clean cycles
+  // between internal main and public-sync can leave node_modules empty.
+  if (!existsSync(join(REPO_ROOT, 'node_modules'))) {
+    console.log(`  npm install (.)...`);
+    execSync(`npm install --no-audit --no-fund`, { cwd: REPO_ROOT, stdio: 'inherit' });
+  }
+  execSync('npm run build', { cwd: REPO_ROOT, stdio: 'inherit' });
+  // Pack the freshly-built core so plugin/memory-plugin can resolve
+  // @psiclawops/hypermem at the version being released (not yet on npm).
+  console.log(`  npm pack (core) for plugin link...`);
+  const packStdout = execSync('npm pack --silent', { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
+  const tarballName = packStdout.split('\n').pop();
+  const tarballPath = join(REPO_ROOT, tarballName);
+  for (const pkgDir of ['plugin', 'memory-plugin']) {
     const nm = join(REPO_ROOT, pkgDir, 'node_modules');
     if (!existsSync(nm)) {
-      console.log(`  npm install (${pkgDir})...`);
-      execSync(`npm install --no-audit --no-fund${pkgDir === '.' ? '' : ` --prefix ${pkgDir}`}`, {
+      console.log(`  npm install (${pkgDir}) with local core tarball...`);
+      execSync(`npm install --no-audit --no-fund --no-save --prefix ${pkgDir} ${tarballPath}`, {
+        cwd: REPO_ROOT,
+        stdio: 'inherit',
+      });
+      // Install the rest of pkg deps (zod etc.) without re-resolving hypermem
+      execSync(`npm install --no-audit --no-fund --prefix ${pkgDir}`, {
         cwd: REPO_ROOT,
         stdio: 'inherit',
       });
     }
   }
-  execSync('npm run build', { cwd: REPO_ROOT, stdio: 'inherit' });
+  rmSync(tarballPath, { force: true });
   execSync('npm --prefix plugin run build', { cwd: REPO_ROOT, stdio: 'inherit' });
   execSync('npm --prefix memory-plugin run build', { cwd: REPO_ROOT, stdio: 'inherit' });
 
