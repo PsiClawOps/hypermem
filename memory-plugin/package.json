@@ -1,0 +1,64 @@
+{
+  "name": "@psiclawops/hypermem-memory",
+  "version": "0.9.0",
+  "description": "HyperMem memory plugin for OpenClaw — bridges HyperMem retrieval into the memory slot",
+  "type": "module",
+  "main": "dist/index.js",
+  "license": "Apache-2.0",
+  "author": "PsiClawOps",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PsiClawOps/hypermem.git",
+    "directory": "memory-plugin"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "openclaw": {
+    "plugin": {
+      "id": "hypermem",
+      "name": "HyperMem Memory",
+      "kind": "memory"
+    },
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.4.12",
+      "minGatewayVersion": "2026.4.12"
+    },
+    "build": {
+      "openclawVersion": "2026.4.9",
+      "pluginSdkVersion": "2026.4.12"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@psiclawops/hypermem": "0.9.0"
+  },
+  "devDependencies": {
+    "openclaw": "*",
+    "typescript": "^5.4.0"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "memory",
+    "hypermem"
+  ],
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
+  ]
+}

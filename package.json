@@ -1,0 +1,107 @@
+{
+  "name": "@psiclawops/hypermem",
+  "version": "0.9.0",
+  "description": "Agent-centric memory and context composition engine for OpenClaw",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "hypermem-status": "bin/hypermem-status.mjs",
+    "hypermem-install": "scripts/install-runtime.mjs",
+    "hypermem-model-audit": "bin/hypermem-model-audit.mjs",
+    "hypermem-bench": "bin/hypermem-bench.mjs",
+    "hypermem-doctor": "bin/hypermem-doctor.mjs"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./image-eviction": {
+      "import": "./dist/image-eviction.js",
+      "types": "./dist/image-eviction.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "health": "node bin/hypermem-status.mjs --master",
+    "health:master": "node bin/hypermem-status.mjs --master",
+    "install:runtime": "node scripts/install-runtime.mjs",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node test/smoke.mjs && node test/lightweight-mode.mjs && node test/cross-agent.mjs && node test/vector-search.mjs && node test/embed-existing-coverage.mjs && node test/library.mjs && node test/compositor.mjs && node test/fleet-cache.mjs && node test/fleet-startup-seeding.mjs && node test/rotation.mjs && node test/knowledge-graph.mjs && node test/rate-limiter.mjs && node test/doc-chunker.mjs && node test/compaction-fence-gate.mjs && node test/hybrid-retrieval.mjs && node test/reranker-hotfix.mjs && node test/live-org-registry.mjs && node test/multi-turn-session.mjs && node test/secret-scanner.mjs && node --test test/content-type-classifier.mjs && node --test test/composition-snapshot-integrity.test.mjs && node --test test/composition-snapshot-store.test.mjs && node test/keystone-history.mjs && node test/cross-topic-keystone.mjs && node test/proactive-pass.mjs && node test/topic-synthesis.mjs && node test/session-topic-map.mjs && node test/virtual-sessions.mjs && node test/budget-downshift.mjs && node --test test/image-eviction.mjs && node test/fos-mod.mjs && node test/history-depth-estimator.mjs && node test/unified-pressure-signal.mjs && node test/sprint4-prompt-placement.mjs && node test/model-aware-budgeting-b4.mjs && node test/adaptive-lifecycle.mjs && node test/repair-tool-pairs.mjs && node test/tool-result-guards.mjs && node test/phase-c-fixtures.mjs && node test/oversized-artifact-c2.mjs && node test/oversized-artifact-guards.mjs && node test/doc-chunk-artifact-retrieval.mjs && node test/dreaming-promoter-temporal.mjs",
+    "test:quick": "node test/smoke.mjs && node test/lightweight-mode.mjs && node test/library.mjs && node test/compositor.mjs",
+    "validate:plugin-pipeline": "npm --prefix plugin run build && node test/plugin-pipeline.mjs && node test/batch-trim-b3.mjs",
+    "validate:release-path": "npm run build && npm --prefix plugin run build && node test/release-gateway-path.mjs",
+    "test:multi-turn": "node test/multi-turn-session.mjs",
+    "test:ci": "npm test && npm --prefix plugin run typecheck",
+    "smoke": "node scripts/smoke-test.mjs",
+    "sync-public": "node scripts/sync-public.mjs",
+    "validate:docs": "node scripts/validate-docs.mjs",
+    "validate:config": "node scripts/validate-config-surface.mjs",
+    "validate:version-parity": "node scripts/validate-version-parity.mjs",
+    "validate:public-surface": "node scripts/validate-public-surface.mjs",
+    "bench:memory": "node bench/data-access-bench.mjs --iterations 1000 --warmup 50",
+    "validate:doctor": "node test/doctor-cli.mjs"
+  },
+  "dependencies": {
+    "sqlite-vec": "^0.1.9",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "bundledDependencies": [
+    "sqlite-vec",
+    "zod"
+  ],
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map",
+    "bin/hypermem-status.mjs",
+    "bin/hypermem-model-audit.mjs",
+    "bin/hypermem-doctor.mjs",
+    "bench/README.md",
+    "bench/data-access-bench.mjs",
+    "bin/hypermem-bench.mjs",
+    "plugin/dist/**",
+    "plugin/package.json",
+    "plugin/openclaw.plugin.json",
+    "memory-plugin/dist/**",
+    "memory-plugin/package.json",
+    "memory-plugin/openclaw.plugin.json",
+    "scripts/install-runtime.mjs",
+    "docs/*.md",
+    "install.sh",
+    "README.md",
+    "INSTALL.md",
+    "CHANGELOG.md",
+    "ARCHITECTURE.md",
+    "LICENSE"
+  ],
+  "author": "PsiClawOps",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PsiClawOps/hypermem.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "keywords": [
+    "openclaw",
+    "agent-memory",
+    "context-engine",
+    "llm",
+    "semantic-search",
+    "sqlite-vec",
+    "redis",
+    "rag"
+  ]
+}

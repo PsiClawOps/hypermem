@@ -1,0 +1,13 @@
+{
+  "id": "hypermem",
+  "enabledByDefault": false,
+  "kind": "memory",
+  "activation": {
+    "onCapabilities": ["memory"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

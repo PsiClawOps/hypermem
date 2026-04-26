@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Build, Typecheck & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install root deps
+        run: npm ci
+
+      - name: Build core
+        run: npm run build
+
+      - name: Typecheck core
+        run: npm run typecheck
+
+      - name: Install plugin deps
+        run: npm install --prefix plugin
+
+      - name: Plugin typecheck
+        run: npm --prefix plugin run typecheck
+
+      - name: Build plugin
+        run: npm --prefix plugin run build
+
+      - name: Install memory-plugin deps
+        run: npm install --prefix memory-plugin
+
+      - name: Memory-plugin typecheck
+        run: npm --prefix memory-plugin run typecheck
+
+      - name: Build memory-plugin
+        run: npm --prefix memory-plugin run build
+
+      - name: Run tests
+        run: npm test

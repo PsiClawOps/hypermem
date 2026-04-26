@@ -1,0 +1,571 @@
+/**
+ * hypermem Cache Layer
+ *
+ * Drop-in replacement for RedisLayer using SQLite :memory: ATTACH.
+ * Same public interface, zero external dependencies, zero TCP overhead.
+ */
+import { DatabaseSync } from 'node:sqlite';
+const DEFAULT_CONFIG = {
+    keyPrefix: 'hm:',
+    sessionTTL: 14400,
+    historyTTL: 86400,
+};
+function now() {
+    return Math.floor(Date.now() / 1000);
+}
+export class CacheLayer {
+    db = null;
+    config;
+    _connected = false;
+    stmtSetSlot;
+    stmtGetSlot;
+    stmtSetTopicSlot;
+    stmtGetTopicSlot;
+    stmtTouchSlots;
+    stmtEvictSlots;
+    stmtActivateSession;
+    stmtDeactivateSession;
+    stmtGetActiveSessions;
+    stmtSetMeta;
+    stmtGetMeta;
+    stmtTouchSession;
+    stmtGetMaxSeq;
+    stmtInsertHistory;
+    stmtGetHistory;
+    stmtGetHistoryLimit;
+    stmtHistoryExists;
+    stmtDeleteHistory;
+    stmtDeleteOldHistory;
+    stmtGetAllHistoryDesc;
+    stmtDeleteHistoryBeforeSeq;
+    stmtEvictHistory;
+    stmtSetWindow;
+    stmtGetWindow;
+    stmtGetFreshWindowBundle;
+    stmtDeleteWindow;
+    stmtEvictWindows;
+    stmtSetKv;
+    stmtGetKv;
+    stmtDeleteKv;
+    constructor(config) {
+        this.config = { ...DEFAULT_CONFIG, ...config };
+    }
+    async connect(db) {
+        if (this._connected)
+            return true;
+        this.db = db ?? new DatabaseSync(':memory:');
+        this.db.exec("ATTACH DATABASE ':memory:' AS cache");
+        this.db.exec([
+            "CREATE TABLE IF NOT EXISTS cache.slots (agent_id TEXT NOT NULL, session_key TEXT NOT NULL, topic_id TEXT NOT NULL DEFAULT '', slot_name TEXT NOT NULL, value TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (agent_id, session_key, topic_id, slot_name));",
+            "CREATE TABLE IF NOT EXISTS cache.history (agent_id TEXT NOT NULL, session_key TEXT NOT NULL, topic_id TEXT NOT NULL DEFAULT '', seq INTEGER NOT NULL, message TEXT NOT NULL, PRIMARY KEY (agent_id, session_key, topic_id, seq));",
+            "CREATE TABLE IF NOT EXISTS cache.sessions (agent_id TEXT NOT NULL, session_key TEXT NOT NULL, meta TEXT, active INTEGER NOT NULL DEFAULT 1, touched_at INTEGER NOT NULL, PRIMARY KEY (agent_id, session_key));",
+            "CREATE TABLE IF NOT EXISTS cache.windows (agent_id TEXT NOT NULL, session_key TEXT NOT NULL, topic_id TEXT NOT NULL DEFAULT '', messages TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (agent_id, session_key, topic_id));",
+            "CREATE TABLE IF NOT EXISTS cache.kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0);"
+        ].join(' '));
+        this._prepareStatements();
+        this._connected = true;
+        return true;
+    }
+    _prepareStatements() {
+        const db = this.db;
+        this.stmtSetSlot = db.prepare("INSERT OR REPLACE INTO cache.slots (agent_id,session_key,topic_id,slot_name,value,expires_at) VALUES (?,?,'',?,?,?)");
+        this.stmtGetSlot = db.prepare("SELECT value FROM cache.slots WHERE agent_id=? AND session_key=? AND topic_id='' AND slot_name=? AND expires_at>?");
+        this.stmtSetTopicSlot = db.prepare("INSERT OR REPLACE INTO cache.slots (agent_id,session_key,topic_id,slot_name,value,expires_at) VALUES (?,?,?,?,?,?)");
+        this.stmtGetTopicSlot = db.prepare("SELECT value FROM cache.slots WHERE agent_id=? AND session_key=? AND topic_id=? AND slot_name=? AND expires_at>?");
+        this.stmtTouchSlots = db.prepare("UPDATE cache.slots SET expires_at=? WHERE agent_id=? AND session_key=? AND topic_id=''");
+        this.stmtEvictSlots = db.prepare("DELETE FROM cache.slots WHERE agent_id=? AND session_key=?");
+        this.stmtActivateSession = db.prepare("INSERT INTO cache.sessions (agent_id,session_key,meta,active,touched_at) VALUES (?,?,NULL,1,?) ON CONFLICT (agent_id,session_key) DO UPDATE SET active=1,touched_at=excluded.touched_at");
+        this.stmtDeactivateSession = db.prepare("UPDATE cache.sessions SET active=0 WHERE agent_id=? AND session_key=?");
+        this.stmtGetActiveSessions = db.prepare("SELECT session_key FROM cache.sessions WHERE agent_id=? AND active=1");
+        this.stmtSetMeta = db.prepare("INSERT INTO cache.sessions (agent_id,session_key,meta,active,touched_at) VALUES (?,?,?,COALESCE((SELECT active FROM cache.sessions WHERE agent_id=? AND session_key=?),1),?) ON CONFLICT (agent_id,session_key) DO UPDATE SET meta=excluded.meta,touched_at=excluded.touched_at");
+        this.stmtGetMeta = db.prepare("SELECT meta FROM cache.sessions WHERE agent_id=? AND session_key=?");
+        this.stmtTouchSession = db.prepare("UPDATE cache.sessions SET touched_at=? WHERE agent_id=? AND session_key=?");
+        this.stmtGetMaxSeq = db.prepare("SELECT MAX(seq) AS max_seq FROM cache.history WHERE agent_id=? AND session_key=? AND topic_id=?");
+        this.stmtInsertHistory = db.prepare("INSERT OR IGNORE INTO cache.history (agent_id,session_key,topic_id,seq,message) VALUES (?,?,?,?,?)");
+        this.stmtGetHistory = db.prepare("SELECT message FROM cache.history WHERE agent_id=? AND session_key=? AND topic_id='' ORDER BY seq ASC");
+        this.stmtGetHistoryLimit = db.prepare("SELECT message FROM cache.history WHERE agent_id=? AND session_key=? AND topic_id='' AND seq IN (SELECT seq FROM cache.history WHERE agent_id=? AND session_key=? AND topic_id='' ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC");
+        this.stmtHistoryExists = db.prepare("SELECT 1 FROM cache.history WHERE agent_id=? AND session_key=? AND topic_id='' LIMIT 1");
+        this.stmtDeleteHistory = db.prepare("DELETE FROM cache.history WHERE agent_id=? AND session_key=? AND topic_id=''");
+        this.stmtDeleteOldHistory = db.prepare("DELETE FROM cache.history WHERE agent_id=? AND session_key=? AND topic_id='' AND seq NOT IN (SELECT seq FROM cache.history WHERE agent_id=? AND session_key=? AND topic_id='' ORDER BY seq DESC LIMIT ?)");
+        this.stmtGetAllHistoryDesc = db.prepare("SELECT seq,message FROM cache.history WHERE agent_id=? AND session_key=? AND topic_id='' ORDER BY seq DESC");
+        this.stmtDeleteHistoryBeforeSeq = db.prepare("DELETE FROM cache.history WHERE agent_id=? AND session_key=? AND topic_id='' AND seq<?");
+        this.stmtEvictHistory = db.prepare("DELETE FROM cache.history WHERE agent_id=? AND session_key=?");
+        this.stmtSetWindow = db.prepare("INSERT OR REPLACE INTO cache.windows (agent_id,session_key,topic_id,messages,expires_at) VALUES (?,?,?,?,?)");
+        this.stmtGetWindow = db.prepare("SELECT messages FROM cache.windows WHERE agent_id=? AND session_key=? AND topic_id=? AND expires_at>?");
+        this.stmtGetFreshWindowBundle = db.prepare(`
+      SELECT
+        w.messages AS messages,
+        wm.value AS meta,
+        c.value AS cursor
+      FROM cache.windows w
+      LEFT JOIN cache.kv wm
+        ON wm.key = ?
+       AND (wm.expires_at = 0 OR wm.expires_at > ?)
+      LEFT JOIN cache.kv c
+        ON c.key = ?
+       AND (c.expires_at = 0 OR c.expires_at > ?)
+      WHERE w.agent_id = ?
+        AND w.session_key = ?
+        AND w.topic_id = ''
+        AND w.expires_at > ?
+    `);
+        this.stmtDeleteWindow = db.prepare("DELETE FROM cache.windows WHERE agent_id=? AND session_key=? AND topic_id=?");
+        this.stmtEvictWindows = db.prepare("DELETE FROM cache.windows WHERE agent_id=? AND session_key=?");
+        this.stmtSetKv = db.prepare("INSERT OR REPLACE INTO cache.kv (key,value,expires_at) VALUES (?,?,?)");
+        this.stmtGetKv = db.prepare("SELECT value FROM cache.kv WHERE key=? AND (expires_at=0 OR expires_at>?)");
+        this.stmtDeleteKv = db.prepare("DELETE FROM cache.kv WHERE key=?");
+    }
+    get isConnected() {
+        return this._connected && this.db !== null;
+    }
+    // ─── Agent-Level Operations ──────────────────────────────────
+    async setProfile(agentId, profile) {
+        if (!this.isConnected)
+            return;
+        this.stmtSetKv.run(`${this.config.keyPrefix}${agentId}:profile`, JSON.stringify(profile), 0);
+    }
+    async getProfile(agentId) {
+        if (!this.isConnected)
+            return null;
+        const row = this.stmtGetKv.get(`${this.config.keyPrefix}${agentId}:profile`, now());
+        return row ? JSON.parse(row.value) : null;
+    }
+    async addActiveSession(agentId, sessionKey) {
+        if (!this.isConnected)
+            return;
+        this.stmtActivateSession.run(agentId, sessionKey, now());
+    }
+    async removeActiveSession(agentId, sessionKey) {
+        if (!this.isConnected)
+            return;
+        this.stmtDeactivateSession.run(agentId, sessionKey);
+    }
+    async getActiveSessions(agentId) {
+        if (!this.isConnected)
+            return [];
+        const rows = this.stmtGetActiveSessions.all(agentId);
+        return rows.map(r => r.session_key);
+    }
+    // ─── Session Slot Operations ─────────────────────────────────
+    async setSlot(agentId, sessionKey, slot, value) {
+        if (!this.isConnected)
+            return;
+        this.stmtSetSlot.run(agentId, sessionKey, slot, value, now() + this.config.sessionTTL);
+    }
+    async getSlot(agentId, sessionKey, slot) {
+        if (!this.isConnected)
+            return null;
+        const row = this.stmtGetSlot.get(agentId, sessionKey, slot, now());
+        return row?.value ?? null;
+    }
+    async setSessionMeta(agentId, sessionKey, meta) {
+        if (!this.isConnected)
+            return;
+        this.stmtSetMeta.run(agentId, sessionKey, JSON.stringify(meta), agentId, sessionKey, now());
+    }
+    async getSessionMeta(agentId, sessionKey) {
+        if (!this.isConnected)
+            return null;
+        const row = this.stmtGetMeta.get(agentId, sessionKey);
+        if (!row?.meta)
+            return null;
+        return JSON.parse(row.meta);
+    }
+    // ─── History Operations ──────────────────────────────────────
+    async pushHistory(agentId, sessionKey, messages, maxMessages = 250) {
+        if (!this.isConnected || messages.length === 0)
+            return;
+        // Get current max seq for dedup
+        const maxRow = this.stmtGetMaxSeq.get(agentId, sessionKey, '');
+        const maxSeq = maxRow?.max_seq ?? -1;
+        // Filter already-stored messages (same dedup logic as Redis path)
+        let filteredMessages = messages;
+        if (maxSeq >= 0) {
+            filteredMessages = messages.filter(m => m.id > maxSeq);
+        }
+        if (filteredMessages.length === 0)
+            return;
+        let seq = maxSeq + 1;
+        for (const msg of filteredMessages) {
+            this.stmtInsertHistory.run(agentId, sessionKey, '', seq++, JSON.stringify(msg));
+        }
+        // Soft cap: keep only last maxMessages
+        this.stmtDeleteOldHistory.run(agentId, sessionKey, agentId, sessionKey, maxMessages);
+    }
+    async replaceHistory(agentId, sessionKey, messages, maxMessages = 250) {
+        if (!this.isConnected)
+            return;
+        this.stmtDeleteHistory.run(agentId, sessionKey);
+        const slice = messages.slice(-maxMessages);
+        for (let i = 0; i < slice.length; i++) {
+            this.stmtInsertHistory.run(agentId, sessionKey, '', i, JSON.stringify(slice[i]));
+        }
+    }
+    async getHistory(agentId, sessionKey, limit) {
+        if (!this.isConnected)
+            return [];
+        let rows;
+        if (limit) {
+            rows = this.stmtGetHistoryLimit.all(agentId, sessionKey, agentId, sessionKey, limit);
+        }
+        else {
+            rows = this.stmtGetHistory.all(agentId, sessionKey);
+        }
+        return rows.map(r => JSON.parse(r.message));
+    }
+    async sessionExists(agentId, sessionKey) {
+        if (!this.isConnected)
+            return false;
+        const row = this.stmtHistoryExists.get(agentId, sessionKey);
+        return row !== undefined;
+    }
+    async trimHistoryToTokenBudget(agentId, sessionKey, tokenBudget) {
+        if (!this.isConnected || tokenBudget <= 0)
+            return 0;
+        const rows = this.stmtGetAllHistoryDesc.all(agentId, sessionKey);
+        if (rows.length <= 10)
+            return 0;
+        const estimateMessageTokens = (msg) => {
+            let msgTokens = Math.ceil((msg.textContent?.length ?? 0) / 4);
+            if (msg.toolCalls)
+                msgTokens += Math.ceil(JSON.stringify(msg.toolCalls).length / 2);
+            if (msg.toolResults)
+                msgTokens += Math.ceil(JSON.stringify(msg.toolResults).length / 2);
+            return msgTokens;
+        };
+        const chronological = rows
+            .slice()
+            .reverse()
+            .map(row => {
+            try {
+                return { seq: row.seq, msg: JSON.parse(row.message), fallback: false };
+            }
+            catch {
+                return { seq: row.seq, msg: null, fallback: true };
+            }
+        });
+        // Helper: check if a message contains any error tool results
+        const hasErrorToolResult = (msg) => {
+            if (!msg.toolResults)
+                return false;
+            return msg.toolResults.some((tr) => tr.isError === true);
+        };
+        const clusters = [];
+        for (let i = 0; i < chronological.length; i++) {
+            const current = chronological[i];
+            if (current.fallback || !current.msg) {
+                clusters.push({ startSeq: current.seq, endSeq: current.seq, tokenCost: 500, hasError: false });
+                continue;
+            }
+            let endSeq = current.seq;
+            let tokenCost = estimateMessageTokens(current.msg);
+            let clusterHasError = hasErrorToolResult(current.msg);
+            if (current.msg.toolCalls && current.msg.toolCalls.length > 0) {
+                const callIds = new Set(current.msg.toolCalls.map(tc => tc.id).filter(Boolean));
+                let j = i + 1;
+                while (j < chronological.length) {
+                    const candidate = chronological[j];
+                    if (candidate.fallback || !candidate.msg || !candidate.msg.toolResults || candidate.msg.toolResults.length === 0)
+                        break;
+                    const resultIds = candidate.msg.toolResults.map(tr => tr.callId).filter(Boolean);
+                    if (callIds.size > 0 && resultIds.length > 0 && !resultIds.some(id => callIds.has(id)))
+                        break;
+                    tokenCost += estimateMessageTokens(candidate.msg);
+                    if (hasErrorToolResult(candidate.msg))
+                        clusterHasError = true;
+                    endSeq = candidate.seq;
+                    j++;
+                }
+                i = j - 1;
+            }
+            else if (current.msg.toolResults && current.msg.toolResults.length > 0) {
+                let j = i + 1;
+                while (j < chronological.length) {
+                    const candidate = chronological[j];
+                    if (candidate.fallback || !candidate.msg || !candidate.msg.toolResults || candidate.msg.toolResults.length === 0 || (candidate.msg.toolCalls && candidate.msg.toolCalls.length > 0))
+                        break;
+                    tokenCost += estimateMessageTokens(candidate.msg);
+                    if (hasErrorToolResult(candidate.msg))
+                        clusterHasError = true;
+                    endSeq = candidate.seq;
+                    j++;
+                }
+                i = j - 1;
+            }
+            // Error clusters get a 90% cost discount so they survive trimming longer.
+            // Failed tool calls are high-signal context the model needs to avoid repeating mistakes.
+            const effectiveCost = clusterHasError ? Math.max(50, Math.ceil(tokenCost * 0.1)) : tokenCost;
+            clusters.push({ startSeq: current.seq, endSeq, tokenCost: effectiveCost, hasError: clusterHasError });
+        }
+        let tokenSum = 0;
+        let keepFromSeq = null;
+        for (let i = clusters.length - 1; i >= 0; i--) {
+            const cluster = clusters[i];
+            if (tokenSum + cluster.tokenCost > tokenBudget)
+                break;
+            tokenSum += cluster.tokenCost;
+            keepFromSeq = cluster.startSeq;
+        }
+        if (keepFromSeq === null) {
+            keepFromSeq = clusters[clusters.length - 1]?.startSeq ?? null;
+        }
+        if (keepFromSeq === null)
+            return 0;
+        const oldestSeq = clusters[0]?.startSeq ?? keepFromSeq;
+        if (keepFromSeq <= oldestSeq)
+            return 0;
+        const cutSeq = keepFromSeq - 1;
+        const stmt = this.db.prepare("DELETE FROM cache.history WHERE agent_id=? AND session_key=? AND topic_id='' AND seq<=?");
+        stmt.run(agentId, sessionKey, cutSeq);
+        const trimmed = rows.filter(r => r.seq <= cutSeq).length;
+        console.log(`[hypermem-cache] trimHistoryToTokenBudget: trimmed ${trimmed} messages from ${agentId}/${sessionKey}`);
+        return trimmed;
+    }
+    // ─── Window Cache Operations ─────────────────────────────────
+    async setWindow(agentId, sessionKey, messages, ttlSeconds = 120) {
+        if (!this.isConnected)
+            return;
+        this.stmtSetWindow.run(agentId, sessionKey, '', JSON.stringify(messages), now() + ttlSeconds);
+    }
+    async getWindow(agentId, sessionKey) {
+        if (!this.isConnected)
+            return null;
+        const row = this.stmtGetWindow.get(agentId, sessionKey, '', now());
+        return row ? JSON.parse(row.messages) : null;
+    }
+    async invalidateWindow(agentId, sessionKey) {
+        if (!this.isConnected)
+            return;
+        this.stmtDeleteWindow.run(agentId, sessionKey, '');
+        this.stmtDeleteKv.run(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:windowmeta`);
+    }
+    /**
+     * Returns the cached window + metadata only if a single read shows the cache
+     * and cursor still refer to the same composed window.
+     * Used for C4 window cache fast-exit in compositor.ts.
+     */
+    async getFreshWindowBundle(agentId, sessionKey, lastMessageId) {
+        if (!this.isConnected)
+            return null;
+        const ts = now();
+        const metaKey = `${this.config.keyPrefix}${agentId}:s:${sessionKey}:windowmeta`;
+        const cursorKey = `${this.config.keyPrefix}${agentId}:s:${sessionKey}:cursor`;
+        const row = this.stmtGetFreshWindowBundle.get(metaKey, ts, cursorKey, ts, agentId, sessionKey, ts);
+        if (!row?.messages || !row.meta || !row.cursor)
+            return null;
+        const meta = JSON.parse(row.meta);
+        const cursor = JSON.parse(row.cursor);
+        if (!meta.composedAt || !meta.diagnostics || cursor.lastSentId < lastMessageId)
+            return null;
+        if (cursor.lastSentAt !== meta.composedAt)
+            return null;
+        return {
+            messages: JSON.parse(row.messages),
+            meta: meta,
+        };
+    }
+    /**
+     * Store compose result metadata alongside the window cache.
+     * Enables the C4 fast-exit to return a complete ComposeResult without re-running.
+     */
+    async setWindowMeta(agentId, sessionKey, meta, ttl) {
+        if (!this.isConnected)
+            return;
+        this.stmtSetKv.run(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:windowmeta`, JSON.stringify(meta), now() + ttl);
+    }
+    async getWindowMeta(agentId, sessionKey) {
+        if (!this.isConnected)
+            return null;
+        const row = this.stmtGetKv.get(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:windowmeta`, now());
+        return row ? JSON.parse(row.value) : null;
+    }
+    // ─── Session Cursor Operations ────────────────────────────────
+    async setCursor(agentId, sessionKey, cursor) {
+        if (!this.isConnected)
+            return;
+        this.stmtSetKv.run(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:cursor`, JSON.stringify(cursor), now() + this.config.historyTTL);
+    }
+    async getCursor(agentId, sessionKey) {
+        if (!this.isConnected)
+            return null;
+        const row = this.stmtGetKv.get(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:cursor`, now());
+        return row ? JSON.parse(row.value) : null;
+    }
+    // ─── Bulk Session Operations ──────────────────────────────────
+    async warmSession(agentId, sessionKey, slots) {
+        if (!this.isConnected)
+            return;
+        const exp = now() + this.config.sessionTTL;
+        if (slots.system)
+            this.stmtSetSlot.run(agentId, sessionKey, 'system', slots.system, exp);
+        if (slots.identity)
+            this.stmtSetSlot.run(agentId, sessionKey, 'identity', slots.identity, exp);
+        if (slots.repairNotice)
+            this.stmtSetSlot.run(agentId, sessionKey, 'repair_notice', slots.repairNotice, exp);
+        if (slots.context)
+            this.stmtSetSlot.run(agentId, sessionKey, 'context', slots.context, exp);
+        if (slots.facts)
+            this.stmtSetSlot.run(agentId, sessionKey, 'facts', slots.facts, exp);
+        if (slots.tools)
+            this.stmtSetSlot.run(agentId, sessionKey, 'tools', slots.tools, exp);
+        if (slots.meta)
+            await this.setSessionMeta(agentId, sessionKey, slots.meta);
+        if (slots.history && slots.history.length > 0)
+            await this.pushHistory(agentId, sessionKey, slots.history);
+        await this.addActiveSession(agentId, sessionKey);
+    }
+    async evictSession(agentId, sessionKey) {
+        if (!this.isConnected)
+            return;
+        this.stmtEvictSlots.run(agentId, sessionKey);
+        this.stmtEvictHistory.run(agentId, sessionKey);
+        this.stmtEvictWindows.run(agentId, sessionKey);
+        this.stmtDeactivateSession.run(agentId, sessionKey);
+        // cursor + window metadata
+        this.stmtDeleteKv.run(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:cursor`);
+        this.stmtDeleteKv.run(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:windowmeta`);
+    }
+    // ─── Touch / TTL ─────────────────────────────────────────────
+    async touchSession(agentId, sessionKey) {
+        if (!this.isConnected)
+            return;
+        const exp = now() + this.config.sessionTTL;
+        this.stmtTouchSlots.run(exp, agentId, sessionKey);
+        this.stmtTouchSession.run(now(), agentId, sessionKey);
+    }
+    async flushPrefix() {
+        if (!this.isConnected)
+            return 0;
+        const db = this.db;
+        const counts = [
+            db.prepare("DELETE FROM cache.slots").run().changes,
+            db.prepare("DELETE FROM cache.history").run().changes,
+            db.prepare("DELETE FROM cache.sessions").run().changes,
+            db.prepare("DELETE FROM cache.windows").run().changes,
+            db.prepare("DELETE FROM cache.kv").run().changes,
+        ];
+        return counts.reduce((a, b) => a + b, 0);
+    }
+    // ─── Fleet Cache (Library L4 Hot Layer) ──────────────────────
+    async setFleetCache(key, value, ttl = 600) {
+        if (!this.isConnected)
+            return;
+        this.stmtSetKv.run(`${this.config.keyPrefix}fleet:${key}`, value, now() + ttl);
+    }
+    async getFleetCache(key) {
+        if (!this.isConnected)
+            return null;
+        const row = this.stmtGetKv.get(`${this.config.keyPrefix}fleet:${key}`, now());
+        return row?.value ?? null;
+    }
+    async delFleetCache(key) {
+        if (!this.isConnected)
+            return;
+        this.stmtDeleteKv.run(`${this.config.keyPrefix}fleet:${key}`);
+    }
+    async cacheFleetAgent(agentId, data) {
+        await this.setFleetCache(`agent:${agentId}`, JSON.stringify(data));
+    }
+    async getCachedFleetAgent(agentId) {
+        const val = await this.getFleetCache(`agent:${agentId}`);
+        return val ? JSON.parse(val) : null;
+    }
+    async cacheFleetSummary(summary) {
+        await this.setFleetCache('summary', JSON.stringify(summary), 120);
+    }
+    async getCachedFleetSummary() {
+        const val = await this.getFleetCache('summary');
+        return val ? JSON.parse(val) : null;
+    }
+    async invalidateFleetAgent(agentId) {
+        await this.delFleetCache(`agent:${agentId}`);
+        await this.delFleetCache('summary');
+    }
+    // ─── Query Embedding Cache ────────────────────────────────────
+    async setQueryEmbedding(agentId, sessionKey, embedding) {
+        if (!this.isConnected)
+            return;
+        const encoded = Buffer.from(embedding.buffer).toString('base64');
+        this.stmtSetKv.run(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:qembed`, encoded, now() + this.config.sessionTTL);
+    }
+    async getQueryEmbedding(agentId, sessionKey) {
+        if (!this.isConnected)
+            return null;
+        try {
+            const row = this.stmtGetKv.get(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:qembed`, now());
+            if (!row)
+                return null;
+            const buf = Buffer.from(row.value, 'base64');
+            return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+        }
+        catch {
+            return null;
+        }
+    }
+    // ─── Topic-Scoped Session Operations ─────────────────────────
+    async setTopicSlot(agentId, sessionKey, topicId, slot, value) {
+        if (!this.isConnected)
+            return;
+        this.stmtSetTopicSlot.run(agentId, sessionKey, topicId, slot, value, now() + this.config.sessionTTL);
+    }
+    async getTopicSlot(agentId, sessionKey, topicId, slot) {
+        if (!this.isConnected)
+            return null;
+        const row = this.stmtGetTopicSlot.get(agentId, sessionKey, topicId, slot, now());
+        return row?.value ?? null;
+    }
+    async setTopicWindow(agentId, sessionKey, topicId, messages, ttl = 120) {
+        if (!this.isConnected)
+            return;
+        this.stmtSetWindow.run(agentId, sessionKey, topicId, JSON.stringify(messages), now() + ttl);
+    }
+    async getTopicWindow(agentId, sessionKey, topicId) {
+        if (!this.isConnected)
+            return null;
+        const row = this.stmtGetWindow.get(agentId, sessionKey, topicId, now());
+        return row ? JSON.parse(row.messages) : null;
+    }
+    async invalidateTopicWindow(agentId, sessionKey, topicId) {
+        if (!this.isConnected)
+            return;
+        this.stmtDeleteWindow.run(agentId, sessionKey, topicId);
+    }
+    async warmTopicSession(agentId, sessionKey, topicId, slots) {
+        if (!this.isConnected)
+            return;
+        const exp = now() + this.config.sessionTTL;
+        if (slots.context)
+            this.stmtSetTopicSlot.run(agentId, sessionKey, topicId, 'context', slots.context, exp);
+        if (slots.facts)
+            this.stmtSetTopicSlot.run(agentId, sessionKey, topicId, 'facts', slots.facts, exp);
+        if (slots.cursor)
+            this.stmtSetTopicSlot.run(agentId, sessionKey, topicId, 'cursor', slots.cursor, exp);
+        if (slots.window)
+            this.stmtSetWindow.run(agentId, sessionKey, topicId, JSON.stringify(slots.window), now() + 120);
+        if (slots.history && slots.history.length > 0) {
+            // Topic history goes into the topic_id-scoped rows
+            const maxRow = this.stmtGetMaxSeq.get(agentId, sessionKey, topicId);
+            let seq = (maxRow?.max_seq ?? -1) + 1;
+            for (const msg of slots.history) {
+                this.stmtInsertHistory.run(agentId, sessionKey, topicId, seq++, JSON.stringify(msg));
+            }
+        }
+    }
+    // ─── Model State ─────────────────────────────────────────────
+    async setModelState(agentId, sessionKey, state) {
+        if (!this.isConnected)
+            return;
+        this.stmtSetKv.run(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:modelstate`, JSON.stringify(state), now() + this.config.sessionTTL);
+    }
+    async getModelState(agentId, sessionKey) {
+        if (!this.isConnected)
+            return null;
+        const row = this.stmtGetKv.get(`${this.config.keyPrefix}${agentId}:s:${sessionKey}:modelstate`, now());
+        return row ? JSON.parse(row.value) : null;
+    }
+    async disconnect() {
+        this._connected = false;
+        this.db = null;
+    }
+}
+//# sourceMappingURL=cache.js.map
