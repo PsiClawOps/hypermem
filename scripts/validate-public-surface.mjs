@@ -14,6 +14,7 @@ const BLOCKED_PATHS = [
   'scripts/flush-agent-session.sh',
   'scripts/migrate-clawtext.mjs',
   'scripts/sync-public.mjs',
+  'scripts/validate-public-surface.mjs',
 ];
 
 const BLOCKED_TERMS = [
@@ -46,7 +47,7 @@ function extname(path) {
 
 function shouldSkipDir(rel) {
   const parts = rel.split('/');
-  return parts.includes('.git') || parts.includes('node_modules') || rel === 'dist' || rel === 'plugin/dist' || rel === 'memory-plugin/dist';
+  return parts.includes('.git') || parts.includes('node_modules');
 }
 
 function isBlockedPath(rel) {

@@ -179,6 +179,7 @@ const EXCLUDE_PATHS = [
   'scripts/flush-agent-session.sh',     // Internal fleet ops only
   'scripts/migrate-clawtext.mjs',       // Internal migration tool, ClawText refs
   'scripts/sync-public.mjs',            // The sync script itself
+  'scripts/validate-public-surface.mjs', // Internal publication guard
   'docs/ROADMAP.md',                    // Internal future work — not for public release
   'docs/KNOWN_LIMITATIONS.md',          // Internal limitation tracker — not for public release
   'docs/PHASE1-VALIDATION.md',          // Internal validation artifact
@@ -189,6 +190,9 @@ const EXCLUDE_PATHS = [
   'specs',                              // Internal planning specs — not public release docs
   'runs',                               // Internal run artifacts — not public release docs
   'test/redis-integration.mjs.retired', // Retired internal artifact — not public release docs
+  'clawmap.json',                         // Internal dependency graph artifact
+  'clawmap.lock.json',                    // Local-path-bearing dependency graph artifact
+  'library.db',                           // Local runtime database artifact
 ];
 
 // ─── Text file extensions to sanitize ───────────────────────────
@@ -538,11 +542,23 @@ async function main() {
     process.exit(1);
   }
 
-  // 5. Build all published artifacts
+  // 5. Build all published artifacts from a clean generated-artifact surface
   console.log('\n[4/7] Building published artifacts...');
+  for (const generatedPath of ['dist', 'plugin/dist', 'memory-plugin/dist']) {
+    rmSync(join(REPO_ROOT, generatedPath), { recursive: true, force: true });
+  }
   execSync('npm run build', { cwd: REPO_ROOT, stdio: 'inherit' });
   execSync('npm --prefix plugin run build', { cwd: REPO_ROOT, stdio: 'inherit' });
   execSync('npm --prefix memory-plugin run build', { cwd: REPO_ROOT, stdio: 'inherit' });
+
+  console.log('\n[4.5/7] Re-validating public surface after build...');
+  try {
+    execSync('node scripts/validate-public-surface.mjs --strict', { cwd: REPO_ROOT, stdio: 'inherit' });
+  } catch {
+    console.error('\n❌ Built public artifacts contain blocked internal terms.');
+    git('checkout main');
+    process.exit(1);
+  }
 
   // 6. Test release path, including plugin runtime artifacts
   console.log('\n[5/7] Running release-path validation...');
