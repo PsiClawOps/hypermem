@@ -576,12 +576,11 @@ async function main() {
     const nm = join(REPO_ROOT, pkgDir, 'node_modules');
     if (!existsSync(nm)) {
       console.log(`  npm install (${pkgDir}) with local core tarball...`);
+      // Install local core tarball directly. The single 'npm install <tarball>'
+      // call resolves the rest of package.json deps (zod etc.) from registry
+      // along the way, so a follow-up 'npm install' is unnecessary and would
+      // fail because the local core version isn't on the registry yet.
       execSync(`npm install --no-audit --no-fund --no-save --prefix ${pkgDir} ${tarballPath}`, {
-        cwd: REPO_ROOT,
-        stdio: 'inherit',
-      });
-      // Install the rest of pkg deps (zod etc.) without re-resolving hypermem
-      execSync(`npm install --no-audit --no-fund --prefix ${pkgDir}`, {
         cwd: REPO_ROOT,
         stdio: 'inherit',
       });
