@@ -143,7 +143,7 @@ That ambiguity is still expensive.
 
 The most recent 2026-04-20 package-only test surfaced a direct docs blocker:
 
-- shipped docs still contained `ocplatform config set plugins.allow ...` in `INSTALL.md`
+- shipped docs still contained a stale command name before `config set plugins.allow ...` in `INSTALL.md`
 
 That is a hard stop for a new user following the docs exactly.
 
@@ -244,7 +244,7 @@ That is meaningful progress.
 ## What Still Breaks Trust
 
 ### 1. Any command typo in the guided path
-Example: `ocplatform` in `INSTALL.md`
+Example: a stale command name in `INSTALL.md`
 
 ### 2. Any missing runtime dependency after successful wiring
 Example: `Cannot find module 'zod'`
@@ -285,7 +285,7 @@ They break down into four categories:
 ## P1, publish-blocking
 
 ### 1. Fix the command typo in shipped docs immediately
-Remove `ocplatform` from the install path and validate every command in the package docs from a clean environment.
+Remove the stale command name from the install path and validate every command in the package docs from a clean environment.
 
 ### 2. Fix the `zod` runtime failure before claiming package-only plugin install works
 Do not treat this as a minor follow-up. It is a direct runtime credibility issue.
