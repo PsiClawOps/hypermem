@@ -693,10 +693,15 @@ export class HyperMem {
           const vs = new VectorStore(vectorDb, merged.embedding, hm.dbManager.getLibraryDb());
           vs.ensureTables();
           hm.compositor.setVectorStore(vs);
-          const embeddingDesc = merged.embedding.provider === 'openai'
-            ? `${merged.embedding.openaiBaseUrl?.includes('openrouter') ? 'openrouter' : 'openai'}/${merged.embedding.model ?? 'text-embedding-3-small'}`
-            : `ollama/${merged.embedding.model ?? 'nomic-embed-text'}`;
-          console.log(`[hypermem] Vector store initialized (sqlite-vec + ${embeddingDesc})`);
+          // Provider label: detect openrouter via base URL when provider is the
+          // OpenAI-compatible adapter; otherwise echo the configured provider so
+          // logs never imply ollama/nomic when something else is actually wired.
+          const providerLabel = merged.embedding.provider === 'openai'
+            ? (merged.embedding.openaiBaseUrl?.includes('openrouter') ? 'openrouter' : 'openai')
+            : merged.embedding.provider;
+          const modelLabel = merged.embedding.model ?? '(default)';
+          const dimsLabel = merged.embedding.dimensions ? `${merged.embedding.dimensions}d` : 'unknown-dims';
+          console.log(`[hypermem] Vector store initialized (sqlite-vec + ${providerLabel}/${modelLabel} ${dimsLabel})`);
         } else {
           console.warn('[hypermem] sqlite-vec unavailable — semantic recall in FTS5-only mode');
         }
