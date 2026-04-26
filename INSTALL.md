@@ -51,7 +51,7 @@ No gateway, plugin load path, or OpenClaw config is required in library mode. Op
 
 This guide is deliberately declarative. Follow the steps in order and verify each install state before moving on.
 
-> **Release note:** if the npm package you installed does not contain `hypermem-install`, `install:runtime`, and `hypermem-model-audit`, you are on an older public release. Use the source-clone path in this guide or wait for the next npm release.
+> **Release note:** current releases ship `hypermem-install`, `install:runtime`, and `hypermem-model-audit`. If your installed package does not contain them, upgrade to the latest `@psiclawops/hypermem` before following this guide.
 
 ```bash
 npm install @psiclawops/hypermem
@@ -529,7 +529,7 @@ npm install
 npm run build
 ```
 
-Build both plugins, then install the runtime payload into 's durable plugin directory:
+Build both plugins, then install the runtime payload into OpenClaw's durable plugin directory:
 
 ```bash
 npm --prefix plugin install && npm --prefix plugin run build
