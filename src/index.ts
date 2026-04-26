@@ -634,6 +634,12 @@ export class HyperMem {
   readonly compositor: Compositor;
   private readonly config: HyperMemConfig;
 
+  // Per-dataDir singleton registry. Multiple plugins (context-engine + memory)
+  // load this package independently, but they must share a single HyperMem
+  // instance per dataDir to avoid dual sqlite-vec init, dual fleet seeding,
+  // and conflicting embedding configs against the same SQLite database.
+  private static readonly _instances = new Map<string, Promise<HyperMem>>();
+
   private constructor(config: HyperMemConfig) {
     this.config = config;
     this.dbManager = new DatabaseManager({ dataDir: config.dataDir });
@@ -655,6 +661,12 @@ export class HyperMem {
 
   /**
    * Create and initialize a hypermem instance.
+   *
+   * Singleton-per-dataDir: callers that pass the same absolute dataDir share
+   * one instance. The first caller's full config wins; later callers get the
+   * existing instance regardless of what config they passed. Plugins should
+   * load the user config file (~/.openclaw/hypermem/config.json) themselves
+   * so whichever plugin races first still produces a fully-configured instance.
    */
   static async create(config?: Partial<HyperMemConfig>): Promise<HyperMem> {
     const merged: HyperMemConfig = {
@@ -669,6 +681,24 @@ export class HyperMem {
       },
     };
 
+    const dataDirKey = path.resolve(merged.dataDir);
+    const existing = HyperMem._instances.get(dataDirKey);
+    if (existing) {
+      return existing;
+    }
+
+    const initPromise = HyperMem._initializeInstance(merged);
+    HyperMem._instances.set(dataDirKey, initPromise);
+    try {
+      return await initPromise;
+    } catch (err) {
+      // Don't cache failed inits; let the next caller retry.
+      HyperMem._instances.delete(dataDirKey);
+      throw err;
+    }
+  }
+
+  private static async _initializeInstance(merged: HyperMemConfig): Promise<HyperMem> {
     const hm = new HyperMem(merged);
 
     const cacheOk = await hm.cache.connect();
