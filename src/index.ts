@@ -638,7 +638,20 @@ export class HyperMem {
   // load this package independently, but they must share a single HyperMem
   // instance per dataDir to avoid dual sqlite-vec init, dual fleet seeding,
   // and conflicting embedding configs against the same SQLite database.
-  private static readonly _instances = new Map<string, Promise<HyperMem>>();
+  //
+  // Backed by globalThis so the registry survives even if Node ends up loading
+  // this module twice (e.g. via differing symlink/realpath resolution from two
+  // sibling plugin packages). Module-scope state alone would not deduplicate
+  // across two module instances.
+  private static readonly _instances: Map<string, Promise<HyperMem>> = (() => {
+    const key = '__psiclawops_hypermem_instances__';
+    const g = globalThis as Record<string, unknown>;
+    const existing = g[key];
+    if (existing instanceof Map) return existing as Map<string, Promise<HyperMem>>;
+    const fresh = new Map<string, Promise<HyperMem>>();
+    g[key] = fresh;
+    return fresh;
+  })();
 
   private constructor(config: HyperMemConfig) {
     this.config = config;
