@@ -342,7 +342,10 @@ function git(cmd, opts = {}) {
 }
 
 function gitOut(cmd) {
-  return execSync(`git -C "${REPO_ROOT}" ${cmd}`, { encoding: 'utf8' }).trim();
+  // 64MB buffer so large `diff --cached --stat` outputs don't ENOBUFS the
+  // sync (release-payload diffs run into the multi-megabyte range when bench/
+  // and bin/ artifacts are first added to public).
+  return execSync(`git -C "${REPO_ROOT}" ${cmd}`, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
 }
 
 function verifyPublicHistoryIsReleaseOnly() {
@@ -576,6 +579,13 @@ async function main() {
 
   // 7. Commit
   console.log('\n[6/7] Committing...');
+  // Remove node_modules from working tree before staging — the public-sync branch
+  // intentionally has no .gitignore-tracked node_modules and `git add -A` would
+  // otherwise stage hundreds of thousands of dependency files (and exceed git
+  // diff --cached --stat's default 1MB execSync buffer).
+  for (const nmDir of ['node_modules', 'plugin/node_modules', 'memory-plugin/node_modules']) {
+    rmSync(join(REPO_ROOT, nmDir), { recursive: true, force: true });
+  }
   git('add -A');
   const diffStat = gitOut('diff --cached --stat');
   if (!diffStat) {
