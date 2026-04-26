@@ -6,7 +6,7 @@
  * Run from the repo root after confirming internal main is clean and tested.
  *
  * Usage:
- *   node scripts/sync-public.mjs "commit message" [--dry-run] [--no-push] [--no-release]
+ *   node scripts/sync-public.mjs [--dry-run] [--no-push] [--no-release]
  *
  * Process:
  *   1. Verify internal main is clean (no uncommitted changes)
@@ -14,7 +14,7 @@
  *   3. Copy + sanitize src/, scripts/, docs/ from internal
  *   4. Sync package.json (version, description — strip internal fields)
  *   5. Build + run full test suite
- *   6. Commit with the provided message
+ *   6. Commit as PsiClawOps with a versioned release message
  *   7. Push to public remote (unless --no-push)
  *   8. Create or update the GitHub release page for the pushed version (unless --no-release)
  *   9. Return to main
@@ -29,6 +29,8 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const REPO_ROOT = join(__dirname, '..');
 const PUBLIC_REMOTE_URL = 'github-psiclawops:PsiClawOps/hypermem.git';
 const PUBLIC_REMOTE = 'public';
+const PUBLIC_AUTHOR_NAME = 'PsiClawOps';
+const PUBLIC_AUTHOR_EMAIL = 'ops@psiclawops.com';
 
 // ─── CLI ─────────────────────────────────────────────────────────
 
@@ -36,12 +38,14 @@ const args = process.argv.slice(2);
 const DRY_RUN = args.includes('--dry-run');
 const NO_PUSH = args.includes('--no-push') || DRY_RUN;
 const NO_RELEASE = args.includes('--no-release') || NO_PUSH;
-const commitMsg = args.filter(a => !a.startsWith('--'))[0];
-
-if (!commitMsg) {
-  console.error('Usage: node scripts/sync-public.mjs "commit message" [--dry-run] [--no-push] [--no-release]');
+const positionalArgs = args.filter(a => !a.startsWith('--'));
+if (positionalArgs.length > 0) {
+  console.error('Usage: node scripts/sync-public.mjs [--dry-run] [--no-push] [--no-release]');
+  console.error('Public commit messages are generated from package.json version so public history stays release-only.');
   process.exit(1);
 }
+const packageVersion = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')).version;
+const commitMsg = `v${packageVersion}: public release`;
 
 // ─── Substitution Map ────────────────────────────────────────────
 //
@@ -337,6 +341,28 @@ function gitOut(cmd) {
   return execSync(`git -C "${REPO_ROOT}" ${cmd}`, { encoding: 'utf8' }).trim();
 }
 
+function verifyPublicHistoryIsReleaseOnly() {
+  const history = gitOut(`log ${PUBLIC_REMOTE}/main --format=%H%x09%an%x09%ae%x09%s`);
+  if (!history) return;
+
+  const failures = [];
+  for (const line of history.split('\n')) {
+    const [sha, authorName, authorEmail, subject] = line.split('\t');
+    const validAuthor = authorName === PUBLIC_AUTHOR_NAME && authorEmail === PUBLIC_AUTHOR_EMAIL;
+    const validSubject = /^v\d+\.\d+\.\d+: public release$/.test(subject || '');
+    if (!validAuthor || !validSubject) {
+      failures.push(`${sha.slice(0, 7)} ${authorName} <${authorEmail}> | ${subject}`);
+    }
+  }
+
+  if (failures.length > 0) {
+    console.error('\n❌ Public history contains non-release commits:');
+    for (const failure of failures) console.error(`  ${failure}`);
+    console.error('Public main must contain only versioned PsiClawOps release commits. Rewrite or repair public history before syncing.');
+    process.exit(1);
+  }
+}
+
 // ─── Main ────────────────────────────────────────────────────────
 
 async function main() {
@@ -367,6 +393,7 @@ async function main() {
   try { git(`remote remove ${PUBLIC_REMOTE}`, { silent: true }); } catch { /* didn't exist */ }
   git(`remote add ${PUBLIC_REMOTE} ${PUBLIC_REMOTE_URL}`);
   git(`fetch ${PUBLIC_REMOTE}`);
+  verifyPublicHistoryIsReleaseOnly();
   console.log(`  Added ${PUBLIC_REMOTE} → ${PUBLIC_REMOTE_URL}`);
 
   // 3. Switch to public branch
