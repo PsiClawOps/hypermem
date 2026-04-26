@@ -275,7 +275,8 @@ function escapeRegex(str) {
 
 function shouldExclude(relativePath) {
   if (relativePath.includes('node_modules')) return true;
-  if (relativePath.endsWith('package-lock.json') && relativePath !== 'package-lock.json') return true;
+  // Keep nested package-lock.json files in sync. Release gate version-parity
+  // treats root + plugin lockfiles as publish-surface evidence.
   return EXCLUDE_PATHS.some(ex =>
     relativePath === ex ||
     relativePath.startsWith(ex + '/') ||
