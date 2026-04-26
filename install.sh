@@ -18,6 +18,7 @@ CONFIG_FILE="$HOME/.openclaw/hypermem/config.json"
 ASSUME_YES=false
 SKIP_NPM=false
 SKIP_STAGE=false
+DRY_RUN=false
 
 usage() {
   cat <<EOF
@@ -32,6 +33,7 @@ Options:
   --runtime-dir <p>  staged OpenClaw runtime dir, default: ~/.openclaw/plugins/hypermem
   --skip-npm         use existing package in install dir
   --skip-stage       install package only, do not run hypermem-install
+  --dry-run          print planned actions without installing, staging, or writing config
   --help             show this help
 
 Environment overrides:
@@ -49,6 +51,7 @@ while [[ $# -gt 0 ]]; do
     --runtime-dir) RUNTIME_DIR="$2"; shift 2 ;;
     --skip-npm) SKIP_NPM=true; shift ;;
     --skip-stage) SKIP_STAGE=true; shift ;;
+    --dry-run) DRY_RUN=true; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo -e "${RED}Unknown option:${NC} $1" >&2; usage; exit 1 ;;
   esac
@@ -57,6 +60,7 @@ done
 info() { echo -e "  ${CYAN}→${NC} $*"; }
 success() { echo -e "  ${GREEN}✓${NC} $*"; }
 warn() { echo -e "  ${YELLOW}⚠${NC}  $*"; }
+dryrun() { echo -e "  ${YELLOW}DRY-RUN${NC} $*"; }
 die() { echo -e "  ${RED}✗${NC} $*" >&2; exit 1; }
 
 confirm() {
@@ -86,6 +90,10 @@ preflight() {
   command -v npm >/dev/null 2>&1 || die "npm is required"
   success "npm $(npm --version)"
 
+  if $DRY_RUN; then
+    warn "dry-run mode: no package install, runtime staging, config write, or gateway change will be performed"
+  fi
+
   if command -v openclaw >/dev/null 2>&1; then
     success "openclaw CLI found"
     openclaw gateway status >/dev/null 2>&1 || warn "OpenClaw gateway is not running or not onboarded yet. Complete OpenClaw setup before activation."
@@ -96,6 +104,12 @@ preflight() {
 
 install_package() {
   echo -e "\n${BOLD}  Package install${NC}"
+  if $DRY_RUN; then
+    dryrun "would create/install package directory: $INSTALL_DIR"
+    dryrun "would install package: $PACKAGE"
+    return
+  fi
+
   mkdir -p "$INSTALL_DIR"
   if [[ ! -f "$INSTALL_DIR/package.json" ]]; then
     info "initializing $INSTALL_DIR"
@@ -114,6 +128,11 @@ install_package() {
 }
 
 backup_runtime() {
+  if $DRY_RUN; then
+    dryrun "would check for existing runtime and optionally back up: $RUNTIME_DIR"
+    return 0
+  fi
+
   [[ -e "$RUNTIME_DIR" ]] || return 0
   local backup
   backup="${RUNTIME_DIR}.backup.$(date +%Y%m%d-%H%M%S)"
@@ -132,6 +151,11 @@ stage_runtime() {
     return
   fi
 
+  if $DRY_RUN; then
+    dryrun "would run runtime installer into: $RUNTIME_DIR"
+    return
+  fi
+
   local installer="$INSTALL_DIR/node_modules/@psiclawops/hypermem/scripts/install-runtime.mjs"
   [[ -f "$installer" ]] || die "missing runtime installer: $installer"
   backup_runtime
@@ -141,6 +165,11 @@ stage_runtime() {
 
 write_minimal_config_if_missing() {
   echo -e "\n${BOLD}  Config check${NC}"
+  if $DRY_RUN; then
+    dryrun "would preserve existing config or write lightweight starter config: $CONFIG_FILE"
+    return
+  fi
+
   if [[ -f "$CONFIG_FILE" ]]; then
     success "existing config preserved: $CONFIG_FILE"
     return
@@ -210,6 +239,11 @@ JSON
 
 verify_stage() {
   echo -e "\n${BOLD}  Stage verification${NC}"
+  if $DRY_RUN; then
+    dryrun "would verify runtime payload under: $RUNTIME_DIR"
+    return
+  fi
+
   [[ -d "$RUNTIME_DIR/dist" ]] || die "missing $RUNTIME_DIR/dist"
   [[ -d "$RUNTIME_DIR/plugin/dist" ]] || die "missing $RUNTIME_DIR/plugin/dist"
   [[ -d "$RUNTIME_DIR/memory-plugin/dist" ]] || die "missing $RUNTIME_DIR/memory-plugin/dist"

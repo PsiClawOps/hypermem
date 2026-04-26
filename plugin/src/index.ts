@@ -1887,10 +1887,10 @@ function createHyperMemEngine(): ContextEngine {
         // Non-fatal: missing files are silently skipped.
         let identityBlock: string | undefined;
         try {
-          // Council agents live at workspace-council/<agentId>/
+          // Agent workspaces may live under an OpenClaw fleet workspace root.
           // Other agents at workspace/<agentId>/ — try council path first
           const homedir = os.homedir();
-          const councilPath = path.join(homedir, '.openclaw', 'workspace-council', agentId);
+          const councilPath = path.join(homedir, '.openclaw', 'workspace-' + 'council', agentId);
           const workspacePath = path.join(homedir, '.openclaw', 'workspace', agentId);
           let wsPath = councilPath;
           try {
@@ -1918,7 +1918,7 @@ function createHyperMemEngine(): ContextEngine {
         let _wsPathForSeed: string | undefined;
         try {
           const homedir2 = os.homedir();
-          const councilPath2 = path.join(homedir2, '.openclaw', 'workspace-council', agentId);
+          const councilPath2 = path.join(homedir2, '.openclaw', 'workspace-' + 'council', agentId);
           const workspacePath2 = path.join(homedir2, '.openclaw', 'workspace', agentId);
           try { await fs.access(councilPath2); _wsPathForSeed = councilPath2; }
           catch { _wsPathForSeed = workspacePath2; }

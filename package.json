@@ -1,6 +1,6 @@
 {
   "name": "@psiclawops/hypermem",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Agent-centric memory and context composition engine for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
@@ -24,6 +24,8 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "prepack": "npm run build",
     "health": "node bin/hypermem-status.mjs --master",
     "health:master": "node bin/hypermem-status.mjs --master",
     "install:runtime": "node scripts/install-runtime.mjs",

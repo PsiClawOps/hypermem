@@ -1071,3 +1071,12 @@ openclaw gateway restart
 ---
 
 _Questions or issues: file against [the repo](https://github.com/PsiClawOps/hypermem) or ask in `#hypermem`._
+
+### Preview installer actions
+
+Run the installer with `--dry-run` to print package install, runtime staging, config, activation, and verification steps without installing, staging, or writing config:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash -s -- --dry-run
+```
+

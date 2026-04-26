@@ -123,14 +123,14 @@ A simple operating rule works well:
 Bad:
 
 ```md
-- Forge runs copilot-local/claude-sonnet-4.6
+- Agent runs provider/model-X
 ```
 
 Better:
 
 ```md
-- Forge standard model was copilot-local/claude-sonnet-4.6 as of 2026-04-11; recheck after provider routing changes
-  → memory_search("Forge standard model 2026-04-11 provider routing")
+- Agent standard model was provider/model-X as of YYYY-MM-DD; recheck after provider routing changes
+  → memory_search("agent standard model YYYY-MM-DD provider routing")
 ```
 
 ## Relationship to daily memory files
