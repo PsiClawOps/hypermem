@@ -2,7 +2,14 @@
 
 All notable changes to hypermem are documented here.
 
-## 0.9.1 - plugin singleton + memory-plugin config patch
+## 0.9.2 - 0.9.1 republish + publish-path hardening
+
+- **0.9.1 was a broken publish.** The npm tarballs for `@psiclawops/hypermem@0.9.1`, `@psiclawops/hypercompositor@0.9.1`, and `@psiclawops/hypermem-memory@0.9.1` shipped without `dist/`, so `import` against the registry artifact fails with `ERR_MODULE_NOT_FOUND`. **Skip 0.9.1.** Operators currently on 0.9.1 should upgrade to 0.9.2.
+- **Same code intent as 0.9.1.** Plugin singleton registry on `globalThis`, memory plugin loads user config, vector-store init log shows resolved provider/model/dims, tool artifact API arity + hydration docs aligned. (See 0.9.1 entry below for detail.)
+- **`prepublishOnly` and `prepack` hooks added** to root, plugin/, and memory-plugin/ `package.json`. `npm publish` now refuses to ship without first running `npm run build`. The 0.9.1 packaging defect (gitignored `dist/` + no build hook → empty tarball) cannot recur.
+- **0.9.1 deprecated on the registry** for all three packages, with a pointer to 0.9.2.
+
+## 0.9.1 - plugin singleton + memory-plugin config patch (BROKEN PUBLISH — use 0.9.2)
 
 - **HyperMem singleton registry is now backed by `globalThis`.** Multiple module instances loaded from `node_modules` would each construct a private singleton, so HyperCompositor and the memory plugin could end up writing to different SQLite/vector stores. The registry now lives on `globalThis`, guaranteeing one instance per `dataDir` regardless of how many copies of the module are resolved.
 - **Memory plugin loads user config.** The memory plugin entrypoint now reads operator config (provider, embedding model, dimensions) instead of falling back to library defaults, so a 768d nomic embedder in OpenClaw config no longer collides with a 4096d default at write time.

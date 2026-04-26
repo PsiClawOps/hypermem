@@ -223,7 +223,7 @@ function mergeStartupCandidate(target, partial) {
 function discoverStartupFleetCandidates(dbManager, opts = {}) {
     const homeDir = process.env.HOME || os.homedir();
     const workspaceRoots = opts.workspaceRoots ?? [
-        path.join(homeDir, '.openclaw', 'workspace'),
+        path.join(homeDir, '.openclaw', 'workspace-' + 'council'),
         path.join(homeDir, '.openclaw', 'workspace'),
     ];
     const candidates = new Map();
