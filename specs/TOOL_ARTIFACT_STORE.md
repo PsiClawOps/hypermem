@@ -35,7 +35,7 @@ In scope:
 - Public API:
   - `hm.recordToolArtifact(...)`
   - `hm.getToolArtifact(artifactId)`
-  - `hm.getToolArtifactsByTurn(sessionKey, turnId)`
+  - `hm.listToolArtifactsByTurn(agentId, sessionKey, turnId)`
 - Unit test coverage
 
 Out of scope (Phase 2+):
