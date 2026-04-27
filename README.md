@@ -20,13 +20,13 @@ Or via the shell installer:
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-Or install manually via `npm install @psiclawops/hypermem` - see [Installation](#installation) for the full declarative plugin path, verification checkpoints, and setup variants.
+Or install manually via `npm install @psiclawops/hypermem`: see [Installation](#installation) for the full declarative plugin path, verification checkpoints, and setup variants.
 
 Release operators should also read:
 
-- [INSTALL.md](./INSTALL.md) - canonical fresh install and upgrade guide
-- [docs/INTEGRATION_VALIDATION.md](./docs/INTEGRATION_VALIDATION.md) - end-to-end integration validation contract
-- [docs/DIAGNOSTICS.md](./docs/DIAGNOSTICS.md) - status, model audit, compose, trim, and release diagnostics
+- [INSTALL.md](./INSTALL.md): canonical fresh install and upgrade guide
+- [docs/INTEGRATION_VALIDATION.md](./docs/INTEGRATION_VALIDATION.md): end-to-end integration validation contract
+- [docs/DIAGNOSTICS.md](./docs/DIAGNOSTICS.md): status, model audit, compose, trim, and release diagnostics
 
 A successful `hypermem-install` only stages the runtime. HyperMem is active only after OpenClaw config is wired, the gateway restarts, and logs show compose activity.
 
@@ -57,7 +57,7 @@ The difference is not intelligence. It is prompt access. Three failure modes fol
 
 ## What OpenClaw provides today
 
-OpenClaw already gives agents a stronger baseline than most stacks. It injects structured guidance into every session:
+OpenClaw already gives agents a strong baseline. It injects structured guidance into every session:
 
 | File | What it contributes | Survives session restart? |
 |---|---|---|
@@ -78,16 +78,16 @@ OpenClaw gives agents a strong starting shape: identity files, user guidance, ta
 
 hypermem closes that gap with four SQLite-backed memory layers that stay local, run in-process, and remain queryable across sessions. No external database service. No retrieval stack to babysit.
 
-| Layer | What it holds | Speed |
+| Layer | What it holds | Representative local read |
 |---|---|---|
-| **L1 SQLite `:memory:`** | What the agent needs right now. Identity, recent history, active state. | 0.08ms |
-| **L2 History** | Every conversation, queryable and concurrent-safe. Per-agent. | 0.13ms |
-| **L3 Semantic** | Finds related content even when the words don't match. | 0.29ms |
-| **L4 Knowledge** | Facts, wiki pages, episodes, preferences. Shared across agents. | 0.09ms |
+| **L1 SQLite `:memory:`** | What the agent needs right now. Identity, recent history, active state. | L1 slot GET: 0.08ms avg |
+| **L2 History** | Every conversation, queryable and concurrent-safe. Per-agent. | L2 history window: 0.13ms avg |
+| **L3 Semantic** | Finds related content even when the words don't match. | async/cached; provider-dependent. See [Speed](#speed) and [Diagnostics](./docs/DIAGNOSTICS.md#memory-access-benchmark). |
+| **L4 Knowledge** | Facts, wiki pages, episodes, preferences. Shared across agents. | L4 knowledge query: 0.09ms avg |
 
 Durable context stays in SQLite and remains queryable across session boundaries. The retry logic decision from last week, the deployment preferences from last month, and the architecture choices from day one can be pulled back in when they matter.
 
-That changes OpenClaw in a few concrete ways. Starts are warm instead of blank because recent history, ranked facts, active topics, and cached semantic state are loaded before the first turn. Recall survives wording drift because FTS5, sqlite-vec, RRF fusion, and an optional reranker can recover the same idea through different phrasing. Time-aware facts can answer “last week” and “before the release” as retrieval problems instead of vague prompt guessing. Shared knowledge stops living in one agent’s scratchpad because `library.db` holds facts, docs, episodes, preferences, fleet state, and output standards with visibility controls.
+That changes OpenClaw in a few concrete ways. Starts are warm instead of blank because recent history, ranked facts, active topics, and cached semantic state are loaded before the first turn. Recall survives wording drift because FTS5, sqlite-vec, RRF fusion, and an optional reranker can recover the same idea through different phrasing. Time-aware facts can answer "last week" and "before the release" as retrieval problems instead of vague prompt guessing. Shared knowledge stops living in one agent’s scratchpad because `library.db` holds facts, docs, episodes, preferences, fleet state, and output standards with visibility controls.
 
 ---
 
@@ -189,11 +189,11 @@ Behavior standards define how your agents write. Anti-sycophancy rules prevent f
 
 ### Model adaptation
 
-Different models have different default behaviors. GPT-5.4 tends toward 2x verbosity and long lists. Claude Opus defaults to hedging and preambles. Gemini produces bulleted summaries where prose would be more direct. Model adaptation corrects for these tendencies per model.
+Different providers and model families have different default answer shapes. Model adaptation applies operator-defined output standards per model so those defaults do not leak into every response.
 
 Adaptation entries are stored in the `model_output_directives` table and matched by model ID using exact match, then glob pattern (longest wins), then wildcard fallback. Each entry contains:
 
-- **Calibration:** known model tendencies and specific adjustments (e.g., "2x verbosity: cut first drafts in half")
+- **Calibration:** known model tendencies and specific adjustments (e.g., "prefer concise first drafts")
 - **Corrections:** hard/medium/soft severity rules applied in order (e.g., "No preamble before the answer")
 - **Task overrides:** per-task-type adjustments
 
@@ -208,7 +208,7 @@ The example below shows the intended effect of `hyperformProfile: "light"`. hype
 ```
 Prompt: "How should I size my context window budget for a long-running agent session?"
 
-WITHOUT hyperform shaping (GPT-5.4 default):
+WITHOUT hyperform shaping (generic verbose default):
 Here are the key factors to consider when sizing your context window budget:
 
 **1. Session depth**
@@ -276,7 +276,7 @@ Reference run, production database: 5,104 facts, 28,441 episodes, 847 knowledge 
 | Operation | avg | p50 | p95 |
 |---|---|---|---|
 | L1 slot GET (SQLite in-memory) | 0.08ms | 0.07ms | 0.13ms |
-| L1 history window (100 messages) | 0.13ms | 0.11ms | 0.19ms |
+| L2 history window (100 messages) | 0.13ms | 0.11ms | 0.19ms |
 | L4 facts (top-28, confidence × decay) | 0.28ms | 0.26ms | 0.36ms |
 | L4 facts + agentId filter | 0.31ms | 0.29ms | 0.40ms |
 | L4 FTS5 keyword search | 0.06ms | 0.05ms | 0.08ms |
@@ -357,13 +357,13 @@ Facts are ranked by `confidence × recencyDecay`, where decay is exponential wit
        │
   topic detection ──► scope retrieval to active thread
        │
-  ┌────┴───────────────────────────────────────────────┐
-  │              query 4 layers (parallel)             │
-  │                                                    │
-  │  L1 in-memory  L2 History   L3 Vectors  L4 Library │
-  │  hot state    durable       semantic    facts/wiki │
-  │  0.1ms        0.16ms        0.29ms      0.08ms     │
-  └────┬───────────────────────────────────────────────┘
+  ┌────┴────────────────────────────────────────────────────────────────┐
+  │                 query 4 layers (parallel)                          │
+  │                                                                    │
+  │  L1 in-memory  L2 History        L3 Vectors        L4 Library      │
+  │  hot state     durable history   semantic recall   facts/wiki      │
+  │  0.08ms avg    0.13ms avg        async/cached      0.09ms avg      │
+  └────┬────────────────────────────────────────────────────────────────┘
        │
   budget allocator ──► 10 slots, fixed token cap
        │
