@@ -5,17 +5,17 @@ This is the canonical install procedure. Keep README shorter and point operators
 ## Prerequisites
 
 - **Node.js 22+** (uses built-in `node:sqlite`)
-- **OpenClaw** must already be installed, onboarded, and running. HyperMem is a plugin for an existing OpenClaw deployment -- it does not bootstrap OpenClaw itself. If you have never run `openclaw gateway start` or completed OpenClaw onboarding, do that first. The HyperMem install guide picks up after OpenClaw is operational.
+- **OpenClaw** must already be installed, onboarded, and running. HyperMem is a plugin for an existing OpenClaw deployment -- it does not bootstrap OpenClaw itself. If you have never run `openclaw daemon start` or completed OpenClaw onboarding, do that first. The HyperMem install guide picks up after OpenClaw is operational.
 - **Disk space:** allow at least 2 GB free. Plugin builds pull OpenClaw as a dev dependency.
 
 **Verify before starting:**
 
 ```bash
-openclaw gateway status    # should show "running" or "ready"
+openclaw daemon status    # should show "running" or "ready"
 openclaw config get gateway # should return gateway config, not an error
 ```
 
-If `gateway status` shows "disabled" or "not configured", complete OpenClaw onboarding first. `openclaw gateway restart` only works when the gateway service is already set up. On a brand-new OpenClaw install that has never been started, you need `openclaw gateway start` (or the full onboarding flow) before installing plugins.
+If `gateway status` shows "disabled" or "not configured", complete OpenClaw onboarding first. `openclaw daemon restart` only works when the gateway service is already set up. On a brand-new OpenClaw install that has never been started, you need `openclaw daemon start` (or the full onboarding flow) before installing plugins.
 
 ## Non-OpenClaw usage
 
@@ -70,7 +70,7 @@ It installs the npm package into `~/.hypermem`, backs up any existing staged run
 
 Release validation details live in [docs/INTEGRATION_VALIDATION.md](./docs/INTEGRATION_VALIDATION.md). Diagnostic surfaces live in [docs/DIAGNOSTICS.md](./docs/DIAGNOSTICS.md).
 
-> **Prerequisites:** OpenClaw must be installed and onboarded. Run `openclaw gateway status` to confirm. If the gateway is not configured, complete OpenClaw setup first.
+> **Prerequisites:** OpenClaw must be installed and onboarded. Run `openclaw daemon status` to confirm. If the gateway is not configured, complete OpenClaw setup first.
 >
 > **Config merge warning:** if you already have values in `plugins.load.paths` or `plugins.allow`, merge them instead of overwriting blindly.
 
@@ -153,7 +153,7 @@ openclaw config set plugins.allow '["existing-plugin","hypercompositor","hyperme
 **Step 3: Restart.**
 
 ```bash
-openclaw gateway restart
+openclaw daemon restart
 ```
 
 OpenClaw loads the plugin runtime from `~/.openclaw/plugins/hypermem/`.
@@ -231,7 +231,7 @@ Upgrades preserve the HyperMem data directory and existing config. The runtime s
 cp -a ~/.openclaw/plugins/hypermem ~/.openclaw/plugins/hypermem.backup.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
 npm install @psiclawops/hypermem@latest
 npx hypermem-install
-openclaw gateway restart
+openclaw daemon restart
 ```
 
 Then validate:
@@ -256,7 +256,7 @@ Rollback disables HyperMem without deleting data:
 ```bash
 openclaw config set plugins.slots.contextEngine legacy
 openclaw config set plugins.slots.memory none
-openclaw gateway restart
+openclaw daemon restart
 ```
 
 ---
@@ -582,7 +582,7 @@ See [Embedding Providers](#embedding-providers) above.
 Do not start tuning before this section passes. If HyperMem is not loaded and composing, the next problem is installation, not tuning.
 
 ```bash
-openclaw gateway restart
+openclaw daemon restart
 ```
 
 > **If restart reports the gateway is disabled or not configured:** you need to complete OpenClaw onboarding before this step. See [Prerequisites](#prerequisites). `gateway restart` only works on an already-running gateway.
@@ -593,7 +593,7 @@ Send a message to any agent, then check:
 openclaw logs --limit 50 | grep hypermem
 ```
 
-> **If `openclaw logs` fails with an auth or token error:** the gateway API requires authentication. Run `openclaw gateway status` to confirm the gateway is running and accessible. If the gateway is running but logs fail, check `openclaw config get gateway.token` and ensure your shell session has the correct auth context.
+> **If `openclaw logs` fails with an auth or token error:** the gateway API requires authentication. Run `openclaw daemon status` to confirm the gateway is running and accessible. If the gateway is running but logs fail, check `openclaw config get gateway.token` and ensure your shell session has the correct auth context.
 
 Expected:
 ```
@@ -678,7 +678,7 @@ architect: 'infrastructure',
 ```bash
 npm run build
 npm --prefix plugin run build
-openclaw gateway restart
+openclaw daemon restart
 ```
 
 Agents not listed in `AGENT_DOMAIN_MAP` default to domain `'general'`, which is fine for most setups. The org registry only matters if you use cross-agent memory visibility (org-scoped or council-scoped facts). If all your facts are agent-private or fleet-wide, you can skip the org structure entirely.
@@ -696,7 +696,7 @@ npm install
 npm run build
 npm --prefix plugin install && npm --prefix plugin run build
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
-openclaw gateway restart
+openclaw daemon restart
 ```
 
 What changed on the path from 0.5.x to current:
@@ -997,7 +997,7 @@ Expected on fresh installs. Facts and episodes accumulate over real conversation
 
 **Lost bundled plugins after setting `plugins.allow`**
 
-If you set `plugins.allow` to only `["hypercompositor","hypermem"]` without including your pre-existing allowed plugins, OpenClaw can stop loading bundled CLI surfaces and channel plugins. Fix: restore the prior allowlist, append `hypercompositor` and `hypermem`, then `openclaw gateway restart`. If `plugins.allow` was previously unset or empty, remove the HyperMem-only allowlist instead of keeping it.
+If you set `plugins.allow` to only `["hypercompositor","hypermem"]` without including your pre-existing allowed plugins, OpenClaw can stop loading bundled CLI surfaces and channel plugins. Fix: restore the prior allowlist, append `hypercompositor` and `hypermem`, then `openclaw daemon restart`. If `plugins.allow` was previously unset or empty, remove the HyperMem-only allowlist instead of keeping it.
 
 **Plugin not found**
 
@@ -1045,7 +1045,7 @@ To return to OpenClaw's default context engine:
 ```bash
 openclaw config set plugins.slots.contextEngine legacy
 openclaw config set plugins.slots.memory none
-openclaw gateway restart
+openclaw daemon restart
 ```
 
 Data in `~/.openclaw/hypermem/` is untouched. Re-enable by switching back.
@@ -1063,7 +1063,7 @@ Example:
 ```bash
 # Point hypermem at a different data location:
 export HYPERMEM_DATA_DIR=/mnt/data/hypermem
-openclaw gateway restart
+openclaw daemon restart
 ```
 
 > The config file path (`~/.openclaw/hypermem/config.json`) is separate from the data directory. Moving `HYPERMEM_DATA_DIR` does not move the config file.
