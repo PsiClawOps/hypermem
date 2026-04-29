@@ -5,17 +5,17 @@ This is the canonical install procedure. Keep README shorter and point operators
 ## Prerequisites
 
 - **Node.js 22+** (uses built-in `node:sqlite`)
-- **OpenClaw** must already be installed, onboarded, and running. HyperMem is a plugin for an existing OpenClaw deployment -- it does not bootstrap OpenClaw itself. If you have never run `openclaw daemon start` or completed OpenClaw onboarding, do that first. The HyperMem install guide picks up after OpenClaw is operational.
+- **OpenClaw** must already be installed, onboarded, and running. HyperMem is a plugin for an existing OpenClaw deployment -- it does not bootstrap OpenClaw itself. If you have not completed OpenClaw onboarding, do that first. The HyperMem install guide picks up after OpenClaw is operational.
 - **Disk space:** allow at least 2 GB free. Plugin builds pull OpenClaw as a dev dependency.
 
 **Verify before starting:**
 
 ```bash
-openclaw daemon status    # should show "running" or "ready"
+openclaw gateway status    # should show "running" or "ready"
 openclaw config get gateway # should return gateway config, not an error
 ```
 
-If `gateway status` shows "disabled" or "not configured", complete OpenClaw onboarding first. `openclaw daemon restart` only works when the gateway service is already set up. On a brand-new OpenClaw install that has never been started, you need `openclaw daemon start` (or the full onboarding flow) before installing plugins.
+If `openclaw gateway status` shows "disabled" or "not configured", complete OpenClaw onboarding first. `openclaw gateway restart` only works when the gateway service is already set up. On a brand-new OpenClaw install that has never been onboarded, complete the OpenClaw onboarding flow before installing plugins.
 
 ## Non-OpenClaw usage
 
@@ -68,29 +68,23 @@ The shell installer is now a thin npm-first wrapper around this same path:
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-It installs the npm package into `~/.hypermem`, backs up any existing staged runtime when confirmed, stages the runtime with `hypermem-install`, writes the recall-friendly starter config only if no config exists, and prints merge-safe OpenClaw activation commands. It does not edit OpenClaw config and does not restart the gateway.
+It installs the npm package into `~/.hypermem`, backs up any existing staged runtime when confirmed, stages the runtime with `hypermem-install`, writes the FTS5 starter config only if no config exists, and prints merge-safe OpenClaw activation commands. It does not edit OpenClaw config and does not restart the gateway.
 
 Release validation details live in [docs/INTEGRATION_VALIDATION.md](./docs/INTEGRATION_VALIDATION.md). Diagnostic surfaces live in [docs/DIAGNOSTICS.md](./docs/DIAGNOSTICS.md).
 
-> **Prerequisites:** OpenClaw must be installed and onboarded. Run `openclaw daemon status` to confirm. If the gateway is not configured, complete OpenClaw setup first.
+> **Prerequisites:** OpenClaw must be installed and onboarded. Run `openclaw gateway status` to confirm. If the gateway is not configured, complete OpenClaw setup first.
 >
 > **Config merge warning:** if you already have values in `plugins.load.paths` or `plugins.allow`, merge them instead of overwriting blindly.
 
-`hypermem-install` creates the current recommended starter config automatically when `~/.openclaw/hypermem/config.json` is missing. The shipped starter config is recall-friendly standard mode:
+`hypermem-install` creates the current recommended starter config automatically when `~/.openclaw/hypermem/config.json` is missing. The shipped starter config is installation-safe FTS5 mode:
 
-- `embedding.provider: "ollama"` with `nomic-embed-text`
+- `embedding.provider: "none"`
 - `warmHistoryBudgetFraction: 0.45`
 - standard fact, keystone, and history caps
 
-If Ollama is not running or `nomic-embed-text` is not installed, `hypermem-install` fails with a remediation block instead of silently staging a degraded semantic-recall install. For CI, container practice, or intentional FTS-only installs, either run:
+This is intentional. A clean first install should load, compose, and verify without requiring Ollama or an external API key. The result is **YELLOW** install readiness: HyperMem is active with keyword recall, but semantic vector recall is disabled. Upgrade to Ollama, OpenRouter, or Gemini after the baseline install is active.
 
-```bash
-npx hypermem-install --skip-embedding-check
-```
-
-or pre-create `~/.openclaw/hypermem/config.json` with `{"embedding":{"provider":"none"}}` before running the installer. Existing config files are preserved unchanged.
-
-If you want a lighter or richer memory profile later, adjust from this baseline using the tuning guidance below instead of starting from the older code defaults.
+Existing config files are preserved unchanged. If an existing config selects `embedding.provider: "ollama"`, `hypermem-install` checks that Ollama and `nomic-embed-text` are available unless you pass `--skip-embedding-check`.
 
 ### Install states
 
@@ -105,6 +99,16 @@ Treat the install as 5 explicit states:
 | 5. Runtime active | HyperMem is actually composing turns | logs show `hypermem initialized` and compose activity |
 
 Do not stop at state 2 and call the install done.
+
+Install readiness states:
+
+| State | Meaning | Action |
+|---|---|---|
+| **GREEN** | Runtime active and semantic embeddings/reranker are configured as intended | Ready for normal use |
+| **YELLOW** | Runtime active with FTS5 fallback or model-audit warnings | Usable, but finish provider/model tuning before production claims |
+| **RED** | Runtime not staged, not loaded, not wired, or falling back to `legacy` | Not installed |
+
+A no-embedding FTS5 install is **YELLOW**, not failed. A `legacy` context-engine fallback is **RED**.
 
 Wire both plugins into OpenClaw:
 
@@ -141,7 +145,7 @@ openclaw config set plugins.allow '["existing-plugin","hypercompositor","hyperme
 **Step 3: Restart.**
 
 ```bash
-openclaw daemon restart
+openclaw gateway restart
 ```
 
 OpenClaw loads the plugin runtime from `~/.openclaw/plugins/hypermem/`.
@@ -219,7 +223,7 @@ Upgrades preserve the HyperMem data directory and existing config. The runtime s
 cp -a ~/.openclaw/plugins/hypermem ~/.openclaw/plugins/hypermem.backup.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
 npm install @psiclawops/hypermem@latest
 npx hypermem-install
-openclaw daemon restart
+openclaw gateway restart
 ```
 
 Then validate:
@@ -244,7 +248,7 @@ Rollback disables HyperMem without deleting data:
 ```bash
 openclaw config set plugins.slots.contextEngine legacy
 openclaw config set plugins.slots.memory none
-openclaw daemon restart
+openclaw gateway restart
 ```
 
 ---
@@ -278,7 +282,7 @@ Everything runs in-process on SQLite memory databases. No external database serv
 
 > **Package versions:** the root package (`hypermem`) and the two plugins (`hypercompositor`, `hypermem-memory`) are versioned independently. Plugin versions trail the core by one minor version when no plugin-facing API changes ship in a release — this is expected.
 
-The **embedding layer** (L3 semantic search) requires a configured provider. Without one, hypermem falls back to FTS5 keyword matching. This is functional but degrades recall quality. Fresh installs should start with `provider: "none"` explicitly so the runtime behavior is intentional and easy to verify, then upgrade later. See [Setup Styles](#setup-styles) below.
+The **embedding layer** (L3 semantic search) is optional at install time. The packaged starter config uses `provider: "none"`, so HyperMem starts in FTS5 keyword mode with no external service dependency. This is functional and easy to verify, but recall quality improves when you later enable Ollama, OpenRouter, or Gemini. See [Setup Styles](#setup-styles) below.
 
 ---
 
@@ -309,7 +313,7 @@ Pick a tier based on your hardware:
 
 ### Minimal (no embedder)
 
-No Ollama, no API key. This config must exist **before gateway restart and runtime verification** so the clean install validates the intended lightweight behavior. Set `provider: 'none'` explicitly in `~/.openclaw/hypermem/config.json` to disable embedding entirely:
+No Ollama, no API key. This is the default clean-install posture. `hypermem-install` writes this config when `~/.openclaw/hypermem/config.json` is missing:
 
 ```json
 {
@@ -319,7 +323,7 @@ No Ollama, no API key. This config must exist **before gateway restart and runti
 }
 ```
 
-Without a config file, the default provider is `ollama` — if Ollama isn't running, the vector store initialization fails non-fatally and hypermem falls back to FTS5. Using `provider: 'none'` makes the intent explicit and avoids the init attempt.
+With `provider: 'none'`, HyperMem does not attempt vector initialization. The install should verify cleanly as FTS5 mode, then you can opt into semantic recall later.
 
 You'll see in the logs:
 ```
@@ -563,8 +567,8 @@ openclaw config set plugins.allow '["existing-plugin","hypercompositor","hyperme
 
 See [Embedding Providers](#embedding-providers) above.
 
-- **Lightweight (no embedder):** create `~/.openclaw/hypermem/config.json` with `{"embedding":{"provider":"none"}}`. The Quick Start block above already does this. Without this file, the default provider is `ollama` and you'll see a non-fatal init warning if Ollama isn't running.
-- **Local:** `ollama pull nomic-embed-text`. No config file needed (Ollama is the default). HyperMem applies retrieval query/document prefixes for supported Ollama embedders (`nomic-embed-text`, `qwen3-embedding`, `mxbai-embed-large`) unless `queryPrefix` / `documentPrefix` are set explicitly.
+- **Lightweight (no embedder):** keep the starter `{"embedding":{"provider":"none"}}` config. This is the default first-install path and verifies as YELLOW until you intentionally enable semantic recall.
+- **Local:** install Ollama, run `ollama pull nomic-embed-text`, then set `embedding.provider` to `"ollama"` with `model: "nomic-embed-text"`. HyperMem applies retrieval query/document prefixes for supported Ollama embedders (`nomic-embed-text`, `qwen3-embedding`, `mxbai-embed-large`) unless `queryPrefix` / `documentPrefix` are set explicitly.
 - **Hosted/Gemini:** create `~/.openclaw/hypermem/config.json` with the provider config block from the relevant section above.
 
 ### Step 4 — Restart and verify
@@ -572,7 +576,7 @@ See [Embedding Providers](#embedding-providers) above.
 Do not start tuning before this section passes. If HyperMem is not loaded and composing, the next problem is installation, not tuning.
 
 ```bash
-openclaw daemon restart
+openclaw gateway restart
 ```
 
 > **If restart reports the gateway is disabled or not configured:** you need to complete OpenClaw onboarding before this step. See [Prerequisites](#prerequisites). `gateway restart` only works on an already-running gateway.
@@ -583,7 +587,7 @@ Send a message to any agent, then check:
 openclaw logs --limit 50 | grep hypermem
 ```
 
-> **If `openclaw logs` fails with an auth or token error:** the gateway API requires authentication. Run `openclaw daemon status` to confirm the gateway is running and accessible. If the gateway is running but logs fail, check `openclaw config get gateway.token` and ensure your shell session has the correct auth context.
+> **If `openclaw logs` fails with an auth or token error:** the gateway API requires authentication. Run `openclaw gateway status` to confirm the gateway is running and accessible. If the gateway is running but logs fail, check your OpenClaw CLI auth context.
 
 Expected:
 ```
@@ -668,7 +672,7 @@ architect: 'infrastructure',
 ```bash
 npm run build
 npm --prefix plugin run build
-openclaw daemon restart
+openclaw gateway restart
 ```
 
 Agents not listed in `AGENT_DOMAIN_MAP` default to domain `'general'`, which is fine for most setups. The org registry only matters if you use cross-agent memory visibility (org-scoped or council-scoped facts). If all your facts are agent-private or fleet-wide, you can skip the org structure entirely.
@@ -686,7 +690,7 @@ npm install
 npm run build
 npm --prefix plugin install && npm --prefix plugin run build
 npm --prefix memory-plugin install && npm --prefix memory-plugin run build
-openclaw daemon restart
+openclaw gateway restart
 ```
 
 What changed on the path from 0.5.x to current:
@@ -1000,7 +1004,7 @@ Expected on fresh installs. Facts and episodes accumulate over real conversation
 
 **Lost bundled plugins after setting `plugins.allow`**
 
-If you set `plugins.allow` to only `["hypercompositor","hypermem"]` without including your pre-existing allowed plugins, OpenClaw can stop loading bundled CLI surfaces and channel plugins. Fix: restore the prior allowlist, append `hypercompositor` and `hypermem`, then `openclaw daemon restart`. If `plugins.allow` was previously unset or empty, remove the HyperMem-only allowlist instead of keeping it.
+If you set `plugins.allow` to only `["hypercompositor","hypermem"]` without including your pre-existing allowed plugins, OpenClaw can stop loading bundled CLI surfaces and channel plugins. Fix: restore the prior allowlist, append `hypercompositor` and `hypermem`, then `openclaw gateway restart`. If `plugins.allow` was previously unset or empty, remove the HyperMem-only allowlist instead of keeping it.
 
 **Plugin not found**
 
@@ -1048,7 +1052,7 @@ To return to OpenClaw's default context engine:
 ```bash
 openclaw config set plugins.slots.contextEngine legacy
 openclaw config set plugins.slots.memory none
-openclaw daemon restart
+openclaw gateway restart
 ```
 
 Data in `~/.openclaw/hypermem/` is untouched. Re-enable by switching back.
@@ -1066,7 +1070,7 @@ Example:
 ```bash
 # Point hypermem at a different data location:
 export HYPERMEM_DATA_DIR=/mnt/data/hypermem
-openclaw daemon restart
+openclaw gateway restart
 ```
 
 > The config file path (`~/.openclaw/hypermem/config.json`) is separate from the data directory. Moving `HYPERMEM_DATA_DIR` does not move the config file.

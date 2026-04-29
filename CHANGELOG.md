@@ -2,6 +2,15 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.9.5 - 2026-04-29
+
+- **Install-readiness defaults hardened.** Fresh installs now stage `embedding.provider: "none"` by default, making the first-install path FTS5-only and free of Ollama or hosted-provider dependencies.
+- **Install states documented.** README, INSTALL, and TUNING now classify fresh installs as GREEN/YELLOW/RED, with FTS5/no-embedding installs explicitly YELLOW rather than failed.
+- **Semantic recall is opt-in after baseline install.** Ollama and hosted embedding setup moved behind the verified baseline path so operators can bring HyperMem online before adding vector recall.
+- **OpenClaw command guidance updated.** Install docs now use the current `openclaw gateway` command surface instead of stale daemon commands.
+- **Public package payload tightened.** npm package files now include operator-facing docs only; internal architecture and release-process docs are excluded from the published artifact.
+- **Fresh-install smoke covers the FTS5 default.** The release gate now validates the no-embedding default path directly.
+
 ## 0.9.4 - 2026-04-28
 
 - **Recall surface re-enriched.** Bootstrap, warmup, and steady lifecycle bands now carry larger warming fractions, `/new` and topic-shift recall surge harder, and topic-bearing warmup avoids heartbeat/small-talk decay.

@@ -1,6 +1,6 @@
 {
   "name": "@psiclawops/hypermem",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "Agent-centric memory and context composition engine for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
@@ -86,14 +86,12 @@
     "docs/MEMORY_MD_AUTHORING.md",
     "docs/MIGRATION.md",
     "docs/MIGRATION_GUIDE.md",
-    "docs/RELEASE_PROCESS.md",
     "docs/SLASH_COMMANDS.md",
     "docs/TUNING.md",
     "install.sh",
     "README.md",
     "INSTALL.md",
     "CHANGELOG.md",
-    "ARCHITECTURE.md",
     "LICENSE"
   ],
   "author": "PsiClawOps",

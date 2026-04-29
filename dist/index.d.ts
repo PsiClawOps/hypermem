@@ -226,11 +226,9 @@ export declare class HyperMem {
      * Routes to MessageStore.queryHistory which owns all history SQL.
      * No general SQL execution, no bypass of compaction fences.
      *
-     * Plugin surface: preferred shape is history.query action in the OpenClaw plugin tool
-     * surface. The SDK currently only exposes registerContextEngine and registerMemoryCapability,
-     * so no plugin tool action is registered in this release. Blocker: no api.registerTool
-     * or equivalent action-routing surface in definePluginEntry. This method is the
-     * public API; agents can call it directly via HyperMem.queryHistory().
+     * Plugin surface: preferred shape is the history_query OpenClaw agent tool,
+     * labeled history.query for operator-facing output. This method is the core
+     * public API that backs the tool via HyperMem.queryHistory().
      */
     queryHistory(query: HistoryQuery): HistoryQueryResult;
     /**

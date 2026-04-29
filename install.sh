@@ -166,7 +166,7 @@ stage_runtime() {
 write_minimal_config_if_missing() {
   echo -e "\n${BOLD}  Config check${NC}"
   if $DRY_RUN; then
-    dryrun "would preserve existing config or write recall-friendly starter config: $CONFIG_FILE"
+    dryrun "would preserve existing config or write FTS5 starter config: $CONFIG_FILE"
     return
   fi
 
@@ -179,7 +179,7 @@ write_minimal_config_if_missing() {
   [[ -f "$default_config" ]] || die "missing packaged default config: $default_config"
   mkdir -p "$(dirname "$CONFIG_FILE")"
   cp "$default_config" "$CONFIG_FILE"
-  success "recall-friendly starter config written: $CONFIG_FILE"
+  success "FTS5 starter config written: $CONFIG_FILE"
 }
 
 verify_stage() {

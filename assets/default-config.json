@@ -1,0 +1,41 @@
+{
+  "embedding": {
+    "provider": "none"
+  },
+  "compositor": {
+    "turnBudget": {
+      "budgetFraction": 0.6,
+      "minContextFraction": 0.18
+    },
+    "warming": {
+      "protectedFloorEnabled": true,
+      "shapedWarmupDecay": true
+    },
+    "adjacency": {
+      "enabled": true,
+      "boostMultiplier": 1.3,
+      "maxLookback": 5,
+      "maxClockDeltaMin": 10,
+      "evictionGuardMessages": 3,
+      "evictionGuardTokenCap": 4000
+    },
+    "contextWindowOverrides": {},
+    "budgetFraction": 0.6,
+    "contextWindowReserve": 0.25,
+    "targetBudgetFraction": 0.5,
+    "warmHistoryBudgetFraction": 0.45,
+    "maxFacts": 28,
+    "maxHistoryMessages": 250,
+    "maxCrossSessionContext": 0,
+    "keystoneHistoryFraction": 0.2,
+    "keystoneMaxMessages": 15,
+    "hyperformProfile": "standard"
+  },
+  "indexer": {
+    "enabled": true,
+    "factExtractionMode": "tiered",
+    "periodicInterval": 300000,
+    "batchSize": 128,
+    "maxMessagesPerTick": 500
+  }
+}

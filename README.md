@@ -386,7 +386,7 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.9.4.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
+**Current release: hypermem 0.9.5.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
 
 | Requirement | Version | Notes |
 |---|---|---|
@@ -398,10 +398,10 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.9.4'
+  ENGINE_VERSION,        // '0.9.5'
   MIN_NODE_VERSION,      // '22.0.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
-  MAIN_SCHEMA_VERSION,   // 10 (messages.db)
+  MAIN_SCHEMA_VERSION,   // 11 (messages.db)
   LIBRARY_SCHEMA_VERSION_EXPORT, // 19 (library.db)
 } from '@psiclawops/hypermem';
 ```
@@ -437,7 +437,7 @@ Install states:
 | Runtime loaded | gateway restarted and both plugins loaded |
 | Runtime active | logs show `hypermem initialized` and compose activity |
 
-The installer writes the starter config for you when `~/.openclaw/hypermem/config.json` is missing. The default is recall-friendly standard mode with Ollama `nomic-embed-text`; if Ollama is not available, install it or run `npx hypermem-install --skip-embedding-check` for CI/container practice. To force lightweight FTS-only mode, pre-create `~/.openclaw/hypermem/config.json` with `{"embedding":{"provider":"none"}}` before running the installer.
+The installer writes the starter config for you when `~/.openclaw/hypermem/config.json` is missing. The default first-install posture is FTS5/no-embedding mode with `{"embedding":{"provider":"none"}}`, so HyperMem can load and compose without Ollama or an API key. That verifies as **YELLOW** install readiness: runtime active, semantic vector recall disabled. Enable Ollama, OpenRouter, or Gemini after the baseline install is active.
 
 Then merge the staged plugin paths into OpenClaw config and set the slots:
 
@@ -495,7 +495,7 @@ Two independent surfaces: **context assembly** (what fills the context window) a
 | `standard` | 128k | Normal deployments, small fleets |
 | `full` | 200k+ | Multi-agent fleets, large-context models |
 
-Start with `light`. Use `mergeProfile()` to adjust individual settings:
+Start from the installed baseline. Use `light` for constrained/no-embedding installs, `standard` once semantic recall is enabled, and `full` for large-context fleets. Use `mergeProfile()` to adjust individual settings:
 
 ```typescript
 import { mergeProfile } from '@psiclawops/hypermem';
@@ -594,7 +594,7 @@ hypermem composes context fresh on every turn, but a long-running session still 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `falling back to default engine "legacy"` in logs | Plugin not loaded or slot misconfigured | Check `openclaw config get plugins.slots.contextEngine` is `hypercompositor`, paths are correct, and both plugins are in `plugins.allow` |
-| `openclaw gateway restart` says disabled/not configured | OpenClaw not fully onboarded | Complete OpenClaw setup first. `gateway restart` requires a running gateway. |
+| `openclaw gateway restart` says disabled/not configured | OpenClaw not fully onboarded | Complete OpenClaw setup first. `openclaw gateway restart` requires an onboarded gateway. |
 | `openclaw logs` fails with auth/token error | Gateway auth not set up for CLI | Run `openclaw gateway status` to confirm the gateway is accessible |
 | `facts=0 semantic=0` every turn | Fresh install, no data yet | Expected. Facts accumulate over real conversations. |
 | Health check says "no sessions ingested" | No agent has run a session yet | Send a test message, then re-run |

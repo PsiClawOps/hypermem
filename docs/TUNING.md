@@ -1,6 +1,6 @@
 # hypermem Tuning Guide
 
-Configuration reference for operators and agents. All settings are optional. The recommended install path writes a starter `config.json` with the 0.9.4 recall-friendly standard profile: local Ollama embeddings by default, protected warming, adjacency preservation, and conservative turn budgeting. Tune from that verified baseline, not from guesswork.
+Configuration reference for operators and agents. All settings are optional. The recommended install path writes a starter `config.json` with the 0.9.4 recall-friendly standard context profile and `embedding.provider: "none"` so first install has no external service dependency. Tune from that verified baseline, then opt into Ollama or a hosted embedding provider when you want semantic vector recall.
 
 Config lives in `~/.openclaw/hypermem/config.json` (takes effect on gateway restart) or is passed programmatically via `HyperMem.create()`:
 
@@ -56,7 +56,7 @@ That said, not every deployment needs full context richness. If you're running a
 
 | Situation | Preset | Reason |
 |---|---|---|
-| First install, trying it out | `light` | Minimal overhead, easy to reason about |
+| First install, trying it out | Installed baseline | FTS5/no-embedding mode verifies cleanly before provider tuning |
 | Single conversational agent | `standard` | Richer memory without fleet overhead |
 | Multi-agent fleet, long-running sessions | `full` | Full continuity, keystone recall, cross-session context |
 | CI pipelines, one-shot tasks | Custom light | Disable indexer, keep only history |
@@ -114,7 +114,7 @@ Estimated context per turn: **12–35k tokens** on a 200k model (lower on smalle
 
 ### Standard setup
 
-The default out-of-the-box configuration. All memory layers are active with 0.9.4 recall preservation turned on. Good for most single-agent deployments and the right baseline for external install testing.
+The standard semantic configuration. All memory layers are active with 0.9.4 recall preservation turned on. Good for most single-agent deployments after the baseline FTS5 install is verified.
 
 ```json
 {
@@ -161,7 +161,7 @@ The default out-of-the-box configuration. All memory layers are active with 0.9.
 }
 ```
 
-Estimated context per turn: **35–80k tokens** on a 200k model. This is what `hypermem-install` writes when no existing config is present. Existing config files are preserved, so run `hypermem-doctor --fix-plan` after upgrades to see whether older installs are missing the 0.9.4 recall-surface knobs.
+Estimated context per turn: **35–80k tokens** on a 200k model. `hypermem-install` writes these context and recall-preservation knobs when no existing config is present, but leaves embeddings disabled by default for installation safety. Existing config files are preserved, so run `hypermem-doctor --fix-plan` after upgrades to see whether older installs are missing the 0.9.4 recall-surface knobs.
 
 ### 0.9.4 recall preservation knobs
 
@@ -249,7 +249,7 @@ const custom = mergeProfile('standard', {
 });
 ```
 
-Start with `light`. Move up when you need richer context and have the headroom.
+Start from the installed baseline. Move to `light` only when you need lower first-turn cost, and move to `standard` or `full` when richer context is worth the token spend.
 
 ---
 
