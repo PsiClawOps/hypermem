@@ -3,11 +3,208 @@
   "enabledByDefault": false,
   "kind": "memory",
   "activation": {
-    "onCapabilities": ["memory"]
+    "onCapabilities": [
+      "memory"
+    ]
   },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "hyperMemPath": {
+        "type": "string"
+      },
+      "dataDir": {
+        "type": "string"
+      },
+      "contextWindowSize": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "contextWindowReserve": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 0.5
+      },
+      "deferToolPruning": {
+        "type": "boolean"
+      },
+      "verboseLogging": {
+        "type": "boolean"
+      },
+      "warmCacheReplayThresholdMs": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "subagentWarming": {
+        "type": "string",
+        "enum": [
+          "full",
+          "light",
+          "off"
+        ]
+      },
+      "contextWindowOverrides": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "contextTokens": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "contextWindow": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      },
+      "compositor": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "eviction": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "imageAgeTurns": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "toolResultAgeTurns": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minTokensToEvict": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "keepPreviewChars": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "embedding": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "none",
+              "ollama",
+              "openai",
+              "gemini"
+            ]
+          },
+          "ollamaUrl": {
+            "type": "string"
+          },
+          "openaiApiKey": {
+            "type": "string"
+          },
+          "openaiBaseUrl": {
+            "type": "string"
+          },
+          "geminiApiKey": {
+            "type": "string"
+          },
+          "geminiBaseUrl": {
+            "type": "string"
+          },
+          "geminiIndexTaskType": {
+            "type": "string"
+          },
+          "geminiQueryTaskType": {
+            "type": "string"
+          },
+          "queryInputType": {
+            "type": "string"
+          },
+          "documentInputType": {
+            "type": "string"
+          },
+          "queryPrefix": {
+            "type": "string"
+          },
+          "documentPrefix": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "dimensions": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "timeout": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "batchSize": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "reranker": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "provider"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "zeroentropy",
+              "openrouter",
+              "local",
+              "none"
+            ]
+          },
+          "minCandidates": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxDocuments": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "topK": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "zeroEntropyApiKey": {
+            "type": "string"
+          },
+          "zeroEntropyModel": {
+            "type": "string"
+          },
+          "openrouterApiKey": {
+            "type": "string"
+          },
+          "openrouterModel": {
+            "type": "string"
+          },
+          "ollamaUrl": {
+            "type": "string"
+          },
+          "ollamaModel": {
+            "type": "string"
+          }
+        }
+      }
+    }
   }
 }

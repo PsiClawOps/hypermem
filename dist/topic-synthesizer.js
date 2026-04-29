@@ -283,7 +283,9 @@ export class TopicSynthesizer {
         if (topicName === 'infrastructure') {
             return messageDb.prepare(`
         SELECT * FROM messages
-        WHERE text_content IS NOT NULL
+        WHERE role IN ('user', 'assistant')
+          AND text_content IS NOT NULL
+          AND trim(text_content) != ''
           AND (
             lower(text_content) LIKE '%redis%'
             OR lower(text_content) LIKE '%sqlite%'
@@ -300,7 +302,9 @@ export class TopicSynthesizer {
         if (topicName === 'security') {
             return messageDb.prepare(`
         SELECT * FROM messages
-        WHERE text_content IS NOT NULL
+        WHERE role IN ('user', 'assistant')
+          AND text_content IS NOT NULL
+          AND trim(text_content) != ''
           AND (
             lower(text_content) LIKE '%security%'
             OR lower(text_content) LIKE '%auth%'
@@ -315,7 +319,9 @@ export class TopicSynthesizer {
         }
         return messageDb.prepare(`
       SELECT * FROM messages
-      WHERE text_content IS NOT NULL
+      WHERE role IN ('user', 'assistant')
+        AND text_content IS NOT NULL
+        AND trim(text_content) != ''
         AND lower(text_content) LIKE ? ESCAPE '\\'
       ORDER BY created_at ASC
       LIMIT ?

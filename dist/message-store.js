@@ -5,7 +5,7 @@
  * All messages are stored in provider-neutral format.
  * This is the write-through layer: Redis → here.
  */
-import { getOrCreateActiveContext, updateContextHead, getArchivedContext } from './context-store.js';
+import { getOrCreateActiveContext, updateContextHead, getArchivedContext, getActiveContext, getContextById } from './context-store.js';
 function nowIso() {
     return new Date().toISOString();
 }
@@ -234,6 +234,47 @@ export class MessageStore {
         return rows.reverse().map(parseMessageRow);
     }
     /**
+     * Get recent human-readable transcript messages for continuity guards.
+     *
+     * Tool-call/tool-result carrier rows are valid runtime messages, but they often
+     * have empty text_content. They must not consume the small "recent turns" depth
+     * used by transcript recovery and fork warming, or a dense tool loop can push
+     * the immediate conversational antecedent out of the selected window.
+     */
+    getRecentMeaningfulMessages(conversationId, limit = 12, minMessageId) {
+        const params = [conversationId];
+        let sql = `
+      SELECT
+        id,
+        conversation_id,
+        agent_id,
+        role,
+        text_content,
+        NULL AS tool_calls,
+        NULL AS tool_results,
+        metadata,
+        token_count,
+        message_index,
+        is_heartbeat,
+        created_at,
+        topic_id
+      FROM messages
+      WHERE conversation_id = ?
+        AND role IN ('user', 'assistant')
+        AND text_content IS NOT NULL
+        AND trim(text_content) != ''
+        AND is_heartbeat = 0
+    `;
+        if (minMessageId != null) {
+            sql += ' AND id >= ?';
+            params.push(minMessageId);
+        }
+        sql += ' ORDER BY message_index DESC LIMIT ?';
+        params.push(limit);
+        const rows = this.db.prepare(sql).all(...params);
+        return rows.reverse().map(parseMessageRow);
+    }
+    /**
      * Get recent messages scoped to a topic (P3.4, Option B).
      * Returns messages matching the topic_id OR with topic_id IS NULL
      * (legacy messages created before topic tracking was introduced).
@@ -307,6 +348,9 @@ export class MessageStore {
         JOIN conversations c ON m.conversation_id = c.id
         WHERE c.session_key = ?
           AND m.role IN ('user', 'assistant')
+          AND m.text_content IS NOT NULL
+          AND trim(m.text_content) != ''
+          AND m.is_heartbeat = 0
         ORDER BY m.message_index DESC
         LIMIT ?
       `).all(sessionKey, limit);
@@ -387,7 +431,7 @@ export class MessageStore {
             sql += ' AND is_heartbeat = 0';
         }
         if (opts?.requireText) {
-            sql += " AND text_content IS NOT NULL AND text_content != ''";
+            sql += " AND role IN ('user', 'assistant') AND text_content IS NOT NULL AND trim(text_content) != ''";
         }
         sql += ' ORDER BY message_index DESC LIMIT ?';
         params.push(limit);
@@ -407,6 +451,10 @@ export class MessageStore {
         SELECT m.* FROM messages m
         JOIN fts_matches ON m.id = fts_matches.rowid
         WHERE m.context_id = ?
+          AND m.role IN ('user', 'assistant')
+          AND m.text_content IS NOT NULL
+          AND trim(m.text_content) != ''
+          AND m.is_heartbeat = 0
         ORDER BY fts_matches.rank
       `).all(query, limit * 3, contextId);
             return rows.slice(0, limit).map(parseMessageRow);
@@ -553,6 +601,311 @@ export class MessageStore {
             }
         }
         return results;
+    }
+    // ─── History Query Surface (0.9.4) ─────────────────────────────────────────
+    /**
+     * Per-mode hard caps and default limits for queryHistory.
+     * No mode may return more than its hard cap regardless of what the caller requests.
+     */
+    static HISTORY_QUERY_CAPS = {
+        runtime_chain: { defaultLimit: 80, hardCap: 200 },
+        transcript_tail: { defaultLimit: 40, hardCap: 120 },
+        tool_events: { defaultLimit: 40, hardCap: 120 },
+        by_topic: { defaultLimit: 60, hardCap: 160 },
+        by_context: { defaultLimit: 80, hardCap: 200 },
+        cross_session: { defaultLimit: 20, hardCap: 80 },
+    };
+    /**
+     * Apply per-mode hard caps to a caller-supplied limit.
+     * Returns [effectiveLimit, wasClamped].
+     *
+     * SQLite treats LIMIT -1 as unlimited, so never pass caller input through
+     * directly. Non-finite, zero, and negative limits fall back to the default.
+     */
+    capHistoryLimit(mode, requestedLimit) {
+        const caps = MessageStore.HISTORY_QUERY_CAPS[mode];
+        if (requestedLimit == null) {
+            return [caps.defaultLimit, false];
+        }
+        if (!Number.isFinite(requestedLimit) || requestedLimit <= 0) {
+            return [caps.defaultLimit, true];
+        }
+        const requested = Math.floor(requestedLimit);
+        const effective = Math.min(requested, caps.hardCap);
+        return [effective, effective < requested];
+    }
+    /**
+     * Resolve conversation id from either a provided conversationId or a sessionKey lookup.
+     * Returns null when neither is available or the conversation cannot be found.
+     */
+    resolveConversationScope(query) {
+        const conv = query.conversationId != null
+            ? this.getConversationById(query.conversationId)
+            : query.sessionKey
+                ? this.getConversation(query.sessionKey)
+                : null;
+        if (!conv)
+            return null;
+        if (conv.agentId !== query.agentId) {
+            throw new Error(`queryHistory: conversation ${conv.id} is not owned by agent '${query.agentId}'`);
+        }
+        return conv.id;
+    }
+    /**
+     * Format a StoredMessage into the HistoryQueryMessage wire shape.
+     * contextId is passed explicitly when available from the query context.
+     */
+    formatHistoryMessage(msg, contextId) {
+        return {
+            id: msg.id,
+            role: msg.role,
+            textContent: msg.textContent,
+            toolCalls: msg.toolCalls,
+            toolResults: msg.toolResults,
+            messageIndex: msg.messageIndex,
+            createdAt: msg.createdAt,
+            topicId: msg.topicId ?? null,
+            contextId: contextId ?? null,
+        };
+    }
+    /**
+     * Redact tool payloads for tool_events mode when includeToolPayloads is false (default).
+     *
+     * Redaction replaces raw arguments/content with metadata-only stubs.
+     * This prevents accidental leakage of secrets or large payloads.
+     */
+    redactToolEvents(messages) {
+        return messages.map(msg => {
+            const redactedCalls = Array.isArray(msg.toolCalls)
+                ? msg.toolCalls.map(tc => ({
+                    id: tc.id,
+                    name: tc.name,
+                    arguments: '[redacted]',
+                }))
+                : msg.toolCalls;
+            const redactedResults = Array.isArray(msg.toolResults)
+                ? msg.toolResults.map(tr => ({
+                    callId: tr.callId,
+                    name: tr.name,
+                    content: '[redacted]',
+                    isError: tr.isError,
+                }))
+                : msg.toolResults;
+            return { ...msg, toolCalls: redactedCalls, toolResults: redactedResults };
+        });
+    }
+    /**
+     * Unified read-only message history query surface (HyperMem 0.9.4).
+     *
+     * Routes to a mode-specific safe SQL path. No general SQL execution.
+     * All modes are capped, parameterized, and compaction-fence-aware where applicable.
+     *
+     * Modes:
+     *   runtime_chain   — full runtime rows (tool-bearing) via DAG chain or recency.
+     *   transcript_tail — nonblank user/assistant text rows only (tool fields null).
+     *   tool_events     — rows with tool calls or results; payloads redacted by default.
+     *   by_topic        — runtime rows scoped to one topic.
+     *   by_context      — runtime rows scoped to one context; active default, archived/forked with includeArchived.
+     *   cross_session   — transcript rows across all conversations for one agent; per-conversation fence enforced.
+     */
+    queryHistory(query) {
+        const { agentId, mode } = query;
+        // Validate allowed modes first — prevent action-passthrough / unknown mode injection
+        const ALLOWED_MODES = new Set([
+            'runtime_chain', 'transcript_tail', 'tool_events',
+            'by_topic', 'by_context', 'cross_session',
+        ]);
+        if (!ALLOWED_MODES.has(mode)) {
+            throw new Error(`queryHistory: unknown mode '${mode}'. Allowed: ${[...ALLOWED_MODES].join(', ')}`);
+        }
+        const [limit, wasClamped] = this.capHistoryLimit(mode, query.limit);
+        // ─ runtime_chain ───────────────────────────────────────────────────────────────
+        if (mode === 'runtime_chain') {
+            const conversationId = this.resolveConversationScope(query);
+            if (conversationId == null) {
+                throw new Error('queryHistory(runtime_chain): requires sessionKey or conversationId');
+            }
+            // Prefer active context DAG chain
+            let messages = [];
+            const resolvedSessionKey = query.sessionKey ?? this.getConversationById(conversationId)?.sessionKey;
+            if (resolvedSessionKey) {
+                const ctx = getActiveContext(this.db, agentId, resolvedSessionKey);
+                if (ctx?.headMessageId != null) {
+                    messages = this.getHistoryByDAGWalk(ctx.headMessageId, limit);
+                }
+            }
+            // Fallback to recency when DAG walk returns nothing
+            if (messages.length === 0) {
+                messages = this.getRecentMessages(conversationId, limit, query.minMessageId);
+            }
+            const truncated = wasClamped || messages.length === limit;
+            return {
+                mode,
+                scopedBy: { agentId, sessionKey: query.sessionKey, conversationId },
+                messages: messages.map(m => this.formatHistoryMessage(m)),
+                truncated,
+                redacted: false,
+            };
+        }
+        // ─ transcript_tail ────────────────────────────────────────────────────────────
+        if (mode === 'transcript_tail') {
+            const conversationId = this.resolveConversationScope(query);
+            if (conversationId == null) {
+                throw new Error('queryHistory(transcript_tail): requires sessionKey or conversationId');
+            }
+            // getRecentMeaningfulMessages already nulls tool_calls / tool_results in its SQL projection
+            const messages = this.getRecentMeaningfulMessages(conversationId, limit, query.minMessageId);
+            const truncated = wasClamped || messages.length === limit;
+            return {
+                mode,
+                scopedBy: { agentId, sessionKey: query.sessionKey, conversationId },
+                messages: messages.map(m => this.formatHistoryMessage(m)),
+                truncated,
+                redacted: false,
+            };
+        }
+        // ─ tool_events ───────────────────────────────────────────────────────────────
+        if (mode === 'tool_events') {
+            const conversationId = this.resolveConversationScope(query);
+            if (conversationId == null) {
+                throw new Error('queryHistory(tool_events): requires sessionKey or conversationId');
+            }
+            // Parameterized query — only tool-bearing rows
+            const rows = this.db.prepare(`
+        SELECT * FROM messages
+        WHERE conversation_id = ?
+          AND (tool_calls IS NOT NULL OR tool_results IS NOT NULL)
+          AND is_heartbeat = 0
+        ORDER BY message_index DESC
+        LIMIT ?
+      `).all(conversationId, limit);
+            let formatted = rows.reverse().map(row => {
+                const msg = parseMessageRow(row);
+                return this.formatHistoryMessage(msg);
+            });
+            const didRedact = !query.includeToolPayloads;
+            if (didRedact) {
+                formatted = this.redactToolEvents(formatted);
+            }
+            const truncated = wasClamped || rows.length === limit;
+            return {
+                mode,
+                scopedBy: { agentId, sessionKey: query.sessionKey, conversationId },
+                messages: formatted,
+                truncated,
+                redacted: didRedact,
+            };
+        }
+        // ─ by_topic ───────────────────────────────────────────────────────────────────
+        if (mode === 'by_topic') {
+            if (!query.topicId) {
+                throw new Error('queryHistory(by_topic): requires topicId');
+            }
+            const conversationId = this.resolveConversationScope(query);
+            if (conversationId == null) {
+                throw new Error('queryHistory(by_topic): requires sessionKey or conversationId');
+            }
+            const messages = this.getRecentMessagesByTopic(conversationId, query.topicId, limit, query.minMessageId);
+            const truncated = wasClamped || messages.length === limit;
+            return {
+                mode,
+                scopedBy: { agentId, sessionKey: query.sessionKey, conversationId, topicId: query.topicId },
+                messages: messages.map(m => this.formatHistoryMessage(m)),
+                truncated,
+                redacted: false,
+            };
+        }
+        // ─ by_context ──────────────────────────────────────────────────────────────────
+        if (mode === 'by_context') {
+            if (query.contextId == null) {
+                throw new Error('queryHistory(by_context): requires contextId');
+            }
+            const ctx = getContextById(this.db, query.contextId);
+            if (!ctx) {
+                throw new Error(`queryHistory(by_context): context ${query.contextId} not found`);
+            }
+            if (ctx.agentId !== agentId) {
+                throw new Error(`queryHistory(by_context): context ${query.contextId} is not owned by agent '${agentId}'`);
+            }
+            // Active context is always allowed.
+            // Archived or forked contexts require explicit opt-in via includeArchived.
+            if (ctx.status !== 'active' && !query.includeArchived) {
+                throw new Error(`queryHistory(by_context): context ${query.contextId} has status '${ctx.status}'. ` +
+                    `Set includeArchived: true to query non-active contexts.`);
+            }
+            const messages = this.getMessagesByContextId(query.contextId, limit, { excludeHeartbeats: true });
+            const truncated = wasClamped || messages.length === limit;
+            return {
+                mode,
+                scopedBy: { agentId, contextId: query.contextId, sessionKey: ctx.sessionKey },
+                messages: messages.map(m => this.formatHistoryMessage(m, query.contextId)),
+                truncated,
+                redacted: false,
+            };
+        }
+        // ─ cross_session ──────────────────────────────────────────────────────────────
+        if (mode === 'cross_session') {
+            // Do NOT reuse getAgentMessages: it does not enforce per-conversation compaction fences.
+            // Each conversation's fence is respected via the LEFT JOIN on compaction_fences.
+            // Transcript-only rows: user/assistant with non-empty text. Tool fields projected as NULL.
+            const params = [agentId];
+            let sql = `
+        SELECT
+          m.id,
+          m.conversation_id,
+          m.agent_id,
+          m.role,
+          m.text_content,
+          NULL AS tool_calls,
+          NULL AS tool_results,
+          m.metadata,
+          m.token_count,
+          m.message_index,
+          m.is_heartbeat,
+          m.created_at,
+          m.topic_id
+        FROM messages m
+        LEFT JOIN compaction_fences cf ON cf.conversation_id = m.conversation_id
+        WHERE m.agent_id = ?
+          AND m.role IN ('user', 'assistant')
+          AND m.text_content IS NOT NULL
+          AND trim(m.text_content) != ''
+          AND m.is_heartbeat = 0
+          AND (cf.fence_message_id IS NULL OR m.id >= cf.fence_message_id)
+      `;
+            if (query.since) {
+                sql += ' AND m.created_at > ?';
+                params.push(query.since);
+            }
+            sql += ' ORDER BY m.created_at DESC LIMIT ?';
+            params.push(limit);
+            const rows = this.db.prepare(sql).all(...params);
+            // Reverse to chronological order
+            rows.reverse();
+            const formatted = rows.map(row => {
+                const msg = parseMessageRow(row);
+                return this.formatHistoryMessage(msg);
+            });
+            const truncated = wasClamped || rows.length === limit;
+            return {
+                mode,
+                scopedBy: { agentId },
+                messages: formatted,
+                truncated,
+                redacted: false,
+            };
+        }
+        // Should never reach here — all modes are covered above and the mode is validated at entry
+        throw new Error(`queryHistory: unhandled mode '${mode}'`);
+    }
+    /**
+     * Get a conversation by id (internal use by queryHistory).
+     */
+    getConversationById(conversationId) {
+        const row = this.db
+            .prepare('SELECT * FROM conversations WHERE id = ?')
+            .get(conversationId);
+        return row ? parseConversationRow(row) : null;
     }
     // ─── Helpers ─────────────────────────────────────────────────
     /**

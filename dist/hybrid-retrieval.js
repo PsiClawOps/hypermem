@@ -67,7 +67,7 @@ function searchFactsFts(db, query, agentId, limit = 20) {
     // applying LIMIT — O(matches) instead of O(limit).  See data-access-bench.
     const innerLimit = agentId ? limit * 4 : limit; // over-fetch to survive filter
     let sql = `
-    SELECT f.id, sub.rank, f.content, f.domain, f.agent_id
+    SELECT f.id, sub.rank, f.content, f.domain, f.agent_id, f.source_ref, f.created_at
     FROM (
       SELECT rowid, rank FROM facts_fts WHERE facts_fts MATCH ? ORDER BY rank LIMIT ?
     ) sub
@@ -89,6 +89,8 @@ function searchFactsFts(db, query, agentId, limit = 20) {
         content: r.content,
         domain: r.domain,
         agentId: r.agent_id,
+        createdAt: r.created_at || undefined,
+        sourceMessageId: parseSourceMessageId(r.source_ref),
     }));
 }
 /**
@@ -97,7 +99,7 @@ function searchFactsFts(db, query, agentId, limit = 20) {
 function searchKnowledgeFts(db, query, agentId, limit = 20) {
     const innerLimit = agentId ? limit * 4 : limit;
     let sql = `
-    SELECT k.id, sub.rank, k.content, k.domain, k.agent_id, k.key
+    SELECT k.id, sub.rank, k.content, k.domain, k.agent_id, k.key, k.source_ref, k.created_at
     FROM (
       SELECT rowid, rank FROM knowledge_fts WHERE knowledge_fts MATCH ? ORDER BY rank LIMIT ?
     ) sub
@@ -119,6 +121,8 @@ function searchKnowledgeFts(db, query, agentId, limit = 20) {
         domain: r.domain,
         agentId: r.agent_id,
         metadata: r.key,
+        createdAt: r.created_at || undefined,
+        sourceMessageId: parseSourceMessageId(r.source_ref),
     }));
 }
 /**
@@ -132,7 +136,7 @@ function searchEpisodesFts(db, query, agentId, limit = 20) {
         // SQLite uses the agent_id index to narrow first, then checks FTS5 membership.
         // Benchmarked: 2.3ms avg vs 8.5ms avg for the post-join approach (13k+ episodes).
         sql = `
-      SELECT e.id, 0 as rank, e.summary, e.event_type, e.agent_id, e.participants, e.created_at
+      SELECT e.id, 0 as rank, e.summary, e.event_type, e.agent_id, e.participants, e.created_at, e.source_message_id
       FROM episodes e
       WHERE e.agent_id = ?
         AND e.decay_score < 0.8
@@ -144,7 +148,7 @@ function searchEpisodesFts(db, query, agentId, limit = 20) {
     }
     else {
         sql = `
-      SELECT e.id, sub.rank, e.summary, e.event_type, e.agent_id, e.participants, e.created_at
+      SELECT e.id, sub.rank, e.summary, e.event_type, e.agent_id, e.participants, e.created_at, e.source_message_id
       FROM (
         SELECT rowid, rank FROM episodes_fts WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?
       ) sub
@@ -163,10 +167,18 @@ function searchEpisodesFts(db, query, agentId, limit = 20) {
         agentId: r.agent_id,
         metadata: r.participants || undefined,
         createdAt: r.created_at || undefined,
+        sourceMessageId: r.source_message_id ?? undefined,
     }));
 }
 function resultKey(table, id) {
     return `${table}:${id}`;
+}
+function parseSourceMessageId(sourceRef) {
+    const match = /^msg:(\d+)$/.exec(sourceRef || '');
+    if (!match)
+        return undefined;
+    const value = Number(match[1]);
+    return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 /**
  * Merge FTS5 and KNN results using Reciprocal Rank Fusion.
@@ -174,12 +186,13 @@ function resultKey(table, id) {
  * RRF score = Σ (weight / (k + rank)) for each result list the item appears in.
  * k is a constant (default 60) that dampens the effect of high rank positions.
  */
-function fuseResults(ftsResults, knnResults, k, ftsWeight, knnWeight) {
+function fuseResults(ftsResults, knnResults, k, ftsWeight, knnWeight, onAdjacencyTelemetry) {
     const merged = new Map();
+    let originalOrder = 0;
     // Add FTS results
     for (const [key, entry] of ftsResults) {
         const score = ftsWeight / (k + (entry.ftsRank || 1));
-        merged.set(key, { ...entry, score, sources: ['fts'] });
+        merged.set(key, { ...entry, originalOrder: originalOrder++, score, sources: ['fts'] });
     }
     // Merge KNN results
     for (const [key, entry] of knnResults) {
@@ -193,11 +206,95 @@ function fuseResults(ftsResults, knnResults, k, ftsWeight, knnWeight) {
             existing.sources = ['fts', 'knn'];
         }
         else {
-            merged.set(key, { ...entry, score: knnScore, sources: ['knn'] });
+            merged.set(key, { ...entry, originalOrder: originalOrder++, score: knnScore, sources: ['knn'] });
         }
     }
-    // Sort by fused score descending
-    return [...merged.values()].sort((a, b) => b.score - a.score);
+    const adjacencyTelemetry = applyAdjacencyBoost(merged);
+    if (adjacencyTelemetry.boostedCount > 0)
+        onAdjacencyTelemetry?.(adjacencyTelemetry);
+    // Sort by fused score descending; preserve retrieval order for exact ties.
+    return [...merged.values()].sort((a, b) => (b.score - a.score) || ((a.originalOrder ?? 0) - (b.originalOrder ?? 0)));
+}
+const DEFAULT_ADJACENCY_BOOST_MULTIPLIER = 1.3;
+const DEFAULT_ADJACENCY_MAX_LOOKBACK = 5;
+const DEFAULT_ADJACENCY_MAX_CLOCK_DELTA_MS = 10 * 60 * 1000;
+function applyAdjacencyBoost(entries) {
+    const multiplier = DEFAULT_ADJACENCY_BOOST_MULTIPLIER;
+    const maxLookback = DEFAULT_ADJACENCY_MAX_LOOKBACK;
+    const maxClockDeltaMs = DEFAULT_ADJACENCY_MAX_CLOCK_DELTA_MS;
+    const candidates = [...entries.values()]
+        .filter(isAdjacencyCandidate)
+        .sort((a, b) => (a.sourceMessageId ?? 0) - (b.sourceMessageId ?? 0));
+    const boosted = new Set();
+    const deltas = [];
+    for (let i = 0; i < candidates.length; i++) {
+        const antecedent = candidates[i];
+        if (boosted.has(antecedent))
+            continue;
+        const antecedentMessageId = antecedent.sourceMessageId;
+        const antecedentTime = parseTimestampMs(antecedent.createdAt);
+        if (antecedentMessageId == null || antecedentTime == null)
+            continue;
+        for (let j = i + 1; j < candidates.length; j++) {
+            const successor = candidates[j];
+            const successorMessageId = successor.sourceMessageId;
+            const successorTime = parseTimestampMs(successor.createdAt);
+            if (successorMessageId == null || successorTime == null)
+                continue;
+            const messageDelta = successorMessageId - antecedentMessageId;
+            if (messageDelta <= 0)
+                continue;
+            if (messageDelta > maxLookback)
+                break;
+            if (!sameAgentOrUnknown(antecedent, successor))
+                continue;
+            if (Math.abs(successorTime - antecedentTime) > maxClockDeltaMs)
+                continue;
+            antecedent.score *= multiplier;
+            boosted.add(antecedent);
+            deltas.push(Math.abs(successorTime - antecedentTime));
+            break;
+        }
+    }
+    const averageDeltaMs = deltas.length > 0
+        ? Math.round(deltas.reduce((sum, value) => sum + value, 0) / deltas.length)
+        : 0;
+    return { boostedCount: boosted.size, averageDeltaMs };
+}
+function isAdjacencyCandidate(entry) {
+    return entry.sourceMessageId != null
+        && parseTimestampMs(entry.createdAt) != null
+        && !isSystemHeartbeatTraffic(entry);
+}
+function parseTimestampMs(value) {
+    if (!value)
+        return null;
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+}
+function sameAgentOrUnknown(a, b) {
+    return !a.agentId || !b.agentId || a.agentId === b.agentId;
+}
+function isSystemHeartbeatTraffic(entry) {
+    const content = entry.content.trim();
+    const lowerContent = content.toLowerCase();
+    const lowerDomain = (entry.domain || '').toLowerCase();
+    const lowerMetadata = (entry.metadata || '').toLowerCase();
+    if (!content)
+        return true;
+    if (content === 'HEARTBEAT_OK' || lowerContent.includes('heartbeat_ok'))
+        return true;
+    if (lowerDomain === 'system' || lowerDomain === 'heartbeat')
+        return true;
+    if (lowerMetadata === 'system' || lowerMetadata === 'heartbeat')
+        return true;
+    if (/^\[(system|heartbeat)\]/i.test(content))
+        return true;
+    if (/^(system|heartbeat)\s*:/i.test(content))
+        return true;
+    if (/\bheartbeat\b/i.test(content) && content.length <= 80)
+        return true;
+    return false;
 }
 // ─── Public API ────────────────────────────────────────────────
 /**
@@ -230,6 +327,8 @@ export async function hybridSearch(libraryDb, vectorStore, query, opts) {
                         content: r.content,
                         domain: r.domain,
                         agentId: r.agentId,
+                        createdAt: r.createdAt,
+                        sourceMessageId: r.sourceMessageId,
                         ftsRank: i + 1,
                         score: 0,
                         sources: ['fts'],
@@ -247,6 +346,8 @@ export async function hybridSearch(libraryDb, vectorStore, query, opts) {
                         domain: r.domain,
                         agentId: r.agentId,
                         metadata: r.metadata,
+                        createdAt: r.createdAt,
+                        sourceMessageId: r.sourceMessageId,
                         ftsRank: i + 1,
                         score: 0,
                         sources: ['fts'],
@@ -265,6 +366,7 @@ export async function hybridSearch(libraryDb, vectorStore, query, opts) {
                         agentId: r.agentId,
                         metadata: r.metadata,
                         createdAt: r.createdAt,
+                        sourceMessageId: r.sourceMessageId,
                         ftsRank: i + 1,
                         score: 0,
                         sources: ['fts'],
@@ -332,7 +434,7 @@ export async function hybridSearch(libraryDb, vectorStore, query, opts) {
         }));
     }
     // Both sources present — RRF fusion
-    const fused = fuseResults(ftsMap, knnMap, rrfK, ftsWeight, knnWeight);
+    const fused = fuseResults(ftsMap, knnMap, rrfK, ftsWeight, knnWeight, opts?.onAdjacencyTelemetry);
     // ── Reranker hook ─────────────────────────────────────────────
     // Reranking runs only on the fused path. FTS-only / KNN-only branches
     // above return before this point. On any error, timeout, or null result

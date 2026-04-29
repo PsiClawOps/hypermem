@@ -7,6 +7,8 @@
  * so 0.9.0 does not grow another independent trim brain.
  */
 
+import { stripMessageMetadata } from './topic-detector.js';
+
 export type AdaptiveLifecycleBand =
   | 'bootstrap'
   | 'warmup'
@@ -24,6 +26,8 @@ export interface AdaptiveLifecycleInput {
   pressureFraction?: number;
   /** Number of user turns observed in the session. */
   userTurnCount?: number;
+  /** Number of topic-bearing (substantive) user turns observed in the session. */
+  topicBearingTurnCount?: number;
   /** True when the incoming user turn explicitly starts with /new. */
   explicitNewSession?: boolean;
   /** Topic-shift confidence from the detector, 0..1. */
@@ -34,6 +38,57 @@ export interface AdaptiveLifecycleInput {
   forkedParentPressureFraction?: number;
   /** Parent-session user turns observed when the fork was prepared. */
   forkedParentUserTurnCount?: number;
+}
+
+/**
+ * Minimal message shape for the lightweight topic-bearing classifier.
+ * Used by compose paths to count substantive user turns from existing
+ * message data without content telemetry or schema migration.
+ */
+export interface TopicBearingMessageLike {
+  role: string;
+  textContent: string | null;
+  isHeartbeat?: boolean;
+}
+
+/**
+ * Determine whether a user turn is "topic-bearing" (substantive).
+ *
+ * Heartbeat, empty, and small-talk turns are NOT topic-bearing and do not
+ * extend the warmup window. This is intentionally a lightweight heuristic:
+ * no topic-detector architecture change, no model calls.
+ *
+ * Mirrors the plugin afterTurn gradient semantics so compose-path band
+ * decisions stay consistent with afterTurn-path band decisions.
+ */
+export function isTopicBearingTurn(msg: TopicBearingMessageLike): boolean {
+  if (msg.isHeartbeat) return false;
+  if (msg.role !== 'user') return false;
+  const text = stripMessageMetadata(msg.textContent ?? '').trim();
+
+  // Empty turn
+  if (text.length === 0) return false;
+
+  // Small-talk: very short generic acknowledgments
+  if (text.length < 15) {
+    if (/^(ok|okay|yes|no|thanks|thank\s+you|got\s+it|sure|yep|nah|nope|alright|cool|nice|great|good|k|kk|heartbeat[_\s-]*ok|👍|👎|hi|hello|hey)[.!]*$/iu.test(text)) {
+      return false;
+    }
+  }
+
+  // Pure punctuation or emoji
+  if (/^[\s\p{P}\p{Emoji}]+$/u.test(text)) return false;
+
+  return true;
+}
+
+/**
+ * Count topic-bearing turns in a message array.
+ *
+ * Pure helper: no side effects, no store access. Returns 0 for empty arrays.
+ */
+export function countTopicBearingTurns(messages: TopicBearingMessageLike[]): number {
+  return messages.filter(isTopicBearingTurn).length;
 }
 
 /**
@@ -63,6 +118,15 @@ export interface AdaptiveEvictionPlan {
   preferBallastFirst: boolean;
 }
 
+interface ProtectedWarmingMetadata {
+  /** Whether warming is currently protected by a hard floor. True for high/critical. */
+  isProtected: boolean;
+  /** The floor value warming cannot drop below. 0 when not protected. */
+  floor: number;
+  /** Human-readable explanation. */
+  reason: string;
+}
+
 export interface AdaptiveLifecyclePolicy {
   band: AdaptiveLifecycleBand;
   pressureFraction: number;
@@ -75,6 +139,7 @@ export interface AdaptiveLifecyclePolicy {
   enableTopicCentroidEviction: boolean;
   triggerProactiveCompaction: boolean;
   evictionPlan: AdaptiveEvictionPlan;
+  protectedWarmingMetadata: ProtectedWarmingMetadata;
   reasons: string[];
 }
 
@@ -136,9 +201,9 @@ const PRESSURE_BANDS = Object.freeze({
 });
 
 const WARMING_BY_BAND: Record<AdaptiveLifecycleBand, number> = Object.freeze({
-  bootstrap: 0.55,
-  warmup: 0.48,
-  steady: 0.40,
+  bootstrap: 0.62,
+  warmup: 0.55,
+  steady: 0.45,
   elevated: 0.34,
   high: 0.28,
   critical: 0.20,
@@ -183,6 +248,9 @@ function isTopicShift(input: AdaptiveLifecycleInput): boolean {
 
 function classifyBand(input: AdaptiveLifecycleInput, pressure: number): AdaptiveLifecycleBand {
   const userTurns = Math.max(0, Math.floor(input.userTurnCount ?? 0));
+  const topicBearingTurns = input.topicBearingTurnCount != null
+    ? Math.max(0, Math.floor(input.topicBearingTurnCount))
+    : null;
 
   if (input.explicitNewSession) return 'bootstrap';
   if (input.forkedContext) {
@@ -197,7 +265,16 @@ function classifyBand(input: AdaptiveLifecycleInput, pressure: number): Adaptive
     return 'warmup';
   }
   if (userTurns === 0) return 'bootstrap';
-  if (userTurns <= 4 && pressure < PRESSURE_BANDS.elevatedMax) return 'warmup';
+  // Packet 2: topic-bearing warmup decay. When topicBearingTurnCount is
+  // provided, warmup extends to 8 substantive turns so heartbeat/empty/
+  // small-talk turns do not prematurely graduate the session. Falls back
+  // to the historical 4 raw-turn window when topic-bearing count is
+  // unavailable (backward compatibility).
+  if (topicBearingTurns != null) {
+    if (topicBearingTurns <= 8 && pressure < PRESSURE_BANDS.elevatedMax) return 'warmup';
+  } else {
+    if (userTurns <= 4 && pressure < PRESSURE_BANDS.elevatedMax) return 'warmup';
+  }
   if (pressure < PRESSURE_BANDS.steadyMax) return 'steady';
   if (pressure < PRESSURE_BANDS.elevatedMax) return 'elevated';
   if (pressure < PRESSURE_BANDS.highMax) return 'high';
@@ -205,16 +282,35 @@ function classifyBand(input: AdaptiveLifecycleInput, pressure: number): Adaptive
 }
 
 function smartRecallMultiplier(input: AdaptiveLifecycleInput, band: AdaptiveLifecycleBand): number {
-  if (input.explicitNewSession || isTopicShift(input)) return 1.5;
-  if (band === 'bootstrap' || band === 'warmup') return 1.25;
+  if (input.explicitNewSession || isTopicShift(input)) return 1.75;
+  if (band === 'bootstrap' || band === 'warmup') return 1.4;
   if (band === 'high') return 0.85;
   if (band === 'critical') return 0.65;
   return 1.0;
 }
 
+function resolveProtectedWarmingMetadata(band: AdaptiveLifecycleBand): ProtectedWarmingMetadata {
+  if (band === 'bootstrap') {
+    return Object.freeze({ isProtected: true, floor: 0.372, reason: 'bootstrap protected warming floor' });
+  }
+  if (band === 'warmup') {
+    return Object.freeze({ isProtected: true, floor: 0.34, reason: 'warmup protected warming floor' });
+  }
+  if (band === 'high') {
+    return Object.freeze({ isProtected: true, floor: 0.28, reason: 'high-pressure warming floor' });
+  }
+  if (band === 'critical') {
+    return Object.freeze({ isProtected: true, floor: 0.20, reason: 'critical-pressure warming floor' });
+  }
+  return Object.freeze({ isProtected: false, floor: 0, reason: 'normal warming range' });
+}
+
 function reasonsFor(input: AdaptiveLifecycleInput, band: AdaptiveLifecycleBand, pressure: number): string[] {
   const reasons: string[] = [`band:${band}`, `pressure:${Math.round(pressure * 100)}%`];
   const turns = Math.max(0, Math.floor(input.userTurnCount ?? 0));
+  const topicBearingTurns = input.topicBearingTurnCount != null
+    ? Math.max(0, Math.floor(input.topicBearingTurnCount))
+    : null;
   if (input.explicitNewSession) reasons.push('explicit-new-session');
   if (input.forkedContext) {
     reasons.push('forked-context');
@@ -226,7 +322,11 @@ function reasonsFor(input: AdaptiveLifecycleInput, band: AdaptiveLifecycleBand, 
     }
   }
   if (turns === 0) reasons.push('cold-start');
-  if (turns > 0 && turns <= 4) reasons.push(`early-session:${turns}`);
+  if (topicBearingTurns != null) {
+    if (topicBearingTurns > 0 && topicBearingTurns <= 8) reasons.push(`topic-bearing:${topicBearingTurns}`);
+  } else {
+    if (turns > 0 && turns <= 4) reasons.push(`early-session:${turns}`);
+  }
   if (isTopicShift(input)) reasons.push(`topic-shift:${(input.topicShiftConfidence ?? 0).toFixed(2)}`);
   if (band === 'high' || band === 'critical') reasons.push('pressure-gated-recall');
   return reasons;
@@ -255,6 +355,7 @@ export function resolveAdaptiveLifecyclePolicy(
     enableTopicCentroidEviction: band === 'elevated' || triggerProactiveCompaction,
     triggerProactiveCompaction,
     evictionPlan: resolveAdaptiveEvictionPlan(band),
+    protectedWarmingMetadata: resolveProtectedWarmingMetadata(band),
     reasons: reasonsFor(input, band, pressureFraction),
   });
 }

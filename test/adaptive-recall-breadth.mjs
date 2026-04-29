@@ -75,7 +75,7 @@ console.log('\n── Scenario 3: explicit /new widens recall token budget and c
     pressureFraction: 0.10,
   });
   assert(policy.band === 'bootstrap', `band bootstrap (got ${policy.band})`);
-  assert(policy.smartRecallMultiplier === 1.5, 'explicit /new surge multiplier=1.5');
+  assert(policy.smartRecallMultiplier === 1.75, 'explicit /new surge multiplier=1.75');
   assert(breadth.mainBudgetTokens > steady.mainBudgetTokens,
     `/new widens main recall budget (${breadth.mainBudgetTokens} > ${steady.mainBudgetTokens})`);
   assert(breadth.fallbackBudgetTokens > steady.fallbackBudgetTokens,
@@ -92,7 +92,7 @@ console.log('\n── Scenario 4: warmup widens moderately, less than /new ─�
   const { breadth: surge } = recallFor({ explicitNewSession: true, userTurnCount: 0, pressureFraction: 0 });
   const { policy, breadth } = recallFor({ userTurnCount: 3, pressureFraction: 0.20 });
   assert(policy.band === 'warmup', `band warmup (got ${policy.band})`);
-  assert(policy.smartRecallMultiplier === 1.25, 'warmup multiplier=1.25');
+  assert(policy.smartRecallMultiplier === 1.4, 'warmup multiplier=1.4');
   assert(breadth.mainBudgetTokens > Math.floor(BASE_REMAINING * 0.12),
     'warmup widens main recall budget vs steady');
   assert(breadth.mainBudgetTokens < surge.mainBudgetTokens,

@@ -16,6 +16,8 @@ HyperMem diagnostics are split into operator CLIs, validation scripts, and runti
 | Version parity | `npm run validate:version-parity` | package versions and plugin dependencies are release-aligned |
 | Release path | `npm run validate:release-path` | build plus plugin pipeline gateway path |
 | Docs/config validation | `npm run validate:docs && npm run validate:config` | documented commands and config surfaces match code |
+| History query validation | `npm run validate:history-query` | `MessageStore.queryHistory()`, `history_query` plugin tool, metadata-only telemetry, and health JSON surface are wired |
+| Fresh-install smoke gate | `npm run release:install-smoke` | packed npm artifact installs without source fallback, no-Ollama failure is clear, skip-mode stages, existing config is preserved, and failure artifacts are captured |
 
 ## `hypermem-status`
 
@@ -34,6 +36,8 @@ hypermem-status --master
 hypermem-status --agent forge --master
 hypermem-status --json
 ```
+
+`hypermem-status --master --json` includes `querySurfaces.historyQuery`, which proves the built core API, memory-plugin tool registration, telemetry hook, and message-store schema are present. A missing item degrades master health with `history.query surface incomplete`. It also includes `config.recallSurface`, which reports whether the active install has the 0.9.4 recall-surface config: turn budget, protected warming, shaped warmup decay, adjacency boost, and literal antecedent guard. A partial match surfaces as `0.9.4 recall-surface config incomplete`, which usually means an older preserved config needs review after upgrade.
 
 Healthy fresh install behavior may include empty counts or `no sessions ingested`. That is not a failure. A fresh install becomes active only after the gateway loads the plugins and an agent turn runs.
 
@@ -70,6 +74,58 @@ hypermem-bench --iterations 1000 --warmup 50 --data-dir /path/to/hypermem
 It reports min, average, p50, p95, p99, and max latency for the data paths present in that install, including message hot-path lookups, session/conversation lookup, message FTS, facts, episodes, topics, fleet records, and doc chunks.
 
 Use this for local validation of README speed claims. Results depend on hardware, database size, selected agent, and which optional surfaces are enabled. Vector embedding generation and hosted reranker latency are not part of these SQLite access timings; they are configured separately and should be measured against the chosen provider.
+
+## Fresh-install smoke artifacts
+
+Release validation uses the packed artifact path, not a repo symlink:
+
+```bash
+npm run release:install-smoke
+```
+
+The smoke gate verifies these installer failure classes before public release:
+
+- install from packed npm artifact with no source checkout mounted
+- no-Ollama/no-tools class fails with actionable remediation instead of silently staging a degraded semantic-recall install
+- `--skip-embedding-check` stages successfully for CI/container practice
+- existing `~/.openclaw/hypermem/config.json` is preserved unchanged
+- executable bins are present in the staged runtime
+
+On failure, artifacts are preserved under `.artifacts/fresh-install-smoke/<run-id>/`. Inspect `metadata.txt`, `fresh-install-smoke.stdout.log`, `fresh-install-smoke.stderr.log`, `npm-pack.log`, `container-tmp-files.txt`, `container-tmp-tree.txt`, installer stdout/stderr captures, generated configs, and package metadata before rerunning. Do not debug installer failures from terminal scrollback alone. That is how the same rake gets stepped on twice.
+
+## Recall-surface diagnostics
+
+0.9.4 added health checks for the recall-preservation surface. Use both tools:
+
+```bash
+hypermem-doctor --fix-plan
+hypermem-status --master --json
+```
+
+Expected active config:
+
+- `compositor.turnBudget.budgetFraction = 0.6`
+- `compositor.turnBudget.minContextFraction = 0.18`
+- `compositor.warming.protectedFloorEnabled = true`
+- `compositor.warming.shapedWarmupDecay = true`
+- `compositor.adjacency.enabled = true`
+- `compositor.adjacency.boostMultiplier = 1.3`
+- `compositor.adjacency.maxLookback = 5`
+- `compositor.adjacency.maxClockDeltaMin = 10`
+- `compositor.adjacency.evictionGuardMessages = 3`
+- `compositor.adjacency.evictionGuardTokenCap = 4000`
+
+The deterministic release tests are:
+
+```bash
+node test/adaptive-recall-breadth.mjs
+node test/afterturn-protected-floor.mjs
+node test/afterturn-stability.mjs
+node test/hybrid-retrieval.mjs
+node test/compositor.mjs
+```
+
+These prove the warmed context floor, shaped warmup, adjacency boost, heartbeat/system suppression, and literal antecedent guard.
 
 ## Runtime logs
 
@@ -198,8 +254,39 @@ npm run validate:version-parity
 npm run validate:docs
 npm run validate:config
 npm run validate:release-path
+npm run validate:history-query
+npm run release:install-smoke
 npm test
 hypermem-model-audit --strict || true
 ```
 
 The local repo may not be the active OpenClaw runtime, so `hypermem-status` and `hypermem-model-audit` should be interpreted against the configured deployment. For package release proof, the required gates are version parity, docs/config validation, release path, tests, and pack dry runs.
+
+
+### Production-shaped runtime validation
+
+HyperMem development validation must install the packed package into OpenClaw's managed plugin directory before claiming a runtime fix is live. Do not rely on a repo symlink, global npm link, or copied `dist/` files as production evidence.
+
+Required loop:
+
+```bash
+npm run build:all
+npm pack
+node scripts/install-packed-runtime.mjs ./psiclawops-hypermem-<version>.tgz
+systemctl --user restart openclaw-gateway
+node bin/hypermem-status.mjs --master
+```
+
+The health check must verify the managed install at `~/.openclaw/plugins/hypermem`, not the working tree.
+
+### Referenced-noise maintenance debt
+
+`hypermem-status --master` reports referenced-noise debt under `## Maintenance`. This is low-signal message content that cannot be deleted by ordinary noise sweep because it is still a foreign-key target, usually through `messages.parent_id`.
+
+Operators can run the conservative repair path:
+
+```bash
+node bin/hypermem-status.mjs --master --repair-referenced-noise --repair-limit 100
+```
+
+The repair only collapses noise nodes blocked solely by `messages.parent_id`. It reparents children to the deleted node's parent, decrements subtree depth, and rolls back the whole batch if `PRAGMA foreign_key_check` reports any violation. Context and composition snapshot heads are detected but not repaired by this pass.

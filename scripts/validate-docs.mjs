@@ -231,6 +231,80 @@ if (pkg.files) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// 9. Release docs and 0.9.4 install-health surface stay aligned
+//    WHY: 0.9.4 changed the installer, default config, and health surfaces in
+//    one release. Docs must not regress to pre-0.9.4 tuning or planned/spec language.
+// ---------------------------------------------------------------------------
+
+const roadmapDoc = `docs/ROADMAP${'.md'}`;
+const roadmap = read(roadmapDoc);
+const tuning = read('docs/TUNING.md');
+const diagnostics = read('docs/DIAGNOSTICS.md');
+const defaultConfig = JSON.parse(read('assets/default-config.json'));
+
+if (changelog && pkg.version) {
+  const versionHeadingMatches = [...changelog.matchAll(new RegExp(`^##\\s+${pkg.version}\\b`, 'gm'))];
+  if (versionHeadingMatches.length !== 1) {
+    fail('release-doc-duplicate-version', `CHANGELOG.md should have exactly one ${pkg.version} heading, found ${versionHeadingMatches.length}`);
+  }
+  if (/^##\s+[^\n]*Unreleased/im.test(changelog)) {
+    fail('release-doc-unreleased-heading', 'CHANGELOG.md still contains an Unreleased release heading');
+  }
+}
+
+if (roadmap && pkg.version === '0.9.4') {
+  if (/0\.9\.4[^\n]*(PLANNED|specs\/)/i.test(roadmap) || /Recall surface hardening \(0\.9\.4\).*PLANNED/i.test(roadmap)) {
+    fail('roadmap-stale-094', `${roadmapDoc} still frames 0.9.4 as planned or spec-backed instead of publication-gate-ready`);
+  }
+}
+
+if (tuning) {
+  const requiredTuningTerms = [
+    'protectedFloorEnabled',
+    'shapedWarmupDecay',
+    'boostMultiplier',
+    'evictionGuardTokenCap',
+    'turnBudget',
+  ];
+  for (const term of requiredTuningTerms) {
+    if (!tuning.includes(term)) fail('tuning-094-surface', `docs/TUNING.md does not document ${term}`);
+  }
+}
+
+if (diagnostics) {
+  const requiredDiagnosticTerms = [
+    'release:install-smoke',
+    'artifact',
+    'history.query',
+    'referenced-noise',
+    'recall-surface config',
+  ];
+  for (const term of requiredDiagnosticTerms) {
+    if (!diagnostics.includes(term)) fail('diagnostics-094-surface', `docs/DIAGNOSTICS.md does not document ${term}`);
+  }
+}
+
+if (defaultConfig?.compositor) {
+  const c = defaultConfig.compositor;
+  const expectedDefaultConfig = [
+    ['turnBudget.budgetFraction', c.turnBudget?.budgetFraction, 0.6],
+    ['turnBudget.minContextFraction', c.turnBudget?.minContextFraction, 0.18],
+    ['warming.protectedFloorEnabled', c.warming?.protectedFloorEnabled, true],
+    ['warming.shapedWarmupDecay', c.warming?.shapedWarmupDecay, true],
+    ['adjacency.enabled', c.adjacency?.enabled, true],
+    ['adjacency.boostMultiplier', c.adjacency?.boostMultiplier, 1.3],
+    ['adjacency.maxLookback', c.adjacency?.maxLookback, 5],
+    ['adjacency.maxClockDeltaMin', c.adjacency?.maxClockDeltaMin, 10],
+    ['adjacency.evictionGuardMessages', c.adjacency?.evictionGuardMessages, 3],
+    ['adjacency.evictionGuardTokenCap', c.adjacency?.evictionGuardTokenCap, 4000],
+  ];
+  for (const [key, actual, expected] of expectedDefaultConfig) {
+    if (actual !== expected) fail('default-config-094-surface', `assets/default-config.json ${key}=${JSON.stringify(actual)} expected ${JSON.stringify(expected)}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Output
 // ---------------------------------------------------------------------------

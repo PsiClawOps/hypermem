@@ -6,7 +6,7 @@
  * This is the write-through layer: Redis → here.
  */
 import type { DatabaseSync } from 'node:sqlite';
-import type { NeutralMessage, StoredMessage, Conversation, ChannelType, ConversationStatus, RecentTurn, ArchivedMiningQuery, ArchivedMiningResult, MultiContextMiningOptions } from './types.js';
+import type { NeutralMessage, StoredMessage, Conversation, ChannelType, ConversationStatus, RecentTurn, ArchivedMiningQuery, ArchivedMiningResult, MultiContextMiningOptions, HistoryQuery, HistoryQueryResult, HistoryQueryMode } from './types.js';
 export declare class MessageStore {
     private readonly db;
     constructor(db: DatabaseSync);
@@ -57,6 +57,15 @@ export declare class MessageStore {
      * Get recent messages for a conversation.
      */
     getRecentMessages(conversationId: number, limit?: number, minMessageId?: number): StoredMessage[];
+    /**
+     * Get recent human-readable transcript messages for continuity guards.
+     *
+     * Tool-call/tool-result carrier rows are valid runtime messages, but they often
+     * have empty text_content. They must not consume the small "recent turns" depth
+     * used by transcript recovery and fork warming, or a dense tool loop can push
+     * the immediate conversational antecedent out of the selected window.
+     */
+    getRecentMeaningfulMessages(conversationId: number, limit?: number, minMessageId?: number): StoredMessage[];
     /**
      * Get recent messages scoped to a topic (P3.4, Option B).
      * Returns messages matching the topic_id OR with topic_id IS NULL
@@ -173,6 +182,58 @@ export declare class MessageStore {
      * explicitly non-active (archived/forked) contexts.
      */
     mineArchivedContexts(contextIds: number[], opts?: MultiContextMiningOptions): ArchivedMiningResult<StoredMessage[]>[];
+    /**
+     * Per-mode hard caps and default limits for queryHistory.
+     * No mode may return more than its hard cap regardless of what the caller requests.
+     */
+    static readonly HISTORY_QUERY_CAPS: Record<HistoryQueryMode, {
+        defaultLimit: number;
+        hardCap: number;
+    }>;
+    /**
+     * Apply per-mode hard caps to a caller-supplied limit.
+     * Returns [effectiveLimit, wasClamped].
+     *
+     * SQLite treats LIMIT -1 as unlimited, so never pass caller input through
+     * directly. Non-finite, zero, and negative limits fall back to the default.
+     */
+    private capHistoryLimit;
+    /**
+     * Resolve conversation id from either a provided conversationId or a sessionKey lookup.
+     * Returns null when neither is available or the conversation cannot be found.
+     */
+    private resolveConversationScope;
+    /**
+     * Format a StoredMessage into the HistoryQueryMessage wire shape.
+     * contextId is passed explicitly when available from the query context.
+     */
+    private formatHistoryMessage;
+    /**
+     * Redact tool payloads for tool_events mode when includeToolPayloads is false (default).
+     *
+     * Redaction replaces raw arguments/content with metadata-only stubs.
+     * This prevents accidental leakage of secrets or large payloads.
+     */
+    private redactToolEvents;
+    /**
+     * Unified read-only message history query surface (HyperMem 0.9.4).
+     *
+     * Routes to a mode-specific safe SQL path. No general SQL execution.
+     * All modes are capped, parameterized, and compaction-fence-aware where applicable.
+     *
+     * Modes:
+     *   runtime_chain   — full runtime rows (tool-bearing) via DAG chain or recency.
+     *   transcript_tail — nonblank user/assistant text rows only (tool fields null).
+     *   tool_events     — rows with tool calls or results; payloads redacted by default.
+     *   by_topic        — runtime rows scoped to one topic.
+     *   by_context      — runtime rows scoped to one context; active default, archived/forked with includeArchived.
+     *   cross_session   — transcript rows across all conversations for one agent; per-conversation fence enforced.
+     */
+    queryHistory(query: HistoryQuery): HistoryQueryResult;
+    /**
+     * Get a conversation by id (internal use by queryHistory).
+     */
+    private getConversationById;
     /**
      * Infer channel type from session key format.
      */

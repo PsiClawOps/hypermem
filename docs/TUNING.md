@@ -1,6 +1,6 @@
 # hypermem Tuning Guide
 
-Configuration reference for operators and agents. All settings are optional. The recommended install path writes a starter `config.json` with an explicit lightweight embedding choice and a declarative baseline compositor profile. Tune from that verified baseline, not from guesswork.
+Configuration reference for operators and agents. All settings are optional. The recommended install path writes a starter `config.json` with the 0.9.4 recall-friendly standard profile: local Ollama embeddings by default, protected warming, adjacency preservation, and conservative turn budgeting. Tune from that verified baseline, not from guesswork.
 
 Config lives in `~/.openclaw/hypermem/config.json` (takes effect on gateway restart) or is passed programmatically via `HyperMem.create()`:
 
@@ -114,13 +114,38 @@ Estimated context per turn: **12–35k tokens** on a 200k model (lower on smalle
 
 ### Standard setup
 
-The default out-of-the-box configuration. All memory layers active with balanced caps. Good for most single-agent deployments.
+The default out-of-the-box configuration. All memory layers are active with 0.9.4 recall preservation turned on. Good for most single-agent deployments and the right baseline for external install testing.
 
 ```json
 {
+  "embedding": {
+    "provider": "ollama",
+    "model": "nomic-embed-text",
+    "dims": 768,
+    "dimensions": 768,
+    "ollamaUrl": "http://localhost:11434"
+  },
   "compositor": {
-    "budgetFraction": 0.703,
+    "turnBudget": {
+      "budgetFraction": 0.6,
+      "minContextFraction": 0.18
+    },
+    "warming": {
+      "protectedFloorEnabled": true,
+      "shapedWarmupDecay": true
+    },
+    "adjacency": {
+      "enabled": true,
+      "boostMultiplier": 1.3,
+      "maxLookback": 5,
+      "maxClockDeltaMin": 10,
+      "evictionGuardMessages": 3,
+      "evictionGuardTokenCap": 4000
+    },
+    "budgetFraction": 0.6,
     "contextWindowReserve": 0.25,
+    "targetBudgetFraction": 0.5,
+    "warmHistoryBudgetFraction": 0.45,
     "maxFacts": 28,
     "maxHistoryMessages": 250,
     "maxCrossSessionContext": 0,
@@ -129,13 +154,29 @@ The default out-of-the-box configuration. All memory layers active with balanced
     "hyperformProfile": "standard"
   },
   "indexer": {
+    "enabled": true,
     "factExtractionMode": "tiered",
     "periodicInterval": 300000
   }
 }
 ```
 
-Estimated context per turn: **35–80k tokens** on a 200k model. This is what ships if you don't touch the config.
+Estimated context per turn: **35–80k tokens** on a 200k model. This is what `hypermem-install` writes when no existing config is present. Existing config files are preserved, so run `hypermem-doctor --fix-plan` after upgrades to see whether older installs are missing the 0.9.4 recall-surface knobs.
+
+### 0.9.4 recall preservation knobs
+
+These settings prevent the regression class that motivated 0.9.4: the direct antecedent or topic-bearing warm context being trimmed away while the system still had enough usable budget.
+
+| Knob | Default | What it protects | Health signal |
+|---|---:|---|---|
+| `compositor.turnBudget.budgetFraction` | `0.6` | Keeps the active turn budget below the old over-warming posture | `hypermem-status --master` recall surface line |
+| `compositor.turnBudget.minContextFraction` | `0.18` | Guarantees a minimum context allocation on constrained windows | `hypermem-doctor --fix-plan` |
+| `compositor.warming.protectedFloorEnabled` | `true` | Prevents afterTurn trim from evicting bootstrap/warmup floor content before elevated pressure | `node test/afterturn-protected-floor.mjs` |
+| `compositor.warming.shapedWarmupDecay` | `true` | Uses topic-bearing turn count instead of blind fixed-turn decay | `node test/adaptive-lifecycle.mjs` |
+| `compositor.adjacency.enabled` | `true` | Boosts recent antecedents during fused retrieval | `node test/hybrid-retrieval.mjs` |
+| `compositor.adjacency.evictionGuardTokenCap` | `4000` | Caps the literal antecedent guard so it cannot consume the whole budget | `node test/compositor.mjs` |
+
+Do not tune these off to save tokens until you have evidence. Lower `maxFacts`, `maxCrossSessionContext`, or wiki caps first. Disabling adjacency or protected warming is a correctness trade, not a cost preset.
 
 ### Full performance setup
 

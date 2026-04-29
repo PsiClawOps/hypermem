@@ -631,6 +631,23 @@ export class HyperMem {
         return store.mineArchivedContexts(contextIds, opts);
     }
     /**
+     * Read-only, capped, mode-dispatched message history query (HyperMem 0.9.4).
+     *
+     * Routes to MessageStore.queryHistory which owns all history SQL.
+     * No general SQL execution, no bypass of compaction fences.
+     *
+     * Plugin surface: preferred shape is history.query action in the OpenClaw plugin tool
+     * surface. The SDK currently only exposes registerContextEngine and registerMemoryCapability,
+     * so no plugin tool action is registered in this release. Blocker: no api.registerTool
+     * or equivalent action-routing surface in definePluginEntry. This method is the
+     * public API; agents can call it directly via HyperMem.queryHistory().
+     */
+    queryHistory(query) {
+        const db = this.dbManager.getMessageDb(query.agentId);
+        const store = new MessageStore(db);
+        return store.queryHistory(query);
+    }
+    /**
      * Warm a session from SQLite into Redis.
      */
     async warm(agentId, sessionKey, opts) {

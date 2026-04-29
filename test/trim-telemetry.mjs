@@ -126,6 +126,19 @@ async function run() {
   T.trimTelemetry({ path: 'assemble.toolLoop', agentId, sessionKey: sk,
     preTokens: 70000, postTokens: 50000, removed: 10, cacheInvalidated: true, reason: 'toolLoop' });
 
+  // Packet 3: afterTurn protected warming telemetry is metadata only.
+  T.lifecyclePolicyTelemetry({
+    path: 'afterTurn.gradient',
+    agentId,
+    sessionKey: sk,
+    band: 'warmup',
+    pressurePct: 42,
+    trimSoftTarget: 0.68,
+    protectedWarmingFloorFraction: 0.34,
+    protectedSlotsKept: 1,
+    reasons: ['band:warmup', 'pressure:42%'],
+  });
+
   // Give the append stream a tick to flush.
   T.reset();
   await new Promise(r => setTimeout(r, 50));
@@ -137,7 +150,15 @@ async function run() {
   assert(events.length >= 3 /*assembleTraces*/ + 9 /*trims*/, `event count >= 12 (got ${events.length})`);
   const trimEvents = events.filter(e => e.event === 'trim');
   const assembleEvents = events.filter(e => e.event === 'assemble');
+  const lifecycleEvents = events.filter(e => e.event === 'lifecycle-policy');
   assert(assembleEvents.length === 3, `3 assembleTrace events emitted (got ${assembleEvents.length})`);
+  const protectedWarmTelemetry = lifecycleEvents.find(e => e.path === 'afterTurn.gradient');
+  assert(protectedWarmTelemetry?.protectedSlotsKept === 1,
+    `afterTurn protected warming telemetry reports kept slot count metadata (got ${protectedWarmTelemetry?.protectedSlotsKept})`);
+  assert(protectedWarmTelemetry?.protectedWarmingFloorFraction === 0.34,
+    `afterTurn protected warming telemetry reports floor fraction metadata (got ${protectedWarmTelemetry?.protectedWarmingFloorFraction})`);
+  assert(!/What is the|governance constraints|release policy|Turn 1 user|tool result/.test(JSON.stringify(protectedWarmTelemetry)),
+    'afterTurn protected warming telemetry remains metadata-only, with no message content');
 
   // Required fields on every trim event
   const requiredTrimFields = ['event', 'ts', 'path', 'agentId', 'sessionKey',

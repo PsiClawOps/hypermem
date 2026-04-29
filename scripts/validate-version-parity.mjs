@@ -17,6 +17,7 @@ function fail(msg) {
 
 const rootPkg = readJson('package.json');
 const rootVersion = rootPkg.version;
+const acceptedCoreDependencyVersions = new Set([rootVersion, `^${rootVersion}`]);
 
 for (const rel of ['plugin/package.json', 'memory-plugin/package.json']) {
   const pkg = readJson(rel);
@@ -24,8 +25,8 @@ for (const rel of ['plugin/package.json', 'memory-plugin/package.json']) {
     fail(`${rel} version ${pkg.version} != root package.json ${rootVersion}`);
   }
   const depVersion = pkg.dependencies?.['@psiclawops/hypermem'];
-  if (depVersion && depVersion != rootVersion) {
-    fail(`${rel} dependency @psiclawops/hypermem ${depVersion} != root package.json ${rootVersion}`);
+  if (depVersion && !acceptedCoreDependencyVersions.has(depVersion)) {
+    fail(`${rel} dependency @psiclawops/hypermem ${depVersion} is not compatible with root package.json ${rootVersion}`);
   }
 }
 
@@ -40,8 +41,8 @@ for (const rel of ['package-lock.json', 'plugin/package-lock.json', 'memory-plug
     fail(`${rel} packages[""] version ${rootPkgEntry.version} != root package.json ${rootVersion}`);
   }
   const depVersion = rootPkgEntry?.dependencies?.['@psiclawops/hypermem'];
-  if (depVersion && !depVersion.startsWith('file:') && depVersion != rootVersion) {
-    fail(`${rel} packages[""].dependencies.@psiclawops/hypermem ${depVersion} != root package.json ${rootVersion}`);
+  if (depVersion && !depVersion.startsWith('file:') && !acceptedCoreDependencyVersions.has(depVersion)) {
+    fail(`${rel} packages[""].dependencies.@psiclawops/hypermem ${depVersion} is not compatible with root package.json ${rootVersion}`);
   }
 }
 

@@ -257,6 +257,139 @@ async function run() {
   });
   assert(limited.length <= 2, `Limit enforced (got ${limited.length})`);
 
+
+  // ── Adjacency-Aware Fusion Boost ──
+  console.log('\n── Adjacency-Aware Fusion Boost ──');
+
+  function addIndexedFact(content, domain, sourceMessageId, createdAt) {
+    const result = libDb.prepare(`
+      INSERT INTO facts (agent_id, scope, domain, content, confidence, visibility,
+        source_type, source_ref, created_at, updated_at, decay_score)
+      VALUES (?, 'agent', ?, ?, 1.0, 'org', 'indexer', ?, ?, ?, 0.0)
+    `).run(agentId, domain, content, `msg:${sourceMessageId}`, createdAt, createdAt);
+    return Number(result.lastInsertRowid);
+  }
+
+  function fakeVectorStore(results) {
+    return {
+      search: async () => results,
+    };
+  }
+
+  function vectorFact(sourceId, content, domain, rankDistance = 0.2) {
+    return {
+      sourceTable: 'facts',
+      sourceId,
+      content,
+      domain,
+      agentId,
+      distance: rankDistance,
+    };
+  }
+
+  const t0 = '2026-04-28T10:00:00.000Z';
+  const t2m = '2026-04-28T10:02:00.000Z';
+  const t11m = '2026-04-28T10:11:00.000Z';
+
+  const antecedentContent = 'adjacencyboost shared antecedent context alpha';
+  const successorContent = 'adjacencyboost shared successor target beta';
+  const antecedentId = addIndexedFact(antecedentContent, 'infrastructure', 100, t0);
+  const successorId = addIndexedFact(successorContent, 'infrastructure', 103, t2m);
+
+  const adjacencyResults = await hybridSearch(
+    libDb,
+    fakeVectorStore([
+      vectorFact(successorId, successorContent, 'infrastructure', 0.1),
+      vectorFact(antecedentId, antecedentContent, 'infrastructure', 0.2),
+    ]),
+    'adjacencyboost shared',
+    { agentId, tables: ['facts'], limit: 5 }
+  );
+  assert(
+    adjacencyResults[0]?.sourceId === antecedentId,
+    'Adjacent antecedent receives bounded boost inside fused ranking'
+  );
+
+  const farAntecedentContent = 'deltaboost shared antecedent context alpha';
+  const farSuccessorContent = 'deltaboost shared successor target beta';
+  const farDistractorContent = 'deltaboost vector-only distractor';
+  const farAntecedentId = addIndexedFact(farAntecedentContent, 'infrastructure', 200, t0);
+  const farSuccessorId = addIndexedFact(farSuccessorContent, 'infrastructure', 203, t11m);
+  const farDistractorId = addIndexedFact(farDistractorContent, 'infrastructure', 900, t0);
+
+  const farResults = await hybridSearch(
+    libDb,
+    fakeVectorStore([
+      vectorFact(farSuccessorId, farSuccessorContent, 'infrastructure', 0.1),
+      vectorFact(farDistractorId, farDistractorContent, 'infrastructure', 0.2),
+      vectorFact(farAntecedentId, farAntecedentContent, 'infrastructure', 0.3),
+    ]),
+    'deltaboost shared',
+    { agentId, tables: ['facts'], limit: 5 }
+  );
+  assert(
+    farResults.findIndex(r => r.sourceId === farSuccessorId) < farResults.findIndex(r => r.sourceId === farAntecedentId),
+    'Adjacency boost suppressed beyond 10 minute clock delta'
+  );
+
+  const heartbeatContent = 'heartbeatcase packetadjacency HEARTBEAT_OK';
+  const heartbeatSuccessorContent = 'heartbeatcase packetadjacency legitimate successor';
+  const heartbeatDistractorContent = 'heartbeatcase vector-only distractor';
+  const heartbeatId = addIndexedFact(heartbeatContent, 'heartbeat', 300, t0);
+  const heartbeatSuccessorId = addIndexedFact(heartbeatSuccessorContent, 'operations', 303, t2m);
+  const heartbeatDistractorId = addIndexedFact(heartbeatDistractorContent, 'operations', 901, t0);
+
+  const heartbeatResults = await hybridSearch(
+    libDb,
+    fakeVectorStore([
+      vectorFact(heartbeatSuccessorId, heartbeatSuccessorContent, 'operations', 0.1),
+      vectorFact(heartbeatDistractorId, heartbeatDistractorContent, 'operations', 0.2),
+      vectorFact(heartbeatId, heartbeatContent, 'heartbeat', 0.3),
+    ]),
+    'heartbeatcase packetadjacency',
+    { agentId, tables: ['facts'], limit: 5 }
+  );
+  assert(
+    heartbeatResults.findIndex(r => r.sourceId === heartbeatSuccessorId) < heartbeatResults.findIndex(r => r.sourceId === heartbeatId),
+    'Heartbeat and HEARTBEAT_OK traffic is suppressed from adjacency boosting'
+  );
+
+  const systemContent = '[system] systemcase packetadjacency control frame';
+  const systemSuccessorContent = 'systemcase packetadjacency legitimate successor';
+  const systemDistractorContent = 'systemcase vector-only distractor';
+  const systemId = addIndexedFact(systemContent, 'system', 400, t0);
+  const systemSuccessorId = addIndexedFact(systemSuccessorContent, 'operations', 403, t2m);
+  const systemDistractorId = addIndexedFact(systemDistractorContent, 'operations', 902, t0);
+
+  const systemResults = await hybridSearch(
+    libDb,
+    fakeVectorStore([
+      vectorFact(systemSuccessorId, systemSuccessorContent, 'operations', 0.1),
+      vectorFact(systemDistractorId, systemDistractorContent, 'operations', 0.2),
+      vectorFact(systemId, systemContent, 'system', 0.3),
+    ]),
+    'systemcase packetadjacency',
+    { agentId, tables: ['facts'], limit: 5 }
+  );
+  assert(
+    systemResults.findIndex(r => r.sourceId === systemSuccessorId) < systemResults.findIndex(r => r.sourceId === systemId),
+    'System traffic is suppressed from adjacency boosting'
+  );
+
+  const stableResults = await hybridSearch(
+    libDb,
+    fakeVectorStore([
+      vectorFact(9901, 'stable tie first', 'test', 0.5),
+      vectorFact(9902, 'stable tie second', 'test', 0.5),
+    ]),
+    'the is a an',
+    { agentId, tables: ['facts'], limit: 2 }
+  );
+  assert(
+    stableResults[0]?.sourceId === 9901 && stableResults[1]?.sourceId === 9902,
+    'Stable ordering preserved when scores tie and no boost applies'
+  );
+
   // ── Cleanup ──
   console.log('\n── Cleanup ──');
   hm.close();

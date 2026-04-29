@@ -151,6 +151,68 @@ async function run() {
   assert(allContent.includes('drift detection'), 'User messages in history');
   assert(allContent.includes('four-layer architecture'), 'Assistant messages in history');
 
+  // ── Test 1b: Meaningful transcript tail survives blank carrier rows ──
+  console.log('\n── Continuity Guard: blank carrier rows do not evict transcript tail ──');
+
+  msgDb.prepare(`
+    INSERT INTO messages (conversation_id, agent_id, role, text_content, message_index, is_heartbeat, created_at)
+    VALUES (?, ?, 'assistant', ?, 6, 0, datetime('now'))
+  `).run(convId, agentId, 'Sprint B Packet B1 is doctor + bench staging. Ask before launch.');
+
+  for (let i = 7; i < 70; i++) {
+    msgDb.prepare(`
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, message_index, is_heartbeat, created_at)
+      VALUES (?, ?, ?, NULL, ?, ?, ?, 0, datetime('now'))
+    `).run(
+      convId,
+      agentId,
+      i % 2 === 0 ? 'assistant' : 'user',
+      i % 3 === 0 ? JSON.stringify([{ id: `call-${i}`, name: 'exec', arguments: '{}' }]) : null,
+      i % 3 === 1 ? JSON.stringify([{ callId: `call-${i - 1}`, name: 'exec', content: 'ok' }]) : null,
+      i,
+    );
+  }
+
+  msgDb.prepare(`
+    INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, message_index, is_heartbeat, created_at)
+    VALUES (?, ?, 'assistant', ?, ?, 70, 0, datetime('now'))
+  `).run(
+    convId,
+    agentId,
+    'I can launch Sprint B Packet B1 after confirmation.',
+    JSON.stringify([{ id: 'call-70', name: 'exec', arguments: '{}' }]),
+  );
+
+  const { MessageStore } = await import('../dist/message-store.js');
+  const messageStore = new MessageStore(msgDb);
+  const meaningfulTail = messageStore.getRecentMeaningfulMessages(convId, 2);
+  assert(meaningfulTail[meaningfulTail.length - 1].toolCalls === null,
+    'Continuity transcript projection strips tool calls from mixed rows');
+
+  const continuityResult = await compositor.compose({
+    agentId,
+    sessionKey,
+    tokenBudget: 50000,
+    provider: 'anthropic',
+    model: 'claude-opus-4-6',
+    includeHistory: true,
+    includeFacts: false,
+    includeLibrary: false,
+    includeContext: false,
+    includeSemanticRecall: false,
+    includeKeystones: false,
+    historyDepth: 10,
+    prompt: 'Launch B1.',
+  }, msgDb, libDb);
+
+  const continuityContent = continuityResult.messages.map(m => {
+    if (typeof m.content === 'string') return m.content;
+    if (Array.isArray(m.content)) return m.content.map(c => c.text || '').join(' ');
+    return '';
+  }).join(' ');
+  assert(continuityContent.includes('Sprint B Packet B1 is doctor + bench staging'),
+    'Immediate meaningful antecedent survives blank carrier rows');
+
   // ── Test 2: Token budget enforcement ──
   console.log('\n── Token Budget Enforcement ──');
 
@@ -1216,6 +1278,56 @@ ${repeated}`;
       `Aggregate trigger cap: capped below uncapped potential (${triggerBudgetResult.slots.library} < ${uncappedTriggerTokens})`);
   }
 
+  // ── Slot scope: cross-session context excludes tool/blank carriers ──
+  console.log('\n── Slot scope: cross-session context excludes tool/blank carriers ──');
+  {
+    const currentScopedSession = 'agent:slot-scope-current:webchat:main';
+    const otherScopedSession = 'agent:slot-scope-other:webchat:main';
+    msgDb.prepare(`
+      INSERT INTO conversations (session_key, session_id, agent_id, channel_type, status, message_count, token_count_in, token_count_out, created_at, updated_at)
+      VALUES (?, 'sess-slot-scope-current', ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+    `).run(currentScopedSession, agentId);
+    msgDb.prepare(`
+      INSERT INTO conversations (session_key, session_id, agent_id, channel_type, status, message_count, token_count_in, token_count_out, created_at, updated_at)
+      VALUES (?, 'sess-slot-scope-other', ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+    `).run(otherScopedSession, agentId);
+    const otherConv = msgDb.prepare('SELECT id FROM conversations WHERE session_key = ?').get(otherScopedSession);
+    msgDb.prepare(`
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_calls, tool_results, message_index, is_heartbeat, created_at)
+      VALUES (?, ?, 'tool', 'TOOL_GARBAGE_SHOULD_NOT_APPEAR', NULL, ?, 1, 0, datetime('now'))
+    `).run(otherConv.id, agentId, JSON.stringify([{ content: 'structured result' }]));
+    msgDb.prepare(`
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, message_index, is_heartbeat, created_at)
+      VALUES (?, ?, 'assistant', '   ', 2, 0, datetime('now'))
+    `).run(otherConv.id, agentId);
+    msgDb.prepare(`
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, message_index, is_heartbeat, created_at)
+      VALUES (?, ?, 'assistant', 'VALID_CROSS_SESSION_PREVIEW survives scoped query', 3, 0, '2999-01-01 00:00:00')
+    `).run(otherConv.id, agentId);
+
+    const scopedResult = await compositor.compose({
+      agentId,
+      sessionKey: currentScopedSession,
+      tokenBudget: 50000,
+      provider: 'anthropic',
+      model: 'claude-opus-4-6',
+      includeHistory: false,
+      includeFacts: false,
+      includeLibrary: false,
+      includeContext: true,
+      includeSemanticRecall: false,
+      includeDocChunks: false,
+      includeKeystones: false,
+      prompt: 'Check other sessions.',
+    }, msgDb, libDb);
+
+    const scopedText = scopedResult.messages.map(m => m.textContent || m.content || '').join('\n');
+    assert(scopedText.includes('VALID_CROSS_SESSION_PREVIEW'),
+      'Cross-session context includes meaningful user/assistant transcript rows');
+    assert(!scopedText.includes('TOOL_GARBAGE_SHOULD_NOT_APPEAR'),
+      'Cross-session context excludes tool carrier rows even when text_content is populated');
+  }
+
   // ── Budget-pressure filtering (Phase 1 fixture) ──
   console.log('\n── Budget-pressure filtering ──');
   {
@@ -1240,6 +1352,140 @@ ${repeated}`;
       'Budget-pressure: messages is an array');
     assert(pressureResult.diagnostics !== undefined,
       'Budget-pressure: diagnostics present');
+  }
+
+  // ── Packet 5: literal antecedent guard ──
+  console.log('\n── Packet 5: Literal antecedent guard ──');
+  {
+    const antecedentSessionKey = 'agent:literal-antecedent:webchat:main';
+    msgDb.prepare(`
+      INSERT INTO conversations (session_key, session_id, agent_id, channel_type, status, message_count, token_count_in, token_count_out, created_at, updated_at)
+      VALUES (?, 'sess-literal-antecedent', ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+    `).run(antecedentSessionKey, agentId);
+
+    const conv = msgDb.prepare('SELECT id FROM conversations WHERE session_key = ?').get(antecedentSessionKey);
+    const convId = conv.id;
+    const antecedentPrefix = 'ANTECEDENT_947_BEGIN:';
+    const antecedentSuffix = ':ANTECEDENT_947_END';
+    const antecedent = antecedentPrefix
+      + 'A'.repeat(947 - antecedentPrefix.length - antecedentSuffix.length)
+      + antecedentSuffix;
+    assert(antecedent.length === 947, `Packet 5: antecedent fixture is 947 chars (got ${antecedent.length})`);
+
+    const composePressureUser = 'Replay the immediately previous literal antecedent exactly.\n'
+      + 'PRESSURE_TOKEN '.repeat(30_000); // ~100k+ estimated tokens at char/4.
+    const insertAntecedentMsg = msgDb.prepare(`
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, tool_results, message_index, is_heartbeat, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
+    `);
+    insertAntecedentMsg.run(convId, agentId, 'assistant', antecedent, null, 1);
+    // Empty tool_results keeps this synthetic pressure turn out of artifact degradation
+    // without adding content telemetry or provider-visible payload.
+    insertAntecedentMsg.run(convId, agentId, 'user', composePressureUser, JSON.stringify([]), 2);
+
+    const guardedResult = await compositor.compose({
+      agentId,
+      sessionKey: antecedentSessionKey,
+      tokenBudget: 140000,
+      provider: 'anthropic',
+      model: 'claude-opus-4-6',
+      includeHistory: true,
+      includeFacts: false,
+      includeLibrary: false,
+      includeContext: false,
+      includeDocChunks: false,
+      includeSemanticRecall: false,
+      skipWindowCache: true,
+    }, msgDb, libDb);
+    const guardedContent = guardedResult.messages.map(m => {
+      if (typeof m.content === 'string') return m.content;
+      if (Array.isArray(m.content)) return m.content.map(c => c.text || '').join(' ');
+      return m.textContent || '';
+    }).join(' ');
+    assert(guardedContent.includes(antecedent), 'Packet 5: 947-char immediate antecedent survives 100k+ token compose pressure');
+    assert(guardedResult.diagnostics.literalAntecedentGuardHits === 1,
+      `Packet 5: guard hit count emitted without content (got ${guardedResult.diagnostics.literalAntecedentGuardHits})`);
+
+    const criticalResult = await compositor.compose({
+      agentId,
+      sessionKey: antecedentSessionKey,
+      tokenBudget: 100000,
+      provider: 'anthropic',
+      model: 'claude-opus-4-6',
+      includeHistory: true,
+      includeFacts: false,
+      includeLibrary: false,
+      includeContext: false,
+      includeDocChunks: false,
+      includeSemanticRecall: false,
+      skipWindowCache: true,
+    }, msgDb, libDb);
+    const criticalContent = criticalResult.messages.map(m => {
+      if (typeof m.content === 'string') return m.content;
+      if (Array.isArray(m.content)) return m.content.map(c => c.text || '').join(' ');
+      return m.textContent || '';
+    }).join(' ');
+    assert(criticalResult.diagnostics.adaptiveEvictionLifecycleBand === 'critical',
+      `Packet 5: critical fixture reached critical pressure (got ${criticalResult.diagnostics.adaptiveEvictionLifecycleBand})`);
+    assert(!criticalContent.includes(antecedent), 'Packet 5: antecedent guard suspends at critical pressure');
+    assert(criticalResult.diagnostics.literalAntecedentGuardHits === undefined,
+      'Packet 5: critical suspension emits no guard hit');
+
+    const virtualPromptSessionKey = 'agent:literal-antecedent-virtual-prompt:webchat:main';
+    msgDb.prepare(`
+      INSERT INTO conversations (session_key, session_id, agent_id, channel_type, status, message_count, token_count_in, token_count_out, created_at, updated_at)
+      VALUES (?, 'sess-literal-antecedent-virtual-prompt', ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+    `).run(virtualPromptSessionKey, agentId);
+
+    const virtualConv = msgDb.prepare('SELECT id FROM conversations WHERE session_key = ?').get(virtualPromptSessionKey);
+    const virtualConvId = virtualConv.id;
+    const virtualAntecedentPrefix = 'VIRTUAL_PROMPT_ANTECEDENT_947_BEGIN:';
+    const virtualAntecedentSuffix = ':VIRTUAL_PROMPT_ANTECEDENT_947_END';
+    const virtualAntecedent = virtualAntecedentPrefix
+      + 'B'.repeat(947 - virtualAntecedentPrefix.length - virtualAntecedentSuffix.length)
+      + virtualAntecedentSuffix;
+    assert(virtualAntecedent.length === 947,
+      `Packet 5: virtual-prompt antecedent fixture is 947 chars (got ${virtualAntecedent.length})`);
+
+    msgDb.prepare(`
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, message_index, is_heartbeat, created_at)
+      VALUES (?, ?, 'assistant', ?, 1, 0, datetime('now'))
+    `).run(virtualConvId, agentId, virtualAntecedent);
+    await hm.cache.setSlot(
+      agentId,
+      virtualPromptSessionKey,
+      'system',
+      'SYSTEM_OVERFLOW_FOR_REQUEST_PROMPT_PATH '.repeat(340),
+    );
+
+    const virtualPrompt = 'Replay the immediately previous assistant literal antecedent exactly. '
+      + 'PRESSURE_TOKEN '.repeat(30_000);
+    const virtualPromptResult = await compositor.compose({
+      agentId,
+      sessionKey: virtualPromptSessionKey,
+      tokenBudget: 1000,
+      provider: 'anthropic',
+      model: 'claude-opus-4-6',
+      prompt: virtualPrompt,
+      includeHistory: true,
+      includeFacts: false,
+      includeLibrary: false,
+      includeContext: false,
+      includeDocChunks: false,
+      includeSemanticRecall: false,
+      skipWindowCache: true,
+    }, msgDb, libDb);
+    const virtualPromptContent = virtualPromptResult.messages.map(m => {
+      if (typeof m.content === 'string') return m.content;
+      if (Array.isArray(m.content)) return m.content.map(c => c.text || '').join(' ');
+      return m.textContent || '';
+    }).join(' ');
+    assert(virtualPromptResult.diagnostics.adaptiveEvictionLifecycleBand !== 'critical',
+      `Packet 5: virtual prompt fixture stays below critical pressure (got ${virtualPromptResult.diagnostics.adaptiveEvictionLifecycleBand})`);
+    assert(virtualPromptContent.includes(virtualAntecedent),
+      'Packet 5: assistant-ending history antecedent survives overflow when current pressure prompt is request.prompt only');
+    assert((virtualPromptResult.diagnostics.literalAntecedentGuardHits ?? 0) > 0,
+      'Packet 5: virtual prompt guard emits count-only hit telemetry');
   }
 
   // ── C1: budget_cluster_drop telemetry ──
@@ -1300,6 +1546,75 @@ ${repeated}`;
     assert(clusterDropResult.warnings.some(w => w.includes('budget_cluster_drop')),
       `C1 budget_cluster_drop: warning includes reason (got [${clusterDropResult.warnings.join(', ')}])`);
   }
+
+
+  // ── Packet 2: persisted topic-bearing count drives lifecycle bands ──
+  console.log('\n── Packet 2: Persisted Topic-Bearing Count Lifecycle ──');
+
+  const persistedTopicSessionKey = 'agent:alice:webchat:persisted-topic-bearing';
+  msgDb.prepare(`
+    INSERT INTO conversations (session_key, session_id, agent_id, channel_type, status, message_count, token_count_in, token_count_out, created_at, updated_at)
+    VALUES (?, 'sess-persisted-topic-bearing', ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+  `).run(persistedTopicSessionKey, agentId);
+  const persistedConv = msgDb.prepare('SELECT id FROM conversations WHERE session_key = ?').get(persistedTopicSessionKey);
+  const persistedConvId = persistedConv.id;
+  const insertLifecycleMsg = msgDb.prepare(`
+    INSERT INTO messages (conversation_id, agent_id, role, text_content, message_index, is_heartbeat, created_at)
+    VALUES (?, ?, ?, ?, ?, 0, datetime('now'))
+  `);
+  insertLifecycleMsg.run(persistedConvId, agentId, 'user', 'Can you inspect the deployment architecture?', 1);
+  insertLifecycleMsg.run(persistedConvId, agentId, 'assistant', 'Yes.', 2);
+  insertLifecycleMsg.run(persistedConvId, agentId, 'user', 'What fails when Redis is unavailable?', 3);
+  await hm.cache.setSlot(agentId, persistedTopicSessionKey, 'topicBearingTurnCount', '12');
+
+  const persistedTopicResult = await compositor.compose({
+    agentId,
+    sessionKey: persistedTopicSessionKey,
+    tokenBudget: 50000,
+    provider: 'anthropic',
+    model: 'claude-opus-4-6',
+    includeHistory: true,
+    includeFacts: false,
+    includeLibrary: false,
+    includeContext: false,
+    includeDocChunks: false,
+    skipWindowCache: true,
+  }, msgDb, libDb);
+
+  assert(persistedTopicResult.diagnostics.adaptiveLifecycleBand === 'steady',
+    `Persisted topicBearingTurnCount=12 wins over bounded recompute and graduates to steady (got ${persistedTopicResult.diagnostics.adaptiveLifecycleBand})`);
+  assert(!persistedTopicResult.diagnostics.adaptiveLifecycleReasons?.some(r => r === 'topic-bearing:2'),
+    `Persisted topic-bearing count prevents bounded topic-bearing:2 reason (got ${persistedTopicResult.diagnostics.adaptiveLifecycleReasons?.join(', ')})`);
+
+  const fallbackTopicSessionKey = 'agent:alice:webchat:fallback-topic-bearing';
+  msgDb.prepare(`
+    INSERT INTO conversations (session_key, session_id, agent_id, channel_type, status, message_count, token_count_in, token_count_out, created_at, updated_at)
+    VALUES (?, 'sess-fallback-topic-bearing', ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+  `).run(fallbackTopicSessionKey, agentId);
+  const fallbackConv = msgDb.prepare('SELECT id FROM conversations WHERE session_key = ?').get(fallbackTopicSessionKey);
+  const fallbackConvId = fallbackConv.id;
+  insertLifecycleMsg.run(fallbackConvId, agentId, 'user', 'Can you review this deployment plan?', 1);
+  insertLifecycleMsg.run(fallbackConvId, agentId, 'assistant', 'Yes.', 2);
+  insertLifecycleMsg.run(fallbackConvId, agentId, 'user', 'What observability should it have?', 3);
+
+  const fallbackTopicResult = await compositor.compose({
+    agentId,
+    sessionKey: fallbackTopicSessionKey,
+    tokenBudget: 50000,
+    provider: 'anthropic',
+    model: 'claude-opus-4-6',
+    includeHistory: true,
+    includeFacts: false,
+    includeLibrary: false,
+    includeContext: false,
+    includeDocChunks: false,
+    skipWindowCache: true,
+  }, msgDb, libDb);
+
+  assert(fallbackTopicResult.diagnostics.adaptiveLifecycleBand === 'warmup',
+    `Absent persisted topicBearingTurnCount falls back to recompute and stays warmup (got ${fallbackTopicResult.diagnostics.adaptiveLifecycleBand})`);
+  assert(fallbackTopicResult.diagnostics.adaptiveLifecycleReasons?.includes('topic-bearing:2'),
+    `Fallback recompute records topic-bearing:2 reason (got ${fallbackTopicResult.diagnostics.adaptiveLifecycleReasons?.join(', ')})`);
 
   await runCachePrefixStabilitySuite(assert);
 

@@ -25,6 +25,19 @@ const goodConfig = {
           contextWindowOverrides: {
             'openai-codex/gpt-5.4': { contextTokens: 128000, contextWindow: 128000 },
           },
+          embedding: { provider: 'ollama', model: 'nomic-embed-text', dims: 768, dimensions: 768 },
+          compositor: {
+            turnBudget: { budgetFraction: 0.6, minContextFraction: 0.18 },
+            warming: { protectedFloorEnabled: true, shapedWarmupDecay: true },
+            adjacency: {
+              enabled: true,
+              boostMultiplier: 1.3,
+              maxLookback: 5,
+              maxClockDeltaMin: 10,
+              evictionGuardMessages: 3,
+              evictionGuardTokenCap: 4000,
+            },
+          },
         },
       },
     },

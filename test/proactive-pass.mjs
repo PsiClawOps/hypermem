@@ -6,7 +6,7 @@
  */
 
 import { HyperMem } from '../dist/index.js';
-import { runNoiseSweep, runToolDecay } from '../dist/proactive-pass.js';
+import { collectReferencedNoiseDebt, runNoiseSweep, runToolDecay, runTreeSafeNoiseCompaction } from '../dist/proactive-pass.js';
 import { BackgroundIndexer } from '../dist/background-indexer.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -206,6 +206,210 @@ async function testNoiseSweep() {
 
   assert(result.messagesDeleted === 6, `messagesDeleted = 6 (got ${result.messagesDeleted})`);
   assert(countMessages(db, convId) === 195, `195 messages remain after sweep (got ${countMessages(db, convId)})`);  
+}
+
+
+async function testNoiseSweepSkipsAllMessageFkReferences() {
+  console.log('\n── Noise Sweep FK Safety ──\n');
+
+  const agentId = 'proactive-fk-test';
+  const db = hm.dbManager.getMessageDb(agentId);
+  const sessionKey = 'agent:proactive-fk-test:webchat:main';
+
+  db.prepare(`
+    INSERT INTO conversations
+      (session_key, agent_id, channel_type, status, message_count,
+       token_count_in, token_count_out, created_at, updated_at)
+    VALUES (?, ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+  `).run(sessionKey, agentId);
+
+  const convId = db.prepare('SELECT id FROM conversations WHERE session_key = ?').get(sessionKey).id;
+  seedConversation(db, convId, agentId);
+
+  const byIndex = (idx) => db
+    .prepare('SELECT id FROM messages WHERE conversation_id = ? AND message_index = ?')
+    .get(convId, idx).id;
+
+  const ids = {
+    summary: byIndex(0),
+    parent: byIndex(1),
+    artifact: byIndex(2),
+    context: byIndex(3),
+    snapshot: byIndex(4),
+    unreferenced: byIndex(5),
+  };
+
+  db.prepare(`
+    INSERT INTO summaries (conversation_id, agent_id, depth, content, created_at, updated_at)
+    VALUES (?, ?, 0, 'summary', datetime('now'), datetime('now'))
+  `).run(convId, agentId);
+  const summaryId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+  db.prepare('INSERT INTO summary_messages (summary_id, message_id) VALUES (?, ?)')
+    .run(summaryId, ids.summary);
+
+  db.prepare(`
+    INSERT INTO messages
+      (conversation_id, agent_id, role, text_content, message_index, parent_id, is_heartbeat, created_at)
+    VALUES (?, ?, 'assistant', 'child referencing ack parent', 201, ?, 0, datetime('now'))
+  `).run(convId, agentId, ids.parent);
+
+  db.prepare(`
+    INSERT INTO tool_artifacts
+      (id, content_hash, agent_id, session_key, conversation_id, message_id, tool_name,
+       content_type, size_bytes, token_estimate, payload, created_at, last_used_at)
+    VALUES ('artifact-fk-test', 'hash', ?, ?, ?, ?, 'exec', 'text/plain', 4, 1, 'test', datetime('now'), datetime('now'))
+  `).run(agentId, sessionKey, convId, ids.artifact);
+
+  db.prepare(`
+    INSERT INTO contexts
+      (agent_id, session_key, conversation_id, head_message_id, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'active', datetime('now'), datetime('now'))
+  `).run(agentId, sessionKey, convId, ids.context);
+  const contextId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+
+  db.prepare(`
+    INSERT INTO composition_snapshots
+      (context_id, head_message_id, captured_at, model, context_window, total_tokens,
+       fill_pct, snapshot_kind, repair_depth, slots_json, slots_integrity_hash, created_at)
+    VALUES (?, ?, datetime('now'), 'test/model', 1000, 10, 0.01, 'full', 0, '{}', 'hash', datetime('now'))
+  `).run(contextId, ids.snapshot);
+
+  const result = runNoiseSweep(db, convId, 20, 6);
+
+  assert(result.messagesDeleted === 1, `Only unreferenced FK candidate deleted (got ${result.messagesDeleted})`);
+  assert(getMessageByIndex(db, convId, 0) !== undefined, 'summary_messages FK target preserved');
+  assert(getMessageByIndex(db, convId, 1) !== undefined, 'messages.parent_id FK target preserved');
+  assert(getMessageByIndex(db, convId, 2) !== undefined, 'tool_artifacts.message_id FK target preserved');
+  assert(getMessageByIndex(db, convId, 3) !== undefined, 'contexts.head_message_id FK target preserved');
+  assert(getMessageByIndex(db, convId, 4) !== undefined, 'composition_snapshots.head_message_id FK target preserved');
+  assert(getMessageByIndex(db, convId, 5) === undefined, 'unreferenced noise candidate deleted');
+
+  const fkRows = db.prepare('PRAGMA foreign_key_check').all();
+  assert(fkRows.length === 0, `No FK violations after noise sweep (got ${fkRows.length})`);
+}
+
+
+async function testReferencedNoiseDebtAndCompaction() {
+  console.log('\n── Referenced Noise Debt + Tree-Safe Compaction ──\n');
+
+  const agentId = 'proactive-tree-compact-test';
+  const db = hm.dbManager.getMessageDb(agentId);
+  const sessionKey = 'agent:proactive-tree-compact-test:webchat:main';
+
+  db.prepare(`
+    INSERT INTO conversations
+      (session_key, agent_id, channel_type, status, message_count,
+       token_count_in, token_count_out, created_at, updated_at)
+    VALUES (?, ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+  `).run(sessionKey, agentId);
+
+  const convId = db.prepare('SELECT id FROM conversations WHERE session_key = ?').get(sessionKey).id;
+  const insertMsg = db.prepare(`
+    INSERT INTO messages
+      (conversation_id, agent_id, role, text_content, message_index, parent_id, depth, is_heartbeat, created_at)
+    VALUES (?, ?, 'assistant', ?, ?, ?, ?, 0, datetime('now'))
+  `);
+
+  insertMsg.run(convId, agentId, 'normal root message', 0, null, 0);
+  const rootId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+  insertMsg.run(convId, agentId, 'ok', 1, rootId, 1);
+  const noiseId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+  insertMsg.run(convId, agentId, 'normal child message', 2, noiseId, 2);
+  const childId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+  for (let i = 3; i <= 12; i++) insertMsg.run(convId, agentId, `normal filler ${i}`, i, childId, 3);
+
+  const beforeDebt = collectReferencedNoiseDebt(db, convId, 2);
+  assert(beforeDebt.referencedNoise === 1, `Referenced noise detected before compaction (got ${beforeDebt.referencedNoise})`);
+  assert(beforeDebt.parentReferencedNoise === 1, `Parent-referenced noise detected before compaction (got ${beforeDebt.parentReferencedNoise})`);
+
+  const compact = runTreeSafeNoiseCompaction(db, convId, 2, 10);
+  assert(compact.deleted === 1, `Tree-safe compaction deleted one noise node (got ${compact.deleted})`);
+  assert(compact.reparented === 1, `Tree-safe compaction reparented one noise node (got ${compact.reparented})`);
+  assert(compact.fkCheck === 'none', `Tree-safe compaction FK check clean (${compact.fkCheck})`);
+
+  const child = db.prepare('SELECT parent_id, depth FROM messages WHERE id = ?').get(childId);
+  assert(child.parent_id === rootId, 'Child reparented to deleted noise node parent');
+  assert(child.depth === 1, `Child depth decremented after compaction (got ${child.depth})`);
+  assert(db.prepare('SELECT id FROM messages WHERE id = ?').get(noiseId) === undefined, 'Noise node deleted after reparent');
+
+  const afterDebt = collectReferencedNoiseDebt(db, convId, 2);
+  assert(afterDebt.referencedNoise === 0, `Referenced noise cleared after compaction (got ${afterDebt.referencedNoise})`);
+  const fkRows = db.prepare('PRAGMA foreign_key_check').all();
+  assert(fkRows.length === 0, `No FK violations after tree-safe compaction (got ${fkRows.length})`);
+}
+
+
+async function testReferencedNoiseCompactionRepairsContextAndSnapshotHeads() {
+  console.log('\n── Referenced Noise Context/Snapshot Head Repair ──\n');
+
+  const agentId = 'proactive-head-repair-test';
+  const db = hm.dbManager.getMessageDb(agentId);
+  const sessionKey = 'agent:proactive-head-repair-test:webchat:main';
+
+  db.prepare(`
+    INSERT INTO conversations
+      (session_key, agent_id, channel_type, status, message_count,
+       token_count_in, token_count_out, created_at, updated_at)
+    VALUES (?, ?, 'webchat', 'active', 0, 0, 0, datetime('now'), datetime('now'))
+  `).run(sessionKey, agentId);
+
+  const convId = db.prepare('SELECT id FROM conversations WHERE session_key = ?').get(sessionKey).id;
+  const insertMsg = db.prepare(`
+    INSERT INTO messages
+      (conversation_id, agent_id, role, text_content, message_index, parent_id, depth, is_heartbeat, created_at)
+    VALUES (?, ?, 'assistant', ?, ?, ?, ?, 0, datetime('now'))
+  `);
+
+  insertMsg.run(convId, agentId, 'normal root message', 0, null, 0);
+  const rootId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+  insertMsg.run(convId, agentId, 'ok', 1, rootId, 1);
+  const noiseId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+  insertMsg.run(convId, agentId, 'normal child message', 2, noiseId, 2);
+  const childId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+  for (let i = 3; i <= 12; i++) insertMsg.run(convId, agentId, `normal filler ${i}`, i, childId, 3);
+
+  db.prepare(`
+    INSERT INTO contexts
+      (agent_id, session_key, conversation_id, head_message_id, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'active', datetime('now'), datetime('now'))
+  `).run(agentId, sessionKey, convId, noiseId);
+  const contextId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+
+  db.prepare(`
+    INSERT INTO composition_snapshots
+      (context_id, head_message_id, captured_at, model, context_window, total_tokens,
+       fill_pct, snapshot_kind, repair_depth, slots_json, slots_integrity_hash, created_at)
+    VALUES (?, ?, datetime('now'), 'test/model', 1000, 10, 0.01, 'full', 0, '{}', 'hash', datetime('now'))
+  `).run(contextId, noiseId);
+
+  const beforeDebt = collectReferencedNoiseDebt(db, convId, 2);
+  assert(beforeDebt.referencedNoise === 1, `Referenced noise detected before head repair (got ${beforeDebt.referencedNoise})`);
+  assert(beforeDebt.parentReferencedNoise === 1, `Parent ref detected before head repair (got ${beforeDebt.parentReferencedNoise})`);
+  assert(beforeDebt.contextReferencedNoise === 1, `Context head ref detected before head repair (got ${beforeDebt.contextReferencedNoise})`);
+  assert(beforeDebt.snapshotReferencedNoise === 1, `Snapshot head ref detected before head repair (got ${beforeDebt.snapshotReferencedNoise})`);
+
+  const compact = runTreeSafeNoiseCompaction(db, convId, 2, 10);
+  assert(compact.deleted === 1, `Head repair compaction deleted one noise node (got ${compact.deleted})`);
+  assert(compact.reparented === 1, `Head repair compaction reparented child node (got ${compact.reparented})`);
+  assert(compact.repairedContextHeads === 1, `Context head repaired once (got ${compact.repairedContextHeads})`);
+  assert(compact.repairedSnapshotHeads === 1, `Snapshot head repaired once (got ${compact.repairedSnapshotHeads})`);
+  assert(compact.fkCheck === 'none', `Head repair compaction FK check clean (${compact.fkCheck})`);
+
+  const ctx = db.prepare('SELECT head_message_id FROM contexts WHERE id = ?').get(contextId);
+  assert(ctx.head_message_id === rootId, `Context head moved to parent root (got ${ctx.head_message_id})`);
+  const snap = db.prepare('SELECT head_message_id, repair_depth FROM composition_snapshots WHERE context_id = ?').get(contextId);
+  assert(snap.head_message_id === rootId, `Snapshot head moved to parent root (got ${snap.head_message_id})`);
+  assert(snap.repair_depth === 1, `Snapshot repair_depth incremented (got ${snap.repair_depth})`);
+
+  const child = db.prepare('SELECT parent_id, depth FROM messages WHERE id = ?').get(childId);
+  assert(child.parent_id === rootId, 'Child reparented to repaired head parent');
+  assert(child.depth === 1, `Child depth decremented after head repair (got ${child.depth})`);
+  assert(db.prepare('SELECT id FROM messages WHERE id = ?').get(noiseId) === undefined, 'Noise head deleted after repair');
+
+  const afterDebt = collectReferencedNoiseDebt(db, convId, 2);
+  assert(afterDebt.referencedNoise === 0, `Referenced noise cleared after head repair (got ${afterDebt.referencedNoise})`);
+  const fkRows = db.prepare('PRAGMA foreign_key_check').all();
+  assert(fkRows.length === 0, `No FK violations after head repair compaction (got ${fkRows.length})`);
 }
 
 // ─── Tool Decay Tests ────────────────────────────────────────────
@@ -421,6 +625,9 @@ console.log('══════════════════════�
 try {
   await setup();
   await testNoiseSweep();
+  await testNoiseSweepSkipsAllMessageFkReferences();
+  await testReferencedNoiseDebtAndCompaction();
+  await testReferencedNoiseCompactionRepairsContextAndSnapshotHeads();
   await testToolDecay();
   await testEdgeCases();
   await testIndexerIntegration();

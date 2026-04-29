@@ -18,6 +18,7 @@ import { definePluginEntry, emptyPluginConfigSchema } from 'openclaw/plugin-sdk/
 import { matchTriggers, TRIGGER_REGISTRY } from '@psiclawops/hypermem';
 import path from 'path';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
 // ─── HyperMem singleton ────────────────────────────────────────
@@ -283,6 +284,196 @@ function createMemorySearchManager(hm, agentId, workspaceDir) {
         },
     };
 }
+// ─── history.query agent tool ───────────────────────────────────
+const HISTORY_QUERY_MODES = [
+    'runtime_chain',
+    'transcript_tail',
+    'tool_events',
+    'by_topic',
+    'by_context',
+    'cross_session',
+];
+const HISTORY_QUERY_TOOL_PARAMETERS = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+        mode: {
+            type: 'string',
+            enum: HISTORY_QUERY_MODES,
+            description: 'History query mode. cross_session is scoped to the current agent by default.',
+        },
+        sessionKey: {
+            type: 'string',
+            description: 'Optional session key. Defaults to the active session when available.',
+        },
+        conversationId: {
+            type: 'number',
+            description: 'Optional direct conversation id. Must belong to the current agent.',
+        },
+        contextId: {
+            type: 'number',
+            description: 'Required for by_context mode. Must belong to the current agent.',
+        },
+        topicId: {
+            type: 'string',
+            description: 'Required for by_topic mode.',
+        },
+        limit: {
+            type: 'number',
+            description: 'Optional result limit. HyperMem clamps this to the hard cap for the selected mode.',
+        },
+        minMessageId: {
+            type: 'number',
+            description: 'Optional lower message id bound for supported modes.',
+        },
+        since: {
+            type: 'string',
+            description: 'Optional ISO timestamp lower bound for cross_session mode.',
+        },
+        includeArchived: {
+            type: 'boolean',
+            description: 'Allow archived/forked contexts for by_context mode.',
+        },
+        includeToolPayloads: {
+            type: 'boolean',
+            description: 'Return raw tool payloads for tool_events. Requires owner context; default is redacted.',
+        },
+    },
+    required: ['mode'],
+};
+function asRecord(value) {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value
+        : {};
+}
+function optionalString(params, key) {
+    const value = params[key];
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+function optionalNumber(params, key) {
+    const value = params[key];
+    if (typeof value !== 'number' || !Number.isFinite(value))
+        return undefined;
+    return value;
+}
+function optionalBoolean(params, key) {
+    return typeof params[key] === 'boolean' ? params[key] : undefined;
+}
+function isHistoryQueryMode(value) {
+    return typeof value === 'string' && HISTORY_QUERY_MODES.includes(value);
+}
+function historyQueryTelemetryEnabled() {
+    return process.env.HYPERMEM_TELEMETRY === '1';
+}
+function emitHistoryQueryTelemetry(event) {
+    if (!historyQueryTelemetryEnabled())
+        return;
+    const telemetryPath = process.env.HYPERMEM_TELEMETRY_PATH || './hypermem-telemetry.jsonl';
+    try {
+        fsSync.appendFileSync(telemetryPath, `${JSON.stringify(event)}\n`, 'utf8');
+    }
+    catch {
+        // Telemetry must never break the tool path.
+    }
+}
+function createHistoryQueryTool(ctx) {
+    return {
+        name: 'history_query',
+        label: 'history.query',
+        description: [
+            'Query HyperMem SQLite-backed message history for the current agent.',
+            'Use this when exact conversation state is needed instead of semantic recall.',
+            'Modes: runtime_chain, transcript_tail, tool_events, by_topic, by_context, cross_session.',
+            'Tool payloads are redacted by default; raw payloads require owner context.',
+        ].join(' '),
+        parameters: HISTORY_QUERY_TOOL_PARAMETERS,
+        displaySummary: 'Query HyperMem message history',
+        async execute(_toolCallId, rawParams) {
+            const started = Date.now();
+            const params = asRecord(rawParams);
+            const mode = params.mode;
+            const agentId = ctx.agentId || 'main';
+            const includeToolPayloads = optionalBoolean(params, 'includeToolPayloads') === true;
+            const baseTelemetry = {
+                ts: new Date().toISOString(),
+                agentId,
+                hasSessionKey: Boolean(optionalString(params, 'sessionKey') ?? ctx.sessionKey),
+                hasConversationId: optionalNumber(params, 'conversationId') !== undefined,
+                includeToolPayloads,
+            };
+            if (!isHistoryQueryMode(mode)) {
+                emitHistoryQueryTelemetry({
+                    event: 'history-query',
+                    status: 'error',
+                    ...baseTelemetry,
+                    durationMs: Date.now() - started,
+                    errorCode: 'invalid-mode',
+                });
+                throw new Error(`history.query: mode must be one of ${HISTORY_QUERY_MODES.join(', ')}`);
+            }
+            if (includeToolPayloads && !ctx.senderIsOwner) {
+                emitHistoryQueryTelemetry({
+                    event: 'history-query',
+                    status: 'error',
+                    mode,
+                    ...baseTelemetry,
+                    durationMs: Date.now() - started,
+                    errorCode: 'owner-required',
+                });
+                throw new Error('history.query: includeToolPayloads requires owner context');
+            }
+            const query = {
+                agentId,
+                mode,
+                sessionKey: optionalString(params, 'sessionKey') ?? ctx.sessionKey,
+                conversationId: optionalNumber(params, 'conversationId'),
+                contextId: optionalNumber(params, 'contextId'),
+                topicId: optionalString(params, 'topicId'),
+                limit: optionalNumber(params, 'limit'),
+                minMessageId: optionalNumber(params, 'minMessageId'),
+                since: optionalString(params, 'since'),
+                includeArchived: optionalBoolean(params, 'includeArchived'),
+                includeToolPayloads,
+            };
+            for (const [key, value] of Object.entries(query)) {
+                if (value === undefined)
+                    delete query[key];
+            }
+            try {
+                const hm = await getHyperMem();
+                const result = hm.queryHistory(query);
+                emitHistoryQueryTelemetry({
+                    event: 'history-query',
+                    status: 'ok',
+                    mode,
+                    ...baseTelemetry,
+                    messageCount: result.messages.length,
+                    truncated: Boolean(result.truncated),
+                    redacted: Boolean(result.redacted),
+                    durationMs: Date.now() - started,
+                });
+                const summary = `history.query ${mode}: ${result.messages.length} message(s)`
+                    + (result.truncated ? ' (truncated)' : '')
+                    + (result.redacted ? ' (redacted)' : '');
+                return {
+                    content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+                    details: { status: 'ok', summary, result },
+                };
+            }
+            catch (err) {
+                emitHistoryQueryTelemetry({
+                    event: 'history-query',
+                    status: 'error',
+                    mode,
+                    ...baseTelemetry,
+                    durationMs: Date.now() - started,
+                    errorCode: 'query-failed',
+                });
+                throw err;
+            }
+        },
+    };
+}
 // ─── Manager cache ──────────────────────────────────────────────
 // One manager per agentId; closed on plugin dispose.
 const _managers = new Map();
@@ -294,6 +485,7 @@ export default definePluginEntry({
     kind: 'memory',
     configSchema: emptyPluginConfigSchema(),
     register(api) {
+        api.registerTool((ctx) => createHistoryQueryTool(ctx), { name: 'history_query', optional: true });
         api.registerMemoryCapability({
             runtime: {
                 async getMemorySearchManager(params) {

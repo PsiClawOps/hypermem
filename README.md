@@ -386,7 +386,7 @@ Slot-level budget allocation is shown in the [hypercompositor diagram](#what-the
 
 ## Requirements
 
-**Current release: hypermem 0.9.2.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
+**Current release: hypermem 0.9.4.** Changelog: [CHANGELOG.md](./CHANGELOG.md)
 
 | Requirement | Version | Notes |
 |---|---|---|
@@ -398,7 +398,7 @@ SQLite is a library, not a service. All four layers run in-process with no exter
 **Runtime version constants** (importable from the package):
 ```typescript
 import {
-  ENGINE_VERSION,        // '0.9.2'
+  ENGINE_VERSION,        // '0.9.4'
   MIN_NODE_VERSION,      // '22.0.0'
   SQLITE_VEC_VERSION,    // '0.1.9'
   MAIN_SCHEMA_VERSION,   // 10 (messages.db)
@@ -423,7 +423,9 @@ npm install @psiclawops/hypermem
 npx hypermem-install
 ```
 
-`hypermem-install` stages the runtime payload into `~/.openclaw/plugins/hypermem`. It does **not** modify OpenClaw config and does **not** restart the gateway. HyperMem is active only after OpenClaw is wired, restarted, and compose activity appears in logs.
+`hypermem-install` stages the runtime payload into `~/.openclaw/plugins/hypermem` and creates `~/.openclaw/hypermem/config.json` only when it is missing. It does **not** modify OpenClaw config and does **not** restart the gateway. HyperMem is active only after OpenClaw is wired, restarted, and compose activity appears in logs.
+
+For production-shaped local validation, run `npm run install:runtime:packed` from the repo. It packs HyperMem, installs the tarball into a temporary app, and stages OpenClaw from that installed package. Avoid validating live gateway behavior from repo symlinks or copied working-tree files.
 
 Install states:
 
@@ -435,30 +437,7 @@ Install states:
 | Runtime loaded | gateway restarted and both plugins loaded |
 | Runtime active | logs show `hypermem initialized` and compose activity |
 
-Minimal starter config for lightweight FTS-only mode:
-
-```bash
-mkdir -p ~/.openclaw/hypermem
-cat > ~/.openclaw/hypermem/config.json <<'JSON'
-{
-  "embedding": { "provider": "none" },
-  "compositor": {
-    "budgetFraction": 0.55,
-    "contextWindowReserve": 0.25,
-    "targetBudgetFraction": 0.50,
-    "warmHistoryBudgetFraction": 0.27,
-    "maxFacts": 25,
-    "maxHistoryMessages": 500,
-    "maxCrossSessionContext": 4000,
-    "maxRecentToolPairs": 3,
-    "maxProseToolPairs": 10,
-    "keystoneHistoryFraction": 0.15,
-    "keystoneMaxMessages": 12,
-    "wikiTokenCap": 500
-  }
-}
-JSON
-```
+The installer writes the starter config for you when `~/.openclaw/hypermem/config.json` is missing. The default is recall-friendly standard mode with Ollama `nomic-embed-text`; if Ollama is not available, install it or run `npx hypermem-install --skip-embedding-check` for CI/container practice. To force lightweight FTS-only mode, pre-create `~/.openclaw/hypermem/config.json` with `{"embedding":{"provider":"none"}}` before running the installer.
 
 Then merge the staged plugin paths into OpenClaw config and set the slots:
 
@@ -480,7 +459,7 @@ hypermem-status --health
 hypermem-model-audit --strict
 ```
 
-`hypermem-doctor` is the confidence check: it validates plugin wiring, runtime load state, recommended OpenClaw settings such as `contextPruning.mode=off`, GPT-5 personality overlay off, startup/bootstrap injection sizing, compaction safety settings, HyperMem data files, and model context-window overrides for GPT/OpenAI-compatible/local gateways. It is read-only and prints a reviewable fix plan.
+`hypermem-doctor` is the confidence check: it validates plugin wiring, plugin registry refresh readiness, runtime load state, recommended OpenClaw settings such as `contextPruning.mode=off`, GPT-5 personality overlay off, startup/bootstrap injection sizing, compaction safety settings including `maxActiveTranscriptBytes` remaining unset for HyperMem-managed compaction, HyperMem data files, and model context-window overrides for GPT/OpenAI-compatible/local gateways. It is read-only and prints a reviewable fix plan.
 
 Full install, upgrade, source-clone, embedding provider, reranker, fleet config, and rollback guidance lives in **[INSTALL.md](./INSTALL.md)**.
 
@@ -574,9 +553,12 @@ hypermem-status --health
 hypermem-status --master
 hypermem-model-audit --strict
 hypermem-bench --iterations 1000 --warmup 50 --agent main
+# repo release validation:
+npm run release:install-smoke
+npm run validate:history-query
 ```
 
-Diagnostics and validation details: **[docs/DIAGNOSTICS.md](./docs/DIAGNOSTICS.md)** and **[docs/INTEGRATION_VALIDATION.md](./docs/INTEGRATION_VALIDATION.md)**.
+Diagnostics and validation details: **[docs/DIAGNOSTICS.md](./docs/DIAGNOSTICS.md)** and **[docs/INTEGRATION_VALIDATION.md](./docs/INTEGRATION_VALIDATION.md)**. The master health surface reports 0.9.4 recall-surface config completeness, history-query readiness, vector coverage, bounded maintenance debt, and referenced-noise repair status.
 
 ## Pressure management
 

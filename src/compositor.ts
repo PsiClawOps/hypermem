@@ -43,7 +43,7 @@ import { SessionTopicMap } from './session-topic-map.js';
 import { toProviderFormat, detectProvider as s4DetectProvider } from './provider-translator.js';
 import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
-import { hybridSearch, type HybridSearchResult, type RerankerTelemetry } from './hybrid-retrieval.js';
+import { hybridSearch, type HybridSearchResult, type RerankerTelemetry, type AdjacencyTelemetry } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence, getCompactionFence, getCompactionEligibility } from './compaction-fence.js';
 import { getActiveContext, getOrCreateActiveContext, type Context } from './context-store.js';
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
@@ -53,7 +53,7 @@ import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
 import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
 import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
-import { resolveAdaptiveLifecyclePolicy, type AdaptiveLifecyclePolicy } from './adaptive-lifecycle.js';
+import { resolveAdaptiveLifecyclePolicy, countTopicBearingTurns, type AdaptiveLifecyclePolicy } from './adaptive-lifecycle.js';
 import { formatToolChainStub, parseToolChainStub, formatArtifactRef, isArtifactRef, type ArtifactRef, type DegradationReason } from './degradation.js';
 import { ToolArtifactStore } from './tool-artifact-store.js';
 import {
@@ -79,6 +79,8 @@ export const OPENCLAW_BOOTSTRAP_FILES = new Set([
 ]);
 
 const CACHE_PREFIX_BOUNDARY_SLOT = 'cache-prefix-boundary';
+const LITERAL_ANTECEDENT_GUARD_MAX_MESSAGES = 3;
+const LITERAL_ANTECEDENT_GUARD_MAX_TOKENS = 4_000;
 
 /**
  * Model context window sizes by provider/model string (or partial match).
@@ -579,6 +581,45 @@ const TOOL_RECENT_OVERSIZE_TARGET_CHARS = 40_000;
 const TOOL_RECENT_OVERSIZE_MAX_TAIL_CHARS = 12_000;
 const TOOL_TRIM_NOTE_PREFIX = '[hypermem_tool_result_trim';
 
+// 0.9.4 Packet 3: afterTurn protected warming floor.
+// refreshRedisGradient only receives the resolved trim target, not the full
+// lifecycle policy. Keep this private and infer the early-session bands from
+// the canonical Packet 1 trim targets so no public API/export surface changes.
+// The floor is intentionally disabled once the lifecycle reaches elevated or
+// worse; pressure bands at/above elevated are allowed to reclaim warming.
+const AFTERTURN_PROTECTED_WARMING_ELEVATED_FLOOR_FRACTION = 0.34;
+const AFTERTURN_PROTECTED_WARMING_BOOTSTRAP_FLOOR_FRACTION = Math.max(
+  AFTERTURN_PROTECTED_WARMING_ELEVATED_FLOOR_FRACTION,
+  0.62 * 0.60,
+);
+const AFTERTURN_PROTECTED_WARMING_WARMUP_FLOOR_FRACTION = Math.max(
+  AFTERTURN_PROTECTED_WARMING_ELEVATED_FLOOR_FRACTION,
+  0.55 * 0.60,
+);
+const AFTERTURN_PROTECTED_WARMING_TRIM_EPSILON = 0.0001;
+
+function resolveAfterTurnProtectedWarmingFloor(
+  tokenBudget: number,
+  trimSoftTarget?: number,
+): { floorFraction: number; floorTokens: number; band: 'bootstrap' | 'warmup' | null } {
+  const safeBudget = Math.max(0, Math.floor(tokenBudget || 0));
+  if (safeBudget <= 0 || trimSoftTarget == null) {
+    return { floorFraction: 0, floorTokens: 0, band: null };
+  }
+
+  // Packet 1 trim targets: bootstrap=0.72, warmup=0.68. Steady=0.65 and
+  // elevated=0.60 do not get this protected floor.
+  if (Math.abs(trimSoftTarget - 0.72) <= AFTERTURN_PROTECTED_WARMING_TRIM_EPSILON) {
+    const floorFraction = AFTERTURN_PROTECTED_WARMING_BOOTSTRAP_FLOOR_FRACTION;
+    return { floorFraction, floorTokens: Math.floor(safeBudget * floorFraction), band: 'bootstrap' };
+  }
+  if (Math.abs(trimSoftTarget - 0.68) <= AFTERTURN_PROTECTED_WARMING_TRIM_EPSILON) {
+    const floorFraction = AFTERTURN_PROTECTED_WARMING_WARMUP_FLOOR_FRACTION;
+    return { floorFraction, floorTokens: Math.floor(safeBudget * floorFraction), band: 'warmup' };
+  }
+  return { floorFraction: 0, floorTokens: 0, band: null };
+}
+
 // ─── Trigger Registry ────────────────────────────────────────────
 // Moved to src/trigger-registry.ts (W5).
 // CollectionTrigger, DEFAULT_TRIGGERS, matchTriggers imported above.
@@ -633,6 +674,64 @@ function clusterNeutralMessages<T extends NeutralMessage>(messages: T[]): Neutra
   }
 
   return clusters;
+}
+
+function resolveLiteralAntecedentGuardClusterIndices<T extends NeutralMessage>(
+  clusters: NeutralMessageCluster<T>[],
+  opts: {
+    enabled: boolean;
+    currentPrompt?: string;
+    maxMessages?: number;
+    maxTokens?: number;
+  },
+): Set<number> {
+  const protectedIndices = new Set<number>();
+  const currentPrompt = opts.currentPrompt?.trim() ?? '';
+  if (!opts.enabled || clusters.length < (currentPrompt ? 1 : 2)) return protectedIndices;
+
+  let boundaryClusterIdx: number | undefined;
+  if (currentPrompt) {
+    for (let i = clusters.length - 1; i >= 0; i--) {
+      const containsCurrentPrompt = clusters[i].messages.some(msg =>
+        msg.role === 'user' && (msg.textContent ?? '').trim() === currentPrompt,
+      );
+      if (containsCurrentPrompt) {
+        boundaryClusterIdx = i;
+        break;
+      }
+    }
+    // In the plugin compose path the current prompt is often request.prompt and
+    // is appended after compose, so it has no persisted cluster yet. Treat the
+    // end of persisted history as the prompt boundary in that case.
+    if (boundaryClusterIdx == null) boundaryClusterIdx = clusters.length;
+  } else {
+    const latestClusterIdx = clusters.length - 1;
+    const latestCluster = clusters[latestClusterIdx];
+    if (!latestCluster.messages.some(msg => msg.role === 'user')) return protectedIndices;
+    boundaryClusterIdx = latestClusterIdx;
+  }
+
+  if (boundaryClusterIdx <= 0) return protectedIndices;
+
+  const maxMessages = Math.max(0, Math.floor(opts.maxMessages ?? LITERAL_ANTECEDENT_GUARD_MAX_MESSAGES));
+  const maxTokens = Math.max(0, Math.floor(opts.maxTokens ?? LITERAL_ANTECEDENT_GUARD_MAX_TOKENS));
+  if (maxMessages <= 0 || maxTokens <= 0) return protectedIndices;
+
+  let messageCount = 0;
+  let tokenCount = 0;
+  for (let i = boundaryClusterIdx - 1; i >= 0; i--) {
+    const cluster = clusters[i];
+    const nextMessageCount = messageCount + cluster.messages.length;
+    const nextTokenCount = tokenCount + cluster.tokenCost;
+    if (nextMessageCount > maxMessages) break;
+    if (nextTokenCount > maxTokens) break;
+    protectedIndices.add(i);
+    messageCount = nextMessageCount;
+    tokenCount = nextTokenCount;
+    if (messageCount >= maxMessages) break;
+  }
+
+  return protectedIndices;
 }
 
 
@@ -1321,6 +1420,15 @@ export function resolveArtifactOversizeThreshold(effectiveBudget: number): numbe
 
 function isExplicitNewSessionPrompt(prompt: string | null | undefined): boolean {
   return /^\/new(?:\s|$)/i.test((prompt ?? '').trim());
+}
+
+function parsePersistedTopicBearingTurnCount(raw: string | null): number | null {
+  if (raw == null) return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.floor(parsed);
 }
 
 /**
@@ -2012,6 +2120,15 @@ export class Compositor {
       PRESSURE_SOURCE.COMPOSE_PRE_RECALL,
     );
     let s09ObservedUserTurnCount = sampleMessages.filter(m => m.role === 'user').length;
+    let s09PersistedTopicBearingTurnCount: number | null = null;
+    try {
+      s09PersistedTopicBearingTurnCount = parsePersistedTopicBearingTurnCount(
+        await this.cache.getSlot(request.agentId, request.sessionKey, 'topicBearingTurnCount'),
+      );
+    } catch {
+      s09PersistedTopicBearingTurnCount = null;
+    }
+    let s09TopicBearingTurnCount = s09PersistedTopicBearingTurnCount ?? countTopicBearingTurns(sampleMessages);
     const s09ForkedContextSeed = request.forkedContext?.enabled ? request.forkedContext : undefined;
     const s09ForkedParentPressure = typeof s09ForkedContextSeed?.parentPressureFraction === 'number'
       && Number.isFinite(s09ForkedContextSeed.parentPressureFraction)
@@ -2025,6 +2142,7 @@ export class Compositor {
     const evictionLifecyclePolicy = resolveAdaptiveLifecyclePolicy({
       pressureFraction: s09EvictionPolicyPressure,
       userTurnCount: s09ObservedUserTurnCount,
+      topicBearingTurnCount: s09TopicBearingTurnCount,
       explicitNewSession: isExplicitNewSessionPrompt(
         request.prompt ?? null,
       ),
@@ -2193,6 +2311,9 @@ export class Compositor {
     // C1: total tool-chain degradation counters across history budget-fit and safety-valve passes.
     let c1CoEjections = 0;
     let c1StubReplacements = 0;
+    let literalAntecedentGuardHits = 0;
+    const literalAntecedentGuardMessages = new Set<NeutralMessage>();
+    const literalAntecedentGuardHitMessages = new Set<NeutralMessage>();
     // Hoisted: activeTopicId/name resolved inside history block, used for window dual-write (VS-1) and wiki page injection
     let composedActiveTopicId: string | undefined;
     let composedActiveTopicName: string | undefined;
@@ -2248,22 +2369,65 @@ export class Compositor {
         activeContext
       );
 
+      // Continuity guard: force a small tail of meaningful transcript rows into
+      // the candidate window before budget selection. Tool carrier rows can have
+      // empty text_content; in dense tool loops they can consume raw history depth
+      // and push the immediate conversational antecedent out of the selected
+      // window. The full tool stream still comes from getHistory(); this guard
+      // only repairs the human-readable transcript tail.
+      let continuityTail: StoredMessage[] = [];
+      try {
+        const conversation = store.getConversation(request.sessionKey);
+        if (conversation) {
+          continuityTail = store.getRecentMeaningfulMessages(conversation.id, 8, fenceMessageId);
+        }
+      } catch {
+        continuityTail = [];
+      }
+      const mergedRawHistory = continuityTail.length > 0
+        ? [...rawHistoryMessages, ...continuityTail].sort((a, b) => {
+            const ai = (a as StoredMessage).messageIndex ?? 0;
+            const bi = (b as StoredMessage).messageIndex ?? 0;
+            return ai - bi;
+          })
+        : rawHistoryMessages;
+
       // Deduplicate history by StoredMessage.id (second line of defense after
       // pushHistory() tail-check dedup). Guards against any duplicates that
       // slipped through the warm path — e.g. bootstrap re-runs on existing sessions.
-      const seenIds = new Set<number>();
-      const historyMessages = rawHistoryMessages.filter(m => {
+      // If the continuity transcript projection overlaps with full runtime
+      // history, prefer the full row. Transcript projections intentionally null
+      // tool_calls/tool_results and must never replace a tool-bearing history row.
+      const historyById = new Map<number, import('./types.js').StoredMessage>();
+      const historyMessagesNoId: NeutralMessage[] = [];
+      const rowScore = (m: import('./types.js').StoredMessage): number =>
+        (m.toolCalls != null ? 2 : 0) + (m.toolResults != null ? 2 : 0) + (m.textContent ? 1 : 0);
+      for (const m of mergedRawHistory) {
         const sm = m as import('./types.js').StoredMessage;
-        if (sm.id != null) {
-          if (seenIds.has(sm.id)) return false;
-          seenIds.add(sm.id);
+        if (sm.id == null) {
+          historyMessagesNoId.push(m);
+          continue;
         }
-        return true;
+        const existing = historyById.get(sm.id);
+        if (!existing || rowScore(sm) > rowScore(existing)) {
+          historyById.set(sm.id, sm);
+        }
+      }
+      const historyMessages = [...historyMessagesNoId, ...historyById.values()].sort((a, b) => {
+        const ai = (a as StoredMessage).messageIndex ?? 0;
+        const bi = (b as StoredMessage).messageIndex ?? 0;
+        return ai - bi;
       });
       s09ObservedUserTurnCount = Math.max(
         s09ObservedUserTurnCount,
         historyMessages.filter(m => m.role === 'user').length,
       );
+      if (s09PersistedTopicBearingTurnCount == null) {
+        s09TopicBearingTurnCount = Math.max(
+          s09TopicBearingTurnCount,
+          countTopicBearingTurns(historyMessages),
+        );
+      }
       composeTopicMessageCount = historyMessages.length;
       composeTopicStampedMessageCount = historyMessages.filter(m => typeof m.topicId === 'string').length;
 
@@ -2302,6 +2466,15 @@ export class Compositor {
       // drop inactive-topic non-tool clusters first when an active topic is
       // known. Bootstrap/warmup/steady reproduce the historical newest-first
       // sweep exactly (preferTopicAwareDrop=false → evictedByPlan stays empty).
+      const literalAntecedentGuardIndices = resolveLiteralAntecedentGuardClusterIndices(
+        budgetClusters,
+        {
+          enabled: evictionLifecyclePolicy.band !== 'critical',
+          currentPrompt: request.prompt,
+          maxMessages: LITERAL_ANTECEDENT_GUARD_MAX_MESSAGES,
+          maxTokens: LITERAL_ANTECEDENT_GUARD_MAX_TOKENS,
+        },
+      );
       const adaptiveOrdering = orderClustersForAdaptiveEviction(
         budgetClusters,
         evictionLifecyclePolicy,
@@ -2327,6 +2500,16 @@ export class Compositor {
         for (const idx of adaptiveOrdering.topicAwareDropOrder) {
           if (projectedTokens <= historyFillCap) break;
           if (adaptiveOrdering.protectedIndices.has(idx)) continue;
+          if (literalAntecedentGuardIndices.has(idx)) {
+            for (const msg of budgetClusters[idx].messages) {
+              literalAntecedentGuardMessages.add(msg);
+              if (!literalAntecedentGuardHitMessages.has(msg)) {
+                literalAntecedentGuardHitMessages.add(msg);
+                literalAntecedentGuardHits++;
+              }
+            }
+            continue;
+          }
           evictedByPlan.add(idx);
           projectedTokens -= budgetClusters[idx].tokenCost;
         }
@@ -2337,12 +2520,28 @@ export class Compositor {
       for (let i = budgetClusters.length - 1; i >= 0; i--) {
         if (evictedByPlan.has(i)) continue;
         const cluster = budgetClusters[i];
+        const isLiteralAntecedentGuarded = literalAntecedentGuardIndices.has(i);
         if (historyTokens + cluster.tokenCost > historyFillCap && includedClusters.length > 0) {
+          if (isLiteralAntecedentGuarded) {
+            includedClusters.unshift(cluster);
+            historyTokens += cluster.tokenCost;
+            for (const msg of cluster.messages) {
+              literalAntecedentGuardMessages.add(msg);
+              if (!literalAntecedentGuardHitMessages.has(msg)) {
+                literalAntecedentGuardHitMessages.add(msg);
+                literalAntecedentGuardHits++;
+              }
+            }
+            continue;
+          }
           truncationCutIndex = i;
           break;
         }
         includedClusters.unshift(cluster);
         historyTokens += cluster.tokenCost;
+        if (isLiteralAntecedentGuarded) {
+          for (const msg of cluster.messages) literalAntecedentGuardMessages.add(msg);
+        }
       }
 
       if (truncationCutIndex >= 0 || evictedByPlan.size > 0) {
@@ -2878,6 +3077,7 @@ export class Compositor {
     const composeLifecyclePolicy = resolveAdaptiveLifecyclePolicy({
       pressureFraction: s09ComposePolicyPressure,
       userTurnCount: s09ObservedUserTurnCount,
+      topicBearingTurnCount: s09TopicBearingTurnCount,
       explicitNewSession: isExplicitNewSessionPrompt(
         request.prompt ?? this.getLastUserMessage(messages),
       ),
@@ -2891,6 +3091,8 @@ export class Compositor {
     );
     let diagAdaptiveRecallBudgetTokens: number | undefined;
     let diagAdaptiveRecallCandidateLimit: number | undefined;
+    let diagComposeAdjacencyBoosted = 0;
+    let diagComposeAdjacencyDeltaTotalMs = 0;
 
     if (request.includeSemanticRecall !== false && remaining > 500 && (this.vectorStore || libDb)) {
       const lastUserMsg = request.prompt?.trim() || this.getLastUserMessage(messages);
@@ -2921,6 +3123,10 @@ export class Compositor {
               diagRerankerStatus = ev.status;
               diagRerankerCandidates = ev.candidates;
               diagRerankerProvider = ev.provider;
+            },
+            (ev: AdjacencyTelemetry) => {
+              diagComposeAdjacencyBoosted += ev.boostedCount;
+              diagComposeAdjacencyDeltaTotalMs += ev.averageDeltaMs * ev.boostedCount;
             },
             recallBreadth.candidateLimit,
           );
@@ -3103,6 +3309,7 @@ export class Compositor {
               libDb || undefined,
               undefined,
               contextFingerprints,  // C2: skip results already in Active Facts
+              undefined,
               undefined,
               recallBreadth.candidateLimit,
             ),
@@ -3312,6 +3519,15 @@ export class Compositor {
         while (i < messages.length && trimmed < overage) {
           // Don't trim the last user message (current prompt).
           if (i === messages.length - 1 && messages[i].role === 'user') break;
+          // Packet 5: preserve the bounded immediate antecedent for literal follow-ups.
+          if (literalAntecedentGuardMessages.has(messages[i])) {
+            if (!literalAntecedentGuardHitMessages.has(messages[i])) {
+              literalAntecedentGuardHitMessages.add(messages[i]);
+              literalAntecedentGuardHits++;
+            }
+            i++;
+            continue;
+          }
           // Sprint 4: Don't trim the volatile context block (dynamicBoundary marker).
           const meta = messages[i].metadata as Record<string, unknown> | undefined;
           if (meta?.dynamicBoundary) { i++; continue; }
@@ -3598,6 +3814,9 @@ export class Compositor {
       adaptiveSmartRecallMultiplier: composeLifecyclePolicy.smartRecallMultiplier,
       adaptiveTrimSoftTarget: composeLifecyclePolicy.trimSoftTarget,
       adaptiveCompactionTargetFraction: composeLifecyclePolicy.compactionTargetFraction,
+      adaptiveProtectedWarmingFraction: composeLifecyclePolicy.protectedWarmingMetadata.isProtected
+        ? composeLifecyclePolicy.protectedWarmingMetadata.floor
+        : undefined,
       adaptiveBreadcrumbPackage: composeLifecyclePolicy.emitBreadcrumbPackage,
       adaptiveTopicCentroidEviction: composeLifecyclePolicy.enableTopicCentroidEviction,
       adaptiveProactiveCompaction: composeLifecyclePolicy.triggerProactiveCompaction,
@@ -3611,6 +3830,11 @@ export class Compositor {
       adaptiveEvictionProtectedClusters,
       adaptiveEvictionTopicIdCoveragePct,
       adaptiveEvictionBypassReason,
+      composeAdjacencyBoosted: diagComposeAdjacencyBoosted > 0 ? diagComposeAdjacencyBoosted : undefined,
+      composeAdjacencyAverageDeltaMs: diagComposeAdjacencyBoosted > 0
+        ? Math.round(diagComposeAdjacencyDeltaTotalMs / diagComposeAdjacencyBoosted)
+        : undefined,
+      evictionAdjacencyGuardHits: literalAntecedentGuardHits > 0 ? literalAntecedentGuardHits : undefined,
       composeTopicSource,
       composeTopicState,
       composeTopicMessageCount,
@@ -3650,6 +3874,9 @@ export class Compositor {
       compactionEligibleRatio: diagCompactionEligibleRatio,
       compactionProcessedCount: diagCompactionProcessedCount,
     };
+    if (literalAntecedentGuardHits > 0) {
+      (diagnostics as import('./types.js').ComposeDiagnostics & { literalAntecedentGuardHits?: number }).literalAntecedentGuardHits = literalAntecedentGuardHits;
+    }
 
     if (pressureHigh) {
       warnings.push(`SESSION_PRESSURE_HIGH: avg_turn_cost=${avgTurnCost} tokens, dynamic reserve capped at ${Math.round(dynamicReserve * 100)}%`);
@@ -3770,7 +3997,7 @@ export class Compositor {
       console.warn(`[hypermem:compositor] composition snapshot write skipped: ${(error as Error).message}`);
     }
 
-    console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode} crossTopicKeystones=${diagCrossTopicKeystones} c2_degradations=${c2ArtifactDegradations} c2_threshold=${c2ArtifactThresholdTokens}`);
+    console.log(`[hypermem:compose] agent=${request.agentId} triggers=${diagTriggerHits} fallback=${diagTriggerFallbackUsed} facts=${diagFactsIncluded} semantic=${diagSemanticResults} chunks=${diagDocChunkCollections} scopeFiltered=${diagScopeFiltered} mode=${diagRetrievalMode} crossTopicKeystones=${diagCrossTopicKeystones} c2_degradations=${c2ArtifactDegradations} c2_threshold=${c2ArtifactThresholdTokens} literal_antecedent_guard_hits=${literalAntecedentGuardHits} adjacency_boosted=${diagComposeAdjacencyBoosted} adjacency_avg_delta_ms=${diagComposeAdjacencyBoosted > 0 ? Math.round(diagComposeAdjacencyDeltaTotalMs / diagComposeAdjacencyBoosted) : 0} eviction_adjacency_guard_hits=${literalAntecedentGuardHits}`);
     return {
       messages: outputMessages,
       tokenCount: totalTokens,
@@ -4072,22 +4299,35 @@ export class Compositor {
     let historyToWrite: NeutralMessage[] = transformedHistory;
     if (tokenBudget && tokenBudget > 0) {
       const budgetCap = gradientAssembleBudget;
+      const protectedFloor = resolveAfterTurnProtectedWarmingFloor(tokenBudget, trimSoftTarget);
       let runningTokens = 0;
+      let protectedClustersKept = 0;
       const clusters = clusterNeutralMessages(transformedHistory);
       const cappedClusters: NeutralMessageCluster<NeutralMessage>[] = [];
       // Walk newest-first, keep whole clusters so tool-call/result pairs survive together.
+      // Packet 3: during bootstrap/warmup, do not let cluster-boundary underfill
+      // cut the refreshed hot window below the protected warming floor. This may
+      // keep one or more whole older clusters past the soft cap, but only until
+      // the protected floor is satisfied. Elevated/high/critical bands get no
+      // floor, so the existing cap behavior remains intact under real pressure.
       for (let i = clusters.length - 1; i >= 0; i--) {
         const cluster = clusters[i];
-        if (runningTokens + cluster.tokenCost > budgetCap && cappedClusters.length > 0) break;
+        const wouldExceedCap = runningTokens + cluster.tokenCost > budgetCap && cappedClusters.length > 0;
+        const belowProtectedFloor = protectedFloor.floorTokens > 0 && runningTokens < protectedFloor.floorTokens;
+        if (wouldExceedCap && !belowProtectedFloor) break;
+        if (wouldExceedCap && belowProtectedFloor) protectedClustersKept++;
         cappedClusters.unshift(cluster);
         runningTokens += cluster.tokenCost;
-        if (runningTokens >= budgetCap) break;
+        if (runningTokens >= budgetCap && runningTokens >= protectedFloor.floorTokens) break;
       }
       historyToWrite = cappedClusters.flatMap(cluster => cluster.messages);
       if (historyToWrite.length < transformedHistory.length) {
+        const protectedNote = protectedFloor.floorTokens > 0
+          ? `, protectedFloor=${protectedFloor.floorTokens}, protectedClustersKept=${protectedClustersKept}`
+          : '';
         console.log(
           `[hypermem] refreshRedisGradient: cluster-capped ${transformedHistory.length}→${historyToWrite.length} messages ` +
-          `for ${agentId}/${sessionKey} (budgetCap=${budgetCap}, tokenCost=${runningTokens})`
+          `for ${agentId}/${sessionKey} (budgetCap=${budgetCap}, tokenCost=${runningTokens}${protectedNote})`
         );
       }
     }
@@ -4412,6 +4652,7 @@ export class Compositor {
     precomputedEmbedding?: Float32Array,
     existingFingerprints?: Set<string>,  // C2: skip results already in Active Facts
     onRerankerTelemetry?: (ev: RerankerTelemetry) => void,  // Sprint 1: surface reranker status at assemble level
+    onAdjacencyTelemetry?: (ev: AdjacencyTelemetry) => void,
     resultLimit?: number,  // 0.9.0: lifecycle-scaled candidate limit for hybrid + KNN-only fallback
   ): Promise<string | null> {
     const libDb = libraryDb || this.libraryDb;
@@ -4454,6 +4695,7 @@ export class Compositor {
         rerankerTopK: this.rerankerTopK,
         // Sprint 1: thread reranker telemetry into compose diagnostics
         onRerankerTelemetry,
+        onAdjacencyTelemetry,
       });
 
       if (results.length === 0) return null;
@@ -4586,9 +4828,6 @@ export class Compositor {
    * Build cross-session context by finding recent activity
    * in other sessions for this agent.
    */
-  // TODO Phase 1: buildCrossSessionContext queries OTHER conversations. Each has its
-  // own compaction fence. Per-conversation fence filtering should be added here so
-  // zombie messages from other sessions don't leak into cross-session context.
   private buildCrossSessionContext(
     agentId: string,
     currentSessionKey: string,
@@ -4606,10 +4845,14 @@ export class Compositor {
       SELECT m.text_content, m.role, c.channel_type, m.created_at
       FROM messages m
       JOIN conversations c ON m.conversation_id = c.id
+      LEFT JOIN compaction_fences cf ON cf.conversation_id = m.conversation_id
       WHERE c.agent_id = ?
       AND m.conversation_id != ?
       AND c.status = 'active'
+      AND (cf.fence_message_id IS NULL OR m.id >= cf.fence_message_id)
+      AND m.role IN ('user', 'assistant')
       AND m.text_content IS NOT NULL
+      AND trim(m.text_content) != ''
       AND m.is_heartbeat = 0
       ORDER BY m.created_at DESC
       LIMIT 10
@@ -4794,9 +5037,10 @@ export class Compositor {
           AND m.id < ?
           ${fenceClause}
           ${contextClause}
+          AND m.role IN ('user', 'assistant')
           AND m.text_content IS NOT NULL
+          AND trim(m.text_content) != ''
           AND m.is_heartbeat = 0
-          AND m.text_content != ''
         LIMIT 200
       `;
 
@@ -4827,9 +5071,10 @@ export class Compositor {
                 AND m.id < ?
                 ${fenceClause}
                 ${contextClause}
+                AND m.role IN ('user', 'assistant')
                 AND m.text_content IS NOT NULL
+                AND trim(m.text_content) != ''
                 AND m.is_heartbeat = 0
-                AND m.text_content != ''
                 AND m.id IN (
                   SELECT rowid FROM messages_fts
                   WHERE messages_fts MATCH ?
@@ -4993,8 +5238,9 @@ export class Compositor {
             AND m.topic_id = ?
             ${topicFenceClause}
             ${topicContextClause}
+            AND m.role IN ('user', 'assistant')
             AND m.text_content IS NOT NULL
-            AND m.text_content != ''
+            AND trim(m.text_content) != ''
             AND m.is_heartbeat = 0
           ORDER BY m.message_index DESC
           LIMIT 50

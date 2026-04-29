@@ -279,6 +279,10 @@ export type {
   ArchivedMiningQuery,
   ArchivedMiningResult,
   MultiContextMiningOptions,
+  HistoryQueryMode,
+  HistoryQuery,
+  HistoryQueryResult,
+  HistoryQueryMessage,
 } from './types.js';
 
 export type { ProviderType } from './provider-translator.js';
@@ -339,6 +343,8 @@ import type {
   ArchivedMiningQuery,
   ArchivedMiningResult,
   MultiContextMiningOptions,
+  HistoryQuery,
+  HistoryQueryResult,
 } from './types.js';
 import { crossAgentQuery, defaultOrgRegistry, buildOrgRegistryFromDb, loadOrgRegistryFromDb, type OrgRegistry } from './cross-agent.js';
 import fs from 'node:fs';
@@ -991,6 +997,24 @@ export class HyperMem {
     const db = this.dbManager.getMessageDb(agentId);
     const store = new MessageStore(db);
     return store.mineArchivedContexts(contextIds, opts);
+  }
+
+  /**
+   * Read-only, capped, mode-dispatched message history query (HyperMem 0.9.4).
+   *
+   * Routes to MessageStore.queryHistory which owns all history SQL.
+   * No general SQL execution, no bypass of compaction fences.
+   *
+   * Plugin surface: preferred shape is history.query action in the OpenClaw plugin tool
+   * surface. The SDK currently only exposes registerContextEngine and registerMemoryCapability,
+   * so no plugin tool action is registered in this release. Blocker: no api.registerTool
+   * or equivalent action-routing surface in definePluginEntry. This method is the
+   * public API; agents can call it directly via HyperMem.queryHistory().
+   */
+  queryHistory(query: HistoryQuery): HistoryQueryResult {
+    const db = this.dbManager.getMessageDb(query.agentId);
+    const store = new MessageStore(db);
+    return store.queryHistory(query);
   }
 
   /**

@@ -91,7 +91,7 @@ export type { LintResult } from './knowledge-lint.js';
 export { buildSpawnContext } from './spawn-context.js';
 export type { SpawnContextOptions, SpawnContext } from './spawn-context.js';
 export { runNoiseSweep, runToolDecay, type NoiseSweepResult, type ToolDecayResult } from './proactive-pass.js';
-export type { NeutralMessage, NeutralToolCall, NeutralToolResult, StoredMessage, MessageRole, ProviderMessage, Conversation, Fact, Topic, Knowledge, Episode, ComposeRequest, ComposeResult, ComposeDiagnostics, ForkedContextSeed, SlotTokenCounts, SessionSlots, SessionMeta, HyperMemConfig, RedisConfig, CompositorConfig, IndexerConfig, ChannelType, ConversationStatus, FactScope, TopicStatus, EpisodeType, MemoryVisibility, CrossAgentQuery, AgentIdentity, SessionCursor, RecentTurn, ExpertiseSourceType, EvidenceRelationship, ArchivedMiningQuery, ArchivedMiningResult, MultiContextMiningOptions, } from './types.js';
+export type { NeutralMessage, NeutralToolCall, NeutralToolResult, StoredMessage, MessageRole, ProviderMessage, Conversation, Fact, Topic, Knowledge, Episode, ComposeRequest, ComposeResult, ComposeDiagnostics, ForkedContextSeed, SlotTokenCounts, SessionSlots, SessionMeta, HyperMemConfig, RedisConfig, CompositorConfig, IndexerConfig, ChannelType, ConversationStatus, FactScope, TopicStatus, EpisodeType, MemoryVisibility, CrossAgentQuery, AgentIdentity, SessionCursor, RecentTurn, ExpertiseSourceType, EvidenceRelationship, ArchivedMiningQuery, ArchivedMiningResult, MultiContextMiningOptions, HistoryQueryMode, HistoryQuery, HistoryQueryResult, HistoryQueryMessage, } from './types.js';
 export type { ProviderType } from './provider-translator.js';
 export { classifyContentType, signalWeight, isSignalBearing, SIGNAL_WEIGHT } from './content-type-classifier.js';
 export type { ContentType, ContentTypeResult } from './content-type-classifier.js';
@@ -114,7 +114,7 @@ import { VectorStore, type VectorSearchResult, type VectorIndexStats } from './v
 import { type DocChunkRow, type ChunkQuery, type IndexResult } from './doc-chunk-store.js';
 import { type SeedOptions, type SeedResult } from './seed.js';
 import { type DocChunk } from './doc-chunker.js';
-import type { HyperMemConfig, ComposeRequest, ComposeResult, NeutralMessage, StoredMessage, Conversation, ChannelType, ArchivedMiningQuery, ArchivedMiningResult, MultiContextMiningOptions } from './types.js';
+import type { HyperMemConfig, ComposeRequest, ComposeResult, NeutralMessage, StoredMessage, Conversation, ChannelType, ArchivedMiningQuery, ArchivedMiningResult, MultiContextMiningOptions, HistoryQuery, HistoryQueryResult } from './types.js';
 import { type OrgRegistry } from './cross-agent.js';
 export interface StartupFleetSeedOptions {
     workspaceRoots?: string[];
@@ -220,6 +220,19 @@ export declare class HyperMem {
      * active composition.
      */
     mineArchivedContexts(agentId: string, contextIds: number[], opts?: MultiContextMiningOptions): ArchivedMiningResult<StoredMessage[]>[];
+    /**
+     * Read-only, capped, mode-dispatched message history query (HyperMem 0.9.4).
+     *
+     * Routes to MessageStore.queryHistory which owns all history SQL.
+     * No general SQL execution, no bypass of compaction fences.
+     *
+     * Plugin surface: preferred shape is history.query action in the OpenClaw plugin tool
+     * surface. The SDK currently only exposes registerContextEngine and registerMemoryCapability,
+     * so no plugin tool action is registered in this release. Blocker: no api.registerTool
+     * or equivalent action-routing surface in definePluginEntry. This method is the
+     * public API; agents can call it directly via HyperMem.queryHistory().
+     */
+    queryHistory(query: HistoryQuery): HistoryQueryResult;
     /**
      * Warm a session from SQLite into Redis.
      */

@@ -91,6 +91,25 @@ function simulateGradientCap(msgs, budget, fraction) {
   return { msgs: kept, tokens: runningTokens };
 }
 
+function simulateProtectedGradientCap(msgs, budget, capFraction, floorFraction) {
+  const cap = Math.floor(budget * capFraction);
+  const floor = Math.floor(budget * floorFraction);
+  let runningTokens = 0;
+  let protectedSlotsKept = 0;
+  const kept = [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const cost = Math.ceil((msgs[i].textContent?.length ?? 0) / 4);
+    const wouldExceedCap = runningTokens + cost > cap && kept.length > 0;
+    const belowFloor = floor > 0 && runningTokens < floor;
+    if (wouldExceedCap && !belowFloor) break;
+    if (wouldExceedCap && belowFloor) protectedSlotsKept++;
+    kept.unshift(msgs[i]);
+    runningTokens += cost;
+    if (runningTokens >= cap && runningTokens >= floor) break;
+  }
+  return { msgs: kept, tokens: runningTokens, protectedSlotsKept, floor };
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────────
 
 async function run() {
@@ -151,6 +170,30 @@ async function run() {
     newCap.tokens <= trimBudget,
     `NEW: gradient rebuilt at ${newCap.tokens} FITS within assemble trimBudget ${trimBudget} → no churn`
   );
+
+  // ── Section 1b: Protected warming floor prevents cluster-boundary underfill ──
+  console.log('\n── Section 1b: Protected warming floor survives afterTurn cluster capping ──\n');
+
+  {
+    const B = 100000;
+    const msgs = [
+      { role: 'user', textContent: 'old protected warm layer ' + 'o'.repeat(159000) }, // ~39.7k tokens
+      { role: 'assistant', textContent: 'recent warm tail ' + 'r'.repeat(119000) },   // ~29.7k tokens
+    ];
+    const withoutFloor = simulateGradientCap(msgs, B, 0.68);
+    const warmupFloor = Math.max(0.34, 0.55 * 0.60);
+    const withFloor = simulateProtectedGradientCap(msgs, B, 0.68, warmupFloor);
+    const elevated = simulateProtectedGradientCap(msgs, B, 0.60, 0);
+
+    assert(withoutFloor.tokens < Math.floor(B * warmupFloor),
+      `baseline cluster cap can underfill protected floor (${withoutFloor.tokens} < ${Math.floor(B * warmupFloor)})`);
+    assert(withFloor.tokens >= Math.floor(B * warmupFloor),
+      `warmup protected floor keeps enough whole clusters (${withFloor.tokens} >= ${Math.floor(B * warmupFloor)})`);
+    assert(withFloor.protectedSlotsKept === 1,
+      `protected warming kept count is metadata-only count (got ${withFloor.protectedSlotsKept})`);
+    assert(elevated.tokens < Math.floor(B * warmupFloor),
+      `elevated-or-worse pressure disables protected floor (${elevated.tokens} < ${Math.floor(B * warmupFloor)})`);
+  }
 
   // ── Section 2: window-within-budget-skip guard telemetry ─────────────────
   console.log('\n── Section 2: assemble.normal guard fires on in-budget window ──\n');

@@ -33,6 +33,36 @@ export interface NoiseSweepResult {
   passType: 'noise_sweep';
 }
 
+export interface ReferencedNoiseDebtResult {
+  passType: 'referenced_noise_debt';
+  conversationsScanned: number;
+  noiseCandidates: number;
+  referencedNoise: number;
+  parentReferencedNoise: number;
+  contextReferencedNoise: number;
+  snapshotReferencedNoise: number;
+  otherReferencedNoise: number;
+  sampleRefs: string[];
+}
+
+export interface TreeSafeNoiseCompactionResult {
+  passType: 'tree_safe_noise_compaction';
+  conversationsScanned: number;
+  candidates: number;
+  reparented: number;
+  repairedContextHeads: number;
+  repairedSnapshotHeads: number;
+  deleted: number;
+  skippedBlocked: number;
+  skippedRoot: number;
+  fkCheck: string;
+}
+
+export interface ProactivePassContext {
+  agentId?: string;
+  dbPath?: string;
+}
+
 export interface ToolDecayResult {
   messagesUpdated: number;
   bytesFreed: number;
@@ -63,46 +93,91 @@ function getMaxMessageIndex(db: DatabaseSync, conversationId: number): number {
   return typeof row.max_index === 'number' ? row.max_index : -1;
 }
 
+function quoteIdent(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
 /**
  * Filter candidate message ids down to rows that are safe to delete without
  * violating HyperMem's FK edges.
  *
- * Current blockers:
- *   - summary_messages.message_id -> messages.id
- *   - messages.parent_id -> messages.id (child rows point at parent rows)
+ * This is intentionally schema-driven instead of a hardcoded table list. The
+ * message schema has grown several durable sidecars over time
+ * (summary_messages, parent_id, tool_artifacts, contexts, composition
+ * snapshots). A noise sweep should never have to know every future sidecar to
+ * avoid breaking referential integrity.
  */
+interface BlockedMessageRef {
+  messageId: number;
+  table: string;
+  column: string;
+  count: number;
+}
+
 function getDeletableMessageIds(db: DatabaseSync, candidateIds: number[]): {
   deletableIds: number[];
   blockedIds: number[];
+  blockedRefs: BlockedMessageRef[];
 } {
-  if (candidateIds.length === 0) return { deletableIds: [], blockedIds: [] };
+  if (candidateIds.length === 0) return { deletableIds: [], blockedIds: [], blockedRefs: [] };
 
   const placeholders = candidateIds.map(() => '?').join(', ');
-  const blocked = db
+  const blockedSet = new Set<number>();
+  const blockedRefs: BlockedMessageRef[] = [];
+  const tables = db
     .prepare(`
-      SELECT DISTINCT id
-      FROM (
-        SELECT sm.message_id AS id
-        FROM summary_messages sm
-        WHERE sm.message_id IN (${placeholders})
-
-        UNION
-
-        SELECT parent.id AS id
-        FROM messages child
-        JOIN messages parent ON parent.id = child.parent_id
-        WHERE child.parent_id IN (${placeholders})
-      ) blocked
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table'
+        AND name NOT LIKE 'sqlite_%'
     `)
-    .all(...candidateIds, ...candidateIds) as Array<{ id: number }>;
+    .all() as Array<{ name: string }>;
 
-  if (blocked.length === 0) return { deletableIds: candidateIds, blockedIds: [] };
+  for (const { name: tableName } of tables) {
+    const refs = db
+      .prepare(`PRAGMA foreign_key_list(${quoteIdent(tableName)})`)
+      .all() as Array<{
+        table: string;
+        from: string;
+        to: string | null;
+        on_delete?: string;
+      }>;
 
-  const blockedIds = blocked.map(row => row.id);
-  const blockedSet = new Set(blockedIds);
+    for (const ref of refs) {
+      if (ref.table !== 'messages') continue;
+      if (ref.to !== null && ref.to !== 'id') continue;
+      if (typeof ref.on_delete === 'string' && ref.on_delete.toUpperCase() === 'CASCADE') continue;
+
+      const rows = db
+        .prepare(`
+          SELECT ${quoteIdent(ref.from)} AS id, COUNT(*) AS count
+          FROM ${quoteIdent(tableName)}
+          WHERE ${quoteIdent(ref.from)} IN (${placeholders})
+          GROUP BY ${quoteIdent(ref.from)}
+        `)
+        .all(...candidateIds) as Array<{ id: number | null; count: number }>;
+
+      for (const row of rows) {
+        if (typeof row.id === 'number') {
+          blockedSet.add(row.id);
+          blockedRefs.push({
+            messageId: row.id,
+            table: tableName,
+            column: ref.from,
+            count: typeof row.count === 'number' ? row.count : 1,
+          });
+        }
+      }
+    }
+  }
+
+  if (blockedSet.size === 0) return { deletableIds: candidateIds, blockedIds: [], blockedRefs: [] };
+
+  const blockedIds = [...blockedSet];
   return {
     deletableIds: candidateIds.filter(id => !blockedSet.has(id)),
     blockedIds,
+    blockedRefs,
   };
 }
 
@@ -123,6 +198,262 @@ function isNoiseMessage(textContent: string | null, isHeartbeat: number): boolea
   return type === 'noise' || type === 'ack';
 }
 
+function formatPassContext(conversationId: number, context?: ProactivePassContext): string {
+  const agent = context?.agentId ?? 'unknown';
+  const dbPath = context?.dbPath ? ` db=${context.dbPath}` : '';
+  return `agent=${agent} conversation=${conversationId}${dbPath}`;
+}
+
+function summarizeBlockedRefs(blockedRefs: BlockedMessageRef[], limit: number = 8): string {
+  if (blockedRefs.length === 0) return 'none';
+  return blockedRefs
+    .slice(0, limit)
+    .map(ref => `${ref.table}.${ref.column}->${ref.messageId}x${ref.count}`)
+    .join(', ') + (blockedRefs.length > limit ? `, +${blockedRefs.length - limit} more` : '');
+}
+
+function summarizeForeignKeyCheck(db: DatabaseSync, limit: number = 8): string {
+  try {
+    const rows = db.prepare('PRAGMA foreign_key_check').all() as Array<{
+      table?: string;
+      rowid?: number;
+      parent?: string;
+      fkid?: number;
+    }>;
+    if (rows.length === 0) return 'none';
+    return rows
+      .slice(0, limit)
+      .map(row => `${row.table ?? '?'}#${row.rowid ?? '?'} parent=${row.parent ?? '?'} fkid=${row.fkid ?? '?'}`)
+      .join(', ') + (rows.length > limit ? `, +${rows.length - limit} more` : '');
+  } catch (err) {
+    return `unavailable:${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+
+function getConversationIds(db: DatabaseSync, conversationId?: number): number[] {
+  if (typeof conversationId === 'number') return [conversationId];
+  const rows = db.prepare('SELECT id FROM conversations ORDER BY id').all() as Array<{ id: number }>;
+  return rows.map(row => row.id).filter(id => typeof id === 'number');
+}
+
+function getNoiseCandidateIds(
+  db: DatabaseSync,
+  conversationId: number,
+  recentWindowSize: number,
+  maxCandidates: number = Infinity,
+): number[] {
+  const safeWindow = resolveSafeWindow(recentWindowSize);
+  const maxIndex = getMaxMessageIndex(db, conversationId);
+  if (maxIndex < 0) return [];
+  const cutoff = maxIndex - safeWindow;
+  if (cutoff <= 0) return [];
+
+  const rows = db
+    .prepare(`
+      SELECT id, text_content, is_heartbeat
+      FROM messages
+      WHERE conversation_id = ?
+        AND message_index < ?
+        AND (tool_results IS NULL OR tool_results = '')
+      ORDER BY message_index ASC
+    `)
+    .all(conversationId, cutoff) as Array<{
+      id: number;
+      text_content: string | null;
+      is_heartbeat: number;
+    }>;
+
+  return rows
+    .filter(row => isNoiseMessage(row.text_content, row.is_heartbeat))
+    .slice(0, Number.isFinite(maxCandidates) ? maxCandidates : undefined)
+    .map(row => row.id);
+}
+
+function emptyReferencedNoiseDebt(): ReferencedNoiseDebtResult {
+  return {
+    passType: 'referenced_noise_debt',
+    conversationsScanned: 0,
+    noiseCandidates: 0,
+    referencedNoise: 0,
+    parentReferencedNoise: 0,
+    contextReferencedNoise: 0,
+    snapshotReferencedNoise: 0,
+    otherReferencedNoise: 0,
+    sampleRefs: [],
+  };
+}
+
+/**
+ * Measure noise rows that maintenance cannot delete because they are still FK
+ * targets. This is health debt, not corruption: the message tree is preserving
+ * referential integrity, but low-signal nodes need tree-safe compaction.
+ */
+export function collectReferencedNoiseDebt(
+  db: DatabaseSync,
+  conversationId?: number,
+  recentWindowSize: number = 20,
+  maxCandidatesPerConversation: number = Infinity,
+): ReferencedNoiseDebtResult {
+  const result = emptyReferencedNoiseDebt();
+  for (const convId of getConversationIds(db, conversationId)) {
+    result.conversationsScanned += 1;
+    const candidateIds = getNoiseCandidateIds(db, convId, recentWindowSize, maxCandidatesPerConversation);
+    result.noiseCandidates += candidateIds.length;
+    if (candidateIds.length === 0) continue;
+
+    const refs = getDeletableMessageIds(db, candidateIds).blockedRefs;
+    const referenced = new Set(refs.map(ref => ref.messageId));
+    result.referencedNoise += referenced.size;
+
+    const parent = new Set<number>();
+    const context = new Set<number>();
+    const snapshot = new Set<number>();
+    const other = new Set<number>();
+    for (const ref of refs) {
+      if (ref.table === 'messages' && ref.column === 'parent_id') parent.add(ref.messageId);
+      else if (ref.table === 'contexts') context.add(ref.messageId);
+      else if (ref.table === 'composition_snapshots') snapshot.add(ref.messageId);
+      else other.add(ref.messageId);
+      if (result.sampleRefs.length < 12) {
+        result.sampleRefs.push(`${ref.table}.${ref.column}->${ref.messageId}x${ref.count}`);
+      }
+    }
+    result.parentReferencedNoise += parent.size;
+    result.contextReferencedNoise += context.size;
+    result.snapshotReferencedNoise += snapshot.size;
+    result.otherReferencedNoise += other.size;
+  }
+  return result;
+}
+
+function isRepairableNoiseReference(ref: BlockedMessageRef): boolean {
+  return (ref.table === 'messages' && ref.column === 'parent_id')
+    || (ref.table === 'contexts' && ref.column === 'head_message_id')
+    || (ref.table === 'composition_snapshots' && ref.column === 'head_message_id');
+}
+
+function isRepairableNoiseReferenced(refs: BlockedMessageRef[]): boolean {
+  return refs.length > 0 && refs.every(isRepairableNoiseReference);
+}
+
+function hasParentReference(refs: BlockedMessageRef[]): boolean {
+  return refs.some(ref => ref.table === 'messages' && ref.column === 'parent_id');
+}
+
+function reparentChildrenAndDelete(db: DatabaseSync, messageId: number): boolean {
+  const row = db
+    .prepare('SELECT id, parent_id, depth FROM messages WHERE id = ?')
+    .get(messageId) as { id: number; parent_id: number | null; depth: number } | undefined;
+  if (!row) return false;
+
+  db.prepare(`
+    WITH RECURSIVE subtree(id) AS (
+      SELECT id FROM messages WHERE parent_id = ?
+      UNION ALL
+      SELECT m.id FROM messages m JOIN subtree s ON m.parent_id = s.id
+    )
+    UPDATE messages
+    SET depth = CASE WHEN depth > 0 THEN depth - 1 ELSE 0 END
+    WHERE id IN (SELECT id FROM subtree)
+  `).run(messageId);
+
+  db.prepare('UPDATE messages SET parent_id = ? WHERE parent_id = ?').run(row.parent_id, messageId);
+  const deleted = db.prepare('DELETE FROM messages WHERE id = ?').run(messageId) as { changes?: number };
+  return (deleted.changes ?? 0) > 0;
+}
+
+function repairContextAndSnapshotHeads(
+  db: DatabaseSync,
+  messageId: number,
+  replacementHeadId: number,
+): { repairedContextHeads: number; repairedSnapshotHeads: number } {
+  const contextResult = db
+    .prepare("UPDATE contexts SET head_message_id = ?, updated_at = datetime('now') WHERE head_message_id = ?")
+    .run(replacementHeadId, messageId) as { changes?: number };
+  const snapshotResult = db
+    .prepare('UPDATE composition_snapshots SET head_message_id = ?, repair_depth = repair_depth + 1 WHERE head_message_id = ?')
+    .run(replacementHeadId, messageId) as { changes?: number };
+
+  return {
+    repairedContextHeads: contextResult.changes ?? 0,
+    repairedSnapshotHeads: snapshotResult.changes ?? 0,
+  };
+}
+
+/**
+ * Safely collapse referenced noise nodes by moving children and durable head
+ * pointers to the deleted node's parent. The repair only handles known safe
+ * message-head references: messages.parent_id, contexts.head_message_id, and
+ * composition_snapshots.head_message_id. Other FK blockers remain preserved.
+ */
+export function runTreeSafeNoiseCompaction(
+  db: DatabaseSync,
+  conversationId?: number,
+  recentWindowSize: number = 20,
+  maxMutations: number = 100,
+): TreeSafeNoiseCompactionResult {
+  const result: TreeSafeNoiseCompactionResult = {
+    passType: 'tree_safe_noise_compaction',
+    conversationsScanned: 0,
+    candidates: 0,
+    reparented: 0,
+    repairedContextHeads: 0,
+    repairedSnapshotHeads: 0,
+    deleted: 0,
+    skippedBlocked: 0,
+    skippedRoot: 0,
+    fkCheck: 'not-run',
+  };
+
+  db.prepare('BEGIN IMMEDIATE').run();
+  try {
+    for (const convId of getConversationIds(db, conversationId)) {
+      if (result.deleted >= maxMutations) break;
+      result.conversationsScanned += 1;
+      const remaining = maxMutations - result.deleted;
+      const candidateIds = getNoiseCandidateIds(db, convId, recentWindowSize, remaining);
+      result.candidates += candidateIds.length;
+
+      for (const id of candidateIds) {
+        if (result.deleted >= maxMutations) break;
+        const refs = getDeletableMessageIds(db, [id]).blockedRefs;
+        if (refs.length === 0) {
+          const deleted = db.prepare('DELETE FROM messages WHERE id = ?').run(id) as { changes?: number };
+          result.deleted += deleted.changes ?? 0;
+          continue;
+        }
+        if (!isRepairableNoiseReferenced(refs)) {
+          result.skippedBlocked += 1;
+          continue;
+        }
+        const row = db.prepare('SELECT parent_id FROM messages WHERE id = ?').get(id) as { parent_id: number | null } | undefined;
+        if (!row || row.parent_id == null) {
+          result.skippedRoot += 1;
+          continue;
+        }
+        const repaired = repairContextAndSnapshotHeads(db, id, row.parent_id);
+        result.repairedContextHeads += repaired.repairedContextHeads;
+        result.repairedSnapshotHeads += repaired.repairedSnapshotHeads;
+        if (reparentChildrenAndDelete(db, id)) {
+          if (hasParentReference(refs)) result.reparented += 1;
+          result.deleted += 1;
+        }
+      }
+    }
+
+    result.fkCheck = summarizeForeignKeyCheck(db);
+    if (result.fkCheck !== 'none') throw new Error(`foreign_key_check failed: ${result.fkCheck}`);
+    db.prepare('COMMIT').run();
+    return result;
+  } catch (err) {
+    db.prepare('ROLLBACK').run();
+    result.fkCheck = summarizeForeignKeyCheck(db);
+    console.warn(`[proactive-pass] Tree-safe noise compaction failed fkCheck=${result.fkCheck} error=${err instanceof Error ? err.message : String(err)}`);
+    return { ...result, deleted: 0, reparented: 0 };
+  }
+}
+
 // ─── Noise Sweep ─────────────────────────────────────────────────
 
 /**
@@ -140,6 +471,7 @@ export function runNoiseSweep(
   conversationId: number,
   recentWindowSize: number = 20,
   maxCandidates: number = Infinity,
+  context?: ProactivePassContext,
 ): NoiseSweepResult {
   const ZERO: NoiseSweepResult = { messagesDeleted: 0, passType: 'noise_sweep' };
 
@@ -185,19 +517,34 @@ export function runNoiseSweep(
     }
 
     const candidateIds = toDelete.map(r => r.id);
-    const { deletableIds: ids, blockedIds } = getDeletableMessageIds(db, candidateIds);
-
-    if (ids.length === 0) {
-      return ZERO;
-    }
 
     // Delete in a transaction; use chunked IN clauses to avoid
     // SQLite's SQLITE_LIMIT_VARIABLE_NUMBER (default 999).
+    // Eligibility is intentionally recomputed inside the transaction. Live
+    // context/snapshot writers can add FK sidecars between the candidate scan
+    // and DELETE; checking blockers outside the write transaction turns the
+    // sweep into a race.
     let totalDeleted = 0;
+    let blockedIds: number[] = [];
+    let blockedRefs: BlockedMessageRef[] = [];
     const CHUNK = 500;
 
-    db.prepare('BEGIN').run();
+    db.prepare('BEGIN IMMEDIATE').run();
     try {
+      const resolved = getDeletableMessageIds(db, candidateIds);
+      const ids = resolved.deletableIds;
+      blockedIds = resolved.blockedIds;
+      blockedRefs = resolved.blockedRefs;
+
+      if (ids.length === 0) {
+        db.prepare('COMMIT').run();
+        if (blockedIds.length > 0) {
+          console.log(
+            `[proactive-pass] Noise sweep skipped referenced ${formatPassContext(conversationId, context)} candidates=${candidates.length} noise=${candidateIds.length} skippedReferenced=${blockedIds.length} refs=${summarizeBlockedRefs(blockedRefs)}`
+          );
+        }
+        return ZERO;
+      }
       for (let i = 0; i < ids.length; i += CHUNK) {
         const chunk = ids.slice(i, i + CHUNK);
         const placeholders = chunk.map(() => '?').join(', ');
@@ -209,12 +556,15 @@ export function runNoiseSweep(
       db.prepare('COMMIT').run();
     } catch (innerErr) {
       db.prepare('ROLLBACK').run();
+      console.warn(
+        `[proactive-pass] Noise sweep delete failed ${formatPassContext(conversationId, context)} candidates=${candidates.length} noise=${candidateIds.length} skippedReferenced=${blockedIds.length} refs=${summarizeBlockedRefs(blockedRefs)} fkCheck=${summarizeForeignKeyCheck(db)} error=${innerErr instanceof Error ? innerErr.message : String(innerErr)}`
+      );
       throw innerErr;
     }
 
     if (totalDeleted > 0) {
       console.log(
-        `[proactive-pass] Noise sweep conversation=${conversationId} candidates=${candidates.length} noise=${candidateIds.length} deleted=${totalDeleted} skippedReferenced=${blockedIds.length} cutoff=${cutoff}`
+        `[proactive-pass] Noise sweep ${formatPassContext(conversationId, context)} candidates=${candidates.length} noise=${candidateIds.length} deleted=${totalDeleted} skippedReferenced=${blockedIds.length} cutoff=${cutoff}`
       );
     }
 
@@ -222,7 +572,7 @@ export function runNoiseSweep(
 
   } catch (err) {
     console.warn(
-      `[proactive-pass] Noise sweep failed for conversation ${conversationId}: ${
+      `[proactive-pass] Noise sweep failed ${formatPassContext(conversationId, context)}: ${
         err instanceof Error ? err.message : String(err)
       }`
     );
@@ -253,6 +603,7 @@ export function runToolDecay(
   conversationId: number,
   recentWindowSize: number = 40,
   maxCandidates: number = Infinity,
+  context?: ProactivePassContext,
 ): ToolDecayResult {
   const ZERO: ToolDecayResult = { messagesUpdated: 0, bytesFreed: 0, passType: 'tool_decay' };
 
@@ -347,7 +698,7 @@ export function runToolDecay(
 
     if (totalUpdated > 0) {
       console.log(
-        `[proactive-pass] Tool decay conversation=${conversationId} candidates=${candidates.length} updated=${totalUpdated} bytesFreed=${totalBytesFreed} cutoff=${cutoff}`
+        `[proactive-pass] Tool decay ${formatPassContext(conversationId, context)} candidates=${candidates.length} updated=${totalUpdated} bytesFreed=${totalBytesFreed} cutoff=${cutoff}`
       );
     }
 
@@ -359,7 +710,7 @@ export function runToolDecay(
 
   } catch (err) {
     console.warn(
-      `[proactive-pass] Tool decay failed for conversation ${conversationId}: ${
+      `[proactive-pass] Tool decay failed ${formatPassContext(conversationId, context)}: ${
         err instanceof Error ? err.message : String(err)
       }`
     );

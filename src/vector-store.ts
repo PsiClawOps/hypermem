@@ -42,6 +42,14 @@ export interface EmbeddingConfig {
   geminiIndexTaskType?: string;
   /** Gemini task type for queries. Default: RETRIEVAL_QUERY */
   geminiQueryTaskType?: string;
+  /** Generic query input type for providers that support asymmetric retrieval embeddings. */
+  queryInputType?: string;
+  /** Generic document input type for providers that support asymmetric retrieval embeddings. */
+  documentInputType?: string;
+  /** Optional explicit query prefix, applied before embedding query text. */
+  queryPrefix?: string;
+  /** Optional explicit document prefix, applied before embedding stored document text. */
+  documentPrefix?: string;
   /** Embedding model name. Default: nomic-embed-text (ollama) or text-embedding-3-small (openai) */
   model: string;
   /** Embedding dimensions. Default: 768 (ollama/nomic) or 1536 (openai/3-small) */
@@ -53,6 +61,8 @@ export interface EmbeddingConfig {
   /** LRU cache max entries. Default: 128 */
   cacheSize?: number;
 }
+
+export type EmbeddingInputKind = 'query' | 'document';
 
 export interface VectorSearchResult {
   rowid: number;
@@ -96,6 +106,43 @@ const GEMINI_DEFAULTS = {
   batchSize: 100,   // Gemini batch limit
   timeout: 15000,
 } as const;
+
+const OLLAMA_RETRIEVAL_PREFIX_DEFAULTS: Record<string, { query: string; document: string }> = {
+  'nomic-embed-text': { query: 'search_query: ', document: 'search_document: ' },
+  'qwen3-embedding': { query: 'query: ', document: 'passage: ' },
+  'mxbai-embed-large': { query: 'Represent this sentence for searching relevant passages: ', document: '' },
+};
+
+function baseModelName(model: string | undefined): string {
+  return String(model ?? '').split(':')[0].toLowerCase();
+}
+
+function defaultInputType(config: EmbeddingConfig, kind: EmbeddingInputKind): string | undefined {
+  if (kind === 'query') return config.queryInputType ?? config.geminiQueryTaskType;
+  return config.documentInputType ?? config.geminiIndexTaskType;
+}
+
+function resolveTextPrefix(config: EmbeddingConfig, kind: EmbeddingInputKind): string {
+  const explicit = kind === 'query' ? config.queryPrefix : config.documentPrefix;
+  if (explicit != null) return explicit;
+
+  if (config.provider === 'ollama' || !config.provider) {
+    const defaults = OLLAMA_RETRIEVAL_PREFIX_DEFAULTS[baseModelName(config.model)];
+    return defaults?.[kind] ?? '';
+  }
+
+  return '';
+}
+
+function prepareEmbeddingTexts(
+  texts: string[],
+  config: EmbeddingConfig,
+  kind: EmbeddingInputKind,
+): string[] {
+  const prefix = resolveTextPrefix(config, kind);
+  if (!prefix) return texts;
+  return texts.map((text) => text.startsWith(prefix) ? text : `${prefix}${text}`);
+}
 
 // ─── LRU Embedding Cache ─────────────────────────────────────────
 // Module-level, per-process. Survives across compose calls within the
@@ -145,7 +192,8 @@ export function clearEmbeddingCache(): void {
  */
 async function generateOpenAIEmbeddings(
   texts: string[],
-  config: EmbeddingConfig
+  config: EmbeddingConfig,
+  kind: EmbeddingInputKind = 'document'
 ): Promise<Float32Array[]> {
   // Resolve API key: config > environment
   const apiKey = config.openaiApiKey
@@ -170,13 +218,17 @@ async function generateOpenAIEmbeddings(
     const timer = setTimeout(() => controller.abort(), config.timeout);
 
     try {
+      const body: Record<string, unknown> = { model, input: batch };
+      const inputType = defaultInputType(config, kind);
+      if (inputType) body.input_type = inputType;
+
       const response = await fetch(`${baseUrl}/embeddings`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ model, input: batch }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 
@@ -489,7 +541,7 @@ async function generateGeminiEmbeddings(
 ): Promise<Float32Array[]> {
   const baseUrl = config.geminiBaseUrl ?? 'https://generativelanguage.googleapis.com';
   const model = config.model;
-  const effectiveTaskType = taskType ?? config.geminiIndexTaskType ?? 'RETRIEVAL_DOCUMENT';
+  const effectiveTaskType = taskType ?? defaultInputType(config, 'document') ?? 'RETRIEVAL_DOCUMENT';
   const results: Float32Array[] = [];
 
   // Resolve auth: API key takes precedence (simpler), then OAuth
@@ -588,10 +640,13 @@ async function generateGeminiEmbeddings(
  */
 export async function generateEmbeddings(
   texts: string[],
-  config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG
+  config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
+  inputKind: EmbeddingInputKind = 'document'
 ): Promise<Float32Array[]> {
   // 'none' provider: explicit no-op — semantic search disabled, FTS5 fallback only
   if (config.provider === 'none') return [];
+
+  texts = prepareEmbeddingTexts(texts, config, inputKind);
 
   // Apply provider-specific defaults when provider is 'openai' and fields are at Ollama defaults
   if (config.provider === 'openai') {
@@ -605,7 +660,7 @@ export async function generateEmbeddings(
     };
     // OpenAI path — no LRU cache (responses are billed; caching at this layer
     // adds complexity without proportional benefit given async background use).
-    return generateOpenAIEmbeddings(texts, config);
+    return generateOpenAIEmbeddings(texts, config, inputKind);
   }
   if (config.provider === 'gemini') {
     config = {
@@ -617,7 +672,13 @@ export async function generateEmbeddings(
     };
     // Gemini path — no LRU cache (same rationale as OpenAI: billed API calls,
     // background indexing context, minimal benefit from this-layer caching).
-    return generateGeminiEmbeddings(texts, config);
+    return generateGeminiEmbeddings(
+      texts,
+      config,
+      inputKind === 'query'
+        ? (config.geminiQueryTaskType ?? config.queryInputType ?? 'RETRIEVAL_QUERY')
+        : (config.geminiIndexTaskType ?? config.documentInputType ?? 'RETRIEVAL_DOCUMENT')
+    );
   }
   if (texts.length === 0) return [];
 
@@ -802,7 +863,7 @@ export class VectorStore {
     }
 
     // Generate embedding
-    const [embedding] = await generateEmbeddings([content], this.config);
+    const [embedding] = await generateEmbeddings([content], this.config, 'document');
 
     const bytes = vecToBytes(embedding);
 
@@ -863,7 +924,7 @@ export class VectorStore {
 
     // Batch generate embeddings
     const texts = toIndex.map(item => item.content);
-    const embeddings = await generateEmbeddings(texts, this.config);
+    const embeddings = await generateEmbeddings(texts, this.config, 'document');
 
     // Insert in a transaction
     this.db.exec('BEGIN');
@@ -940,7 +1001,7 @@ export class VectorStore {
       const maxSize = this.config.cacheSize ?? 128;
       cachePut(simpleHash(query), queryEmbedding, maxSize);
     } else {
-      [queryEmbedding] = await generateEmbeddings([query], this.config);
+      [queryEmbedding] = await generateEmbeddings([query], this.config, 'query');
     }
     const queryBytes = vecToBytes(queryEmbedding);
 

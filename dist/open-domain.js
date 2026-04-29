@@ -94,8 +94,9 @@ export function searchOpenDomain(db, query, existingContent, limit = 10) {
         m.created_at AS createdAt
       FROM messages m
       JOIN fts_matches ON m.id = fts_matches.rowid
-      WHERE m.text_content IS NOT NULL
-        AND m.text_content != ''
+      WHERE m.role IN ('user', 'assistant')
+        AND m.text_content IS NOT NULL
+        AND trim(m.text_content) != ''
         AND m.is_heartbeat = 0
       ORDER BY fts_matches.rank
     `).all(ftsQuery, limit * 2);

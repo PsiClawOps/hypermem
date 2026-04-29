@@ -123,6 +123,10 @@ function setCommand(pathKey, value, strictJson = false) {
   return `openclaw config set ${pathKey} ${shellQuote(rendered)}${strictJson ? ' --strict-json' : ''}`;
 }
 
+function unsetCommand(pathKey) {
+  return `openclaw config unset ${pathKey}`;
+}
+
 function shellQuote(value) {
   if (/^[A-Za-z0-9_./:@=-]+$/.test(value)) return value;
   return `'${String(value).replaceAll("'", "'\\''")}'`;
@@ -165,7 +169,7 @@ function checkConfigReadable() {
   } else if (hypermemRead.exists) {
     required('ok', 'hypermem-config-json', `HyperMem config readable: ${flags.hypermemConfig}`);
   } else {
-    recommended('warn', 'hypermem-config-present', `No legacy HyperMem config found at ${flags.hypermemConfig}; ok if config lives in openclaw.json`);
+    recommended('warn', 'hypermem-config-present', `HyperMem config missing at ${flags.hypermemConfig}; run hypermem-install to create the 0.9.4 default config, or declare equivalent plugin config in openclaw.json`);
   }
 }
 
@@ -212,6 +216,15 @@ function checkRuntimePlugins() {
     recommended('ok', 'runtime-plugin-list', 'Runtime plugin load check skipped');
     return;
   }
+  const registryRefresh = spawnSync('openclaw', ['plugins', 'registry', '--refresh'], { encoding: 'utf8', timeout: 15000 });
+  if (registryRefresh.error) {
+    recommended('warn', 'plugin-registry-refresh', `Could not refresh OpenClaw plugin registry: ${registryRefresh.error.message}`);
+  } else if (registryRefresh.status === 0) {
+    recommended('ok', 'plugin-registry-refresh', 'OpenClaw plugin registry refresh command completed');
+  } else {
+    recommended('warn', 'plugin-registry-refresh', `OpenClaw plugin registry refresh exited ${registryRefresh.status}; run openclaw plugins registry --refresh after staging HyperMem`);
+  }
+
   const result = spawnSync('openclaw', ['plugins', 'list'], { encoding: 'utf8', timeout: 8000 });
   if (result.error) {
     recommended('warn', 'runtime-plugin-list', `Could not run openclaw plugins list: ${result.error.message}`);
@@ -224,7 +237,51 @@ function checkRuntimePlugins() {
     'runtime-plugin-list',
     hasComposer && hasMemory
       ? 'Runtime plugin list mentions hypercompositor and hypermem'
-      : 'Runtime plugin list did not clearly show both hypercompositor and hypermem; restart gateway after config changes');
+      : 'Runtime plugin list did not clearly show both hypercompositor and hypermem; run openclaw plugins registry --refresh, openclaw doctor --fix --yes, then restart gateway after config changes');
+}
+
+
+function effectiveHyperMemConfig() {
+  return {
+    ...hypermem,
+    ...pluginConfig,
+    compositor: { ...(hypermem.compositor ?? {}), ...(pluginConfig.compositor ?? {}) },
+    embedding: { ...(hypermem.embedding ?? {}), ...(pluginConfig.embedding ?? {}) },
+  };
+}
+
+function checkRecallSurfaceRecommendations() {
+  const config = effectiveHyperMemConfig();
+  const compositor = config.compositor ?? {};
+  const expected = [
+    ['compositor.turnBudget.budgetFraction', 0.6],
+    ['compositor.turnBudget.minContextFraction', 0.18],
+    ['compositor.warming.protectedFloorEnabled', true],
+    ['compositor.warming.shapedWarmupDecay', true],
+    ['compositor.adjacency.enabled', true],
+    ['compositor.adjacency.boostMultiplier', 1.3],
+    ['compositor.adjacency.maxLookback', 5],
+    ['compositor.adjacency.maxClockDeltaMin', 10],
+    ['compositor.adjacency.evictionGuardMessages', 3],
+    ['compositor.adjacency.evictionGuardTokenCap', 4000],
+  ];
+
+  for (const [pathKey, value] of expected) {
+    const actual = get({ compositor }, pathKey);
+    const ok = actual === value;
+    recommended(ok ? 'ok' : 'warn', pathKey,
+      ok
+        ? `${pathKey} is recommended 0.9.4 value ${JSON.stringify(value)}`
+        : `${pathKey} is ${JSON.stringify(actual)}; recommended ${JSON.stringify(value)} for 0.9.4 recall-surface protection`);
+  }
+
+  const dims = config.embedding?.dims;
+  const dimensions = config.embedding?.dimensions;
+  if (dims != null && dimensions != null && dims !== dimensions) {
+    recommended('warn', 'embedding.dims-consistency', `embedding.dims (${dims}) and embedding.dimensions (${dimensions}) differ; keep them aligned while both aliases are supported`);
+  } else {
+    recommended('ok', 'embedding.dims-consistency', 'Embedding dimension aliases are absent or aligned');
+  }
 }
 
 function checkOpenClawRecommendations() {
@@ -253,6 +310,22 @@ function checkOpenClawRecommendations() {
     if (level === 'required') required(ok ? 'ok' : 'fail', pathKey, message, details);
     else recommended(ok ? 'ok' : 'warn', pathKey, message, details);
   }
+
+  const legacyMemorySearch = get(openclaw, 'agents.defaults.memorySearch');
+  recommended(legacyMemorySearch == null ? 'ok' : 'warn',
+    'agents.defaults.memorySearch',
+    legacyMemorySearch == null
+      ? 'Legacy agents.defaults.memorySearch is unset'
+      : `Legacy agents.defaults.memorySearch is ${JSON.stringify(legacyMemorySearch)}; HyperMem supersedes this path and it should be unset to avoid stale operator assumptions`,
+    legacyMemorySearch == null ? {} : { command: unsetCommand('agents.defaults.memorySearch') });
+
+  const maxActiveTranscriptBytes = get(openclaw, 'agents.defaults.compaction.maxActiveTranscriptBytes');
+  recommended(maxActiveTranscriptBytes == null ? 'ok' : 'warn',
+    'agents.defaults.compaction.maxActiveTranscriptBytes',
+    maxActiveTranscriptBytes == null
+      ? 'agents.defaults.compaction.maxActiveTranscriptBytes is unset, as recommended for HyperMem-managed compaction'
+      : `agents.defaults.compaction.maxActiveTranscriptBytes is ${JSON.stringify(maxActiveTranscriptBytes)}; recommended unset so OpenClaw transcript rotation does not fight HyperMem fences`,
+    maxActiveTranscriptBytes == null ? {} : { command: unsetCommand('agents.defaults.compaction.maxActiveTranscriptBytes') });
 
   const injection = get(openclaw, 'agents.defaults.contextInjection');
   if (injection == null || injection === 'always' || injection === 'continuation-skip') {
@@ -367,6 +440,7 @@ if (openclawRead.value) {
   checkOpenClawRecommendations();
   checkModels();
 }
+checkRecallSurfaceRecommendations();
 checkDataDir();
 checkRuntimePlugins();
 

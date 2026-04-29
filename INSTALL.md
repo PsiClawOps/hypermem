@@ -58,7 +58,9 @@ npm install @psiclawops/hypermem
 npx hypermem-install
 ```
 
-`hypermem-install` stages the plugin runtime into `~/.openclaw/plugins/hypermem`. It does **not** modify your OpenClaw config and does **not** restart the gateway. That means a successful `npx hypermem-install` is **not** a completed install. It is only a completed staging step.
+`hypermem-install` stages the plugin runtime into `~/.openclaw/plugins/hypermem` and writes `~/.openclaw/hypermem/config.json` only if that file does not already exist. It does **not** modify your OpenClaw config and does **not** restart the gateway. That means a successful `npx hypermem-install` is **not** a completed install. It is only a completed staging step.
+
+For local release validation, use `npm run install:runtime:packed` from the repo. That command builds an npm tarball, installs that tarball into a temporary app, and stages the runtime from the installed package. Do not validate production behavior from a repo symlink or copied working-tree files.
 
 The shell installer is now a thin npm-first wrapper around this same path:
 
@@ -66,7 +68,7 @@ The shell installer is now a thin npm-first wrapper around this same path:
 curl -fsSL https://raw.githubusercontent.com/PsiClawOps/hypermem/main/install.sh | bash
 ```
 
-It installs the npm package into `~/.hypermem`, backs up any existing staged runtime when confirmed, stages the runtime with `hypermem-install`, writes a lightweight starter config only if no config exists, and prints merge-safe OpenClaw activation commands. It does not edit OpenClaw config and does not restart the gateway.
+It installs the npm package into `~/.hypermem`, backs up any existing staged runtime when confirmed, stages the runtime with `hypermem-install`, writes the recall-friendly starter config only if no config exists, and prints merge-safe OpenClaw activation commands. It does not edit OpenClaw config and does not restart the gateway.
 
 Release validation details live in [docs/INTEGRATION_VALIDATION.md](./docs/INTEGRATION_VALIDATION.md). Diagnostic surfaces live in [docs/DIAGNOSTICS.md](./docs/DIAGNOSTICS.md).
 
@@ -74,35 +76,19 @@ Release validation details live in [docs/INTEGRATION_VALIDATION.md](./docs/INTEG
 >
 > **Config merge warning:** if you already have values in `plugins.load.paths` or `plugins.allow`, merge them instead of overwriting blindly.
 
-Create the config directory and write the current recommended fresh-install starter config. This does 2 things:
+`hypermem-install` creates the current recommended starter config automatically when `~/.openclaw/hypermem/config.json` is missing. The shipped starter config is recall-friendly standard mode:
 
-1. sets `embedding.provider` to `none` so a clean install does not try to use Ollama by default
-2. applies the current recommended lean compositor settings so fresh installs start from the same OpenClaw and HyperMem guidance we want operators to use
+- `embedding.provider: "ollama"` with `nomic-embed-text`
+- `warmHistoryBudgetFraction: 0.45`
+- standard fact, keystone, and history caps
+
+If Ollama is not running or `nomic-embed-text` is not installed, `hypermem-install` fails with a remediation block instead of silently staging a degraded semantic-recall install. For CI, container practice, or intentional FTS-only installs, either run:
 
 ```bash
-mkdir -p ~/.openclaw/hypermem
-cat > ~/.openclaw/hypermem/config.json <<'JSON'
-{
-  "embedding": {
-    "provider": "none"
-  },
-  "compositor": {
-    "budgetFraction": 0.55,
-    "contextWindowReserve": 0.25,
-    "targetBudgetFraction": 0.50,
-    "warmHistoryBudgetFraction": 0.27,
-    "maxFacts": 25,
-    "maxHistoryMessages": 500,
-    "maxCrossSessionContext": 4000,
-    "maxRecentToolPairs": 3,
-    "maxProseToolPairs": 10,
-    "keystoneHistoryFraction": 0.15,
-    "keystoneMaxMessages": 12,
-    "wikiTokenCap": 500
-  }
-}
-JSON
+npx hypermem-install --skip-embedding-check
 ```
+
+or pre-create `~/.openclaw/hypermem/config.json` with `{"embedding":{"provider":"none"}}` before running the installer. Existing config files are preserved unchanged.
 
 If you want a lighter or richer memory profile later, adjust from this baseline using the tuning guidance below instead of starting from the older code defaults.
 
@@ -141,6 +127,8 @@ openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
 # Set the context engine and memory slots:
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
+openclaw plugins registry --refresh
+openclaw doctor --fix --yes
 
 # Only set plugins.allow if your OpenClaw config already uses an allowlist.
 # If `openclaw config get plugins.allow` returns null, empty, or unset, skip this step.
@@ -561,6 +549,8 @@ openclaw config set plugins.load.paths "$HYPERMEM_PATHS" --strict-json
 # Set the context engine and memory slots:
 openclaw config set plugins.slots.contextEngine hypercompositor
 openclaw config set plugins.slots.memory hypermem
+openclaw plugins registry --refresh
+openclaw doctor --fix --yes
 
 # Only set plugins.allow if your OpenClaw config already uses an allowlist.
 # If it returns an array, append the HyperMem plugin ids to that existing array.
@@ -574,7 +564,7 @@ openclaw config set plugins.allow '["existing-plugin","hypercompositor","hyperme
 See [Embedding Providers](#embedding-providers) above.
 
 - **Lightweight (no embedder):** create `~/.openclaw/hypermem/config.json` with `{"embedding":{"provider":"none"}}`. The Quick Start block above already does this. Without this file, the default provider is `ollama` and you'll see a non-fatal init warning if Ollama isn't running.
-- **Local:** `ollama pull nomic-embed-text`. No config file needed (Ollama is the default).
+- **Local:** `ollama pull nomic-embed-text`. No config file needed (Ollama is the default). HyperMem applies retrieval query/document prefixes for supported Ollama embedders (`nomic-embed-text`, `qwen3-embedding`, `mxbai-embed-large`) unless `queryPrefix` / `documentPrefix` are set explicitly.
 - **Hosted/Gemini:** create `~/.openclaw/hypermem/config.json` with the provider config block from the relevant section above.
 
 ### Step 4 — Restart and verify
@@ -775,9 +765,11 @@ openclaw config set agents.defaults.compaction.reserveTokens 16384 --strict-json
 openclaw config set agents.defaults.compaction.keepRecentTokens 6000 --strict-json
 openclaw config set agents.defaults.compaction.reserveTokensFloor 15000 --strict-json
 openclaw config set agents.defaults.compaction.maxHistoryShare 0.65 --strict-json
+# Recommended for HyperMem: leave OpenClaw transcript byte rotation unset.
+openclaw config unset agents.defaults.compaction.maxActiveTranscriptBytes
 ```
 
-This reserves 16k tokens for reply generation. HyperMem's own pressure system (afterTurn at 80%, nuclear at 85%) fires first in normal operation. OpenClaw's safeguard catches edge cases.
+This reserves 16k tokens for reply generation. HyperMem's own pressure system (afterTurn at 80%, nuclear at 85%) fires first in normal operation. OpenClaw's safeguard catches edge cases. Leave `agents.defaults.compaction.maxActiveTranscriptBytes` unset while HyperMem owns context pressure; native transcript byte rotation can evict transcript spans before HyperMem's fences and repair gates see them.
 
 ### LLM idle timeout
 
@@ -824,41 +816,52 @@ Resolution order is: (1) `plugins.entries.hypercompositor.config` in `openclaw.j
 
 These settings live in `~/.openclaw/hypermem/config.json` under the `compositor` key. All fields are optional — omit any knob to get the code-level default. Gateway restart required after changes.
 
-The recommended starting config for a standard single-agent deployment is intentionally lean on turn-1 warming. Semantic recall and fact triggers fire against each incoming message, so topic-relevant context surfaces as the conversation takes shape. This produces a steadier pressure profile than aggressive pre-loading and avoids the warm→trim→compact cycling you see when every session starts near the top of the budget.
+The recommended starting config for a standard single-agent deployment is the same recall-friendly profile shipped in `assets/default-config.json` and written by `hypermem-install` when no config exists. It keeps semantic recall active, protects topic-bearing warm context, boosts recent antecedents, and guards the literal antecedent of the current user turn under non-critical pressure.
+
+Key 0.9.4 defaults:
 
 ```json
 {
+  "embedding": {
+    "provider": "ollama",
+    "model": "nomic-embed-text",
+    "dims": 768,
+    "dimensions": 768
+  },
   "compositor": {
-    "budgetFraction": 0.55,
+    "turnBudget": {
+      "budgetFraction": 0.6,
+      "minContextFraction": 0.18
+    },
+    "warming": {
+      "protectedFloorEnabled": true,
+      "shapedWarmupDecay": true
+    },
+    "adjacency": {
+      "enabled": true,
+      "boostMultiplier": 1.3,
+      "maxLookback": 5,
+      "maxClockDeltaMin": 10,
+      "evictionGuardMessages": 3,
+      "evictionGuardTokenCap": 4000
+    },
+    "budgetFraction": 0.6,
     "contextWindowReserve": 0.25,
     "targetBudgetFraction": 0.50,
-    "warmHistoryBudgetFraction": 0.27,
-    "maxFacts": 25,
-    "maxHistoryMessages": 500,
-    "maxCrossSessionContext": 4000,
-    "maxRecentToolPairs": 3,
-    "maxProseToolPairs": 10,
-    "keystoneHistoryFraction": 0.15,
-    "keystoneMaxMessages": 12,
-    "wikiTokenCap": 500
+    "warmHistoryBudgetFraction": 0.45,
+    "maxFacts": 28,
+    "maxHistoryMessages": 250,
+    "maxCrossSessionContext": 0,
+    "keystoneHistoryFraction": 0.20,
+    "keystoneMaxMessages": 15,
+    "hyperformProfile": "standard"
   }
 }
 ```
 
-| Knob | Recommended | What it controls | Notes |
-|---|---|---|---|
-| `budgetFraction` | 0.55 | Fraction of the detected context window used as input budget | Raise to 0.65 for agents that aggressively tool-use. Autodetect only handles known model families — see *Context window overrides* below for custom/local/finetuned models |
-| `contextWindowReserve` | 0.25 | Reserve left for output and tool results | Below 0.20 on large-context models invites late-turn overflow |
-| `targetBudgetFraction` | 0.50 | Split between context assembly and history | Higher = richer facts/wiki; lower = more conversation headroom |
-| `warmHistoryBudgetFraction` | 0.27 | History's share of first-turn warming | The key lever against tight trim cycles; don't push below 0.20 |
-| `maxFacts` | 25 | Structured facts injected per turn | Recall surfaces more as topics emerge; 35 is fine for long-memory seats |
-| `maxHistoryMessages` | 500 | Candidate pool for history ranking | Pool size, not load size. 300 is fine for short-session agents |
-| `maxCrossSessionContext` | 4000 | Cross-session context tokens | Solo agents with one session: set to 0 |
-| `maxRecentToolPairs` | 3 | Verbatim tool pairs kept | Raise to 5 for code agents with heavy tool output |
-| `maxProseToolPairs` | 10 | Compressed tool pairs before stubbing | |
-| `keystoneHistoryFraction` | 0.15 | Older significant turns reserved within history slot | |
-| `keystoneMaxMessages` | 12 | Max keystone candidates per turn | Raise to 18 if the agent loses track of older decisions |
-| `wikiTokenCap` | 500 | Cap on wiki/knowledge injection | Raise if your agent uses heavy doc content |
+Run `hypermem-doctor --fix-plan` after upgrades. It flags older preserved configs that are missing the 0.9.4 recall-surface knobs, legacy `agents.defaults.memorySearch`, native compaction collisions, plugin wiring defects, and risky model-window autodetect paths.
+
+`hypermem-status --master` also reports the active recall-surface config as `0.9.4 surface N/10 recommended knobs`, plus history-query health, vector coverage, and bounded maintenance debt. Fleet maintenance scans are bounded by default; use `--fleet-agent-limit`, `--max-candidates-per-conversation`, and `--top-agents` only when you intentionally widen the health check. Referenced-noise repair remains capped by `--repair-limit` with a hard max of 500.
 
 **Lean profile** (~35–45% fewer tokens per turn) — for constrained hosts, small models, or cost-sensitive deployments:
 

@@ -154,10 +154,20 @@ npm pack ./plugin --dry-run
 npm pack ./memory-plugin --dry-run
 ```
 
-Then test the packed artifact from a temp directory:
+Runtime validation must install the packed artifact, not the repo working tree. The production-shaped local install path is:
+
+```bash
+npm run install:runtime:packed
+openclaw gateway restart
+openclaw plugins list
+node ~/.openclaw/plugins/hypermem/bin/hypermem-status.mjs --master
+```
+
+For isolated validation, test the packed artifact from a temp directory:
 
 ```bash
 TMP=$(mktemp -d)
+npm pack
 npm --prefix "$TMP" init -y
 npm --prefix "$TMP" install ./psiclawops-hypermem-*.tgz
 node "$TMP/node_modules/@psiclawops/hypermem/scripts/install-runtime.mjs" "$TMP/runtime"
@@ -184,3 +194,32 @@ The staged runtime must contain:
 | `memory_search` bypasses HyperMem | memory slot not set or memory plugin not loaded | set `plugins.slots.memory hypermem`, restart, verify plugins list |
 | status tool reports missing data dir | gateway has not initialized HyperMem yet | restart after wiring and send one agent message |
 | model audit flags unknown context window | active model needs explicit override | add `contextWindowOverrides` in HyperMem config |
+
+
+### Production-shaped runtime validation
+
+HyperMem development validation must install the packed package into OpenClaw's managed plugin directory before claiming a runtime fix is live. Do not rely on a repo symlink, global npm link, or copied `dist/` files as production evidence.
+
+Required loop:
+
+```bash
+npm run build:all
+npm pack
+node scripts/install-packed-runtime.mjs ./psiclawops-hypermem-<version>.tgz
+systemctl --user restart openclaw-gateway
+node bin/hypermem-status.mjs --master
+```
+
+The health check must verify the managed install at `~/.openclaw/plugins/hypermem`, not the working tree.
+
+### Referenced-noise maintenance debt
+
+`hypermem-status --master` reports referenced-noise debt under `## Maintenance`. This is low-signal message content that cannot be deleted by ordinary noise sweep because it is still a foreign-key target, usually through `messages.parent_id`.
+
+Operators can run the conservative repair path:
+
+```bash
+node bin/hypermem-status.mjs --master --repair-referenced-noise --repair-limit 100
+```
+
+The repair only collapses noise nodes blocked solely by `messages.parent_id`. It reparents children to the deleted node's parent, decrements subtree depth, and rolls back the whole batch if `PRAGMA foreign_key_check` reports any violation. Context and composition snapshot heads are detected but not repaired by this pass.

@@ -166,7 +166,7 @@ stage_runtime() {
 write_minimal_config_if_missing() {
   echo -e "\n${BOLD}  Config check${NC}"
   if $DRY_RUN; then
-    dryrun "would preserve existing config or write lightweight starter config: $CONFIG_FILE"
+    dryrun "would preserve existing config or write recall-friendly starter config: $CONFIG_FILE"
     return
   fi
 
@@ -175,66 +175,11 @@ write_minimal_config_if_missing() {
     return
   fi
 
+  local default_config="$INSTALL_DIR/node_modules/@psiclawops/hypermem/assets/default-config.json"
+  [[ -f "$default_config" ]] || die "missing packaged default config: $default_config"
   mkdir -p "$(dirname "$CONFIG_FILE")"
-  cat > "$CONFIG_FILE" <<'JSON'
-{
-  "contextWindowSize": 128000,
-  "contextWindowReserve": 0.25,
-  "deferToolPruning": false,
-  "verboseLogging": false,
-  "contextWindowOverrides": {},
-  "warmCacheReplayThresholdMs": 120000,
-  "subagentWarming": "light",
-  "embedding": {
-    "provider": "none"
-  },
-  "compositor": {
-    "budgetFraction": 0.55,
-    "reserveFraction": 0.25,
-    "historyFraction": 0.4,
-    "memoryFraction": 0.4,
-    "defaultTokenBudget": 90000,
-    "maxHistoryMessages": 500,
-    "maxFacts": 25,
-    "maxExpertisePatterns": 6,
-    "maxCrossSessionContext": 4000,
-    "maxTotalTriggerTokens": 4000,
-    "maxRecentToolPairs": 3,
-    "maxProseToolPairs": 10,
-    "warmHistoryBudgetFraction": 0.27,
-    "contextWindowReserve": 0.25,
-    "dynamicReserveTurnHorizon": 5,
-    "dynamicReserveMax": 0.5,
-    "dynamicReserveEnabled": true,
-    "keystoneHistoryFraction": 0.15,
-    "keystoneMaxMessages": 12,
-    "keystoneMinSignificance": 0.5,
-    "targetBudgetFraction": 0.50,
-    "enableFOS": true,
-    "enableMOD": true,
-    "hyperformProfile": "standard",
-    "wikiTokenCap": 500,
-    "zigzagOrdering": true
-  },
-  "eviction": {
-    "enabled": true,
-    "imageAgeTurns": 2,
-    "toolResultAgeTurns": 4,
-    "minTokensToEvict": 200,
-    "keepPreviewChars": 120
-  },
-  "maintenance": {
-    "periodicInterval": 300000,
-    "maxActiveConversations": 5,
-    "recentConversationCooldownMs": 30000,
-    "maxCandidatesPerPass": 200
-  },
-  "vectorStore": {
-    "enabled": false
-  }
-}
-JSON
-  success "lightweight starter config written: $CONFIG_FILE"
+  cp "$default_config" "$CONFIG_FILE"
+  success "recall-friendly starter config written: $CONFIG_FILE"
 }
 
 verify_stage() {

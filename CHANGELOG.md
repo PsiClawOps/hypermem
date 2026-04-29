@@ -2,6 +2,22 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.9.4 - 2026-04-28
+
+- **Recall surface re-enriched.** Bootstrap, warmup, and steady lifecycle bands now carry larger warming fractions, `/new` and topic-shift recall surge harder, and topic-bearing warmup avoids heartbeat/small-talk decay.
+- **Adjacency-aware preservation added.** Hybrid retrieval boosts recent antecedents while filtering heartbeat/system noise, and compose eviction guards the literal antecedent under non-critical pressure.
+- **Install path hardened.** `hypermem-install` ships the doctor, bench, and default config artifacts, writes `~/.openclaw/hypermem/config.json` only when missing, probes the default Ollama embedder, preserves existing config, supports CI-safe flags, and rejects unknown options.
+- **Fresh-install smoke gate added.** `release-gate-internal/fresh-install-smoke.sh` packs the npm artifact, installs it in the PsiClawOps Docker test image without a source mount, verifies graceful no-tools failure, verifies skip-mode staging, and proves existing config is not overwritten.
+- **Installer failure artifacts captured.** Failed smoke runs now preserve logs, generated configs, package metadata, the packed tarball, and container `/tmp` inventories under `.artifacts/fresh-install-smoke/` for postmortem reuse.
+
+## 0.9.3 - OpenClaw 2026.4.26 compatibility hardening
+
+- **Plugin manifests declare runtime config schema.** HyperCompositor and HyperMem memory manifests now expose the supported config surface for OpenClaw 2026.4.26 registry/config validation.
+- **Install and doctor flow aligned with persisted plugin registry.** operator guidance and `hypermem-doctor` now include registry refresh, doctor repair, and plugin-list verification steps.
+- **Native compaction collision guard added.** `hypermem-doctor` warns when `agents.defaults.compaction.maxActiveTranscriptBytes` is set; HyperMem deployments should leave it unset so HyperMem remains the single trim/compose pressure owner.
+- **Embedding query/document asymmetry supported.** HyperMem config now supports query/document input types and prefixes, with defaults for `nomic-embed-text`, `qwen3-embedding`, and `mxbai-embed-large`.
+- **Forked subagent warm-start repair.** `prepareSubagentSpawn()` falls back to durable runtime history when the hot cache is empty, so forked children inherit parent working context instead of silently starting cold.
+
 ## 0.9.2 - 0.9.1 republish + publish-path hardening
 
 - **0.9.1 was a broken publish.** The npm tarballs for `@psiclawops/hypermem@0.9.1`, `@psiclawops/hypercompositor@0.9.1`, and `@psiclawops/hypermem-memory@0.9.1` shipped without `dist/`, so `import` against the registry artifact fails with `ERR_MODULE_NOT_FOUND`. **Skip 0.9.1.** Operators currently on 0.9.1 should upgrade to 0.9.2.

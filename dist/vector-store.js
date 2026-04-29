@@ -39,6 +39,35 @@ const GEMINI_DEFAULTS = {
     batchSize: 100, // Gemini batch limit
     timeout: 15000,
 };
+const OLLAMA_RETRIEVAL_PREFIX_DEFAULTS = {
+    'nomic-embed-text': { query: 'search_query: ', document: 'search_document: ' },
+    'qwen3-embedding': { query: 'query: ', document: 'passage: ' },
+    'mxbai-embed-large': { query: 'Represent this sentence for searching relevant passages: ', document: '' },
+};
+function baseModelName(model) {
+    return String(model ?? '').split(':')[0].toLowerCase();
+}
+function defaultInputType(config, kind) {
+    if (kind === 'query')
+        return config.queryInputType ?? config.geminiQueryTaskType;
+    return config.documentInputType ?? config.geminiIndexTaskType;
+}
+function resolveTextPrefix(config, kind) {
+    const explicit = kind === 'query' ? config.queryPrefix : config.documentPrefix;
+    if (explicit != null)
+        return explicit;
+    if (config.provider === 'ollama' || !config.provider) {
+        const defaults = OLLAMA_RETRIEVAL_PREFIX_DEFAULTS[baseModelName(config.model)];
+        return defaults?.[kind] ?? '';
+    }
+    return '';
+}
+function prepareEmbeddingTexts(texts, config, kind) {
+    const prefix = resolveTextPrefix(config, kind);
+    if (!prefix)
+        return texts;
+    return texts.map((text) => text.startsWith(prefix) ? text : `${prefix}${text}`);
+}
 const _embeddingCache = new Map();
 /**
  * Insert an entry into the LRU cache, evicting the oldest if over capacity.
@@ -74,7 +103,7 @@ export function clearEmbeddingCache() {
  * Generate embeddings via OpenAI Embeddings API.
  * Batches up to batchSize inputs per request.
  */
-async function generateOpenAIEmbeddings(texts, config) {
+async function generateOpenAIEmbeddings(texts, config, kind = 'document') {
     // Resolve API key: config > environment
     const apiKey = config.openaiApiKey
         ?? process.env.OPENROUTER_API_KEY
@@ -92,13 +121,17 @@ async function generateOpenAIEmbeddings(texts, config) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), config.timeout);
         try {
+            const body = { model, input: batch };
+            const inputType = defaultInputType(config, kind);
+            if (inputType)
+                body.input_type = inputType;
             const response = await fetch(`${baseUrl}/embeddings`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${apiKey}`,
                 },
-                body: JSON.stringify({ model, input: batch }),
+                body: JSON.stringify(body),
                 signal: controller.signal,
             });
             if (!response.ok) {
@@ -378,7 +411,7 @@ function l2Normalize(vec) {
 async function generateGeminiEmbeddings(texts, config, taskType) {
     const baseUrl = config.geminiBaseUrl ?? 'https://generativelanguage.googleapis.com';
     const model = config.model;
-    const effectiveTaskType = taskType ?? config.geminiIndexTaskType ?? 'RETRIEVAL_DOCUMENT';
+    const effectiveTaskType = taskType ?? defaultInputType(config, 'document') ?? 'RETRIEVAL_DOCUMENT';
     const results = [];
     // Resolve auth: API key takes precedence (simpler), then OAuth
     const apiKey = config.geminiApiKey ?? process.env.GEMINI_EMBEDDING_API_KEY ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? null;
@@ -459,10 +492,11 @@ async function generateGeminiEmbeddings(texts, config, taskType) {
  * Supports single and batch embedding.
  * Results are cached per text hash — cache hits skip the Ollama call entirely.
  */
-export async function generateEmbeddings(texts, config = DEFAULT_EMBEDDING_CONFIG) {
+export async function generateEmbeddings(texts, config = DEFAULT_EMBEDDING_CONFIG, inputKind = 'document') {
     // 'none' provider: explicit no-op — semantic search disabled, FTS5 fallback only
     if (config.provider === 'none')
         return [];
+    texts = prepareEmbeddingTexts(texts, config, inputKind);
     // Apply provider-specific defaults when provider is 'openai' and fields are at Ollama defaults
     if (config.provider === 'openai') {
         // Merge: OpenAI defaults fill in any unset fields, user-supplied values always win
@@ -475,7 +509,7 @@ export async function generateEmbeddings(texts, config = DEFAULT_EMBEDDING_CONFI
         };
         // OpenAI path — no LRU cache (responses are billed; caching at this layer
         // adds complexity without proportional benefit given async background use).
-        return generateOpenAIEmbeddings(texts, config);
+        return generateOpenAIEmbeddings(texts, config, inputKind);
     }
     if (config.provider === 'gemini') {
         config = {
@@ -487,7 +521,9 @@ export async function generateEmbeddings(texts, config = DEFAULT_EMBEDDING_CONFI
         };
         // Gemini path — no LRU cache (same rationale as OpenAI: billed API calls,
         // background indexing context, minimal benefit from this-layer caching).
-        return generateGeminiEmbeddings(texts, config);
+        return generateGeminiEmbeddings(texts, config, inputKind === 'query'
+            ? (config.geminiQueryTaskType ?? config.queryInputType ?? 'RETRIEVAL_QUERY')
+            : (config.geminiIndexTaskType ?? config.documentInputType ?? 'RETRIEVAL_DOCUMENT'));
     }
     if (texts.length === 0)
         return [];
@@ -635,7 +671,7 @@ export class VectorStore {
             return false; // Already indexed, content unchanged
         }
         // Generate embedding
-        const [embedding] = await generateEmbeddings([content], this.config);
+        const [embedding] = await generateEmbeddings([content], this.config, 'document');
         const bytes = vecToBytes(embedding);
         if (existing) {
             // Update: delete old vector, insert new
@@ -684,7 +720,7 @@ export class VectorStore {
             return { indexed, skipped };
         // Batch generate embeddings
         const texts = toIndex.map(item => item.content);
-        const embeddings = await generateEmbeddings(texts, this.config);
+        const embeddings = await generateEmbeddings(texts, this.config, 'document');
         // Insert in a transaction
         this.db.exec('BEGIN');
         try {
@@ -745,7 +781,7 @@ export class VectorStore {
             cachePut(simpleHash(query), queryEmbedding, maxSize);
         }
         else {
-            [queryEmbedding] = await generateEmbeddings([query], this.config);
+            [queryEmbedding] = await generateEmbeddings([query], this.config, 'query');
         }
         const queryBytes = vecToBytes(queryEmbedding);
         const results = [];

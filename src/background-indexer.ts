@@ -508,7 +508,7 @@ export class BackgroundIndexer {
   private consecutiveFailures: number = 0;
   /** True when the indexer is running in backoff mode due to repeated failures. */
   private inBackoff: boolean = false;
-  private readonly _conversationLastProcessed = new Map<number, number>();
+  private readonly _conversationLastProcessed = new Map<string, number>();
   lastMaintenanceDiagnostics: MaintenanceTickDiagnostics | null = null;
 
   constructor(
@@ -839,7 +839,8 @@ export class BackgroundIndexer {
 
         for (const conv of convRows) {
           maintConsidered++;
-          const lastProcessed = this._conversationLastProcessed.get(conv.id) ?? 0;
+          const conversationKey = `${agentId}:${conv.id}`;
+          const lastProcessed = this._conversationLastProcessed.get(conversationKey) ?? 0;
           if (now - lastProcessed < cooldownMs) {
             maintSkipped++;
             continue;
@@ -849,17 +850,18 @@ export class BackgroundIndexer {
           // Any successful scan means we're in a real working state —
           // clear any stale 'no-conversations' marker from an earlier agent.
           if (maintExitReason === 'no-conversations') maintExitReason = 'complete';
-          const noiseSweepResult = runNoiseSweep(messageDb, conv.id, 20, maxCandidates);
-          const toolDecayResult = runToolDecay(messageDb, conv.id, 40, maxCandidates);
+          const proactiveContext = { agentId };
+          const noiseSweepResult = runNoiseSweep(messageDb, conv.id, 20, maxCandidates, proactiveContext);
+          const toolDecayResult = runToolDecay(messageDb, conv.id, 40, maxCandidates, proactiveContext);
           const changed = noiseSweepResult.messagesDeleted + toolDecayResult.messagesUpdated;
           if (changed > 0) {
             maintMutated += changed;
             console.log(
-              `[indexer] Proactive pass (conv ${conv.id}): swept ${noiseSweepResult.messagesDeleted} noise msgs, ` +
+              `[indexer] Proactive pass (agent ${agentId} conv ${conv.id}): swept ${noiseSweepResult.messagesDeleted} noise msgs, ` +
               `decayed ${toolDecayResult.messagesUpdated} tool results (${toolDecayResult.bytesFreed} bytes freed)`
             );
           }
-          this._conversationLastProcessed.set(conv.id, now);
+          this._conversationLastProcessed.set(conversationKey, now);
 
           if (maintMutated >= maxCandidates) {
             maintExitReason = 'cap-reached';

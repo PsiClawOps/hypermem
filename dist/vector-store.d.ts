@@ -37,6 +37,14 @@ export interface EmbeddingConfig {
     geminiIndexTaskType?: string;
     /** Gemini task type for queries. Default: RETRIEVAL_QUERY */
     geminiQueryTaskType?: string;
+    /** Generic query input type for providers that support asymmetric retrieval embeddings. */
+    queryInputType?: string;
+    /** Generic document input type for providers that support asymmetric retrieval embeddings. */
+    documentInputType?: string;
+    /** Optional explicit query prefix, applied before embedding query text. */
+    queryPrefix?: string;
+    /** Optional explicit document prefix, applied before embedding stored document text. */
+    documentPrefix?: string;
     /** Embedding model name. Default: nomic-embed-text (ollama) or text-embedding-3-small (openai) */
     model: string;
     /** Embedding dimensions. Default: 768 (ollama/nomic) or 1536 (openai/3-small) */
@@ -48,6 +56,7 @@ export interface EmbeddingConfig {
     /** LRU cache max entries. Default: 128 */
     cacheSize?: number;
 }
+export type EmbeddingInputKind = 'query' | 'document';
 export interface VectorSearchResult {
     rowid: number;
     distance: number;
@@ -72,7 +81,7 @@ export declare function clearEmbeddingCache(): void;
  * Supports single and batch embedding.
  * Results are cached per text hash — cache hits skip the Ollama call entirely.
  */
-export declare function generateEmbeddings(texts: string[], config?: EmbeddingConfig): Promise<Float32Array[]>;
+export declare function generateEmbeddings(texts: string[], config?: EmbeddingConfig, inputKind?: EmbeddingInputKind): Promise<Float32Array[]>;
 /**
  * VectorStore — manages vector indexes in an agent's vector database.
  *

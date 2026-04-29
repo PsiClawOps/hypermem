@@ -39,8 +39,27 @@ const flags = {
   health: args.includes('--health'),
   master: args.includes('--master') || args.includes('--planks'),
   help: args.includes('--help') || args.includes('-h'),
+  repairReferencedNoise: args.includes('--repair-referenced-noise'),
+  fleetRepair: args.includes('--fleet-repair'),
   agent: null,
 };
+
+function numericArg(name, fallback) {
+  const idx = args.indexOf(name);
+  if (idx === -1 || !args[idx + 1]) return fallback;
+  const value = Number(args[idx + 1]);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+}
+
+const MAX_REPAIR_LIMIT = 500;
+const repairLimit = Math.min(numericArg('--repair-limit', 100), MAX_REPAIR_LIMIT);
+const DEFAULT_FLEET_AGENT_LIMIT = 20;
+const DEFAULT_FLEET_CANDIDATES_PER_CONVERSATION = 500;
+const DEFAULT_TOP_AGENTS = 10;
+const fleetAgentLimit = numericArg('--fleet-agent-limit', DEFAULT_FLEET_AGENT_LIMIT);
+const maxAgents = numericArg('--max-agents', fleetAgentLimit);
+const maxCandidatesPerConversation = numericArg('--max-candidates-per-conversation', DEFAULT_FLEET_CANDIDATES_PER_CONVERSATION);
+const topAgentsLimit = Math.max(1, numericArg('--top-agents', DEFAULT_TOP_AGENTS));
 
 const agentIdx = args.indexOf('--agent');
 if (agentIdx !== -1 && args[agentIdx + 1]) {
@@ -59,9 +78,23 @@ Options:
   --agent <id>  Scope metrics to a specific agent
   --json        Output raw JSON instead of formatted summary
   --health      Health checks only (exits 1 if any check fails)
+  --repair-referenced-noise  Run conservative tree-safe referenced-noise compaction
+  --repair-limit <n>         Max referenced-noise mutations per run (default: 100, capped at 500)
+  --fleet-repair             Allow referenced-noise repair without --agent (off by default)
+  --fleet-agent-limit <n>    Max agent DBs scanned in fleet maintenance summary (default: ${DEFAULT_FLEET_AGENT_LIMIT})
+  --max-agents <n>           Alias for --fleet-agent-limit
+  --top-agents <n>           Max agents shown in maintenance top list (default: ${DEFAULT_TOP_AGENTS})
+  --max-candidates-per-conversation <n>
+                              Max noise candidates inspected per conversation in fleet mode (default: ${DEFAULT_FLEET_CANDIDATES_PER_CONVERSATION})
   -h, --help    Show this help
 `);
   process.exit(0);
+}
+
+
+if (flags.repairReferencedNoise && !flags.agent && !flags.fleetRepair) {
+  console.error('Error: --repair-referenced-noise requires --agent <id>. Use --fleet-repair only for explicit fleet-wide repair.');
+  process.exit(2);
 }
 
 // ── Resolve config and data directory ────────────────────────────
@@ -141,6 +174,38 @@ function resolveRuntimeConfig() {
 const runtime = resolveRuntimeConfig();
 const dataDir = runtime.dataDir;
 
+function nestedValue(obj, dotted) {
+  return dotted.split('.').reduce((acc, key) => (acc && typeof acc === 'object' ? acc[key] : undefined), obj);
+}
+
+function collectRecallSurfaceConfig(config) {
+  const checks = [
+    ['turnBudget.budgetFraction', 0.6],
+    ['turnBudget.minContextFraction', 0.18],
+    ['warming.protectedFloorEnabled', true],
+    ['warming.shapedWarmupDecay', true],
+    ['adjacency.enabled', true],
+    ['adjacency.boostMultiplier', 1.3],
+    ['adjacency.maxLookback', 5],
+    ['adjacency.maxClockDeltaMin', 10],
+    ['adjacency.evictionGuardMessages', 3],
+    ['adjacency.evictionGuardTokenCap', 4000],
+  ];
+  const compositor = config.compositor ?? {};
+  const items = checks.map(([pathKey, expected]) => {
+    const actual = nestedValue(compositor, pathKey);
+    return { path: `compositor.${pathKey}`, expected, actual: actual ?? null, ok: actual === expected };
+  });
+  const missing = items.filter(item => !item.ok);
+  return {
+    status: missing.length === 0 ? 'ok' : 'attention',
+    ok: items.length - missing.length,
+    total: items.length,
+    missing,
+    items,
+  };
+}
+
 if (!existsSync(dataDir)) {
   console.error(`Error: data directory not found: ${dataDir}`);
   console.error('Is HyperMem installed? Set HYPERMEM_DATA_DIR if using a custom path.');
@@ -216,12 +281,121 @@ function findMessageDb(agentId) {
   return null;
 }
 
-function collectMessageStats(agentId) {
+
+function listMessageDbs(agentId, limit = Infinity) {
   const agentsDir = join(dataDir, 'agents');
-  if (!existsSync(agentsDir)) return { agentsWithMessages: 0, totalMessages: 0, newestMessageAt: null };
+  if (!existsSync(agentsDir)) return { items: [], totalAvailable: 0, skipped: 0, truncated: false };
   const agents = agentId ? [agentId] : readdirSync(agentsDir, { withFileTypes: true })
     .filter(d => d.isDirectory())
+    .map(d => d.name)
+    .sort();
+  const existing = agents
+    .map(agent => ({ agent, path: join(agentsDir, agent, 'messages.db') }))
+    .filter(item => existsSync(item.path));
+  const boundedLimit = Number.isFinite(limit) ? Math.max(0, limit) : Infinity;
+  const items = existing.slice(0, boundedLimit);
+  return {
+    items,
+    totalAvailable: existing.length,
+    skipped: Math.max(0, existing.length - items.length),
+    truncated: existing.length > items.length,
+  };
+}
+
+function emptyReferencedNoiseHealth() {
+  return {
+    status: 'ok',
+    agentsScanned: 0,
+    conversationsScanned: 0,
+    noiseCandidates: 0,
+    referencedNoise: 0,
+    parentReferencedNoise: 0,
+    contextReferencedNoise: 0,
+    snapshotReferencedNoise: 0,
+    otherReferencedNoise: 0,
+    topAgents: [],
+    sampleRefs: [],
+    repair: null,
+    truncated: false,
+    agentsAvailable: 0,
+    agentsSkipped: 0,
+    caps: null,
+  };
+}
+
+async function collectReferencedNoiseHealth(agentId, repair = false) {
+  const health = emptyReferencedNoiseHealth();
+  const fleetMode = !agentId;
+  const agentLimit = fleetMode ? maxAgents : Infinity;
+  const candidateLimit = fleetMode ? maxCandidatesPerConversation : Infinity;
+  health.caps = fleetMode
+    ? { agents: agentLimit, candidatesPerConversation: candidateLimit, topAgents: topAgentsLimit }
+    : null;
+  const distPath = join(root, 'dist', 'proactive-pass.js');
+  if (!existsSync(distPath)) {
+    health.status = 'unknown';
+    health.error = 'dist/proactive-pass.js missing; run npm run build';
+    return health;
+  }
+  const { collectReferencedNoiseDebt, runTreeSafeNoiseCompaction } = await import(distPath);
+  const perAgent = [];
+  const repairs = [];
+
+  const messageDbs = listMessageDbs(agentId, agentLimit);
+  health.agentsAvailable = messageDbs.totalAvailable;
+  health.agentsSkipped = messageDbs.skipped;
+  health.truncated = messageDbs.truncated;
+
+  for (const item of messageDbs.items) {
+    const db = openDb(item.path, `${item.agent} messages.db`, false);
+    if (!db) continue;
+    try {
+      if (repair) {
+        const repaired = runTreeSafeNoiseCompaction(db, undefined, 20, repairLimit);
+        repairs.push({ agent: item.agent, ...repaired });
+      }
+      const debt = collectReferencedNoiseDebt(db, undefined, 20, candidateLimit);
+      health.agentsScanned += 1;
+      health.conversationsScanned += debt.conversationsScanned;
+      health.noiseCandidates += debt.noiseCandidates;
+      health.referencedNoise += debt.referencedNoise;
+      health.parentReferencedNoise += debt.parentReferencedNoise;
+      health.contextReferencedNoise += debt.contextReferencedNoise;
+      health.snapshotReferencedNoise += debt.snapshotReferencedNoise;
+      health.otherReferencedNoise += debt.otherReferencedNoise;
+      for (const ref of debt.sampleRefs) if (health.sampleRefs.length < 12) health.sampleRefs.push(`${item.agent}:${ref}`);
+      if (debt.referencedNoise > 0) perAgent.push({ agent: item.agent, referencedNoise: debt.referencedNoise, parentReferencedNoise: debt.parentReferencedNoise });
+    } finally {
+      try { db.close(); } catch {}
+    }
+  }
+
+  health.topAgents = perAgent
+    .sort((a, b) => b.referencedNoise - a.referencedNoise)
+    .slice(0, topAgentsLimit);
+  health.status = health.referencedNoise > 0 ? 'attention' : 'ok';
+  if (repair) {
+    health.repair = {
+      limit: repairLimit,
+      agentsAttempted: repairs.length,
+      deleted: repairs.reduce((sum, item) => sum + (item.deleted || 0), 0),
+      reparented: repairs.reduce((sum, item) => sum + (item.reparented || 0), 0),
+      skippedBlocked: repairs.reduce((sum, item) => sum + (item.skippedBlocked || 0), 0),
+      skippedRoot: repairs.reduce((sum, item) => sum + (item.skippedRoot || 0), 0),
+      failures: repairs.filter(item => item.fkCheck && item.fkCheck !== 'none'),
+    };
+  }
+  return health;
+}
+
+function collectMessageStats(agentId) {
+  const agentsDir = join(dataDir, 'agents');
+  if (!existsSync(agentsDir)) return { agentsWithMessages: 0, totalMessages: 0, newestMessageAt: null, agentsAvailable: 0, agentsSkipped: 0, truncated: false };
+  const allAgents = agentId ? [agentId] : readdirSync(agentsDir, { withFileTypes: true })
+    .filter(d => d.isDirectory())
     .map(d => d.name);
+  const limit = agentId ? Infinity : maxAgents;
+  const agents = allAgents.slice(0, Number.isFinite(limit) ? Math.max(0, limit) : undefined);
   let agentsWithMessages = 0;
   let totalMessages = 0;
   let newestMessageAt = null;
@@ -237,7 +411,14 @@ function collectMessageStats(agentId) {
     if (newest && (!newestMessageAt || newest > newestMessageAt)) newestMessageAt = newest;
     try { db.close(); } catch {}
   }
-  return { agentsWithMessages, totalMessages, newestMessageAt };
+  return {
+    agentsWithMessages,
+    totalMessages,
+    newestMessageAt,
+    agentsAvailable: allAgents.length,
+    agentsSkipped: Math.max(0, allAgents.length - agents.length),
+    truncated: allAgents.length > agents.length,
+  };
 }
 
 function getVectorDimensions(vectorDb, tableName) {
@@ -252,7 +433,35 @@ function getQuickCheck(db) {
   return row ? Object.values(row)[0] : 'unknown';
 }
 
-function collectMasterHealth(libraryDb, vectorDb, mainDb) {
+function fileContains(filePath, text) {
+  try {
+    return existsSync(filePath) && readFileSync(filePath, 'utf8').includes(text);
+  } catch {
+    return false;
+  }
+}
+
+function collectHistoryQueryHealth(mainDb) {
+  const coreDts = join(root, 'dist', 'index.d.ts');
+  const memoryPluginJs = join(root, 'memory-plugin', 'dist', 'index.js');
+  const coreApi = fileContains(coreDts, 'queryHistory(query: HistoryQuery): HistoryQueryResult');
+  const pluginTool = fileContains(memoryPluginJs, 'history_query') && fileContains(memoryPluginJs, 'history.query');
+  const telemetry = fileContains(memoryPluginJs, 'history-query') && fileContains(memoryPluginJs, 'HYPERMEM_TELEMETRY_PATH');
+  const messagesTable = safeGet(mainDb, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages'`)?.sql ?? '';
+  const fencesTable = safeGet(mainDb, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'compaction_fences'`)?.sql ?? '';
+  const schemaReady = ['tool_calls', 'tool_results', 'context_id', 'topic_id'].every(col => messagesTable.includes(col))
+    && fencesTable.includes('fence_message_id');
+
+  return {
+    status: coreApi && pluginTool && telemetry && schemaReady ? 'ok' : 'fail',
+    coreApi,
+    pluginTool,
+    telemetry,
+    schemaReady,
+  };
+}
+
+async function collectMasterHealth(libraryDb, vectorDb, mainDb) {
   const agentClause = flags.agent ? 'AND agent_id = ?' : '';
   const params = flags.agent ? [flags.agent] : [];
 
@@ -374,10 +583,14 @@ function collectMasterHealth(libraryDb, vectorDb, mainDb) {
   const dbStatus = libraryQuickCheck === 'ok' && (vectorQuickCheck === 'ok' || vectorQuickCheck === 'missing') && (mainQuickCheck === 'ok' || mainQuickCheck === 'missing') ? 'ok' : 'fail';
 
   const messageStats = collectMessageStats(flags.agent);
+  const historyQueryHealth = collectHistoryQueryHealth(mainDb);
+  const recallSurfaceConfig = collectRecallSurfaceConfig(runtime.config);
   const totalTurns = safeGet(libraryDb, `SELECT COUNT(*) AS count FROM output_metrics WHERE 1=1 ${agentClause}`, params)?.count ?? 0;
   const avgLatency = safeGet(libraryDb, `SELECT AVG(latency_ms) AS value FROM output_metrics WHERE latency_ms IS NOT NULL ${agentClause}`, params)?.value ?? null;
   const avgInput = safeGet(libraryDb, `SELECT AVG(input_tokens) AS value FROM output_metrics WHERE input_tokens IS NOT NULL ${agentClause}`, params)?.value ?? null;
   const avgOutput = safeGet(libraryDb, `SELECT AVG(output_tokens) AS value FROM output_metrics WHERE output_tokens IS NOT NULL ${agentClause}`, params)?.value ?? null;
+
+  const referencedNoiseHealth = await collectReferencedNoiseHealth(flags.agent, flags.repairReferencedNoise);
 
   const issues = [];
   if (dbStatus === 'fail') issues.push('database quick_check failed');
@@ -386,8 +599,12 @@ function collectMasterHealth(libraryDb, vectorDb, mainDb) {
   if (episodeStatus === 'warn') issues.push(`episode vector coverage low (${episodeCoverage}%)`);
   if (knowledgeStatus === 'warn') issues.push(`knowledge vector coverage low (${knowledgeCoverage}%)`);
   if (!vectorDb) issues.push('shared vectors.db missing');
+  if (historyQueryHealth.status !== 'ok') issues.push('history.query surface incomplete');
+  if (recallSurfaceConfig.status !== 'ok') issues.push(`0.9.4 recall-surface config incomplete (${recallSurfaceConfig.ok}/${recallSurfaceConfig.total} recommended knobs)`);
+  if (referencedNoiseHealth.status === 'attention') issues.push(`referenced-noise compaction debt (${referencedNoiseHealth.referencedNoise} messages${referencedNoiseHealth.truncated ? ', bounded fleet sample' : ''})`);
+  if (referencedNoiseHealth.status === 'unknown') issues.push(`referenced-noise health unknown: ${referencedNoiseHealth.error}`);
 
-  const overall = issues.length === 0 ? 'healthy' : (dbStatus === 'fail' || dimensionMatches === 'fail' ? 'degraded' : 'attention');
+  const overall = issues.length === 0 ? 'healthy' : (dbStatus === 'fail' || dimensionMatches === 'fail' || historyQueryHealth.status === 'fail' ? 'degraded' : 'attention');
 
   return {
     snapshotAt: new Date().toISOString(),
@@ -405,6 +622,7 @@ function collectMasterHealth(libraryDb, vectorDb, mainDb) {
         baseUrl: runtime.embedding.openaiBaseUrl ?? runtime.embedding.ollamaUrl ?? runtime.embedding.geminiBaseUrl ?? null,
       },
       reranker: runtime.config.reranker ? stripSecretFields(runtime.config.reranker) : null,
+      recallSurface: recallSurfaceConfig,
     },
     databases: {
       library: { path: libraryDbPath, ...fileInfo(libraryDbPath), quickCheck: libraryQuickCheck },
@@ -437,6 +655,12 @@ function collectMasterHealth(libraryDb, vectorDb, mainDb) {
       avgOutputTokens: avgOutput == null ? null : Math.round(avgOutput),
       semanticDiagnosticsPersisted: false,
     },
+    maintenance: {
+      referencedNoise: referencedNoiseHealth,
+    },
+    querySurfaces: {
+      historyQuery: historyQueryHealth,
+    },
   };
 }
 
@@ -461,6 +685,11 @@ function formatMasterHealth(h) {
   lines.push(`  embed:   ${h.config.embedding.provider ?? 'unknown'} / ${h.config.embedding.model ?? 'unknown'}${h.config.embedding.dimensions ? ` (${h.config.embedding.dimensions}d)` : ''}${h.config.embedding.batchSize ? ` batch=${h.config.embedding.batchSize}` : ''}`);
   if (h.config.embedding.baseUrl) lines.push(`  base:    ${h.config.embedding.baseUrl}`);
   lines.push(`  rerank:  ${h.config.reranker?.provider ?? 'none'}`);
+  const rs = h.config.recallSurface;
+  lines.push(`  recall:  ${icon(rs.status === 'ok' ? 'ok' : 'warn')} 0.9.4 surface ${rs.ok}/${rs.total} recommended knobs`);
+  for (const item of rs.missing.slice(0, 5)) {
+    lines.push(`           missing ${item.path}=${JSON.stringify(item.expected)}`);
+  }
 
   lines.push('');
   lines.push('## Databases');
@@ -475,7 +704,7 @@ function formatMasterHealth(h) {
   lines.push(`  episodes: ${h.memory.episodes.eligible.toLocaleString()} significant / ${h.memory.episodes.total.toLocaleString()} total`);
   lines.push(`  knowledge:${String(h.memory.knowledge.active.toLocaleString()).padStart(7)} active`);
   lines.push(`  chunks:   ${h.memory.docChunks.total.toLocaleString()}`);
-  lines.push(`  messages: ${h.memory.messages.totalMessages.toLocaleString()} across ${h.memory.messages.agentsWithMessages} agent DBs${h.memory.messages.newestMessageAt ? `, newest ${h.memory.messages.newestMessageAt}` : ''}`);
+  lines.push(`  messages: ${h.memory.messages.totalMessages.toLocaleString()} across ${h.memory.messages.agentsWithMessages} agent DBs${h.memory.messages.truncated ? `/${h.memory.messages.agentsAvailable} bounded` : ''}${h.memory.messages.newestMessageAt ? `, newest ${h.memory.messages.newestMessageAt}` : ''}`);
 
   lines.push('');
   lines.push('## Vector coverage');
@@ -502,6 +731,25 @@ function formatMasterHealth(h) {
     lines.push('  no persisted output_metrics rows');
   }
   lines.push('  semantic recall counts: runtime log only, not persisted yet');
+
+  lines.push('');
+  lines.push('## Maintenance');
+  const rn = h.maintenance.referencedNoise;
+  lines.push(`  ${icon(rn.status === 'ok' ? 'ok' : rn.status === 'attention' ? 'warn' : 'fail')} referenced-noise debt=${rn.referencedNoise.toLocaleString()} parent=${rn.parentReferencedNoise.toLocaleString()} context=${rn.contextReferencedNoise.toLocaleString()} snapshot=${rn.snapshotReferencedNoise.toLocaleString()} agents=${rn.agentsScanned}${rn.truncated ? `/${rn.agentsAvailable} bounded` : ''}`);
+  if (rn.truncated) {
+    lines.push(`  fleet scan bounded: skipped ${rn.agentsSkipped} agent DBs; rerun with --fleet-agent-limit ${rn.agentsAvailable} for a full scan`);
+  }
+  if (rn.topAgents.length > 0) {
+    lines.push(`  top agents: ${rn.topAgents.map(item => `${item.agent}=${Number(item.referencedNoise).toLocaleString()}`).join(' ')}`);
+  }
+  if (rn.repair) {
+    lines.push(`  repair: limit=${rn.repair.limit} deleted=${rn.repair.deleted} reparented=${rn.repair.reparented} skippedBlocked=${rn.repair.skippedBlocked} skippedRoot=${rn.repair.skippedRoot}`);
+  }
+
+  lines.push('');
+  lines.push('## Query surfaces');
+  const hq = h.querySurfaces.historyQuery;
+  lines.push(`  ${icon(hq.status)} history.query coreApi=${hq.coreApi ? 'yes' : 'no'} pluginTool=${hq.pluginTool ? 'yes' : 'no'} telemetry=${hq.telemetry ? 'yes' : 'no'} schema=${hq.schemaReady ? 'yes' : 'no'}`);
 
   return lines.join('\n');
 }
@@ -538,7 +786,7 @@ if (vectorDb) {
 
 try {
   if (flags.master) {
-    const master = collectMasterHealth(libraryDb, vectorDb, mainDb);
+    const master = await collectMasterHealth(libraryDb, vectorDb, mainDb);
     if (flags.json) console.log(JSON.stringify(master, null, 2));
     else console.log(formatMasterHealth(master));
     process.exit(master.overall === 'degraded' ? 1 : 0);

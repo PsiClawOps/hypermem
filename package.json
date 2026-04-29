@@ -1,6 +1,6 @@
 {
   "name": "@psiclawops/hypermem",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Agent-centric memory and context composition engine for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
@@ -45,7 +45,10 @@
     "validate:public-surface": "node scripts/validate-public-surface.mjs",
     "bench:memory": "node bench/data-access-bench.mjs --iterations 1000 --warmup 50",
     "validate:doctor": "node test/doctor-cli.mjs",
-    "build:all": "npm run build && npm --prefix plugin install --prefer-offline && npm --prefix plugin run build && npm --prefix memory-plugin install --prefer-offline && npm --prefix memory-plugin run build"
+    "build:all": "npm run build && npm --prefix plugin install --prefer-offline && npm --prefix plugin run build && npm --prefix memory-plugin install --prefer-offline && npm --prefix memory-plugin run build",
+    "validate:history-query": "npm run build && npm --prefix memory-plugin run build && node scripts/validate-history-query.mjs",
+    "install:runtime:packed": "node scripts/install-packed-runtime.mjs",
+    "release:install-smoke": "bash release-gate-internal/fresh-install-smoke.sh"
   },
   "dependencies": {
     "sqlite-vec": "^0.1.9",
@@ -58,14 +61,11 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "bundledDependencies": [
-    "sqlite-vec",
-    "zod"
-  ],
   "files": [
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "dist/**/*.d.ts.map",
+    "assets/default-config.json",
     "bin/hypermem-status.mjs",
     "bin/hypermem-model-audit.mjs",
     "bin/hypermem-doctor.mjs",
@@ -79,6 +79,7 @@
     "memory-plugin/package.json",
     "memory-plugin/openclaw.plugin.json",
     "scripts/install-runtime.mjs",
+    "scripts/install-packed-runtime.mjs",
     "docs/*.md",
     "install.sh",
     "README.md",
@@ -91,7 +92,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/PsiClawOps/hypermem.git"
+    "url": "git+https://github.com/PsiClawOps/hypermem.git"
   },
   "publishConfig": {
     "access": "public",
@@ -106,5 +107,17 @@
     "sqlite-vec",
     "redis",
     "rag"
-  ]
+  ],
+  "bundleDependencies": [
+    "sqlite-vec",
+    "zod"
+  ],
+  "directories": {
+    "doc": "docs",
+    "test": "test"
+  },
+  "bugs": {
+    "url": "https://github.com/PsiClawOps/hypermem/issues"
+  },
+  "homepage": "https://github.com/PsiClawOps/hypermem#readme"
 }

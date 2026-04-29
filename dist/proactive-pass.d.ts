@@ -27,11 +27,51 @@ export interface NoiseSweepResult {
     messagesDeleted: number;
     passType: 'noise_sweep';
 }
+export interface ReferencedNoiseDebtResult {
+    passType: 'referenced_noise_debt';
+    conversationsScanned: number;
+    noiseCandidates: number;
+    referencedNoise: number;
+    parentReferencedNoise: number;
+    contextReferencedNoise: number;
+    snapshotReferencedNoise: number;
+    otherReferencedNoise: number;
+    sampleRefs: string[];
+}
+export interface TreeSafeNoiseCompactionResult {
+    passType: 'tree_safe_noise_compaction';
+    conversationsScanned: number;
+    candidates: number;
+    reparented: number;
+    repairedContextHeads: number;
+    repairedSnapshotHeads: number;
+    deleted: number;
+    skippedBlocked: number;
+    skippedRoot: number;
+    fkCheck: string;
+}
+export interface ProactivePassContext {
+    agentId?: string;
+    dbPath?: string;
+}
 export interface ToolDecayResult {
     messagesUpdated: number;
     bytesFreed: number;
     passType: 'tool_decay';
 }
+/**
+ * Measure noise rows that maintenance cannot delete because they are still FK
+ * targets. This is health debt, not corruption: the message tree is preserving
+ * referential integrity, but low-signal nodes need tree-safe compaction.
+ */
+export declare function collectReferencedNoiseDebt(db: DatabaseSync, conversationId?: number, recentWindowSize?: number, maxCandidatesPerConversation?: number): ReferencedNoiseDebtResult;
+/**
+ * Safely collapse referenced noise nodes by moving children and durable head
+ * pointers to the deleted node's parent. The repair only handles known safe
+ * message-head references: messages.parent_id, contexts.head_message_id, and
+ * composition_snapshots.head_message_id. Other FK blockers remain preserved.
+ */
+export declare function runTreeSafeNoiseCompaction(db: DatabaseSync, conversationId?: number, recentWindowSize?: number, maxMutations?: number): TreeSafeNoiseCompactionResult;
 /**
  * Delete noise and heartbeat messages outside the recent window.
  *
@@ -42,7 +82,7 @@ export interface ToolDecayResult {
  * Deletions are wrapped in a single transaction. The FTS5 trigger handles
  * index cleanup automatically (msg_fts_ad fires on DELETE).
  */
-export declare function runNoiseSweep(db: DatabaseSync, conversationId: number, recentWindowSize?: number, maxCandidates?: number): NoiseSweepResult;
+export declare function runNoiseSweep(db: DatabaseSync, conversationId: number, recentWindowSize?: number, maxCandidates?: number, context?: ProactivePassContext): NoiseSweepResult;
 /**
  * Truncate oversized tool_results outside the recent window.
  *
@@ -59,5 +99,5 @@ export declare function runNoiseSweep(db: DatabaseSync, conversationId: number, 
  *
  * Mutations are committed in a single transaction.
  */
-export declare function runToolDecay(db: DatabaseSync, conversationId: number, recentWindowSize?: number, maxCandidates?: number): ToolDecayResult;
+export declare function runToolDecay(db: DatabaseSync, conversationId: number, recentWindowSize?: number, maxCandidates?: number, context?: ProactivePassContext): ToolDecayResult;
 //# sourceMappingURL=proactive-pass.d.ts.map

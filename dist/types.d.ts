@@ -451,6 +451,8 @@ export interface ComposeDiagnostics {
     adaptiveTrimSoftTarget?: number;
     /** Compaction target fraction recommended by the lifecycle policy. */
     adaptiveCompactionTargetFraction?: number;
+    /** Protected warming floor fraction emitted by the lifecycle policy, when active. */
+    adaptiveProtectedWarmingFraction?: number;
     /** True when the policy recommends emitting a `/new` breadcrumb package. */
     adaptiveBreadcrumbPackage?: boolean;
     /** True when topic-centroid eviction may participate in trimming decisions. */
@@ -477,6 +479,12 @@ export interface ComposeDiagnostics {
     adaptiveEvictionTopicIdCoveragePct?: number;
     /** Reason topic-aware eviction did not participate, when applicable. */
     adaptiveEvictionBypassReason?: 'no-active-topic' | 'no-stamped-clusters' | 'band-not-topic-aware' | 'within-budget' | 'no-eligible-inactive-topic-clusters';
+    /** Count of retrieval candidates boosted by adjacency scoring during compose. */
+    composeAdjacencyBoosted?: number;
+    /** Average wall-clock delta for adjacency-boosted candidates, in milliseconds. */
+    composeAdjacencyAverageDeltaMs?: number;
+    /** Count of history messages protected from eviction by the adjacency antecedent guard. */
+    evictionAdjacencyGuardHits?: number;
     /** Canonical compose-time topic resolution source used for active-topic scoping. */
     composeTopicSource?: 'request-topic-id' | 'session-topic-map' | 'none';
     /**
@@ -730,6 +738,14 @@ export interface EmbeddingProviderConfig {
     geminiIndexTaskType?: string;
     /** Gemini task type for queries. Default: RETRIEVAL_QUERY */
     geminiQueryTaskType?: string;
+    /** Generic query input type for providers that support asymmetric retrieval embeddings. */
+    queryInputType?: string;
+    /** Generic document input type for providers that support asymmetric retrieval embeddings. */
+    documentInputType?: string;
+    /** Optional explicit query prefix, applied before embedding query text. */
+    queryPrefix?: string;
+    /** Optional explicit document prefix, applied before embedding stored document text. */
+    documentPrefix?: string;
     /**
      * Embedding model name.
      * - ollama default: nomic-embed-text (768d)
@@ -1011,6 +1027,89 @@ export interface LifecyclePolicyTelemetryEvent {
     reasons?: string[];
 }
 export type HyperMemTelemetryEvent = TrimTelemetryEvent | AssembleTraceEvent | LifecyclePolicyTelemetryEvent;
+/**
+ * Scoped read-only history query modes. Each mode routes to a safe,
+ * bounded SQL path. No raw SQL execution is allowed via this surface.
+ */
+export type HistoryQueryMode = 'runtime_chain' | 'transcript_tail' | 'tool_events' | 'by_topic' | 'by_context' | 'cross_session';
+/**
+ * Input parameters for MessageStore.queryHistory().
+ *
+ * Mode-specific required fields:
+ *   runtime_chain   — sessionKey or conversationId
+ *   transcript_tail — sessionKey or conversationId
+ *   tool_events     — sessionKey or conversationId
+ *   by_topic        — topicId + (sessionKey or conversationId)
+ *   by_context      — contextId; includeArchived required for non-active contexts
+ *   cross_session   — agentId (queries all conversations for that agent)
+ */
+export interface HistoryQuery {
+    /** Owning agent. Required for all modes. */
+    agentId: string;
+    /** Session key — used to resolve conversationId when conversationId is not provided. */
+    sessionKey?: string;
+    /** Conversation id. Takes precedence over sessionKey when both are provided. */
+    conversationId?: number;
+    /** Context id for by_context mode. */
+    contextId?: number;
+    /** Topic id for by_topic mode. */
+    topicId?: string;
+    /** Query mode. */
+    mode: HistoryQueryMode;
+    /** Result limit. Clamped to the per-mode hard cap when exceeded. */
+    limit?: number;
+    /** Only return messages with id >= minMessageId. */
+    minMessageId?: number;
+    /** ISO timestamp lower bound (cross_session mode). */
+    since?: string;
+    /** Unused in this release — reserved for future FTS filtering. */
+    query?: string;
+    /** Allow archived/forked contexts in by_context mode. Default: false. */
+    includeArchived?: boolean;
+    /**
+     * When true, include raw tool_calls / tool_results payloads in tool_events results.
+     * Default false: payloads are redacted (metadata only, no arguments or content).
+     * This is an explicit opt-in — do not widen without confirmed need.
+     */
+    includeToolPayloads?: boolean;
+}
+/**
+ * A single message row in a HistoryQueryResult.
+ * toolCalls / toolResults are null in transcript_tail mode.
+ * In tool_events mode, these may be redacted (metadata-only) unless
+ * includeToolPayloads was true.
+ */
+export interface HistoryQueryMessage {
+    id: number;
+    role: string;
+    textContent?: string | null;
+    toolCalls?: unknown | null;
+    toolResults?: unknown | null;
+    messageIndex: number;
+    createdAt: string;
+    topicId?: string | null;
+    contextId?: number | null;
+}
+/**
+ * Result envelope for MessageStore.queryHistory().
+ */
+export interface HistoryQueryResult {
+    mode: HistoryQueryMode;
+    scopedBy: {
+        agentId: string;
+        sessionKey?: string;
+        conversationId?: number;
+        contextId?: number;
+        topicId?: string;
+        /** The fence message id applied in this query (null = no fence active). */
+        fenceMessageId?: number | null;
+    };
+    messages: HistoryQueryMessage[];
+    /** True when the result was capped by the mode's hard limit. */
+    truncated: boolean;
+    /** True when tool payloads were redacted (tool_events mode default). */
+    redacted: boolean;
+}
 /**
  * Query parameters for mining a single archived/forked context.
  *

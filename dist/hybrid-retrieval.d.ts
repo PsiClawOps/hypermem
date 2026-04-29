@@ -25,6 +25,12 @@ export interface RerankerTelemetry {
     /** Outcome for this invocation. */
     status: RerankerStatus;
 }
+export interface AdjacencyTelemetry {
+    /** Number of candidates boosted by adjacency scoring. */
+    boostedCount: number;
+    /** Average antecedent-to-successor wall-clock delta in milliseconds. */
+    averageDeltaMs: number;
+}
 export interface HybridSearchResult {
     sourceTable: string;
     sourceId: number;
@@ -86,6 +92,8 @@ export interface HybridSearchOptions {
     rerankerTimeoutMs?: number;
     /** Optional telemetry sink. When omitted, falls back to emitRerankerLog. */
     onRerankerTelemetry?: (ev: RerankerTelemetry) => void;
+    /** Optional metadata-only telemetry for adjacency boosts. */
+    onAdjacencyTelemetry?: (ev: AdjacencyTelemetry) => void;
 }
 /**
  * Build an FTS5 query from a natural language string.

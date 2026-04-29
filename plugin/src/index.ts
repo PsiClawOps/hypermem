@@ -221,6 +221,8 @@ function lifecyclePolicyTelemetry(fields: {
   pressurePct?: number;
   topicShiftConfidence?: number;
   trimSoftTarget?: number;
+  protectedWarmingFloorFraction?: number;
+  protectedSlotsKept?: number;
   reasons?: string[];
 }): void {
   if (!telemetryEnabled()) return;
@@ -236,6 +238,22 @@ function lifecyclePolicyTelemetry(fields: {
   } catch {
     // Telemetry must never throw
   }
+}
+
+function resolveAfterTurnProtectedWarmingTelemetry(policy: {
+  band: string;
+  warmHistoryBudgetFraction?: number;
+}, effectiveBudget?: number): { protectedWarmingFloorFraction?: number; protectedSlotsKept?: number } {
+  if (policy.band !== 'bootstrap' && policy.band !== 'warmup') return {};
+  if (Math.max(0, Math.floor(effectiveBudget ?? 0)) <= 0) return {};
+  const elevatedFloor = 0.34;
+  const bandFloor = Math.max(elevatedFloor, Math.max(0, policy.warmHistoryBudgetFraction ?? 0) * 0.60);
+  return {
+    protectedWarmingFloorFraction: Math.round(bandFloor * 10000) / 10000,
+    // Metadata-only count: one protected warming slot is active for this
+    // afterTurn gradient refresh. No message text or identifiers are emitted.
+    protectedSlotsKept: 1,
+  };
 }
 
 function nextTurnId(): string {
@@ -479,6 +497,10 @@ let _embeddingConfig: {
   geminiBaseUrl?: string;
   geminiIndexTaskType?: string;
   geminiQueryTaskType?: string;
+  queryInputType?: string;
+  documentInputType?: string;
+  queryPrefix?: string;
+  documentPrefix?: string;
   model: string;
   dimensions: number;
   timeout: number;
@@ -853,6 +875,10 @@ async function loadUserConfig(): Promise<{
     geminiBaseUrl?: string;
     geminiIndexTaskType?: string;
     geminiQueryTaskType?: string;
+    queryInputType?: string;
+    documentInputType?: string;
+    queryPrefix?: string;
+    documentPrefix?: string;
     model?: string;
     dimensions?: number;
     timeout?: number;
@@ -962,8 +988,8 @@ async function getHyperMem(): Promise<HyperMemInstance> {
     // Bind it with the user's embedding config so the pre-compute path uses the
     // same provider as the indexer (Ollama vs OpenAI).
     if (typeof mod.generateEmbeddings === 'function') {
-      const rawGenerate = mod.generateEmbeddings as (texts: string[], config?: unknown) => Promise<Float32Array[]>;
-      _generateEmbeddings = (texts: string[]) => rawGenerate(texts, _embeddingConfig ?? undefined);
+      const rawGenerate = mod.generateEmbeddings as (texts: string[], config?: unknown, inputKind?: 'query' | 'document') => Promise<Float32Array[]>;
+      _generateEmbeddings = (texts: string[]) => rawGenerate(texts, _embeddingConfig ?? undefined, 'query');
     }
 
     // Load optional user config — compositor tuning overrides
@@ -989,14 +1015,19 @@ async function getHyperMem(): Promise<HyperMemInstance> {
         geminiBaseUrl: ue.geminiBaseUrl,
         geminiIndexTaskType: ue.geminiIndexTaskType,
         geminiQueryTaskType: ue.geminiQueryTaskType,
+        queryInputType: ue.queryInputType,
+        documentInputType: ue.documentInputType,
+        queryPrefix: ue.queryPrefix,
+        documentPrefix: ue.documentPrefix,
         model: ue.model ?? providerDefaults.model,
         dimensions: ue.dimensions ?? providerDefaults.dimensions,
         timeout: ue.timeout ?? providerDefaults.timeout,
         batchSize: ue.batchSize ?? providerDefaults.batchSize,
       };
+      const embeddingConfig = _embeddingConfig;
       console.log(
-        `[hypermem-plugin] Embedding provider: ${_embeddingConfig.provider} ` +
-        `(model: ${_embeddingConfig.model}, ${_embeddingConfig.dimensions}d, batch: ${_embeddingConfig.batchSize})`
+        `[hypermem-plugin] Embedding provider: ${embeddingConfig.provider} ` +
+        `(model: ${embeddingConfig.model}, ${embeddingConfig.dimensions}d, batch: ${embeddingConfig.batchSize})`
       );
     }
 
@@ -1197,6 +1228,36 @@ function extractTextFromInboundContent(content: InboundMessage['content']): stri
     .filter(part => part.type === 'text' && typeof part.text === 'string')
     .map(part => part.text ?? '')
     .join('\n');
+}
+
+/**
+ * Determine whether a user turn is "topic-bearing" (substantive).
+ *
+ * Heartbeat, empty, and small-talk turns are NOT topic-bearing and do not
+ * extend the warmup window. This is intentionally a lightweight heuristic:
+ * no topic-detector architecture change, no model calls.
+ */
+function isTopicBearingTurn(msg: InboundMessage | undefined, isHeartbeat: boolean): boolean {
+  if (isHeartbeat) return false;
+  if (!msg) return false;
+  if (msg.role !== 'user') return false;
+
+  const text = stripMessageMetadata(extractTextFromInboundContent(msg.content)).trim();
+
+  // Empty turn
+  if (text.length === 0) return false;
+
+  // Small-talk: very short generic acknowledgments
+  if (text.length < 15) {
+    if (/^(ok|okay|yes|no|thanks|thank\s+you|got\s+it|sure|yep|nah|nope|alright|cool|nice|great|good|k|kk|heartbeat[_\s-]*ok|👍|👎|hi|hello|hey)[.!]*$/iu.test(text)) {
+      return false;
+    }
+  }
+
+  // Pure punctuation or emoji
+  if (/^[\s\p{P}\p{Emoji}]+$/u.test(text)) return false;
+
+  return true;
 }
 
 function resolveAssistantTokenCount(
@@ -2765,7 +2826,11 @@ function createHyperMemEngine(): ContextEngine {
       // (contextBlock) is cached, since that's what determines prefix identity.
       const cacheReplayThresholdMs = _cacheReplayThresholdMs;
       let cachedContextBlock: string | null = null;
-      if (cacheReplayThresholdMs > 0 && !replayRecovery.shouldSkipCacheReplay) {
+      const promptHasUserText = typeof prompt === 'string' && prompt.trim().length > 0;
+      // A new user prompt must force a fresh context block. Prefix-cache replay is
+      // only safe for tool-loop/maintenance paths where no new conversational
+      // antecedent needs to be reflected in the transcript context.
+      if (cacheReplayThresholdMs > 0 && !promptHasUserText && !replayRecovery.shouldSkipCacheReplay) {
         try {
           const cachedAt = await hm.cache.getSlot(agentId, sk, 'assemblyContextAt');
           if (cachedAt && Date.now() - parseInt(cachedAt) < cacheReplayThresholdMs) {
@@ -2922,6 +2987,49 @@ function createHyperMemEngine(): ContextEngine {
           ? `${result.contextBlock}
 ${replayRecovery.emittedText}`
           : replayRecovery.emittedText;
+      }
+
+      if (forkedContext) {
+        try {
+          let parentHistoryText = (forkedContext as typeof forkedContext & { parentHistoryText?: string })?.parentHistoryText;
+          if (!parentHistoryText) {
+            const rawParentHistory = await hm.cache.getSlot(agentId, sk, 'parentHistory');
+            if (rawParentHistory) {
+              const parentHistory = JSON.parse(rawParentHistory) as Array<{ role?: string; textContent?: string | null; content?: string | null }>;
+              parentHistoryText = parentHistory
+                .map(m => ({ role: m.role, text: m.textContent ?? m.content ?? null }))
+                .filter(m => m && typeof m.role === 'string' && typeof m.text === 'string' && m.text.trim())
+                .slice(-12)
+                .map(m => `${m.role}: ${m.text!.trim()}`)
+                .join('\n');
+            }
+          }
+          if (!parentHistoryText && forkedContext.parentSessionKey) {
+            const parentAgentId = extractAgentId(forkedContext.parentSessionKey);
+            const durableParentHistory = hm.queryHistory({
+              agentId: parentAgentId,
+              sessionKey: forkedContext.parentSessionKey,
+              mode: 'runtime_chain',
+              limit: 12,
+            });
+            parentHistoryText = durableParentHistory.messages
+              .filter(m => typeof m.textContent === 'string' && m.textContent.trim())
+              .map(m => `${m.role}: ${m.textContent!.trim()}`)
+              .join('\n');
+          }
+          if (parentHistoryText && !(result.contextBlock ?? '').includes(parentHistoryText)) {
+            const forkedHistoryBlock = `## Forked Parent Working History\n${parentHistoryText}`;
+            result.contextBlock = result.contextBlock
+              ? `${result.contextBlock}\n\n${forkedHistoryBlock}`
+              : forkedHistoryBlock;
+            result.messages.unshift({
+              role: 'system',
+              content: forkedHistoryBlock,
+            });
+          }
+        } catch {
+          // Parent-history injection is advisory; seeded hot history remains primary.
+        }
       }
 
       // Convert NeutralMessage[] → AgentMessage[] for the OpenClaw runtime.
@@ -3419,11 +3527,36 @@ ${replayRecovery.emittedText}`
             const inboundUserText = inboundUserMsg
               ? stripMessageMetadata(extractTextFromInboundContent(inboundUserMsg.content))
               : '';
+
+            // Packet 2: topic-bearing warmup decay.
+            // Persist a running count of substantive user turns per session.
+            // Heartbeat/empty/small-talk turns do not increment the counter.
+            const isCurrentTurnTopicBearing = isTopicBearingTurn(inboundUserMsg, Boolean(isHeartbeat));
+            let topicBearingTurnCount = 0;
+            try {
+              const raw = await hm.cache.getSlot(agentId, sk, 'topicBearingTurnCount');
+              if (raw) topicBearingTurnCount = Math.max(0, parseInt(raw, 10) || 0);
+            } catch { /* non-fatal */ }
+
+            const explicitNewSession = /^\/new(?:\s|$)/i.test(inboundUserText.trim());
+            if (explicitNewSession) {
+              topicBearingTurnCount = 0;
+              try {
+                await hm.cache.setSlot(agentId, sk, 'topicBearingTurnCount', '0');
+              } catch { /* non-fatal */ }
+            } else if (isCurrentTurnTopicBearing) {
+              topicBearingTurnCount++;
+              try {
+                await hm.cache.setSlot(agentId, sk, 'topicBearingTurnCount', String(topicBearingTurnCount));
+              } catch { /* non-fatal */ }
+            }
+
             const lifecyclePolicy = resolveAdaptiveLifecyclePolicy({
               usedTokens: estimateMessageArrayTokens(messages as unknown[]),
               effectiveBudget: gradientBudget,
               userTurnCount: (messages as unknown as InboundMessage[]).filter(m => m.role === 'user').length,
-              explicitNewSession: /^\/new(?:\s|$)/i.test(inboundUserText.trim()),
+              topicBearingTurnCount,
+              explicitNewSession,
               topicShiftConfidence: adaptiveTopicShiftConfidence,
             });
             lifecyclePolicyTelemetry({
@@ -3434,6 +3567,7 @@ ${replayRecovery.emittedText}`
               pressurePct: lifecyclePolicy.pressurePct,
               topicShiftConfidence: adaptiveTopicShiftConfidence,
               trimSoftTarget: lifecyclePolicy.trimSoftTarget,
+              ...resolveAfterTurnProtectedWarmingTelemetry(lifecyclePolicy, gradientBudget),
               reasons: lifecyclePolicy.reasons,
             });
             await hm.refreshRedisGradient(agentId, sk, gradientBudget, gradientDepth, lifecyclePolicy.trimSoftTarget);
@@ -3624,6 +3758,7 @@ ${replayRecovery.emittedText}`
         let parentHistoryMessages = 0;
         let parentUserTurnCount = 0;
         let parentPressureFraction: number | undefined;
+        let parentHistoryText: string | undefined;
 
         // Seed child with parent's active facts. This preserves the historical
         // slot for compatibility; facts still primarily come from L4 by agent id.
@@ -3635,12 +3770,41 @@ ${replayRecovery.emittedText}`
           await hm.cache.setSlot(childAgentId, childSessionKey, 'parentFacts', factBlock);
         }
 
-        const history = await hm.cache.getHistory(parentAgentId, parentSessionKey);
+        const maxSeededHistory = _subagentWarming === 'full' ? 25 : 12;
+        let history = await hm.cache.getHistory(parentAgentId, parentSessionKey, maxSeededHistory);
+        if (!history || history.length === 0) {
+          const durableHistory = hm.queryHistory({
+            agentId: parentAgentId,
+            sessionKey: parentSessionKey,
+            mode: 'runtime_chain',
+            limit: maxSeededHistory,
+          });
+          history = durableHistory.messages.map(message => ({
+            id: message.id,
+            conversationId: durableHistory.scopedBy.conversationId ?? 0,
+            agentId: parentAgentId,
+            role: message.role as NeutralMessage['role'],
+            textContent: message.textContent ?? null,
+            toolCalls: Array.isArray(message.toolCalls) ? message.toolCalls : null,
+            toolResults: Array.isArray(message.toolResults) ? message.toolResults : null,
+            messageIndex: message.messageIndex,
+            tokenCount: null,
+            isHeartbeat: false,
+            createdAt: message.createdAt,
+          }));
+        }
         if (history && history.length > 0) {
-          const maxSeededHistory = _subagentWarming === 'full' ? 25 : 12;
           const recentHistory = history.slice(-maxSeededHistory);
           parentHistoryMessages = recentHistory.length;
           parentUserTurnCount = recentHistory.filter(m => m.role === 'user').length;
+          parentHistoryText = recentHistory
+            .map(m => ({
+              role: m.role,
+              text: typeof m.textContent === 'string' ? m.textContent : (typeof (m as unknown as { content?: unknown }).content === 'string' ? (m as unknown as { content: string }).content : null),
+            }))
+            .filter(m => typeof m.text === 'string' && m.text.trim())
+            .map(m => `${m.role}: ${m.text!.trim()}`)
+            .join('\n');
           const parentTokens = estimateMessageArrayTokens(recentHistory as unknown[]);
           const parentModelState = await hm.cache.getModelState(parentAgentId, parentSessionKey).catch(() => null);
           const parentBudget = parentModelState?.tokenBudget && parentModelState.tokenBudget > 0
@@ -3649,7 +3813,16 @@ ${replayRecovery.emittedText}`
           parentPressureFraction = parentBudget ? parentTokens / parentBudget : undefined;
 
           if (isForkedContext || _subagentWarming === 'full') {
-            await hm.cache.replaceHistory(childAgentId, childSessionKey, recentHistory, maxSeededHistory);
+            const forkedHistoryText = parentHistoryText
+              ? `Forked parent working history:\n${parentHistoryText}`
+              : undefined;
+            if (isForkedContext && forkedHistoryText) {
+              await hm.recordUserMessage(childAgentId, childSessionKey, forkedHistoryText, { channelType: 'subagent' });
+            }
+            const seededHistory = isForkedContext && parentHistoryText
+              ? [{ role: 'system' as NeutralMessage['role'], textContent: `## Forked Parent Working History\n${parentHistoryText}`, toolCalls: null, toolResults: null }, ...recentHistory]
+              : recentHistory;
+            await hm.cache.replaceHistory(childAgentId, childSessionKey, seededHistory, maxSeededHistory + 1);
             await hm.cache.invalidateWindow(childAgentId, childSessionKey).catch(() => {});
           }
           await hm.cache.setSlot(
@@ -3669,7 +3842,8 @@ ${replayRecovery.emittedText}`
             parentPressureFraction,
             parentUserTurnCount,
             parentHistoryMessages,
-          };
+            parentHistoryText,
+          } as NonNullable<ComposeRequest['forkedContext']> & { parentHistoryText?: string };
           await hm.cache.setSlot(
             childAgentId,
             childSessionKey,
@@ -3940,6 +4114,10 @@ const hypercompositorConfigSchema = z.object({
     geminiBaseUrl: z.string().optional(),
     geminiIndexTaskType: z.string().optional(),
     geminiQueryTaskType: z.string().optional(),
+    queryInputType: z.string().optional(),
+    documentInputType: z.string().optional(),
+    queryPrefix: z.string().optional(),
+    documentPrefix: z.string().optional(),
     model: z.string().optional(),
     dimensions: z.number().int().positive().optional(),
     timeout: z.number().int().positive().optional(),

@@ -16,6 +16,8 @@ export interface AdaptiveLifecycleInput {
     pressureFraction?: number;
     /** Number of user turns observed in the session. */
     userTurnCount?: number;
+    /** Number of topic-bearing (substantive) user turns observed in the session. */
+    topicBearingTurnCount?: number;
     /** True when the incoming user turn explicitly starts with /new. */
     explicitNewSession?: boolean;
     /** Topic-shift confidence from the detector, 0..1. */
@@ -27,6 +29,33 @@ export interface AdaptiveLifecycleInput {
     /** Parent-session user turns observed when the fork was prepared. */
     forkedParentUserTurnCount?: number;
 }
+/**
+ * Minimal message shape for the lightweight topic-bearing classifier.
+ * Used by compose paths to count substantive user turns from existing
+ * message data without content telemetry or schema migration.
+ */
+export interface TopicBearingMessageLike {
+    role: string;
+    textContent: string | null;
+    isHeartbeat?: boolean;
+}
+/**
+ * Determine whether a user turn is "topic-bearing" (substantive).
+ *
+ * Heartbeat, empty, and small-talk turns are NOT topic-bearing and do not
+ * extend the warmup window. This is intentionally a lightweight heuristic:
+ * no topic-detector architecture change, no model calls.
+ *
+ * Mirrors the plugin afterTurn gradient semantics so compose-path band
+ * decisions stay consistent with afterTurn-path band decisions.
+ */
+export declare function isTopicBearingTurn(msg: TopicBearingMessageLike): boolean;
+/**
+ * Count topic-bearing turns in a message array.
+ *
+ * Pure helper: no side effects, no store access. Returns 0 for empty arrays.
+ */
+export declare function countTopicBearingTurns(messages: TopicBearingMessageLike[]): number;
 /**
  * Eviction-pipeline step labels. The order in `AdaptiveEvictionPlan.steps`
  * is the order the compose-window cluster-drop path should attempt them.
@@ -47,6 +76,14 @@ export interface AdaptiveEvictionPlan {
     /** Ballast-reduction steps run before any cluster drop. Always true today. */
     preferBallastFirst: boolean;
 }
+interface ProtectedWarmingMetadata {
+    /** Whether warming is currently protected by a hard floor. True for high/critical. */
+    isProtected: boolean;
+    /** The floor value warming cannot drop below. 0 when not protected. */
+    floor: number;
+    /** Human-readable explanation. */
+    reason: string;
+}
 export interface AdaptiveLifecyclePolicy {
     band: AdaptiveLifecycleBand;
     pressureFraction: number;
@@ -59,6 +96,7 @@ export interface AdaptiveLifecyclePolicy {
     enableTopicCentroidEviction: boolean;
     triggerProactiveCompaction: boolean;
     evictionPlan: AdaptiveEvictionPlan;
+    protectedWarmingMetadata: ProtectedWarmingMetadata;
     reasons: string[];
 }
 /**
@@ -78,4 +116,5 @@ export declare function resolveAdaptiveEvictionPlan(band: AdaptiveLifecycleBand)
  * Resolve the adaptive lifecycle posture for one compose/afterTurn cycle.
  */
 export declare function resolveAdaptiveLifecyclePolicy(input?: AdaptiveLifecycleInput): AdaptiveLifecyclePolicy;
+export {};
 //# sourceMappingURL=adaptive-lifecycle.d.ts.map

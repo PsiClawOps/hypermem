@@ -81,6 +81,8 @@ declare function lifecyclePolicyTelemetry(fields: {
     pressurePct?: number;
     topicShiftConfidence?: number;
     trimSoftTarget?: number;
+    protectedWarmingFloorFraction?: number;
+    protectedSlotsKept?: number;
     reasons?: string[];
 }): void;
 declare function nextTurnId(): string;
