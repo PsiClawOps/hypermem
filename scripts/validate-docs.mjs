@@ -229,6 +229,21 @@ if (pkg.files) {
       warn('missing-files-entry', `package.json files array includes "${f}" but it doesn't exist`);
     }
   }
+
+  const blockedNpmDocs = [
+    `docs/ROADMAP${'.md'}`,
+    `docs/KNOWN_LIMITATIONS${'.md'}`,
+    'docs/PHASE1-VALIDATION.md',
+    'docs/RELEASE_0.8.0_VALIDATION.md',
+  ];
+  if (pkg.files.includes('docs/*.md')) {
+    fail('npm-docs-wildcard', 'package.json files must list public docs explicitly; docs/*.md can publish internal planning docs');
+  }
+  for (const doc of blockedNpmDocs) {
+    if (pkg.files.includes(doc)) {
+      fail('npm-internal-doc', `package.json files includes internal doc ${doc}`);
+    }
+  }
 }
 
 
