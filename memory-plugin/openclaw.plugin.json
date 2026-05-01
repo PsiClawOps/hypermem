@@ -5,7 +5,8 @@
   "activation": {
     "onCapabilities": [
       "memory"
-    ]
+    ],
+    "onStartup": false
   },
   "configSchema": {
     "type": "object",

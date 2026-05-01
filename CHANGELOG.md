@@ -2,6 +2,11 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.9.6 - 2026-05-01
+
+- **OpenClaw 2026.4.29 plugin startup compatibility.** HyperCompositor and HyperMem memory manifests now declare `activation.onStartup: false`, making slot-triggered loading explicit and removing reliance on deprecated implicit startup sidecar fallback behavior.
+- **Release parity preserved.** Core, context-engine plugin, memory plugin, and lockfiles are aligned at 0.9.6 for the compatibility update.
+
 ## 0.9.5 - 2026-04-29
 
 - **Install-readiness defaults hardened.** Fresh installs now stage `embedding.provider: "none"` by default, making the first-install path FTS5-only and free of Ollama or hosted-provider dependencies.

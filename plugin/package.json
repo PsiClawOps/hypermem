@@ -1,6 +1,6 @@
 {
   "name": "@psiclawops/hypercompositor",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "description": "HyperCompositor \u2014 context engine plugin for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
@@ -40,7 +40,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@psiclawops/hypermem": "0.9.5",
+    "@psiclawops/hypermem": "0.9.6",
     "zod": "^4.0.0"
   },
   "devDependencies": {

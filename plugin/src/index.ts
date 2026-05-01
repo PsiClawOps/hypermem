@@ -4153,7 +4153,9 @@ export default definePluginEntry({
   name: 'HyperCompositor — context engine',
   description: 'Four-layer memory architecture for OpenClaw agents: SQLite hot cache, message history, vector search, and structured library.',
   kind: 'context-engine',
-  configSchema: buildPluginConfigSchema(hypercompositorConfigSchema),
+  configSchema: buildPluginConfigSchema(
+    hypercompositorConfigSchema as unknown as Parameters<typeof buildPluginConfigSchema>[0],
+  ),
   register(api) {
     // ── Resolve plugin config from openclaw.json ──
     const pluginCfg = (api.pluginConfig ?? {}) as HypercompositorConfig;

@@ -820,17 +820,14 @@ Resolution order is: (1) `plugins.entries.hypercompositor.config` in `openclaw.j
 
 These settings live in `~/.openclaw/hypermem/config.json` under the `compositor` key. All fields are optional — omit any knob to get the code-level default. Gateway restart required after changes.
 
-The recommended starting config for a standard single-agent deployment is the same recall-friendly profile shipped in `assets/default-config.json` and written by `hypermem-install` when no config exists. It keeps semantic recall active, protects topic-bearing warm context, boosts recent antecedents, and guards the literal antecedent of the current user turn under non-critical pressure.
+The recommended starting config for a standard single-agent deployment is the same recall-friendly context profile shipped in `assets/default-config.json` and written by `hypermem-install` when no config exists. It keeps embeddings disabled for baseline install safety, protects topic-bearing warm context, boosts recent antecedents, and guards the literal antecedent of the current user turn under non-critical pressure. Enable Ollama, OpenRouter, or Gemini after the baseline FTS5 install is verified.
 
-Key 0.9.4 defaults:
+Key starter defaults:
 
 ```json
 {
   "embedding": {
-    "provider": "ollama",
-    "model": "nomic-embed-text",
-    "dims": 768,
-    "dimensions": 768
+    "provider": "none"
   },
   "compositor": {
     "turnBudget": {
