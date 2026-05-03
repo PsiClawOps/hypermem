@@ -8,6 +8,11 @@
     ],
     "onStartup": false
   },
+  "contracts": {
+    "tools": [
+      "history_query"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

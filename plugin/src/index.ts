@@ -20,17 +20,17 @@
  * Session key format expected: "agent:<agentId>:<channel>:<name>"
  */
 
-import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
-import { buildPluginConfigSchema } from 'openclaw/plugin-sdk/core';
+import { buildPluginConfigSchema, definePluginEntry } from 'openclaw/plugin-sdk/core';
+import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/core';
 import { z } from 'zod';
-import type {
-  ContextEngine,
-  ContextEngineInfo,
-  ContextEngineMaintenanceResult,
-  IngestBatchResult,
-  SubagentSpawnPreparation,
-  SubagentEndReason,
-} from 'openclaw/plugin-sdk';
+
+type ContextEngineFactory = Parameters<OpenClawPluginApi['registerContextEngine']>[1];
+type ContextEngine = Awaited<ReturnType<ContextEngineFactory>>;
+type ContextEngineInfo = ContextEngine['info'];
+type ContextEngineMaintenanceResult = Awaited<ReturnType<NonNullable<ContextEngine['maintain']>>>;
+type IngestBatchResult = Awaited<ReturnType<NonNullable<ContextEngine['ingestBatch']>>>;
+type SubagentSpawnPreparation = NonNullable<Awaited<ReturnType<NonNullable<ContextEngine['prepareSubagentSpawn']>>>>;
+type SubagentEndReason = Parameters<NonNullable<ContextEngine['onSubagentEnded']>>[0]['reason'];
 import type {
   NeutralMessage,
   NeutralToolCall,

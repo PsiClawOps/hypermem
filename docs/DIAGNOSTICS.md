@@ -14,10 +14,25 @@ HyperMem diagnostics are split into operator CLIs, validation scripts, and runti
 | Compose report | `node scripts/compose-report.mjs` | direct compositor slot selection, budget decisions, diagnostics fields |
 | Trim report | `node scripts/trim-report.mjs` | trim events, cache invalidation, pressure behavior |
 | Version parity | `npm run validate:version-parity` | package versions and plugin dependencies are release-aligned |
+| SDK import policy | `npm run validate:sdk-imports` | plugin packages use public OpenClaw Plugin SDK entrypoints and pinned build metadata |
+| Latest SDK canary | `npm run validate:sdk-latest-canary` | both plugin packages still typecheck and build against the latest published OpenClaw SDK |
+| Plugin compatibility gates | `npm run validate:plugin-checkers` | Plugin Inspector static/runtime reports, isolated dependency-install cold import proof, production/dev dependency audit, and zero unhandled Plugin Inspector issue debt |
+| OpenClaw plugin runtime gate | `npm run validate:plugins:runtime` | packed artifact installs into OpenClaw's plugin runtime, registry refreshes, plugin doctor passes for HyperMem-owned plugins, and runtime inspection is clean |
 | Release path | `npm run validate:release-path` | build plus plugin pipeline gateway path |
 | Docs/config validation | `npm run validate:docs && npm run validate:config` | documented commands and config surfaces match code |
 | History query validation | `npm run validate:history-query` | `MessageStore.queryHistory()`, `history_query` plugin tool, metadata-only telemetry, and health JSON surface are wired |
 | Fresh-install smoke gate | `npm run release:install-smoke` | packed npm artifact installs without source fallback, no-Ollama failure is clear, skip-mode stages, existing config is preserved, and failure artifacts are captured |
+
+## Plugin compatibility gates
+
+Use the smallest gate that matches the decision.
+
+- Sprint completion / PR readiness: `npm run validate:plugin-checkers`. This runs Plugin Inspector static/runtime reports, proves dependency-install cold import in isolated npm workspaces, audits production and plugin dev dependencies, and fails if any Plugin Inspector issue lacks proof-backed coverage.
+- Publish readiness on an OpenClaw host: `npm run validate:plugins:runtime`. This installs the packed 0.9.x-shaped artifact, refreshes the OpenClaw plugin registry, runs `openclaw plugins doctor`, and inspects both HyperMem plugins with `--runtime`.
+
+`openclaw plugins doctor` is not a replacement for Plugin Inspector. Doctor proves the installed artifact satisfies the current host loader. Plugin Inspector proves the package remains compatible as a plugin project and produces durable CI artifacts. The full release gate runs both because either one alone can lie. That's how you buy fewer 3am pages.
+
+As of 0.9.7, Plugin Inspector's raw reports can still surface `package-dependency-install-required` as an inspector-owned P2 because Plugin Inspector 0.3.6 does not reconcile dependency-install proof artifacts. HyperMem does not ignore that row: `validate:plugin-checkers` runs `validate:plugin-isolated-cold-import`, writes proof under `.artifacts/plugin-isolated-cold-import/`, and `validate:plugin-inspector:debt` fails on any Plugin Inspector issue without proof-backed coverage. P0/P1/live issues, deprecations, hard breakages, production or plugin dev audit findings, unproved inspector gaps, and HyperMem-owned `openclaw plugins doctor` diagnostics block publish.
 
 ## `hypermem-status`
 

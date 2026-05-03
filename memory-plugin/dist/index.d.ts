@@ -18,7 +18,7 @@ declare const _default: {
     id: string;
     name: string;
     description: string;
-    configSchema: import("openclaw/plugin-sdk").OpenClawPluginConfigSchema;
-    register: NonNullable<import("openclaw/plugin-sdk/plugin-entry").OpenClawPluginDefinition["register"]>;
-} & Pick<import("openclaw/plugin-sdk/plugin-entry").OpenClawPluginDefinition, "kind" | "reload" | "nodeHostCommands" | "securityAuditCollectors">;
+    configSchema: import("openclaw/plugin-sdk/core").OpenClawPluginConfigSchema;
+    register: NonNullable<import("openclaw/plugin-sdk/core").OpenClawPluginDefinition["register"]>;
+} & Pick<import("openclaw/plugin-sdk/core").OpenClawPluginDefinition, "kind" | "reload" | "nodeHostCommands" | "securityAuditCollectors">;
 export default _default;

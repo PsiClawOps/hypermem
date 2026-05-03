@@ -19,8 +19,7 @@
  *
  * Session key format expected: "agent:<agentId>:<channel>:<name>"
  */
-import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
-import { buildPluginConfigSchema } from 'openclaw/plugin-sdk/core';
+import { buildPluginConfigSchema, definePluginEntry } from 'openclaw/plugin-sdk/core';
 import { z } from 'zod';
 import { detectTopicShift, stripMessageMetadata, SessionTopicMap, applyToolGradientToWindow, OPENCLAW_BOOTSTRAP_FILES, rotateSessionContext, TRIM_SOFT_TARGET, TRIM_GROWTH_THRESHOLD, TRIM_HEADROOM_FRACTION, resolveTrimBudgets, resolveAdaptiveLifecyclePolicy, formatToolChainStub, decideReplayRecovery, isReplayState, recordOutputMetrics, 
 // Sprint 3: unified pressure signal

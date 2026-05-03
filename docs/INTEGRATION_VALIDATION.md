@@ -143,6 +143,9 @@ Before publishing a release, run:
 
 ```bash
 npm run validate:version-parity
+npm run validate:sdk-imports
+npm run validate:sdk-latest-canary
+npm run validate:plugin-checkers
 npm run validate:docs
 npm run validate:config
 npm run validate:release-path
@@ -154,6 +157,10 @@ npm pack ./plugin --dry-run
 npm pack ./memory-plugin --dry-run
 ```
 
+The SDK gates are split deliberately: `validate:sdk-imports` enforces reproducible pinned OpenClaw Plugin SDK metadata, while `validate:sdk-latest-canary` rebuilds both plugin packages against the latest published OpenClaw SDK in a temp workspace so a stale pin cannot hide a future import break.
+
+The plugin checker gate is deliberately composite: it runs Plugin Inspector static/runtime reports, isolated dependency-install cold import proof, production/dev dependency audit, Plugin Inspector issue-debt validation for the plugin packages. Raw Plugin Inspector P2 rows are not ignored: they must either disappear or have a proof artifact consumed by `validate:plugin-inspector:debt`.
+
 Runtime validation must install the packed artifact, not the repo working tree. The production-shaped local install path is:
 
 ```bash
@@ -162,6 +169,14 @@ openclaw gateway restart
 openclaw plugins list
 node ~/.openclaw/plugins/hypermem/bin/hypermem-status.mjs --master
 ```
+
+The final OpenClaw host-runtime plugin checker is:
+
+```bash
+npm run validate:plugins:runtime
+```
+
+That gate packs and installs the release artifact into OpenClaw's managed plugin directory, refreshes the plugin registry, runs `openclaw plugins doctor`, and runs runtime inspection for `hypercompositor` and `hypermem`. Treat HyperMem-owned doctor diagnostics as release-blocking. Unrelated local plugin diagnostics are reported but ignored by the HyperMem gate.
 
 For isolated validation, test the packed artifact from a temp directory:
 

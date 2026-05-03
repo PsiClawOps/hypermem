@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    allow:
+      - dependency-name: "@openclaw/plugin-inspector"
+    commit-message:
+      prefix: "deps(plugin-inspector)"
+  - package-ecosystem: "npm"
+    directory: "/plugin"
+    schedule:
+      interval: "weekly"
+    allow:
+      - dependency-name: "openclaw"
+    commit-message:
+      prefix: "deps(plugin-sdk)"
+  - package-ecosystem: "npm"
+    directory: "/memory-plugin"
+    schedule:
+      interval: "weekly"
+    allow:
+      - dependency-name: "openclaw"
+    commit-message:
+      prefix: "deps(plugin-sdk)"

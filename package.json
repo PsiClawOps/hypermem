@@ -1,6 +1,6 @@
 {
   "name": "@psiclawops/hypermem",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "description": "Agent-centric memory and context composition engine for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
@@ -48,13 +48,24 @@
     "build:all": "npm run build && npm --prefix plugin install --prefer-offline && npm --prefix plugin run build && npm --prefix memory-plugin install --prefer-offline && npm --prefix memory-plugin run build",
     "validate:history-query": "npm run build && npm --prefix memory-plugin run build && node scripts/validate-history-query.mjs",
     "install:runtime:packed": "node scripts/install-packed-runtime.mjs",
-    "release:install-smoke": "bash release-gate-internal/fresh-install-smoke.sh"
+    "release:install-smoke": "bash release-gate-internal/fresh-install-smoke.sh",
+    "validate:sdk-imports": "node scripts/validate-sdk-imports.mjs",
+    "validate:sdk-latest-canary": "node scripts/validate-sdk-latest-canary.mjs",
+    "validate:plugin-inspector": "node scripts/validate-plugin-inspector.mjs",
+    "validate:plugin-inspector:runtime": "npm run build:all && node scripts/validate-plugin-inspector.mjs --runtime",
+    "validate:plugins:runtime": "node scripts/validate-openclaw-plugin-runtime.mjs",
+    "validate:release-readiness": "npm run validate:version-parity && npm run validate:sdk-imports && npm run validate:sdk-latest-canary && npm run validate:plugin-checkers && npm run validate:docs && npm run validate:config && npm run validate:release-path && npm run validate:public-surface",
+    "validate:plugin-isolated-cold-import": "npm run build:all && node scripts/validate-plugin-isolated-cold-import.mjs",
+    "validate:plugin-inspector:debt": "node scripts/validate-plugin-inspector-issue-debt.mjs",
+    "validate:plugin-checkers": "npm run validate:plugin-inspector && npm run validate:plugin-isolated-cold-import && npm run validate:plugin-inspector:runtime && npm run validate:plugin-inspector:debt && npm run validate:plugin-dev-audit",
+    "validate:plugin-dev-audit": "npm audit && npm --prefix plugin audit && npm --prefix memory-plugin audit"
   },
   "dependencies": {
     "sqlite-vec": "^0.1.9",
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@openclaw/plugin-inspector": "0.3.6",
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0"
   },

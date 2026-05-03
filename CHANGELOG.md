@@ -2,6 +2,13 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.9.7 - 2026-05-02
+
+- **OpenClaw Plugin SDK imports modernized.** HyperCompositor and HyperMem memory now import plugin entry helpers through the canonical public Plugin SDK surface and refresh OpenClaw/Plugin SDK build provenance to the validated runtime.
+- **SDK drift is now actively challenged.** Release gates enforce public SDK imports and exact build metadata for reproducibility, while a latest-SDK canary and Dependabot tracking keep the pin from quietly aging into another compatibility break.
+- **Memory plugin tool contract declared.** `hypermem` now declares ownership of the optional `history_query` tool in its OpenClaw plugin manifest, satisfying the 2026.5.2 plugin checker contract gate.
+- **Plugin checker gates are now standard release infrastructure.** HyperMem CI runs Plugin Inspector static/runtime checks plus isolated dependency-install cold import proof, production/dev dependency audit, and issue-debt validation; publish readiness has a packed-artifact OpenClaw `plugins doctor`/runtime-inspect gate. The previous context-engine root SDK barrel P2 is fixed by deriving context-engine types from the public `OpenClawPluginApi` core type surface.
+
 ## 0.9.6 - 2026-05-01
 
 - **OpenClaw 2026.4.29 plugin startup compatibility.** HyperCompositor and HyperMem memory manifests now declare `activation.onStartup: false`, making slot-triggered loading explicit and removing reliance on deprecated implicit startup sidecar fallback behavior.

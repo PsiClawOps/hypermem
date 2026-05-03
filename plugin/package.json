@@ -1,7 +1,7 @@
 {
   "name": "@psiclawops/hypercompositor",
-  "version": "0.9.6",
-  "description": "HyperCompositor \u2014 context engine plugin for OpenClaw",
+  "version": "0.9.7",
+  "description": "HyperCompositor — context engine plugin for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
   "license": "Apache-2.0",
@@ -18,7 +18,7 @@
   "openclaw": {
     "plugin": {
       "id": "hypercompositor",
-      "name": "HyperCompositor \u2014 Context Engine",
+      "name": "HyperCompositor — Context Engine",
       "kind": "context-engine"
     },
     "extensions": [
@@ -29,8 +29,8 @@
       "minGatewayVersion": "2026.4.12"
     },
     "build": {
-      "openclawVersion": "2026.4.9",
-      "pluginSdkVersion": "2026.4.12"
+      "openclawVersion": "2026.5.2",
+      "pluginSdkVersion": "2026.5.2"
     }
   },
   "scripts": {
@@ -40,11 +40,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@psiclawops/hypermem": "0.9.6",
+    "@psiclawops/hypermem": "0.9.7",
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "openclaw": "*",
+    "openclaw": "2026.5.2",
     "typescript": "^5.4.0"
   },
   "peerDependencies": {
@@ -63,5 +63,8 @@
     "openclaw.plugin.json",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "overrides": {
+    "uuid": "14.0.0"
+  }
 }

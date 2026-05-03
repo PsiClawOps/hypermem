@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '17 10 * * 1'
+  workflow_dispatch:
 
 jobs:
   test:
@@ -47,5 +50,30 @@ jobs:
       - name: Build memory-plugin
         run: npm --prefix memory-plugin run build
 
+      - name: Validate SDK import policy
+        run: npm run validate:sdk-imports
+
+      - name: Run plugin compatibility gates
+        run: npm run validate:plugin-checkers
+
       - name: Run tests
         run: npm test
+
+  sdk-latest-canary:
+    name: Latest OpenClaw SDK Canary
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install root deps
+        run: npm ci
+
+      - name: Validate against latest OpenClaw SDK
+        run: npm run validate:sdk-latest-canary

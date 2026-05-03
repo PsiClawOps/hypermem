@@ -14,7 +14,7 @@
  *
  * Both plugins share the same HyperMem singleton (loaded from repo dist).
  */
-import { definePluginEntry, emptyPluginConfigSchema } from 'openclaw/plugin-sdk/plugin-entry';
+import { definePluginEntry, emptyPluginConfigSchema } from 'openclaw/plugin-sdk/core';
 import { matchTriggers, TRIGGER_REGISTRY } from '@psiclawops/hypermem';
 import path from 'path';
 import fs from 'fs/promises';
