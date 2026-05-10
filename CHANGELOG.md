@@ -6,6 +6,9 @@ All notable changes to hypermem are documented here.
 
 - **Replay duplication cleanup is operator-visible.** `hypermem-cleanup` now ships as a package CLI, dry-runs by default, reports timestamp-stamped Gateway replay duplicate debt without printing message content, and applies repairs only with `--apply` after creating a SQLite backup, rewiring local message references, rebuilding FTS, and passing integrity checks.
 - **Doctor warns on stamped replay duplicate debt.** `hypermem-doctor` now scans the HyperMem data dir for timestamp-stamped user replay duplicate rows and emits a hard-to-miss `stamped-replay-duplicate-debt` warning with the cleanup dry-run command.
+- **Operational memory defaults tightened.** Shipped defaults now favor stable pressure over maximum recall: lower first-turn warm history load, bounded facts/keystones, 250 hot history messages, and cross-session context off by default while LoCoMo tuning continues.
+- **Boundary user turns are persisted reliably.** The context-engine plugin now recovers the current plain user message at the afterTurn boundary when OpenClaw pre-prompt counts already include it, preventing assistant-only replay gaps in HyperMem's SQLite history.
+- **Plugin audit gate is clean.** Context-engine and memory-plugin packages pin the transitive `fast-xml-builder` audit fix through package overrides and refreshed lockfiles.
 
 ## 0.9.8 - 2026-05-03
 

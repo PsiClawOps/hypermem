@@ -129,6 +129,10 @@ async function run() {
     cache: hm.cache,
     vectorStore: null,  // No vector search for this test
     libraryDb: libDb,
+  }, {
+    // Production defaults keep cross-session recall off; this suite exercises
+    // the enabled path explicitly so slot filtering remains covered.
+    maxCrossSessionContext: 2000,
   });
 
   // ── Query-matched message recall smoke ──

@@ -120,21 +120,21 @@ export const lightProfile: HyperMemConfig = {
 
 const STANDARD_COMPOSITOR: CompositorConfig = {
   // ── Primary budget controls ──
-  budgetFraction: 0.703,               // 90k effective at 128k window
+  budgetFraction: 0.60,                // operational default: ~77k effective at 128k before reserve
   reserveFraction: 0.25,               // balanced — leaves room for large tool results
   historyFraction: 0.40,               // ~27k tokens of conversation history
   memoryFraction: 0.40,                // ~27k tokens for facts/wiki/semantic
   // ── Absolute fallback ──
   defaultTokenBudget: 90000,
   // ── History internals ──
-  maxHistoryMessages: 500,
-  warmHistoryBudgetFraction: 0.40,
-  keystoneHistoryFraction: 0.20,
-  keystoneMaxMessages: 15,
+  maxHistoryMessages: 250,
+  warmHistoryBudgetFraction: 0.27,
+  keystoneHistoryFraction: 0.15,
+  keystoneMaxMessages: 12,
   keystoneMinSignificance: 0.5,
   // ── Memory internals ──
-  maxFacts: 30,
-  maxCrossSessionContext: 4000,
+  maxFacts: 25,
+  maxCrossSessionContext: 0,
   maxTotalTriggerTokens: 4000,
   wikiTokenCap: 600,
   // ── Tool gradient (internal — safe floor enforced automatically) ──
@@ -189,14 +189,14 @@ const EXTENDED_COMPOSITOR: CompositorConfig = {
   // ── Absolute fallback ──
   defaultTokenBudget: 160000,
   // ── History internals ──
-  maxHistoryMessages: 1000,
-  warmHistoryBudgetFraction: 0.45,
-  keystoneHistoryFraction: 0.25,
-  keystoneMaxMessages: 30,
+  maxHistoryMessages: 500,
+  warmHistoryBudgetFraction: 0.27,
+  keystoneHistoryFraction: 0.15,
+  keystoneMaxMessages: 12,
   keystoneMinSignificance: 0.4,
   // ── Memory internals ──
-  maxFacts: 60,
-  maxCrossSessionContext: 12000,
+  maxFacts: 25,
+  maxCrossSessionContext: 4000,
   maxTotalTriggerTokens: 10000,
   wikiTokenCap: 800,
   // ── Tool gradient (internal — safe floor enforced automatically) ──

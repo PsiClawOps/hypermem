@@ -72,7 +72,7 @@ Estimates on a 200k model (Claude Sonnet). Scale proportionally for smaller wind
 | `standard` (default) | **35–50k** | 55–80k | All layers, default caps |
 | `full` | **40–55k** | 60–85k | All layers, raised caps, cross-session on |
 
-Standard turn 1 is lower than full because `warmHistoryBudgetFraction` is the same, but full enables cross-session context which adds tokens immediately; by turn 5 full overtakes standard as more layers accumulate history.
+Standard turn 1 is intentionally conservative. Full keeps cross-session context opt-in and should be used only when operators accept the extra pressure.
 
 **Turn 1 is where token-conscious users will react.** Light vs full on turn 1 is roughly 25–40k tokens — the number that shows up in provider dashboards. By turn 5 the gap is still real, but the value case is easier to make because the user has already experienced continuity.
 
@@ -145,12 +145,12 @@ The standard semantic configuration. All memory layers are active with 0.9.4 rec
     "budgetFraction": 0.6,
     "contextWindowReserve": 0.25,
     "targetBudgetFraction": 0.5,
-    "warmHistoryBudgetFraction": 0.45,
-    "maxFacts": 28,
+    "warmHistoryBudgetFraction": 0.27,
+    "maxFacts": 25,
     "maxHistoryMessages": 250,
     "maxCrossSessionContext": 0,
-    "keystoneHistoryFraction": 0.20,
-    "keystoneMaxMessages": 15,
+    "keystoneHistoryFraction": 0.15,
+    "keystoneMaxMessages": 12,
     "hyperformProfile": "standard"
   },
   "indexer": {
@@ -187,11 +187,11 @@ For long-running sessions, multi-agent fleets, or any deployment where the agent
   "compositor": {
     "budgetFraction": 0.70,
     "contextWindowReserve": 0.22,
-    "maxFacts": 40,
+    "maxFacts": 35,
     "maxHistoryMessages": 500,
-    "maxCrossSessionContext": 6000,
-    "keystoneHistoryFraction": 0.22,
-    "keystoneMaxMessages": 20,
+    "maxCrossSessionContext": 4000,
+    "keystoneHistoryFraction": 0.18,
+    "keystoneMaxMessages": 18,
     "wikiTokenCap": 600,
     "hyperformProfile": "full"
   },
@@ -234,7 +234,7 @@ Three pre-built profiles ship with hypermem. Each configures every setting to a 
 | Profile | Context window | Budget | Hyperform | Best for |
 |---|---|---|---|---|
 | `light` | 64k | 40k effective | `light` (behavior only) | Single agent, small models, constrained resources |
-| `standard` | 128k | 90k effective | `standard` (behavior + structure) | Normal deployments, small fleets |
+| `standard` | 128k | ~77k effective before reserve | `standard` (behavior + structure) | Normal deployments, safe starter posture |
 | `full` | 200k+ | 160k effective | `full` (behavior + model adaptation) | Multi-agent fleets, large-context models |
 
 ```ts
@@ -432,10 +432,10 @@ effective budget × (1 - targetBudgetFraction) = history budget
 **Worked example (standard profile, 128k model):**
 
 ```
-128,000 × 0.703 = 89,984 (effective budget before reserve)
-89,984 × (1 - 0.25) = 67,488 (effective budget after reserve)
-67,488 × 0.65 = 43,867 (context assembly budget)
-67,488 × 0.35 = 23,621 (history budget)
+128,000 × 0.60 = 76,800 (effective budget before reserve)
+76,800 × (1 - 0.25) = 57,600 (effective budget after reserve)
+57,600 × 0.50 = 28,800 (context assembly budget)
+57,600 × 0.50 = 28,800 (history budget)
 ```
 
 **Model swap resilience:** The budget is computed from the model's actual context window at compose time when OpenClaw passes `tokenBudget`. If runtime metadata is missing, HyperMem falls back to `contextWindowOverrides` and then `contextWindowSize`. Structured tool history is guarded from being overwritten during a budget downshift — the compositor computes the new allocation but doesn't persist a lower-context snapshot to disk, preserving the full history for when the larger model returns.
@@ -542,7 +542,7 @@ This gives only 45% to context assembly and 55% to history. Useful for coding ag
 }
 ```
 
-Raises the fact injection cap from the default 30 to 50, and reduces wiki page space from 600 to 400 tokens.
+Raises the fact injection cap from the default 25 to 50, and reduces wiki page space from 600 to 400 tokens.
 
 **More keystone history (recalled older messages):**
 
@@ -555,7 +555,7 @@ Raises the fact injection cap from the default 30 to 50, and reduces wiki page s
 }
 ```
 
-Reserves 30% of the history budget for keystones (up from default 20%) and allows up to 25 keystone messages (up from 15). Keystones are high-significance older messages that survive pressure trimming ahead of ordinary history.
+Reserves 30% of the history budget for keystones (up from default 15%) and allows up to 25 keystone messages (up from 12). Keystones are high-significance older messages that survive pressure trimming ahead of ordinary history.
 
 ### Adjusting for model context size
 
@@ -880,7 +880,7 @@ Higher `contextWindowReserve` (0.30) gives more headroom for large tool results.
 
 | Knob | Type | Default | What it controls |
 |---|---|---|---|
-| `maxFacts` | number | 30 | Maximum facts surfaced per compose pass. |
+| `maxFacts` | number | 25 | Maximum facts surfaced per compose pass. |
 | `wikiTokenCap` | tokens | 600 | Hard ceiling on wiki/knowledge injection per pass. |
 | `maxTotalTriggerTokens` | tokens | 4000 | Ceiling across all trigger-fired doc chunk collections. |
 
@@ -888,9 +888,9 @@ Higher `contextWindowReserve` (0.30) gives more headroom for large tool results.
 
 | Knob | Type | Default | What it controls |
 |---|---|---|---|
-| `maxHistoryMessages` | number | 500 | Maximum messages in the hot history window. |
-| `keystoneHistoryFraction` | 0.0–0.5 | 0.20 | Fraction of history budget reserved for keystones. 0 disables. |
-| `keystoneMaxMessages` | number | 15 | Max keystone messages injected per pass. |
+| `maxHistoryMessages` | number | 250 | Maximum messages in the hot history window. |
+| `keystoneHistoryFraction` | 0.0-0.5 | 0.15 | Fraction of history budget reserved for keystones. 0 disables. |
+| `keystoneMaxMessages` | number | 12 | Max keystone messages injected per pass. |
 | `keystoneMinSignificance` | 0.0–1.0 | 0.5 | Minimum episode significance for keystone qualification. |
 
 ### Tool history
@@ -899,7 +899,7 @@ Higher `contextWindowReserve` (0.30) gives more headroom for large tool results.
 |---|---|---|---|
 | `maxRecentToolPairs` | number | 3 | Tool call/result pairs kept verbatim. |
 | `maxProseToolPairs` | number | 10 | Older pairs converted to prose stubs. Beyond this, payloads dropped. |
-| `maxCrossSessionContext` | tokens | 4000 | Token ceiling for cross-agent context. 0 disables. |
+| `maxCrossSessionContext` | tokens | 0 | Token ceiling for cross-session context. 0 disables and is the default. |
 
 ### Dynamic reserve
 

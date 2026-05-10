@@ -1127,6 +1127,27 @@ function toNeutralMessage(msg) {
         toolResults,
     };
 }
+function isPlainUserTurnMessage(msg) {
+    if (msg.role !== 'user' || shouldDropInboundMessage(msg))
+        return false;
+    const neutral = toNeutralMessage(msg);
+    return neutral.role === 'user'
+        && !neutral.toolResults?.length
+        && stripMessageMetadata(neutral.textContent ?? '').trim().length > 0;
+}
+function findBoundaryPlainUserMessage(messages, prePromptMessageCount) {
+    const start = Math.min(prePromptMessageCount - 1, messages.length - 1);
+    for (let i = start; i >= 0; i--) {
+        const msg = messages[i];
+        if (shouldDropInboundMessage(msg))
+            continue;
+        if (isPlainUserTurnMessage(msg))
+            return msg;
+        if (msg.role === 'assistant' || msg.role === 'system' || isToolResultRole(msg.role))
+            return null;
+    }
+    return null;
+}
 // ─── Context Engine Implementation ─────────────────────────────
 /**
  * In-flight warm dedup map.
@@ -2860,7 +2881,10 @@ ${replayRecovery.emittedText}`
          *
          * IMPORTANT: When afterTurn is defined, the runtime calls ONLY afterTurn —
          * it never calls ingest() or ingestBatch(). So we must ingest the new
-         * messages here, using messages.slice(prePromptMessageCount).
+         * messages here. Some OpenClaw runtimes include the current user + adjacent
+         * transport metadata in prePromptMessageCount, leaving only assistant/tool
+         * outputs in messages.slice(prePromptMessageCount). Reconcile the boundary
+         * user turn explicitly so SQLite preserves the real user→assistant order.
          */
         async afterTurn({ sessionId, sessionKey, messages, prePromptMessageCount, isHeartbeat, runtimeContext }) {
             if (isHeartbeat)
@@ -2869,9 +2893,21 @@ ${replayRecovery.emittedText}`
                 const hm = await getHyperMem();
                 const sk = resolveSessionKey(sessionId, sessionKey);
                 const agentId = extractAgentId(sk);
-                // Ingest only the new messages produced this turn
+                // Ingest only the new messages produced this turn, plus the boundary
+                // user turn when OpenClaw counted it as pre-prompt context. The write
+                // path is idempotent, so if an ingress/runtime variant already persisted
+                // this user message, recordUserMessage() suppresses the duplicate.
                 const newMessages = messages.slice(prePromptMessageCount);
-                for (const msg of newMessages) {
+                const hasNewPlainUserMessage = newMessages
+                    .map(m => m)
+                    .some(m => isPlainUserTurnMessage(m));
+                const boundaryUserMessage = hasNewPlainUserMessage
+                    ? null
+                    : findBoundaryPlainUserMessage(messages, prePromptMessageCount);
+                const currentTurnMessages = boundaryUserMessage
+                    ? [boundaryUserMessage, ...newMessages]
+                    : newMessages;
+                for (const msg of currentTurnMessages) {
                     const m = msg;
                     // Skip system and non-provider metadata messages — they come from the
                     // runtime/transport, not the conversation.
@@ -2911,7 +2947,7 @@ ${replayRecovery.emittedText}`
                     }
                 }
                 try {
-                    const lastAssistantMessage = [...newMessages].reverse().find(m => m.role === 'assistant');
+                    const lastAssistantMessage = [...currentTurnMessages].reverse().find(m => m.role === 'assistant');
                     if (lastAssistantMessage) {
                         const modelState = await hm.cache.getModelState(agentId, sk).catch(() => null);
                         const promptCacheUsage = runtimeContext?.promptCache?.lastCallUsage;
@@ -2959,7 +2995,7 @@ ${replayRecovery.emittedText}`
                 // Non-fatal: topic detection never blocks afterTurn
                 let adaptiveTopicShiftConfidence;
                 try {
-                    const inboundUserMsg = newMessages
+                    const inboundUserMsg = currentTurnMessages
                         .map(m => m)
                         .find(m => m.role === 'user');
                     if (inboundUserMsg) {
@@ -3020,7 +3056,7 @@ ${replayRecovery.emittedText}`
                         const modelState = await hm.cache.getModelState(agentId, sk);
                         const gradientBudget = modelState?.tokenBudget;
                         const gradientDepth = modelState?.historyDepth;
-                        const inboundUserMsg = newMessages
+                        const inboundUserMsg = currentTurnMessages
                             .map(m => m)
                             .find(m => m.role === 'user');
                         const inboundUserText = inboundUserMsg

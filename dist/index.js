@@ -112,18 +112,18 @@ const DEFAULT_CONFIG = {
         historyTTL: 604800, // 7 days — extended for canvas display
     },
     compositor: {
-        // TUNE-010 (2026-04-02): Raised from 65000 → 90000.
-        // TUNE-008 dropped to 65k as a tool-loop overflow band-aid. The real fix
-        // (tool-loop pass-through guard in assemble()) means tool turns don't
-        // re-run composition, so 90k is safe — leaves ~30k headroom for in-flight
-        // tool results on a 120k window. Budget is better spent on context quality.
+        // Operational default: safe, bounded recall. Keep first-turn warm load
+        // conservative until LoCoMo tuning is complete, and require operators to
+        // opt in to cross-session context explicitly.
         defaultTokenBudget: 90000,
-        maxHistoryMessages: 1000,
-        maxFacts: 28,
-        maxCrossSessionContext: 6000,
+        maxHistoryMessages: 250,
+        maxFacts: 25,
+        maxCrossSessionContext: 0,
         maxRecentToolPairs: 3,
         maxProseToolPairs: 10,
-        warmHistoryBudgetFraction: 0.4,
+        warmHistoryBudgetFraction: 0.27,
+        keystoneHistoryFraction: 0.15,
+        keystoneMaxMessages: 12,
         entityBridge: {
             enabled: false,
             structuredHandoff: false,

@@ -79,8 +79,9 @@ Release validation details live in [docs/INTEGRATION_VALIDATION.md](./docs/INTEG
 `hypermem-install` creates the current recommended starter config automatically when `~/.openclaw/hypermem/config.json` is missing. The shipped starter config is installation-safe FTS5 mode:
 
 - `embedding.provider: "none"`
-- `warmHistoryBudgetFraction: 0.45`
-- standard fact, keystone, and history caps
+- `warmHistoryBudgetFraction: 0.27`
+- bounded fact, keystone, and history caps
+- cross-session context disabled by default
 
 This is intentional. A clean first install should load, compose, and verify without requiring Ollama or an external API key. The result is **YELLOW** install readiness: HyperMem is active with keyword recall, but semantic vector recall is disabled. Upgrade to Ollama, OpenRouter, or Gemini after the baseline install is active.
 
@@ -868,12 +869,12 @@ Key starter defaults:
     "budgetFraction": 0.6,
     "contextWindowReserve": 0.25,
     "targetBudgetFraction": 0.50,
-    "warmHistoryBudgetFraction": 0.45,
-    "maxFacts": 28,
+    "warmHistoryBudgetFraction": 0.27,
+    "maxFacts": 25,
     "maxHistoryMessages": 250,
     "maxCrossSessionContext": 0,
-    "keystoneHistoryFraction": 0.20,
-    "keystoneMaxMessages": 15,
+    "keystoneHistoryFraction": 0.15,
+    "keystoneMaxMessages": 12,
     "hyperformProfile": "standard"
   }
 }
@@ -948,7 +949,7 @@ Use it during install and after model changes. `--strict` exits non-zero if a mo
 ```json
 {
   "compositor": {
-    "budgetFraction": 0.55,
+    "budgetFraction": 0.6,
     "contextWindowReserve": 0.25,
     "warmHistoryBudgetFraction": 0.27,
     "contextWindowOverrides": {

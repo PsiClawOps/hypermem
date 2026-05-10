@@ -49,13 +49,13 @@ cat > ~/.openclaw/hypermem/config.json <<'JSON'
 {
   "embedding": { "provider": "none" },
   "compositor": {
-    "budgetFraction": 0.55,
+    "budgetFraction": 0.60,
     "contextWindowReserve": 0.25,
     "targetBudgetFraction": 0.50,
     "warmHistoryBudgetFraction": 0.27,
     "maxFacts": 25,
-    "maxHistoryMessages": 500,
-    "maxCrossSessionContext": 4000,
+    "maxHistoryMessages": 250,
+    "maxCrossSessionContext": 0,
     "maxRecentToolPairs": 3,
     "maxProseToolPairs": 10,
     "keystoneHistoryFraction": 0.15,

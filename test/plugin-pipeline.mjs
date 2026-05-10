@@ -244,6 +244,41 @@ ${currentUserText}`;
     assert(prefixWire.includes('please diagnose the current emergency'),
       'assemble() preserves actual user text after stripping metadata prefix');
 
+    // ── Boundary user persistence guard ────────────────────────
+    // Some OpenClaw afterTurn calls count the current user + adjacent custom
+    // metadata as pre-prompt context. The plugin must still persist that user
+    // before appending the assistant reply, or SQLite history becomes
+    // assistant-only and loses the real turn boundary.
+    const boundarySessionKey = `agent:${agentId}:webchat:boundary-user-guard`;
+    const boundaryUserText = '[Sat 2026-05-09 23:41 MST] actor_type and source_surface?';
+    await engine.afterTurn?.({
+      sessionId: 'plugin-boundary-session',
+      sessionKey: boundarySessionKey,
+      prePromptMessageCount: 2,
+      isHeartbeat: false,
+      runtimeContext: {},
+      messages: [
+        { role: 'user', content: boundaryUserText },
+        { role: 'custom', content: senderMetadata },
+        { role: 'assistant', content: [{ type: 'text', text: 'Boundary answer.' }] },
+      ],
+    });
+
+    const hmBoundaryInspect = await HyperMem.create({ dataDir });
+    const boundaryTail = hmBoundaryInspect.queryHistory({
+      agentId,
+      sessionKey: boundarySessionKey,
+      mode: 'transcript_tail',
+      limit: 10,
+    });
+    await hmBoundaryInspect.close();
+    const boundaryRoles = boundaryTail.messages.map(m => m.role).join('>');
+    const boundaryWire = JSON.stringify(boundaryTail.messages);
+    assert(boundaryWire.includes('actor_type and source_surface'),
+      'afterTurn() persists boundary user when prePromptMessageCount already includes it');
+    assert(boundaryRoles.includes('user>assistant'),
+      `afterTurn() preserves boundary user→assistant order (${boundaryRoles})`);
+
     // ── Forked-context prepare proof ───────────────────────────
     // OpenClaw 2026.4.23 passes contextMode='fork' plus parent/child ids to
     // context-engine prepareSubagentSpawn(). The plugin should seed the child

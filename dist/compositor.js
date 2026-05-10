@@ -468,7 +468,7 @@ function scoreRecallTermOverlap(content, terms) {
 }
 const DEFAULT_CONFIG = {
     // Primary budget controls
-    budgetFraction: 0.703,
+    budgetFraction: 0.6,
     reserveFraction: 0.25,
     historyFraction: 0.40,
     memoryFraction: 0.40,
@@ -476,13 +476,13 @@ const DEFAULT_CONFIG = {
     defaultTokenBudget: 90000,
     // History internals
     maxHistoryMessages: 250,
-    warmHistoryBudgetFraction: 0.4,
-    keystoneHistoryFraction: 0.2,
-    keystoneMaxMessages: 15,
+    warmHistoryBudgetFraction: 0.27,
+    keystoneHistoryFraction: 0.15,
+    keystoneMaxMessages: 12,
     keystoneMinSignificance: 0.5,
     // Memory internals
-    maxFacts: 28,
-    maxCrossSessionContext: 6000,
+    maxFacts: 25,
+    maxCrossSessionContext: 0,
     // Tool gradient (internal)
     maxRecentToolPairs: 3,
     maxProseToolPairs: 10,
