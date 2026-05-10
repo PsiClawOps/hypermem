@@ -1230,6 +1230,69 @@ function extractTextFromInboundContent(content: InboundMessage['content']): stri
     .join('\n');
 }
 
+function isToolResultRole(role: string | undefined): boolean {
+  return role === 'tool' || role === 'tool_result' || role === 'toolResult';
+}
+
+function isPersistableInboundRole(role: string | undefined): boolean {
+  return role === 'user' || role === 'assistant' || role === 'system' || isToolResultRole(role);
+}
+
+function isSenderMetadataText(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (/^Sender \(untrusted metadata\):/i.test(trimmed)) return true;
+  return stripMessageMetadata(trimmed).trim().length === 0 && /Sender \(untrusted metadata\):/i.test(trimmed);
+}
+
+function shouldDropInboundMessage(msg: InboundMessage): boolean {
+  if (isPersistableInboundRole(msg.role)) return false;
+  const text = extractTextFromInboundContent(msg.content);
+  // OpenClaw/webchat may carry adjacent sender envelopes as role='custom'. They
+  // are transport metadata, not conversation turns. Persisting or replaying them
+  // lets the metadata row become the latest assistant-ish history item, which can
+  // mask the real user prompt under load.
+  if (msg.role === 'custom' && isSenderMetadataText(text)) return true;
+  // Unknown roles are not part of the provider transcript contract. Dropping is
+  // safer than casting them to assistant in toNeutralMessage().
+  return true;
+}
+
+function sanitizeInboundMessageForModel(msg: InboundMessage): InboundMessage | null {
+  if (shouldDropInboundMessage(msg)) return null;
+
+  // OpenClaw prepends untrusted inbound metadata directly to user-role text for
+  // the current provider prompt. That context is useful for the live inbound
+  // turn, but if HyperMem replays it from the message window it becomes duplicate
+  // user content and can make the model repeat the previous message. Strip it at
+  // the context-engine boundary while preserving the actual user text.
+  if (msg.role !== 'user') return msg;
+
+  if (typeof msg.content === 'string') {
+    const stripped = stripMessageMetadata(msg.content);
+    return stripped === msg.content ? msg : { ...msg, content: stripped };
+  }
+
+  if (Array.isArray(msg.content)) {
+    let changed = false;
+    const content = msg.content.map((part) => {
+      if (!part || part.type !== 'text' || typeof part.text !== 'string') return part;
+      const stripped = stripMessageMetadata(part.text);
+      if (stripped !== part.text) changed = true;
+      return stripped === part.text ? part : { ...part, text: stripped };
+    });
+    return changed ? { ...msg, content } : msg;
+  }
+
+  return msg;
+}
+
+function sanitizeInboundMessagesForModel<T extends unknown[]>(messages: T): T {
+  return messages
+    .map((msg) => sanitizeInboundMessageForModel(msg as InboundMessage))
+    .filter((msg): msg is InboundMessage => Boolean(msg)) as unknown as T;
+}
+
 /**
  * Determine whether a user turn is "topic-bearing" (substantive).
  *
@@ -1490,7 +1553,7 @@ function toNeutralMessage(msg: InboundMessage): NeutralMessage {
     toolCalls = contentBlockToolCalls;
   }
   // OpenClaw uses role 'toolResult' (camelCase). Support all three spellings.
-  const isToolResultMsg = msg.role === 'tool' || msg.role === 'tool_result' || msg.role === 'toolResult';
+  const isToolResultMsg = isToolResultRole(msg.role);
 
   // Tool results must stay on the result side of the transcript. If we persist them as
   // assistant rows with orphaned toolResults, later replay can retain a tool_result after
@@ -2128,7 +2191,7 @@ function createHyperMemEngine(): ContextEngine {
 
       // Skip system messages — they come from the runtime, not the conversation
       const msg = message as unknown as InboundMessage;
-      if (msg.role === 'system') {
+      if (msg.role === 'system' || shouldDropInboundMessage(msg)) {
         return { ingested: false };
       }
 
@@ -2264,7 +2327,7 @@ function createHyperMemEngine(): ContextEngine {
 
         for (const message of messages) {
           const msg = message as unknown as InboundMessage;
-          if (msg.role === 'system') continue;
+          if (msg.role === 'system' || shouldDropInboundMessage(msg)) continue;
 
           const neutral = toNeutralMessage(msg);
           if (neutral.role === 'user' && !neutral.toolResults?.length) {
@@ -2294,6 +2357,12 @@ function createHyperMemEngine(): ContextEngine {
      *   systemPromptAddition — facts/recall/episodes injected before runtime system prompt
      */
     async assemble({ sessionId, sessionKey, messages, tokenBudget, prompt, model }): ReturnType<ContextEngine['assemble']> {
+      // Drop non-provider transcript metadata before any pass-through, token
+      // estimate, or persistence-adjacent decision. The current user prompt is
+      // carried separately as `prompt`; adjacent role='custom' sender envelopes
+      // must never become the final model message.
+      messages = sanitizeInboundMessagesForModel(messages as unknown[]) as typeof messages;
+
       // ── Tool-loop guard ──────────────────────────────────────────────────────
       // When the last message is a toolResult, the runtime is mid tool-loop:
       // the model already has full context from the initial turn assembly.
@@ -3371,8 +3440,9 @@ ${replayRecovery.emittedText}`
         const newMessages = messages.slice(prePromptMessageCount);
         for (const msg of newMessages) {
           const m = msg as unknown as InboundMessage;
-          // Skip system messages — they come from the runtime, not the conversation
-          if (m.role === 'system') continue;
+          // Skip system and non-provider metadata messages — they come from the
+          // runtime/transport, not the conversation.
+          if (m.role === 'system' || shouldDropInboundMessage(m)) continue;
 
           if (m.role === 'toolResult' && extractTextFromInboundContent(m.content).trim() === SYNTHETIC_MISSING_TOOL_RESULT_TEXT) {
             const toolCallId = typeof m.toolCallId === 'string' ? m.toolCallId : 'unknown';

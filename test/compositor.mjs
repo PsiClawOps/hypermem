@@ -12,6 +12,7 @@ import { HyperMem, toProviderFormat, repairToolCallPairs } from '../dist/index.j
 import { Compositor, DEFAULT_TRIGGERS } from '../dist/compositor.js';
 import { chunkMarkdown } from '../dist/doc-chunker.js';
 import { DocChunkStore } from '../dist/doc-chunk-store.js';
+import { isOpenDomainQuery, searchOpenDomain } from '../dist/open-domain.js';
 import { runCachePrefixStabilitySuite } from './cache-prefix-stability.mjs';
 import fs from 'fs';
 import path from 'path';
@@ -79,6 +80,18 @@ async function run() {
     `).run(convId, agentId, m.role, m.text, m.idx);
   }
 
+  const broadRecallMsgs = [
+    { role: 'user', text: 'Mira enjoys pottery on weekends and restores old bicycles with Theo.', idx: 101 },
+    { role: 'assistant', text: 'She displays the pottery at the community gallery and donates repaired bikes to neighborhood students.', idx: 102 },
+  ];
+
+  for (const m of broadRecallMsgs) {
+    msgDb.prepare(`
+      INSERT INTO messages (conversation_id, agent_id, role, text_content, message_index, is_heartbeat, created_at)
+      VALUES (?, ?, ?, ?, ?, 0, datetime('now'))
+    `).run(convId, agentId, m.role, m.text, m.idx);
+  }
+
   // Seed facts
   hm.addFact(agentId, 'Redis 7.0.15 is running on localhost:6379', {
     domain: 'infrastructure',
@@ -117,6 +130,71 @@ async function run() {
     vectorStore: null,  // No vector search for this test
     libraryDb: libDb,
   });
+
+  // ── Query-matched message recall smoke ──
+  // Compose should be able to recall older raw transcript turns directly from
+  // messages_fts, even when history/facts/library/context are disabled. This is
+  // the product-side fix for LoCoMo non-temporal evidence misses: prompt-only
+  // retrieval, no gold evidence leakage.
+  const queryRecallResult = await compositor.compose({
+    agentId,
+    sessionKey: 'agent:alice:webchat:query-recall-smoke',
+    tokenBudget: 50000,
+    provider: 'anthropic',
+    model: 'claude-opus-4-6',
+    includeHistory: false,
+    includeFacts: false,
+    includeLibrary: false,
+    includeContext: false,
+    includeSemanticRecall: true,
+    includeDocChunks: false,
+    includeKeystones: false,
+    prompt: 'What does the library DB schema include?',
+  }, msgDb, libDb);
+
+  assert(queryRecallResult.contextBlock.includes('## Query-Matched Conversation Memory'),
+    'Query-matched message recall injects a raw transcript memory block');
+  assert(queryRecallResult.contextBlock.includes('Library DB v5 has 10 collections'),
+    'Query-matched message recall surfaces raw message evidence');
+  assert((queryRecallResult.diagnostics.queryMessageRecallIncluded ?? 0) > 0,
+    'Query-matched message recall diagnostics report included lines');
+
+  const constrainedRecallCompositor = new Compositor({
+    cache: hm.cache,
+    vectorStore: null,
+    libraryDb: libDb,
+  }, {
+    queryMessageRecall: {
+      openDomainRemainingFraction: 1,
+      openDomainMaxTokens: 1,
+    },
+  });
+  const constrainedRecallResult = await constrainedRecallCompositor.compose({
+    agentId,
+    sessionKey: 'agent:alice:webchat:query-recall-config-smoke',
+    tokenBudget: 50000,
+    provider: 'anthropic',
+    model: 'claude-opus-4-6',
+    includeHistory: false,
+    includeFacts: false,
+    includeLibrary: false,
+    includeContext: false,
+    includeSemanticRecall: true,
+    includeDocChunks: false,
+    includeKeystones: false,
+    prompt: 'What does the library DB schema include?',
+  }, msgDb, libDb);
+  assert(!constrainedRecallResult.contextBlock.includes('## Query-Matched Conversation Memory'),
+    'Query-matched message recall honors runtime token ceiling config');
+
+  const broadQuery = 'What did Mira say about activities?';
+  const odResults = searchOpenDomain(msgDb, broadQuery, '', 6);
+  assert(isOpenDomainQuery(broadQuery),
+    'Open-domain detection allows broad named-person questions');
+  assert(odResults.some(r => r.content.includes('pottery')),
+    'Open-domain retrieval finds the named raw-message anchor');
+  assert(odResults.some(r => r.content.includes('community gallery')),
+    'Open-domain retrieval expands adjacent dialogue evidence');
 
   const result = await compositor.compose({
     agentId,

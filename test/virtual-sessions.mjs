@@ -123,6 +123,29 @@ console.log('── VS-5: stripMessageMetadata ──');
 }
 
 {
+  // Gateway-injected Sender metadata with fenced JSON should be stripped,
+  // preserving the actual stamped canvas/WebChat user text.
+  const openclawPrefix = [
+    'Sender (untrusted metadata):',
+    '```json',
+    '{',
+    '  "label": "operator (gateway-client)",',
+    '  "id": "gateway-client",',
+    '  "name": "operator",',
+    '  "username": "operator"',
+    '}',
+    '```',
+    '',
+    '[Sat 2026-05-09 18:22 MST] make sure its not a part of how canvas takes the message from me to the gateway',
+  ].join('\n');
+  const stripped = stripMessageMetadata(openclawPrefix);
+  assert(!stripped.includes('Sender (untrusted metadata)'), 'Strips Gateway sender metadata prefix');
+  assert(!stripped.includes('gateway-client'), 'Strips Gateway sender metadata JSON');
+  assert(stripped === '[Sat 2026-05-09 18:22 MST] make sure its not a part of how canvas takes the message from me to the gateway',
+    'Preserves stamped user text after Gateway sender metadata prefix');
+}
+
+{
   // Pure user message with no metadata — should be unchanged
   const clean = 'Can you help me debug the Redis connection issue?';
   const stripped = stripMessageMetadata(clean);

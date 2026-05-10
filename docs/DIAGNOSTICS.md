@@ -10,6 +10,7 @@ HyperMem diagnostics are split into operator CLIs, validation scripts, and runti
 | operator dashboard | `hypermem-status --master` | concise fleet-facing status summary |
 | JSON status | `hypermem-status --json` | machine-readable database and runtime state |
 | Model audit | `hypermem-model-audit --strict` | active models have known context-window behavior or overrides |
+| Replay duplicate cleanup | `hypermem-cleanup --data-dir ~/.openclaw/hypermem` | detects Gateway-stamped user replay duplicates without printing content; dry-run by default |
 | Memory benchmark | `hypermem-bench --iterations 1000 --warmup 50 --agent <agent>` | local dataset access latency with p50/p95/p99 timings |
 | Compose report | `node scripts/compose-report.mjs` | direct compositor slot selection, budget decisions, diagnostics fields |
 | Trim report | `node scripts/trim-report.mjs` | trim events, cache invalidation, pressure behavior |
@@ -22,6 +23,37 @@ HyperMem diagnostics are split into operator CLIs, validation scripts, and runti
 | Docs/config validation | `npm run validate:docs && npm run validate:config` | documented commands and config surfaces match code |
 | History query validation | `npm run validate:history-query` | `MessageStore.queryHistory()`, `history_query` plugin tool, metadata-only telemetry, and health JSON surface are wired |
 | Fresh-install smoke gate | `npm run release:install-smoke` | packed npm artifact installs without source fallback, no-Ollama failure is clear, skip-mode stages, existing config is preserved, and failure artifacts are captured |
+
+## Replay duplicate cleanup
+
+**Hard-to-miss failure signature:** after a Gateway restart, old user turns appear again, often with an injected timestamp prefix such as `[Sat 2026-05-09 18:49 MST] Ok`. This is persisted replay debt when it remains after reload/API checks. It is different from canvas optimistic/live-cache duplicates that disappear after switching channels.
+
+Use `hypermem-doctor --fix-plan` first. Doctor now warns with `stamped-replay-duplicate-debt` when it finds timestamp-stamped duplicate user rows in `messages.db`.
+
+Repair path:
+
+```bash
+# 1. Inspect only. This is the default and prints no message content.
+hypermem-cleanup --data-dir ~/.openclaw/hypermem
+
+# 2. Machine-readable report for agents and automation.
+hypermem-cleanup --data-dir ~/.openclaw/hypermem --json
+
+# 3. Apply during a maintenance window after stopping Gateway/OpenClaw writers.
+hypermem-cleanup --data-dir ~/.openclaw/hypermem --apply
+```
+
+Safety contract:
+
+- dry-run is default
+- examples use SHA-256 prefixes, not message content
+- apply mode keeps the earliest canonical row and deletes later stamped duplicates
+- apply mode creates a SQLite backup by default
+- local references are moved from duplicate row IDs to the canonical row before delete
+- FTS is rebuilt and `PRAGMA integrity_check` plus `PRAGMA foreign_key_check` must pass before commit
+- entity/grace bridge rows for deleted duplicates are derived index rows and are dropped; rerun `scripts/backfill-entity-bridge.mjs` later if exact bridge parity matters
+
+If a duplicate is still being created after the prevention patch is installed, capture the timestamp and run the cleanup dry-run plus `hypermem-doctor --json`. Treat that as a live write-path bug, not cleanup residue.
 
 ## Plugin compatibility gates
 

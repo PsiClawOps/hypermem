@@ -29,7 +29,22 @@
     "maxCrossSessionContext": 0,
     "keystoneHistoryFraction": 0.2,
     "keystoneMaxMessages": 15,
-    "hyperformProfile": "standard"
+    "hyperformProfile": "standard",
+    "entityBridge": {
+      "enabled": false,
+      "structuredHandoff": false,
+      "pprEnabled": false,
+      "liveIndexingEnabled": false,
+      "maxTokens": 1200,
+      "maxGraphEdges": 5000,
+      "maxGraphNodes": 2000,
+      "maxCandidateMessagesBeforeRanking": 500,
+      "maxSeedEntities": 4,
+      "maxSeedFacets": 4,
+      "pprMaxIterations": 20,
+      "pprTeleportProbability": 0.15,
+      "pprConvergenceTolerance": 1e-06
+    }
   },
   "indexer": {
     "enabled": true,

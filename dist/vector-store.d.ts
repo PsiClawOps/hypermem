@@ -131,6 +131,12 @@ export declare class VectorStore {
         limit?: number;
         maxDistance?: number;
         precomputedEmbedding?: Float32Array;
+        /**
+         * When false, return no KNN results instead of generating a query
+         * embedding inline. Used by memory_search/recall to keep embedders out of
+         * the hot path. Default true preserves explicit semanticSearch callers.
+         */
+        allowInlineQueryEmbedding?: boolean;
     }): Promise<VectorSearchResult[]>;
     /**
      * Get content from a source table by id.

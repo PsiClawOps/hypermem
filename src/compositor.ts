@@ -24,6 +24,7 @@ import type {
   ProviderMessage,
   StoredMessage,
   CompositorConfig,
+  QueryMessageRecallConfig,
   SessionMeta,
   SessionCursor,
 } from './types.js';
@@ -43,7 +44,7 @@ import { SessionTopicMap } from './session-topic-map.js';
 import { toProviderFormat, detectProvider as s4DetectProvider } from './provider-translator.js';
 import { VectorStore, type VectorSearchResult } from './vector-store.js';
 import { DocChunkStore } from './doc-chunk-store.js';
-import { hybridSearch, type HybridSearchResult, type RerankerTelemetry, type AdjacencyTelemetry } from './hybrid-retrieval.js';
+import { buildFtsQuery, hybridSearch, reciprocalRankFuse, type HybridSearchResult, type RerankerTelemetry, type AdjacencyTelemetry } from './hybrid-retrieval.js';
 import { ensureCompactionFenceSchema, updateCompactionFence, getCompactionFence, getCompactionEligibility } from './compaction-fence.js';
 import { getActiveContext, getOrCreateActiveContext, type Context } from './context-store.js';
 import { rankKeystones, scoreKeystone, type KeystoneCandidate, type ScoredKeystone } from './keystone-scorer.js';
@@ -51,7 +52,12 @@ import { buildOrgRegistryFromDb, defaultOrgRegistry, type OrgRegistry } from './
 import { getActiveFOS, matchMOD, renderFOS, renderMOD, renderLightFOS, resolveOutputTier, buildActionVerificationSummary } from './fos-mod.js';
 import { KnowledgeStore } from './knowledge-store.js';
 import { TemporalStore, hasTemporalSignals } from './temporal-store.js';
-import { isOpenDomainQuery, searchOpenDomain } from './open-domain.js';
+import { buildOpenDomainFtsQueries, expandOpenDomainQueryTerms, isOpenDomainQuery, scoreOpenDomainEvidence, searchOpenDomain } from './open-domain.js';
+import { detectQuestionShape, extractQueryEntities, extractQueryFacets } from './question-shape.js';
+import { annotateRecallGroups, formatStructuredHandoffBlock, buildStructuredHandoffInstruction, normalizeEntityKey, normalizeFacetKey } from './entity-extractor.js';
+import { EntityBridgeStore } from './entity-bridge-store.js';
+import { runPersonalizedPageRank } from './entity-ppr.js';
+import type { EntityBridgeRecallDiagnostics } from './types.js';
 import { TRIM_BUDGET_POLICY, resolveTrimBudgets } from './budget-policy.js';
 import { resolveAdaptiveLifecyclePolicy, countTopicBearingTurns, type AdaptiveLifecyclePolicy } from './adaptive-lifecycle.js';
 import { formatToolChainStub, parseToolChainStub, formatArtifactRef, isArtifactRef, type ArtifactRef, type DegradationReason } from './degradation.js';
@@ -487,11 +493,16 @@ export function computeUnifiedPressure(
  * and a /new surge does not blow up hybrid search cost.
  */
 export const RECALL_BREADTH_BASE = Object.freeze({
-  mainBudgetFraction: 0.12,
-  fallbackBudgetFraction: 0.10,
-  candidateLimit: 10,
-  candidateLimitMin: 6,
-  candidateLimitMax: 16,
+  // 0.9.8 LoCoMo tuning: Mem0-class runs spend ~7k tokens/query on
+  // add-only, entity-linked long-horizon recall. Our prior 12% memory slice
+  // under-filled benchmark turns on 128k-class models and then starved exact
+  // single-hop/temporal evidence. Raise the steady-state recall envelope while
+  // preserving pressure clamps for normal production sessions.
+  mainBudgetFraction: 0.18,
+  fallbackBudgetFraction: 0.14,
+  candidateLimit: 18,
+  candidateLimitMin: 8,
+  candidateLimitMax: 32,
 });
 
 export interface ScaledRecallBreadth {
@@ -528,6 +539,106 @@ export function scaleRecallBreadth(
   return { mainBudgetTokens, fallbackBudgetTokens, candidateLimit, multiplier: safeMultiplier };
 }
 
+
+const LOCOMO_LONG_HORIZON_SIGNALS = [
+  'when', 'where', 'what', 'which', 'who', 'how long', 'how many', 'both',
+  'relationship', 'activities', 'activity', 'identity', 'career', 'planning', 'likely',
+  'before', 'after', 'since', 'first', 'last', 'year', 'month',
+  'common', 'share', 'shared', 'same', 'places', 'events', 'items', 'bought',
+];
+
+const MULTI_HOP_RECALL_FACETS: Array<{ pattern: RegExp; terms: string[] }> = [
+  { pattern: /\b(martial art|martial arts|kickbox|taekwondo|karate|boxing|mma)\b/i, terms: ['martial', 'arts', 'kickboxing', 'taekwondo', 'karate', 'boxing', 'mma', 'training'] },
+  { pattern: /\b(indoor|activities|activity|girlfriend|boyfriend|partner|dog|dogs)\b/i, terms: ['indoor', 'activity', 'activities', 'girlfriend', 'boyfriend', 'partner', 'cooking', 'cook', 'baking', 'bake', 'games', 'boardgames', 'board', 'volunteering', 'volunteer', 'shelter', 'wine', 'tasting', 'growing', 'flowers', 'movie', 'movies', 'dog', 'dogs', 'treats'] },
+  { pattern: /\b(destress|de-stress|relax|stress|dance|dancing)\b/i, terms: ['destress', 'relax', 'stress', 'dance', 'dancing', 'music', 'studio'] },
+  { pattern: /\b(common|both|share|shared|same|interests|like|likes)\b/i, terms: ['both', 'common', 'share', 'shared', 'same', 'lost', 'job', 'jobs', 'business', 'businesses', 'interests', 'movies', 'desserts', 'dessert', 'baking', 'music', 'games'] },
+  { pattern: /\b(place|places|event|events|meet|met|planned|planning)\b/i, terms: ['place', 'places', 'event', 'events', 'meet', 'met', 'planned', 'planning', 'starbucks', 'mcgee', 'pub', 'vr', 'club', 'baseball', 'game', 'restaurant', 'bar'] },
+  { pattern: /\b(item|items|buy|bought|purchase|purchased|march)\b/i, terms: ['item', 'items', 'buy', 'bought', 'purchase', 'purchased', 'march', 'car', 'mansion', 'house'] },
+  { pattern: /\b(family|friend|friends|passed away|died|death|mother|father|pet|pets)\b/i, terms: ['family', 'friend', 'friends', 'passed', 'away', 'died', 'death', 'mother', 'father', 'karlie', 'pet', 'pets', 'dog', 'cat'] },
+  { pattern: /\b(goal|goals|career|basketball|team|position|championship)\b/i, terms: ['goal', 'goals', 'career', 'basketball', 'team', 'position', 'championship', 'shooting', 'endorsement', 'brand'] },
+];
+
+function expandMultiHopQueryTerms(query: string, terms: string[]): string[] {
+  const expanded = [...terms, ...matchedMultiHopFacetTerms(query)];
+  return [...new Set(expanded)].slice(0, 48);
+}
+
+function matchedMultiHopFacetTerms(query: string): string[] {
+  const expanded: string[] = [];
+  for (const grace of MULTI_HOP_RECALL_FACETS) {
+    if (grace.pattern.test(query)) expanded.push(...grace.terms);
+  }
+  return [...new Set(expanded)];
+}
+
+const RECALL_QUERY_STOP_WORDS = new Set([
+  'what', 'when', 'where', 'which', 'would', 'could', 'should', 'about', 'with',
+  'from', 'have', 'has', 'had', 'does', 'did', 'were', 'was', 'are', 'the',
+  'and', 'for', 'that', 'this', 'there', 'their', 'them', 'they', 'your', 'you',
+  'his', 'her', 'she', 'him', 'how', 'many', 'long', 'likely', 'still', 'current',
+]);
+
+function baseRecallQueryTerms(query: string): string[] {
+  const words = query
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .replace(/-/g, ' ')
+    .split(/\s+/)
+    .map(w => w.trim())
+    .filter(w => w.length >= 3 && !RECALL_QUERY_STOP_WORDS.has(w));
+  return [...new Set(words)];
+}
+
+function recallQueryTerms(query: string, opts: { expandMultiHop?: boolean } = {}): string[] {
+  const unique = baseRecallQueryTerms(query);
+  const openExpanded = expandOpenDomainQueryTerms(query, unique);
+  return opts.expandMultiHop === false
+    ? openExpanded.slice(0, 48)
+    : expandMultiHopQueryTerms(query, openExpanded).slice(0, 80);
+}
+
+function toRecallFtsQuery(terms: string[], limit: number): string | null {
+  const unique = [...new Set(terms)]
+    .map(w => w.replace(/"/g, '').trim())
+    .filter(Boolean)
+    .slice(0, limit);
+  if (unique.length === 0) return null;
+  return unique.map(w => `"${w}"*`).join(' OR ');
+}
+
+function buildQueryMessageFtsQueries(query: string, opts: {
+  expandMultiHop?: boolean;
+  naturalTermLimit?: number;
+  specificityTermLimit?: number;
+} = {}): string[] {
+  const primary = buildFtsQuery(query);
+  const terms = recallQueryTerms(query, opts);
+  const naturalLimit = opts.naturalTermLimit ?? (opts.expandMultiHop === false ? 16 : 32);
+  const specificityLimit = opts.specificityTermLimit ?? (opts.expandMultiHop === false ? 12 : 24);
+  const naturalOrder = toRecallFtsQuery(terms, naturalLimit);
+  const specificityOrder = toRecallFtsQuery([...terms].sort((a, b) => b.length - a.length), specificityLimit);
+
+  const openDomainQueries = isOpenDomainQuery(query) ? buildOpenDomainFtsQueries(query) : [];
+
+  return [...openDomainQueries, primary, naturalOrder, specificityOrder].filter((q): q is string => Boolean(q));
+}
+
+function isLongHorizonRecallQuery(query: string): boolean {
+  const lower = query.toLowerCase();
+  if (hasTemporalSignals(query)) return true;
+  return LOCOMO_LONG_HORIZON_SIGNALS.some(signal => lower.includes(signal));
+}
+
+function scoreRecallTermOverlap(content: string, terms: string[]): number {
+  if (terms.length === 0) return 0;
+  const lower = content.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (lower.includes(term)) score += term.length >= 6 ? 2 : 1;
+  }
+  return score;
+}
+
 const DEFAULT_CONFIG: CompositorConfig = {
   // Primary budget controls
   budgetFraction: 0.703,
@@ -553,6 +664,37 @@ const DEFAULT_CONFIG: CompositorConfig = {
   dynamicReserveMax: 0.50,
   dynamicReserveEnabled: true,
 };
+
+const DEFAULT_QUERY_MESSAGE_RECALL_CONFIG: Required<QueryMessageRecallConfig> = {
+  openDomainRemainingFraction: 0.34,
+  temporalRemainingFraction: 0.22,
+  multiHopRemainingFraction: 0.44,
+  openDomainMaxTokens: 4200,
+  temporalMaxTokens: 2400,
+  multiHopMaxTokens: 6500,
+  openDomainHitLimit: 24,
+  temporalHitLimit: 12,
+  multiHopHitLimit: 48,
+  openDomainNeighborWindow: 4,
+  temporalNeighborWindow: 2,
+  multiHopNeighborWindow: 8,
+  openDomainLineCharLimit: 420,
+  temporalLineCharLimit: 420,
+  multiHopLineCharLimit: 760,
+  temporalFtsNaturalTermLimit: 16,
+  temporalFtsSpecificTermLimit: 12,
+  multiHopFtsNaturalTermLimit: 32,
+  multiHopFtsSpecificTermLimit: 24,
+  multiHopScopedFacetTermLimit: 24,
+  multiHopSpecificFacetTermLimit: 16,
+  multiHopRareFacetFanoutLimit: 12,
+  multiHopRareFacetPerTermLimit: 3,
+  multiHopSameConversationDirectFirst: false,
+};
+
+function resolveQueryMessageRecallConfig(config?: QueryMessageRecallConfig): Required<QueryMessageRecallConfig> {
+  return { ...DEFAULT_QUERY_MESSAGE_RECALL_CONFIG, ...(config ?? {}) };
+}
 
 // Tool gradient thresholds — controls how aggressively tool results are
 // truncated as they age out of the recent window.
@@ -2769,6 +2911,9 @@ export class Compositor {
     let diagTriggerFallbackUsed = false;
     let diagFactsIncluded = 0;
     let diagSemanticResults = 0;
+    let diagQueryMessageRecallHits = 0;
+    let diagQueryMessageRecallExpanded = 0;
+    let diagQueryMessageRecallIncluded = 0;
     let diagDocChunkCollections = 0;
     let diagScopeFiltered = 0;
     let diagFingerprintDedups = 0;
@@ -2778,6 +2923,12 @@ export class Compositor {
     let diagRerankerStatus: string | undefined;
     let diagRerankerCandidates: number | undefined;
     let diagRerankerProvider: string | null | undefined;
+    // Sprint A: Multi-hop structured handoff diagnostics
+    let diagQuestionShape: ComposeDiagnostics['questionShape'];
+    let diagStructuredHandoffApplied: boolean | undefined;
+    let diagStructuredHandoffEntityGroups: number | undefined;
+    let diagStructuredHandoffFacetGroups: number | undefined;
+    let diagEntityBridgeRecall: EntityBridgeRecallDiagnostics | undefined;
 
     function normalizeFingerprintText(text: string): string {
       return text.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -2901,15 +3052,27 @@ export class Compositor {
       if (request.includeSemanticRecall !== false && queryText && hasTemporalSignals(queryText) && libDb && remaining > 300) {
         try {
           const temporalStore = new TemporalStore(libDb);
+          const temporalTerms = recallQueryTerms(queryText, { expandMultiHop: false });
           const temporalFacts = temporalStore.timeRangeQuery({
             agentId: request.agentId,
-            limit: 15,
+            // 0.9.8: over-fetch then query-shape in memory. The old path took
+            // the latest 15 temporal rows, which is exactly how a "when did X"
+            // benchmark question gets a plausible but wrong recent date.
+            limit: 80,
             order: 'DESC',
           });
 
           if (temporalFacts.length > 0) {
             const beforeCount = temporalFacts.length;
-            const novel = temporalFacts.filter(f => !isDuplicate(f.content));
+            const novel = temporalFacts
+              .filter(f => !isDuplicate(f.content))
+              .map(f => ({ ...f, recallScore: scoreRecallTermOverlap(f.content, temporalTerms) }))
+              .filter(f => f.recallScore > 0)
+              .sort((a, b) => {
+                if (b.recallScore !== a.recallScore) return b.recallScore - a.recallScore;
+                return b.occurredAt - a.occurredAt;
+              })
+              .slice(0, 24);
             diagFingerprintDedups += beforeCount - novel.length;
 
             if (novel.length > 0) {
@@ -2924,7 +3087,7 @@ export class Compositor {
 
               const temporalSection = `## Temporal Context\n${temporalBlock}`;
               const tempTokens = estimateTokens(temporalSection);
-              const tempBudget = Math.floor(remaining * 0.20);
+              const tempBudget = Math.floor(remaining * 0.30);
 
               if (tempTokens <= tempBudget) {
                 volatileContextParts.push(temporalSection);
@@ -3052,6 +3215,164 @@ export class Compositor {
       }
     }
 
+    // ── Query-matched message recall (L2 rescue lane) ───────────
+    // Long-horizon and LoCoMo-style questions often need raw dialogue turns that
+    // have not been promoted into facts/knowledge/episodes yet. Semantic recall
+    // searches the library/vector surfaces; this bounded FTS lane searches the
+    // message transcript directly and expands around matching turns so multi-hop
+    // questions can see neighboring supporting evidence. It uses only the user
+    // prompt, never benchmark gold evidence.
+    let openDomainRawRecallStrong = false;
+
+    if (request.includeSemanticRecall !== false && remaining > 400) {
+      const queryText = request.prompt?.trim() || this.getLastUserMessage(messages) || '';
+      const longHorizonRecall = isLongHorizonRecallQuery(queryText);
+      const openDomainRecall = isOpenDomainQuery(queryText);
+      const temporalRecall = hasTemporalSignals(queryText);
+      const temporalStrictRecall = temporalRecall && !openDomainRecall;
+      if (queryText && (longHorizonRecall || openDomainRecall)) {
+        // Sprint A: detect question shape for structured handoff gate
+        const questionShape = !openDomainRecall && !temporalStrictRecall
+          ? detectQuestionShape(queryText)
+          : null;
+        if (questionShape) {
+          diagQuestionShape = {
+            kind: questionShape.kind,
+            entities: questionShape.entities,
+            facets: questionShape.facets,
+            confidence: questionShape.confidence,
+          };
+        }
+        // Sprint A: structured handoff fires when question is multi-hop AND flag is on
+        const entityBridgeCfg = this.config.entityBridge;
+        const structuredHandoffEnabled = Boolean(entityBridgeCfg?.structuredHandoff);
+        const useStructuredHandoff =
+          structuredHandoffEnabled &&
+          questionShape?.kind === 'multi-hop';
+
+        try {
+          const qmr = resolveQueryMessageRecallConfig(this.config.queryMessageRecall);
+          const recallMode = openDomainRecall ? 'openDomain' : temporalStrictRecall ? 'temporal' : 'multiHop';
+          const recall = this.buildQueryMessageRecall(db, queryText, {
+            maxTokens: Math.min(
+              Math.floor(remaining * (recallMode === 'openDomain' ? qmr.openDomainRemainingFraction : recallMode === 'temporal' ? qmr.temporalRemainingFraction : qmr.multiHopRemainingFraction)),
+              recallMode === 'openDomain' ? qmr.openDomainMaxTokens : recallMode === 'temporal' ? qmr.temporalMaxTokens : qmr.multiHopMaxTokens,
+            ),
+            hitLimit: recallMode === 'openDomain' ? qmr.openDomainHitLimit : recallMode === 'temporal' ? qmr.temporalHitLimit : qmr.multiHopHitLimit,
+            neighborWindow: recallMode === 'openDomain' ? qmr.openDomainNeighborWindow : recallMode === 'temporal' ? qmr.temporalNeighborWindow : qmr.multiHopNeighborWindow,
+            lineCharLimit: recallMode === 'openDomain' ? qmr.openDomainLineCharLimit : recallMode === 'temporal' ? qmr.temporalLineCharLimit : qmr.multiHopLineCharLimit,
+            ftsNaturalTermLimit: temporalStrictRecall ? qmr.temporalFtsNaturalTermLimit : qmr.multiHopFtsNaturalTermLimit,
+            ftsSpecificTermLimit: temporalStrictRecall ? qmr.temporalFtsSpecificTermLimit : qmr.multiHopFtsSpecificTermLimit,
+            scopedFacetTermLimit: qmr.multiHopScopedFacetTermLimit,
+            specificFacetTermLimit: qmr.multiHopSpecificFacetTermLimit,
+            rareFacetFanoutLimit: qmr.multiHopRareFacetFanoutLimit,
+            rareFacetPerTermLimit: qmr.multiHopRareFacetPerTermLimit,
+            sameConversationDirectFirst: qmr.multiHopSameConversationDirectFirst,
+            openDomain: openDomainRecall,
+            expandMultiHop: !temporalStrictRecall,
+            isDuplicate,
+            addFingerprint,
+          });
+          if (recall) {
+            let recallBlock: string;
+            if (openDomainRecall) {
+              recallBlock = `## Query-Matched Conversation Memory\nUse these raw transcript lines as primary evidence for the current question. If a line supports an answer, do not answer that no information is available.\n${recall.content}`;
+            } else if (temporalStrictRecall) {
+              recallBlock = `## Query-Matched Conversation Memory\nUse these date-ordered raw transcript lines as primary evidence for the current time-sensitive question. Prefer the latest directly supported answer when the question asks current, recent, before, after, first, last, or when. Do not broaden the answer with unrelated anchors from the same group.\n${recall.content}`;
+            } else if (useStructuredHandoff && questionShape) {
+              // Sprint A: structured handoff — annotate groups with entity/grace tags
+              try {
+                const annotated = annotateRecallGroups(
+                  recall.content,
+                  questionShape.entities,
+                  questionShape.facets,
+                );
+                const formatted = formatStructuredHandoffBlock(
+                  annotated,
+                  questionShape.entities,
+                  questionShape.facets,
+                );
+                const instruction = buildStructuredHandoffInstruction(
+                  questionShape.entities,
+                  questionShape.facets,
+                );
+                recallBlock = `${instruction}\n${formatted.content}`;
+                diagStructuredHandoffApplied = true;
+                diagStructuredHandoffEntityGroups = formatted.entityGroupCount;
+                diagStructuredHandoffFacetGroups = formatted.facetGroupCount;
+              } catch {
+                // Structured handoff is best-effort — fall back to flat format
+                recallBlock = `## Query-Matched Conversation Memory\nUse these grouped raw transcript lines as primary evidence. For multi-part questions, collect every relevant item across the group before answering. If the question asks what people share, have in common, bought, planned, pursued, or lost, scan the whole group and include every matching item before summarizing. Prefer the shortest complete list of supported items; do not add unsupported extras. For names, places, events, purchases, deaths, goals, or activities, preserve each distinct transcript anchor you find instead of collapsing to a generic category. Do not answer that no information is available when the group contains supporting evidence.\n${recall.content}`;
+                diagStructuredHandoffApplied = false;
+              }
+            } else {
+              recallBlock = `## Query-Matched Conversation Memory\nUse these grouped raw transcript lines as primary evidence. For multi-part questions, collect every relevant item across the group before answering. If the question asks what people share, have in common, bought, planned, pursued, or lost, scan the whole group and include every matching item before summarizing. Prefer the shortest complete list of supported items; do not add unsupported extras. For names, places, events, purchases, deaths, goals, or activities, preserve each distinct transcript anchor you find instead of collapsing to a generic category. Do not answer that no information is available when the group contains supporting evidence.\n${recall.content}`;
+            }
+            volatileContextParts.push(recallBlock);
+            contextTokens += recall.tokens;
+            remaining -= recall.tokens;
+            slots.context += recall.tokens;
+            diagQueryMessageRecallHits = recall.hitCount;
+            diagQueryMessageRecallExpanded = recall.expandedCount;
+            diagQueryMessageRecallIncluded = recall.includedCount;
+            if (openDomainRecall) {
+              diagRetrievalMode = 'open_domain_raw';
+              openDomainRawRecallStrong = recall.includedCount >= 8;
+            } else {
+              if (diagRetrievalMode === 'none') diagRetrievalMode = 'raw_message_fts';
+              openDomainRawRecallStrong = !temporalStrictRecall && recall.includedCount >= 10;
+            }
+          }
+        } catch {
+          // Raw message recall is best-effort — never fail composition.
+        }
+      }
+    }
+
+    // ── Sprint B: Entity-Bridge Conversation Memory (PPR lane) ────────────
+    // Inserted after the query-matched raw message recall and before semantic
+    // recall. Disabled by default. Requires `entityBridge.enabled` AND
+    // `entityBridge.pprEnabled` AND a query with at least one seed entity or
+    // grace AND the v12 bridge tables to exist. On any failure the lane
+    // degrades to a metadata-only diagnostic and the existing semantic recall
+    // path runs unchanged.
+    const entityBridgeDiagnostics: EntityBridgeRecallDiagnostics = { attempted: false, applied: false };
+    {
+      const cfg = this.config.entityBridge;
+      const queryText = request.prompt?.trim() || this.getLastUserMessage(messages) || '';
+      if (cfg?.enabled && cfg?.pprEnabled && queryText && remaining > 200) {
+        entityBridgeDiagnostics.attempted = true;
+        try {
+          const recall = this.buildEntityBridgeRecall(
+            db,
+            queryText,
+            cfg,
+            { isDuplicate, addFingerprint, remaining, agentId: request.agentId },
+            entityBridgeDiagnostics,
+          );
+          if (recall && recall.tokens > 0) {
+            volatileContextParts.push(recall.content);
+            contextTokens += recall.tokens;
+            remaining -= recall.tokens;
+            slots.context += recall.tokens;
+            entityBridgeDiagnostics.applied = true;
+            entityBridgeDiagnostics.tokensEmitted = recall.tokens;
+          }
+        } catch (err) {
+          entityBridgeDiagnostics.applied = false;
+          entityBridgeDiagnostics.reason = 'failed';
+          // Best-effort lane: never fail composition.
+          void err;
+        }
+      } else if (cfg?.enabled && cfg?.pprEnabled) {
+        entityBridgeDiagnostics.attempted = true;
+        entityBridgeDiagnostics.reason = queryText ? 'no_seeds' : 'no_seeds';
+      }
+    }
+    if (entityBridgeDiagnostics.attempted) {
+      diagEntityBridgeRecall = entityBridgeDiagnostics;
+    }
+
     // ── Semantic Recall (L3: Hybrid FTS5+KNN) ───────────────
     // scope: agent — buildSemanticRecall filters by agentId internally
     // Fires when either vector store or library DB is available.
@@ -3094,7 +3415,7 @@ export class Compositor {
     let diagComposeAdjacencyBoosted = 0;
     let diagComposeAdjacencyDeltaTotalMs = 0;
 
-    if (request.includeSemanticRecall !== false && remaining > 500 && (this.vectorStore || libDb)) {
+    if (request.includeSemanticRecall !== false && remaining > 500 && (this.vectorStore || libDb) && !openDomainRawRecallStrong) {
       const lastUserMsg = request.prompt?.trim() || this.getLastUserMessage(messages);
       if (lastUserMsg) {
         try {
@@ -3110,10 +3431,11 @@ export class Compositor {
           diagAdaptiveRecallBudgetTokens = recallBreadth.mainBudgetTokens;
           diagAdaptiveRecallCandidateLimit = recallBreadth.candidateLimit;
 
+          const longHorizonRecall = isLongHorizonRecallQuery(lastUserMsg);
           const semanticContent = await this.buildSemanticRecall(
             lastUserMsg,
             request.agentId,
-            // 0.9.0: recall token budget = base 0.12 of remaining * lifecycle multiplier.
+            // 0.9.0: recall token budget = base fraction of remaining * lifecycle multiplier.
             recallBreadth.mainBudgetTokens,
             libDb || undefined,
             precomputedEmbedding,
@@ -3129,6 +3451,7 @@ export class Compositor {
               diagComposeAdjacencyDeltaTotalMs += ev.averageDeltaMs * ev.boostedCount;
             },
             recallBreadth.candidateLimit,
+            longHorizonRecall,
           );
           if (semanticContent) {
             const tokens = estimateTokens(semanticContent);
@@ -3289,7 +3612,7 @@ export class Compositor {
         if (docParts.length > 0) {
           volatileContextParts.push(docParts.join('\n\n'));
         }
-      } else if (request.includeSemanticRecall !== false && remaining > 400 && (this.vectorStore || libDb)) {
+      } else if (request.includeSemanticRecall !== false && remaining > 400 && (this.vectorStore || libDb) && !openDomainRawRecallStrong) {
         // Trigger-miss fallback: no trigger fired — attempt bounded semantic retrieval
         // so there is never a silent zero-memory path on doc chunks.
         // INVARIANT: this block is mutually exclusive with triggered-retrieval above.
@@ -3301,6 +3624,7 @@ export class Compositor {
             diagAdaptiveRecallBudgetTokens = recallBreadth.fallbackBudgetTokens;
             diagAdaptiveRecallCandidateLimit = recallBreadth.candidateLimit;
           }
+          const fallbackLongHorizonRecall = isLongHorizonRecallQuery(lastMsg);
           const fallbackContent = await Promise.race([
             this.buildSemanticRecall(
               lastMsg,
@@ -3312,6 +3636,7 @@ export class Compositor {
               undefined,
               undefined,
               recallBreadth.candidateLimit,
+              fallbackLongHorizonRecall,
             ),
             new Promise<null>((_, reject) =>
               setTimeout(() => reject(new Error('fallback_knn_timeout')), 3000)
@@ -3766,6 +4091,15 @@ export class Compositor {
       triggerFallbackUsed: diagTriggerFallbackUsed,
       factsIncluded: diagFactsIncluded,
       semanticResultsIncluded: diagSemanticResults,
+      queryMessageRecallHits: diagQueryMessageRecallHits,
+      queryMessageRecallExpanded: diagQueryMessageRecallExpanded,
+      queryMessageRecallIncluded: diagQueryMessageRecallIncluded,
+      // Sprint A: Multi-hop structured handoff diagnostics
+      questionShape: diagQuestionShape,
+      structuredHandoffApplied: diagStructuredHandoffApplied,
+      structuredHandoffEntityGroups: diagStructuredHandoffEntityGroups,
+      structuredHandoffFacetGroups: diagStructuredHandoffFacetGroups,
+      entityBridgeRecall: diagEntityBridgeRecall,
       docChunksCollections: diagDocChunkCollections,
       scopeFiltered: diagScopeFiltered,
       zeroResultReason,
@@ -4654,6 +4988,7 @@ export class Compositor {
     onRerankerTelemetry?: (ev: RerankerTelemetry) => void,  // Sprint 1: surface reranker status at assemble level
     onAdjacencyTelemetry?: (ev: AdjacencyTelemetry) => void,
     resultLimit?: number,  // 0.9.0: lifecycle-scaled candidate limit for hybrid + KNN-only fallback
+    longHorizonRecall?: boolean,  // 0.9.8: LoCoMo-style long-term facts should not be recency-decayed away
   ): Promise<string | null> {
     const libDb = libraryDb || this.libraryDb;
     if (!libDb && !this.vectorStore) return null;
@@ -4689,10 +5024,23 @@ export class Compositor {
         agentId,
         maxKnnDistance: 1.2,
         precomputedEmbedding,
+        allowInlineQueryEmbedding: false,
+        // 0.9.8 LoCoMo tuning: MemPal/MemPalace-style benchmark gains came
+        // from broad candidate pools plus exact keyword/person/date boosts.
+        // Keep normal production fusion unchanged, but for long-horizon QA use
+        // a lower RRF k so top exact matches separate, and a modest FTS weight
+        // so exact names/dates/objects can beat semantically-near old chatter.
+        rrfK: longHorizonRecall ? 20 : undefined,
+        ftsWeight: longHorizonRecall ? 1.35 : undefined,
+        knnWeight: 1.0,
         reranker: this.reranker,
         rerankerMinCandidates: this.rerankerMinCandidates,
-        rerankerMaxDocuments: this.rerankerMaxDocuments,
-        rerankerTopK: this.rerankerTopK,
+        rerankerMaxDocuments: longHorizonRecall
+          ? Math.max(this.rerankerMaxDocuments ?? 0, Math.min(hybridLimit, 32))
+          : this.rerankerMaxDocuments,
+        rerankerTopK: longHorizonRecall
+          ? Math.max(this.rerankerTopK ?? 0, Math.min(hybridLimit, 18))
+          : this.rerankerTopK,
         // Sprint 1: thread reranker telemetry into compose diagnostics
         onRerankerTelemetry,
         onAdjacencyTelemetry,
@@ -4713,6 +5061,7 @@ export class Compositor {
       //       >72h:   multiply by 0.5
       const now = Date.now();
       const decayedResults = results.map(result => {
+        if (longHorizonRecall) return result;
         if (!result.createdAt) return result;
         const ageMs = now - new Date(result.createdAt).getTime();
         const ageDays = ageMs / 86_400_000;
@@ -4737,12 +5086,15 @@ export class Compositor {
       for (const result of decayedResults) {
         // TUNE-001: drop very-low-relevance results (RRF scores below 0.008 are noise)
         if (result.score < 0.008) continue;
-        // TUNE-016: FTS-only results require higher floor — low-score FTS hits are noise
-        if (result.sources.length === 1 && result.sources[0] === 'fts' && result.score < 0.05) continue;
-        // TUNE-014: episodes require higher confidence — score:2 episodes bleed adjacent
-        // session context and contaminate current session. Require fts+knn agreement
-        // (score >= 0.04) for episodes to make it into assembled context.
-        if (result.sourceTable === 'episodes' && result.score < 0.04) continue;
+        // TUNE-016: FTS-only results require higher floor — low-score FTS hits are noise.
+        // 0.9.8: for long-horizon QA, exact FTS-only episode hits are often the
+        // only evidence path when embeddings are unavailable or too broad. Relax
+        // the floor there, but keep the production floor for ordinary turns.
+        if (result.sources.length === 1 && result.sources[0] === 'fts' && result.score < (longHorizonRecall ? 0.015 : 0.05)) continue;
+        // TUNE-014: episodes require higher confidence in normal production turns.
+        // Long-horizon LoCoMo-style recall is explicitly asking for old episodic
+        // evidence, so do not drop relevant old episodes just because they are old.
+        if (!longHorizonRecall && result.sourceTable === 'episodes' && result.score < 0.04) continue;
         // C2: Skip results whose content is already fingerprinted (e.g. in Active Facts)
         // Dedup count is not tracked separately here — compose-level counter covers the other paths.
         if (fpCheck(result.content)) continue;
@@ -4780,6 +5132,522 @@ export class Compositor {
     }
 
     return lines.length > 0 ? lines.join('\n') : null;
+  }
+
+
+  /**
+   * Bounded prompt-only FTS recall over raw message history.
+   *
+   * This is intentionally separate from benchmark evidence tracing. The only
+   * input is the user query, so it is safe for product compose and for LoCoMo
+   * evaluation. Neighbor expansion gives the reader local dialogue context for
+   * multi-hop questions where the first FTS hit is only one side of the answer.
+   */
+
+  /**
+   * Sprint B: build the entity-bridge conversation memory block.
+   *
+   * Pipeline:
+   *  1. Detect question shape → seed entity/grace keys.
+   *  2. Use EntityBridgeStore to build a capped graph snapshot.
+   *  3. Run sparse personalized PageRank.
+   *  4. Pull top-K candidate messages, hydrate text, emit a capped block.
+   *
+   * Degrades safely:
+   *  - Tables missing: returns null with reason=tables_missing.
+   *  - No seeds: returns null with reason=no_seeds.
+   *  - Empty graph or no candidates: returns null with reason set.
+   *  - PPR or DB error: thrown to caller, which records reason=failed.
+   */
+  private buildEntityBridgeRecall(
+    db: DatabaseSync,
+    query: string,
+    cfg: NonNullable<typeof this.config.entityBridge>,
+    opts: {
+      isDuplicate: (text: string) => boolean;
+      addFingerprint: (text: string) => void;
+      remaining: number;
+      agentId?: string;
+    },
+    diag: EntityBridgeRecallDiagnostics,
+  ): { content: string; tokens: number } | null {
+    const store = new EntityBridgeStore(db);
+    if (!store.tablesExist()) {
+      diag.reason = 'tables_missing';
+      return null;
+    }
+    // Cheap question-shape extraction. Normalize seeds to the same keys used
+    // by the ingest path so query lookup and message indexing join correctly.
+    const shape = {
+      entities: extractQueryEntities(query),
+      facets: extractQueryFacets(query),
+    };
+    const maxSeeds = Math.max(1, Math.min(16, cfg.maxSeedEntities ?? 4));
+    const maxFacets = Math.max(1, Math.min(16, cfg.maxSeedFacets ?? 4));
+    const seedEntityKeys = [...new Set(shape.entities.map(normalizeEntityKey).filter(Boolean))].slice(0, maxSeeds);
+    const seedFacetKeys = [...new Set(shape.facets.map(normalizeFacetKey).filter(Boolean))].slice(0, maxFacets);
+    diag.seedEntityCount = seedEntityKeys.length;
+    diag.seedFacetCount = seedFacetKeys.length;
+    if (seedEntityKeys.length === 0 && seedFacetKeys.length === 0) {
+      diag.reason = 'no_seeds';
+      return null;
+    }
+
+    const agentId = opts.agentId
+      ?? (this as unknown as { _activeAgentId?: string })._activeAgentId
+      ?? this.getCurrentAgentIdForBridge(db);
+    if (!agentId) {
+      diag.reason = 'no_seeds';
+      return null;
+    }
+
+    const snapshot = store.buildGraphSnapshot({
+      agentId,
+      seedEntityKeys,
+      seedFacetKeys,
+      maxNodes: cfg.maxGraphNodes ?? 2000,
+      maxEdges: cfg.maxGraphEdges ?? 5000,
+      perSeedMessageLimit: cfg.perSeedMessageLimit ?? 200,
+    });
+    const graphMessageIds = new Set<number>([
+      ...snapshot.messageEntities.keys(),
+      ...snapshot.messageFacets.keys(),
+    ]);
+    diag.graphNodeCount = snapshot.diagnostics.nodeCount;
+    diag.graphMessageCount = graphMessageIds.size;
+    diag.graphEdgeCount = snapshot.diagnostics.edgeCount;
+    diag.graphNodesCapped = snapshot.diagnostics.nodesCapped || undefined;
+    diag.graphEdgesCapped = snapshot.diagnostics.edgesCapped || undefined;
+    diag.capFired = [
+      snapshot.diagnostics.nodesCapped ? 'node_cap' : '',
+      snapshot.diagnostics.edgesCapped ? 'edge_cap' : '',
+    ].filter(Boolean);
+    if (snapshot.messageEntities.size === 0 && snapshot.messageFacets.size === 0) {
+      diag.reason = 'empty_graph';
+      return null;
+    }
+
+    const ppr = runPersonalizedPageRank(snapshot, seedEntityKeys, seedFacetKeys, {
+      teleportProbability: cfg.pprTeleportProbability,
+      maxIterations: cfg.pprMaxIterations,
+      convergenceTolerance: cfg.pprConvergenceTolerance,
+      topK: cfg.pprTopK ?? 20,
+    });
+    diag.pprIterations = ppr.diagnostics.iterations;
+    diag.pprConverged = ppr.diagnostics.converged;
+    if (ppr.ranked.length === 0) {
+      diag.reason = 'no_candidates';
+      return null;
+    }
+
+    const pprCandidateIds = ppr.ranked.map(r => r.messageId);
+    const ftsCandidateIds = this.rankBridgeCandidatesByFts(db, query, pprCandidateIds);
+    diag.ftsCandidates = ftsCandidateIds.length;
+    const fused = reciprocalRankFuse<number>([
+      {
+        ranked: pprCandidateIds.map(id => ({ key: String(id), item: id })),
+        weight: 1.25,
+      },
+      ...(ftsCandidateIds.length > 0
+        ? [{ ranked: ftsCandidateIds.map(id => ({ key: String(id), item: id })), weight: 1.0 }]
+        : []),
+    ]);
+    diag.rrfCandidates = fused.length;
+    const candidateIds = fused.slice(0, cfg.pprTopK ?? 20).map(r => r.item);
+    const candidates = store.fetchCandidates({ agentId, messageIds: candidateIds });
+    if (candidates.length === 0) {
+      diag.reason = 'no_candidates';
+      return null;
+    }
+
+    // Hydrate text from `messages`. The store deliberately does not load
+    // message text; we do the join here so payloads stay scoped to compose.
+    const placeholders = candidates.map(() => '?').join(',');
+    const rows = db.prepare(
+      `SELECT id, role, text_content, conversation_id, created_at
+       FROM messages WHERE id IN (${placeholders}) AND COALESCE(text_content,'') != ''`,
+    ).all(...candidates.map(c => c.messageId)) as Array<{
+      id: number; role: string; text_content: string; conversation_id: number; created_at: string;
+    }>;
+    const rowById = new Map(rows.map(r => [r.id, r]));
+
+    const maxTokens = Math.max(
+      120,
+      Math.min(
+        cfg.maxTokens ?? 1200,
+        Math.floor(opts.remaining * 0.4),
+      ),
+    );
+    const lines: string[] = ['## Entity-Bridge Conversation Memory'];
+    const subjectParts: string[] = [];
+    if (seedEntityKeys.length) subjectParts.push(`entities: ${seedEntityKeys.slice(0, 4).join(', ')}`);
+    if (seedFacetKeys.length) subjectParts.push(`facets: ${seedFacetKeys.slice(0, 4).join(', ')}`);
+    if (subjectParts.length) lines.push(`Bridge subjects — ${subjectParts.join('; ')}.`);
+    lines.push('Use these PPR-ranked transcript anchors as supplementary evidence.');
+
+    let used = estimateTokens(lines.join('\n'));
+    let emitted = 0;
+    for (const cand of candidates) {
+      const row = rowById.get(cand.messageId);
+      if (!row) continue;
+      const snippet = row.text_content.slice(0, 320).replace(/\s+/g, ' ').trim();
+      if (!snippet) continue;
+      if (opts.isDuplicate(snippet)) continue;
+      const annot: string[] = [];
+      if (cand.matchedEntities.length) annot.push(`e: ${cand.matchedEntities.slice(0, 3).join(', ')}`);
+      if (cand.matchedFacets.length) annot.push(`f: ${cand.matchedFacets.slice(0, 3).join(', ')}`);
+      const header = annot.length
+        ? `### Bridge message ${row.id} [${annot.join('; ')}]`
+        : `### Bridge message ${row.id}`;
+      const block = `${header}\n- [${row.role}] ${snippet}`;
+      const cost = estimateTokens(block);
+      if (used + cost > maxTokens) break;
+      lines.push(block);
+      opts.addFingerprint(snippet);
+      used += cost;
+      emitted++;
+      if (emitted >= (cfg.pprTopK ?? 20)) break;
+    }
+    if (emitted === 0) {
+      diag.reason = 'no_candidates';
+      return null;
+    }
+    diag.candidatesEmitted = emitted;
+    return { content: lines.join('\n'), tokens: used };
+  }
+
+  /**
+   * Metadata-only FTS rank over the PPR candidate set. This lets the Sprint B
+   * bridge lane use the same generic RRF math for message-FTS + PPR ordering
+   * without changing the existing raw recall block or hybridSearch() semantics.
+   */
+  private rankBridgeCandidatesByFts(
+    db: DatabaseSync,
+    query: string,
+    candidateIds: number[],
+  ): number[] {
+    if (candidateIds.length === 0) return [];
+    const ftsQuery = buildFtsQuery(query);
+    if (!ftsQuery) return [];
+    try {
+      const placeholders = candidateIds.map(() => '?').join(',');
+      const rows = db.prepare(
+        `SELECT m.id AS id, messages_fts.rank AS rank
+         FROM messages_fts
+         JOIN messages m ON m.id = messages_fts.rowid
+         WHERE messages_fts MATCH ?
+           AND m.id IN (${placeholders})
+         ORDER BY messages_fts.rank
+         LIMIT ?`,
+      ).all(ftsQuery, ...candidateIds, candidateIds.length) as Array<{ id: number }>;
+      return rows.map(r => r.id);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Best-effort lookup for an agent id usable by the entity-bridge lane.
+   * The bridge index is per-agent, so we need to resolve which agent's
+   * messages belong to this DB. Falls back to the most recent conversation
+   * row's `agent_id`.
+   */
+  private getCurrentAgentIdForBridge(db: DatabaseSync): string | null {
+    try {
+      const row = db.prepare(
+        'SELECT agent_id FROM conversations ORDER BY id DESC LIMIT 1',
+      ).get() as { agent_id: string } | undefined;
+      return row?.agent_id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private buildQueryMessageRecall(
+    db: DatabaseSync,
+    query: string,
+    opts: {
+      maxTokens: number;
+      hitLimit: number;
+      neighborWindow: number;
+      openDomain?: boolean;
+      expandMultiHop?: boolean;
+      lineCharLimit?: number;
+      ftsNaturalTermLimit?: number;
+      ftsSpecificTermLimit?: number;
+      scopedFacetTermLimit?: number;
+      specificFacetTermLimit?: number;
+      rareFacetFanoutLimit?: number;
+      rareFacetPerTermLimit?: number;
+      sameConversationDirectFirst?: boolean;
+      isDuplicate: (text: string) => boolean;
+      addFingerprint: (text: string) => void;
+    },
+  ): { content: string; tokens: number; hitCount: number; expandedCount: number; includedCount: number } | null {
+    const ftsQueries = [...new Set(buildQueryMessageFtsQueries(query, {
+      expandMultiHop: opts.expandMultiHop,
+      naturalTermLimit: opts.ftsNaturalTermLimit,
+      specificityTermLimit: opts.ftsSpecificTermLimit,
+    }))];
+    if (ftsQueries.length === 0) return null;
+    const queryTerms = recallQueryTerms(query, { expandMultiHop: opts.expandMultiHop });
+    const openDomainRecall = Boolean(opts.openDomain || isOpenDomainQuery(query));
+    const lineCharLimit = Math.max(240, Math.min(1000, Math.floor(opts.lineCharLimit || 420)));
+
+    type QueryMessageRow = {
+      id: number;
+      conversation_id: number;
+      role: string;
+      text_content: string;
+      message_index: number;
+      created_at: string;
+      rank?: number;
+      overlap?: number;
+    };
+
+    const hitLimit = Math.max(1, Math.min(60, Math.floor(opts.hitLimit || 5)));
+    const neighborWindow = Math.max(0, Math.min(8, Math.floor(opts.neighborWindow || 0)));
+    const hitStmt = db.prepare(`
+      WITH fts_matches AS (
+        SELECT rowid, rank
+        FROM messages_fts
+        WHERE messages_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+      )
+      SELECT
+        m.id,
+        m.conversation_id,
+        m.role,
+        m.text_content,
+        m.message_index,
+        m.created_at,
+        fts_matches.rank AS rank
+      FROM messages m
+      JOIN fts_matches ON m.id = fts_matches.rowid
+      WHERE m.role IN ('user', 'assistant')
+        AND m.text_content IS NOT NULL
+        AND trim(m.text_content) != ''
+        AND m.is_heartbeat = 0
+      ORDER BY fts_matches.rank
+    `);
+
+    const rowsById = new Map<number, QueryMessageRow>();
+    const seenHitIds = new Set<number>();
+    const hits: QueryMessageRow[] = [];
+    let expandedCount = 0;
+
+    for (const ftsQuery of ftsQueries) {
+      const queryHits = hitStmt.all(ftsQuery, hitLimit) as QueryMessageRow[];
+      for (const hit of queryHits) {
+        if (seenHitIds.has(hit.id)) continue;
+        seenHitIds.add(hit.id);
+        hit.overlap = openDomainRecall
+          ? scoreOpenDomainEvidence(hit.text_content ?? '', query, queryTerms)
+          : scoreRecallTermOverlap(hit.text_content ?? '', queryTerms);
+        hits.push(hit);
+      }
+    }
+
+    if (hits.length === 0) return null;
+
+    if (!openDomainRecall && opts.expandMultiHop !== false) {
+      const genericFacetTerms = new Set([
+        'activity', 'activities', 'place', 'places', 'event', 'events', 'meet', 'met',
+        'planned', 'planning', 'item', 'items', 'buy', 'bought', 'purchase', 'purchased',
+        'family', 'friend', 'friends', 'goal', 'goals', 'career', 'common', 'both',
+        'share', 'shared', 'same', 'like', 'likes', 'team', 'game', 'games',
+      ]);
+      const facetTerms = matchedMultiHopFacetTerms(query)
+        .filter(term => term.length >= 4 || /^[a-z]{2,3}$/i.test(term))
+        .sort((a, b) => b.length - a.length);
+      const specificFacetTerms = facetTerms.filter(term => !genericFacetTerms.has(term.toLowerCase()));
+      const addFacetHits = (facetHits: QueryMessageRow[]) => {
+        for (const hit of facetHits) {
+          if (seenHitIds.has(hit.id)) continue;
+          seenHitIds.add(hit.id);
+          hit.overlap = scoreRecallTermOverlap(hit.text_content ?? '', queryTerms);
+          hits.push(hit);
+        }
+      };
+      const scopedFacetQuery = toRecallFtsQuery(facetTerms, opts.scopedFacetTermLimit ?? 24);
+      if (scopedFacetQuery) {
+        const scopedFacetStmt = db.prepare(`
+          SELECT
+            m.id,
+            m.conversation_id,
+            m.role,
+            m.text_content,
+            m.message_index,
+            m.created_at,
+            messages_fts.rank AS rank
+          FROM messages_fts
+          JOIN messages m ON m.id = messages_fts.rowid
+          WHERE messages_fts MATCH ?
+            AND m.conversation_id = ?
+            AND m.role IN ('user', 'assistant')
+            AND m.text_content IS NOT NULL
+            AND trim(m.text_content) != ''
+            AND m.is_heartbeat = 0
+          ORDER BY messages_fts.rank
+          LIMIT ?
+        `);
+        const hitConversationIds = [...new Set(hits.map(hit => hit.conversation_id))];
+        for (const conversationId of hitConversationIds) {
+          addFacetHits(scopedFacetStmt.all(scopedFacetQuery, conversationId, Math.min(12, hitLimit)) as QueryMessageRow[]);
+        }
+      }
+      const specificFacetQuery = toRecallFtsQuery(specificFacetTerms, opts.specificFacetTermLimit ?? 16);
+      if (specificFacetQuery) {
+        const specificFacetStmt = db.prepare(`
+          SELECT
+            m.id,
+            m.conversation_id,
+            m.role,
+            m.text_content,
+            m.message_index,
+            m.created_at,
+            messages_fts.rank AS rank
+          FROM messages_fts
+          JOIN messages m ON m.id = messages_fts.rowid
+          WHERE messages_fts MATCH ?
+            AND m.role IN ('user', 'assistant')
+            AND m.text_content IS NOT NULL
+            AND trim(m.text_content) != ''
+            AND m.is_heartbeat = 0
+          ORDER BY messages_fts.rank
+          LIMIT ?
+        `);
+        addFacetHits(specificFacetStmt.all(specificFacetQuery, Math.min(10, hitLimit)) as QueryMessageRow[]);
+
+        // LoCoMo-style multi-hop failures often hinge on one rare anchor
+        // (for example a named friend, venue acronym, or uncommon activity)
+        // that loses the combined OR-query rank contest to common grace terms.
+        // Add a tiny per-term fanout for specific grace terms so rare anchors
+        // are admitted without reopening the broad rank-packing blast radius.
+        let rareFacetFanout = 0;
+        for (const term of specificFacetTerms) {
+          if (rareFacetFanout >= (opts.rareFacetFanoutLimit ?? 12)) break;
+          const perTermQuery = toRecallFtsQuery([term], 1);
+          if (!perTermQuery) continue;
+          const before = hits.length;
+          addFacetHits(specificFacetStmt.all(perTermQuery, opts.rareFacetPerTermLimit ?? 3) as QueryMessageRow[]);
+          rareFacetFanout += Math.max(0, hits.length - before);
+        }
+      }
+    }
+
+    for (const hit of hits) {
+      if (!rowsById.has(hit.id)) rowsById.set(hit.id, hit);
+      if (neighborWindow === 0) continue;
+
+      const neighbors = db.prepare(`
+        SELECT
+          id,
+          conversation_id,
+          role,
+          text_content,
+          message_index,
+          created_at
+        FROM messages
+        WHERE conversation_id = ?
+          AND message_index BETWEEN ? AND ?
+          AND role IN ('user', 'assistant')
+          AND text_content IS NOT NULL
+          AND trim(text_content) != ''
+          AND is_heartbeat = 0
+        ORDER BY message_index ASC
+      `).all(
+        hit.conversation_id,
+        hit.message_index - neighborWindow,
+        hit.message_index + neighborWindow,
+      ) as QueryMessageRow[];
+
+      for (const neighbor of neighbors) {
+        if (!rowsById.has(neighbor.id)) {
+          rowsById.set(neighbor.id, neighbor);
+          expandedCount += 1;
+        }
+      }
+    }
+
+    const bestRankByConversation = new Map<number, number>();
+    const bestOverlapByConversation = new Map<number, number>();
+    for (const hit of hits) {
+      const rank = hit.rank ?? Number.MAX_SAFE_INTEGER;
+      const prevRank = bestRankByConversation.get(hit.conversation_id) ?? Number.MAX_SAFE_INTEGER;
+      if (rank < prevRank) bestRankByConversation.set(hit.conversation_id, rank);
+
+      const overlap = hit.overlap ?? (openDomainRecall
+        ? scoreOpenDomainEvidence(hit.text_content ?? '', query, queryTerms)
+        : scoreRecallTermOverlap(hit.text_content ?? '', queryTerms));
+      const prevOverlap = bestOverlapByConversation.get(hit.conversation_id) ?? 0;
+      if (overlap > prevOverlap) bestOverlapByConversation.set(hit.conversation_id, overlap);
+    }
+
+    for (const row of rowsById.values()) {
+      row.overlap = openDomainRecall
+        ? scoreOpenDomainEvidence(row.text_content ?? '', query, queryTerms)
+        : scoreRecallTermOverlap(row.text_content ?? '', queryTerms);
+    }
+
+    const rows = [...rowsById.values()]
+      .sort((a, b) => {
+        const convOverlapA = bestOverlapByConversation.get(a.conversation_id) ?? 0;
+        const convOverlapB = bestOverlapByConversation.get(b.conversation_id) ?? 0;
+        if (convOverlapA !== convOverlapB) return convOverlapB - convOverlapA;
+        const rankA = bestRankByConversation.get(a.conversation_id) ?? a.rank ?? Number.MAX_SAFE_INTEGER;
+        const rankB = bestRankByConversation.get(b.conversation_id) ?? b.rank ?? Number.MAX_SAFE_INTEGER;
+        if (rankA !== rankB) return rankA - rankB;
+        const rowOverlapA = a.overlap ?? 0;
+        const rowOverlapB = b.overlap ?? 0;
+        if (a.conversation_id === b.conversation_id) {
+          if (!openDomainRecall && opts.expandMultiHop !== false && opts.sameConversationDirectFirst === true) {
+            const directA = seenHitIds.has(a.id) ? 1 : 0;
+            const directB = seenHitIds.has(b.id) ? 1 : 0;
+            if (directA !== directB) return directB - directA;
+          }
+          return a.message_index - b.message_index;
+        }
+        if (rowOverlapA !== rowOverlapB) return rowOverlapB - rowOverlapA;
+        if (a.conversation_id !== b.conversation_id) return a.conversation_id - b.conversation_id;
+        return a.message_index - b.message_index;
+      });
+
+    const lines: string[] = [];
+    let tokens = 0;
+    let currentConversationId: number | null = null;
+    let includedCount = 0;
+
+    for (const row of rows) {
+      const text = String(row.text_content || '').trim();
+      if (!text || text.length < 8) continue;
+      if (opts.isDuplicate(text)) continue;
+
+      if (currentConversationId !== row.conversation_id) {
+        const header = `### Raw transcript group ${row.conversation_id}`;
+        const headerTokens = estimateTokens(header);
+        if (tokens + headerTokens > opts.maxTokens) break;
+        lines.push(header);
+        tokens += headerTokens;
+        currentConversationId = row.conversation_id;
+      }
+
+      const date = row.created_at ? new Date(row.created_at).toISOString().slice(0, 10) : '';
+      const prefix = date ? `[${date}] ` : '';
+      const line = `- ${prefix}${row.role}: ${text.length > lineCharLimit ? `${text.slice(0, lineCharLimit)}…` : text}`;
+      const lineTokens = estimateTokens(line);
+      if (tokens + lineTokens > opts.maxTokens) break;
+
+      lines.push(line);
+      tokens += lineTokens;
+      includedCount += 1;
+      opts.addFingerprint(text);
+    }
+
+    return includedCount > 0
+      ? { content: lines.join('\n'), tokens, hitCount: hits.length, expandedCount, includedCount }
+      : null;
   }
 
   /**

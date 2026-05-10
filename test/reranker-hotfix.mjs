@@ -112,12 +112,14 @@ async function run() {
     const baseline = await hybridSearch(libDb, fakeVector, baseQuery, {
       agentId,
       limit: 10,
+      allowInlineQueryEmbedding: true,
     });
     assert(baseline.length >= 2, `fused baseline returned ${baseline.length} results`);
 
     const reranked = await hybridSearch(libDb, fakeVector, baseQuery, {
       agentId,
       limit: 10,
+      allowInlineQueryEmbedding: true,
       reranker: appliedReranker,
       onRerankerTelemetry: (ev) => { telemetry = ev; },
     });
@@ -156,6 +158,7 @@ async function run() {
     const results = await hybridSearch(libDb, fakeVector, baseQuery, {
       agentId,
       limit: 10,
+      allowInlineQueryEmbedding: true,
       reranker: thresholdReranker,
       rerankerMinCandidates: 9999, // intentionally unreachable
       onRerankerTelemetry: (ev) => { telemetry = ev; },
@@ -179,10 +182,12 @@ async function run() {
     const baseline = await hybridSearch(libDb, fakeVector, baseQuery, {
       agentId,
       limit: 10,
+      allowInlineQueryEmbedding: true,
     });
     const fallback = await hybridSearch(libDb, fakeVector, baseQuery, {
       agentId,
       limit: 10,
+      allowInlineQueryEmbedding: true,
       reranker: failingReranker,
       onRerankerTelemetry: (ev) => { telemetry = ev; },
     });
@@ -208,10 +213,12 @@ async function run() {
     const baseline = await hybridSearch(libDb, fakeVector, baseQuery, {
       agentId,
       limit: 10,
+      allowInlineQueryEmbedding: true,
     });
     const fallback = await hybridSearch(libDb, fakeVector, baseQuery, {
       agentId,
       limit: 10,
+      allowInlineQueryEmbedding: true,
       reranker: throwingReranker,
       onRerankerTelemetry: (ev) => { telemetry = ev; },
     });
@@ -236,10 +243,12 @@ async function run() {
     const baseline = await hybridSearch(libDb, fakeVector, baseQuery, {
       agentId,
       limit: 10,
+      allowInlineQueryEmbedding: true,
     });
     const fallback = await hybridSearch(libDb, fakeVector, baseQuery, {
       agentId,
       limit: 10,
+      allowInlineQueryEmbedding: true,
       reranker: slowReranker,
       rerankerTimeoutMs: 25,
       onRerankerTelemetry: (ev) => { telemetry = ev; },

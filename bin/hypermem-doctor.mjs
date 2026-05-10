@@ -7,6 +7,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -37,6 +38,11 @@ Examples:
   hypermem-doctor
   hypermem-doctor --fix-plan
   hypermem-doctor --json --strict
+
+Replay duplicate warning:
+  If doctor reports stamped replay duplicate debt, run:
+    hypermem-cleanup --data-dir <path>
+    hypermem-cleanup --data-dir <path> --apply
 `);
 }
 
@@ -153,6 +159,53 @@ function findMessageDb(dir) {
     return null;
   }
   return null;
+}
+
+function scanStampedReplayDuplicateDebt(dir) {
+  const agentsDir = path.join(dir, 'agents');
+  const summary = { agents: 0, duplicateGroups: 0, duplicateRows: 0, topAgents: [] };
+  if (!existsSync(agentsDir)) return summary;
+  let entries = [];
+  try {
+    entries = readdirSync(agentsDir, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name).sort();
+  } catch {
+    return summary;
+  }
+
+  for (const agent of entries) {
+    const dbPath = path.join(agentsDir, agent, 'messages.db');
+    if (!existsSync(dbPath)) continue;
+    let db;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      const row = db.prepare(`
+        SELECT COUNT(*) AS duplicate_groups, COALESCE(SUM(n - 1), 0) AS duplicate_rows
+        FROM (
+          SELECT COUNT(*) AS n
+          FROM messages
+          WHERE role = 'user'
+            AND text_content LIKE '[___ ____-__-__ __:__ %]%'
+          GROUP BY conversation_id, role, text_content, COALESCE(tool_calls, ''), COALESCE(tool_results, '')
+          HAVING COUNT(*) > 1
+        )
+      `).get() || { duplicate_groups: 0, duplicate_rows: 0 };
+      const duplicateGroups = Number(row.duplicate_groups || 0);
+      const duplicateRows = Number(row.duplicate_rows || 0);
+      if (duplicateRows > 0) {
+        summary.agents += 1;
+        summary.duplicateGroups += duplicateGroups;
+        summary.duplicateRows += duplicateRows;
+        summary.topAgents.push({ agent, duplicateGroups, duplicateRows });
+      }
+    } catch {
+      // Doctor is advisory here. unreadable DBs are covered by data-file checks.
+    } finally {
+      try { db?.close(); } catch {}
+    }
+  }
+  summary.topAgents.sort((a, b) => b.duplicateRows - a.duplicateRows || a.agent.localeCompare(b.agent));
+  summary.topAgents = summary.topAgents.slice(0, 5);
+  return summary;
 }
 
 function checkConfigReadable() {
@@ -335,6 +388,23 @@ function checkOpenClawRecommendations() {
   }
 }
 
+
+function checkReplayDuplicateDebt() {
+  const debt = scanStampedReplayDuplicateDebt(dataDir);
+  if (debt.duplicateRows > 0) {
+    recommended('warn', 'stamped-replay-duplicate-debt',
+      `Found ${debt.duplicateRows} timestamp-stamped replay duplicate message rows across ${debt.agents} agent DB(s); run hypermem-cleanup dry-run, then apply during a maintenance window`,
+      {
+        duplicateGroups: debt.duplicateGroups,
+        duplicateRows: debt.duplicateRows,
+        topAgents: debt.topAgents,
+        command: `hypermem-cleanup --data-dir ${shellQuote(dataDir)} --json`,
+      });
+  } else {
+    recommended('ok', 'stamped-replay-duplicate-debt', 'No timestamp-stamped replay duplicate debt detected');
+  }
+}
+
 function checkDataDir() {
   const dirStat = statExists(dataDir);
   required(dirStat?.isDirectory() ? 'ok' : 'fail', 'data-dir', dirStat?.isDirectory() ? `HyperMem data dir exists: ${dataDir}` : `HyperMem data dir missing: ${dataDir}`);
@@ -442,6 +512,7 @@ if (openclawRead.value) {
 }
 checkRecallSurfaceRecommendations();
 checkDataDir();
+checkReplayDuplicateDebt();
 checkRuntimePlugins();
 
 const failedRequired = checks.filter(c => c.kind === 'required' && c.status === 'fail');

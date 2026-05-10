@@ -11,6 +11,7 @@ This page is the operator validation contract for HyperMem releases. It describe
 | Memory plugin | `~/.openclaw/plugins/hypermem/memory-plugin` | OpenClaw memory slot integration for `memory_search` and retrieval surfaces | `openclaw plugins list` shows `hypermem` loaded |
 | Runtime staging tool | `hypermem-install` | Copies package runtime into `~/.openclaw/plugins/hypermem` | staged directory contains `dist`, `plugin`, `memory-plugin`, `bin` |
 | Status CLI | `hypermem-status` | Health, database, vector, and runtime summary | `hypermem-status --health` exits cleanly or reports only healthy-empty state |
+| Runtime validator | `hypermem-validate-runtime` | Seeds a deterministic fixture and validates write, FTS, facts, vector index/search, warm, and compose | exits 0 with `consistencyScore: 1` |
 | Model audit CLI | `hypermem-model-audit` | Checks model context-window detection and overrides | `hypermem-model-audit --strict` reports no risky unknown models, or known required overrides |
 
 ## Install state machine
@@ -24,8 +25,9 @@ Do not treat installation as complete until all 5 states pass.
 | 3. OpenClaw wired | OpenClaw config points at staged plugins | `plugins.load.paths` includes both staged plugin dirs, slots are set |
 | 4. Runtime loaded | Gateway has loaded both plugins | `openclaw plugins list` shows `hypercompositor` and `hypermem` loaded |
 | 5. Runtime active | HyperMem is composing live turns | logs show `[hypermem] hypermem initialized` and `[hypermem:compose]` |
+| 6. Runtime validated | HyperMem components round-trip deterministic data | `hypermem-validate-runtime` exits 0 |
 
-A successful `hypermem-install` proves only state 2. It does not modify OpenClaw config and does not restart the gateway.
+A successful `hypermem-install` proves only state 2. It does not modify OpenClaw config and does not restart the gateway. A live install is not complete until runtime validation passes or a skipped semantic path is explicitly accepted for lightweight FTS-only mode.
 
 ## Fresh install validation
 
@@ -88,6 +90,7 @@ Verify activation:
 openclaw plugins list
 openclaw logs --limit 100 | grep -E 'hypermem|context-engine'
 hypermem-status --health
+hypermem-validate-runtime --allow-no-embedding
 hypermem-model-audit --strict
 ```
 
@@ -116,6 +119,7 @@ Validate after restart:
 openclaw plugins list
 openclaw logs --limit 100 | grep -E 'hypermem|context-engine|falling back'
 hypermem-status --health
+hypermem-validate-runtime --allow-no-embedding
 hypermem-model-audit --strict
 ```
 
@@ -168,6 +172,7 @@ npm run install:runtime:packed
 openclaw gateway restart
 openclaw plugins list
 node ~/.openclaw/plugins/hypermem/bin/hypermem-status.mjs --master
+node ~/.openclaw/plugins/hypermem/bin/hypermem-validate-runtime.mjs --allow-no-embedding
 ```
 
 The final OpenClaw host-runtime plugin checker is:

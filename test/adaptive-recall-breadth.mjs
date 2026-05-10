@@ -5,7 +5,7 @@
  * scaled exclusively by the adaptive lifecycle policy's smartRecallMultiplier:
  *   - /new or topic-shift surge → wider recall
  *   - bootstrap / warmup       → moderately wider recall
- *   - steady / elevated        → unchanged from base 0.12 / 0.10 / limit=10
+ *   - steady / elevated        → unchanged from base 0.18 / 0.14 / limit=18
  *   - high                     → narrower recall
  *   - critical                 → narrower recall, harder
  *
@@ -48,12 +48,12 @@ console.log('\n── Scenario 1: steady baseline preserves prior recall envelop
   const { policy, breadth } = recallFor({ userTurnCount: 20, pressureFraction: 0.50 });
   assert(policy.band === 'steady', `band steady (got ${policy.band})`);
   assert(policy.smartRecallMultiplier === 1.0, 'steady multiplier=1.0');
-  assert(breadth.mainBudgetTokens === Math.floor(BASE_REMAINING * 0.12),
-    `steady main budget == base 12% (got ${breadth.mainBudgetTokens})`);
-  assert(breadth.fallbackBudgetTokens === Math.floor(BASE_REMAINING * 0.10),
-    `steady fallback budget == base 10% (got ${breadth.fallbackBudgetTokens})`);
+  assert(breadth.mainBudgetTokens === Math.floor(BASE_REMAINING * RECALL_BREADTH_BASE.mainBudgetFraction),
+    `steady main budget == configured base fraction (got ${breadth.mainBudgetTokens})`);
+  assert(breadth.fallbackBudgetTokens === Math.floor(BASE_REMAINING * RECALL_BREADTH_BASE.fallbackBudgetFraction),
+    `steady fallback budget == configured base fraction (got ${breadth.fallbackBudgetTokens})`);
   assert(breadth.candidateLimit === RECALL_BREADTH_BASE.candidateLimit,
-    `steady candidate limit == 10 (got ${breadth.candidateLimit})`);
+    `steady candidate limit == ${RECALL_BREADTH_BASE.candidateLimit} (got ${breadth.candidateLimit})`);
 }
 
 console.log('\n── Scenario 2: elevated preserves baseline recall envelope ──');
@@ -61,9 +61,9 @@ console.log('\n── Scenario 2: elevated preserves baseline recall envelope �
   const { policy, breadth } = recallFor({ userTurnCount: 20, pressureFraction: 0.70 });
   assert(policy.band === 'elevated', `band elevated (got ${policy.band})`);
   assert(policy.smartRecallMultiplier === 1.0, 'elevated multiplier=1.0');
-  assert(breadth.mainBudgetTokens === Math.floor(BASE_REMAINING * 0.12),
+  assert(breadth.mainBudgetTokens === Math.floor(BASE_REMAINING * RECALL_BREADTH_BASE.mainBudgetFraction),
     'elevated main budget unchanged');
-  assert(breadth.candidateLimit === 10, 'elevated candidate limit unchanged');
+  assert(breadth.candidateLimit === RECALL_BREADTH_BASE.candidateLimit, 'elevated candidate limit unchanged');
 }
 
 console.log('\n── Scenario 3: explicit /new widens recall token budget and candidate limit ──');
@@ -93,7 +93,7 @@ console.log('\n── Scenario 4: warmup widens moderately, less than /new ─�
   const { policy, breadth } = recallFor({ userTurnCount: 3, pressureFraction: 0.20 });
   assert(policy.band === 'warmup', `band warmup (got ${policy.band})`);
   assert(policy.smartRecallMultiplier === 1.4, 'warmup multiplier=1.4');
-  assert(breadth.mainBudgetTokens > Math.floor(BASE_REMAINING * 0.12),
+  assert(breadth.mainBudgetTokens > Math.floor(BASE_REMAINING * RECALL_BREADTH_BASE.mainBudgetFraction),
     'warmup widens main recall budget vs steady');
   assert(breadth.mainBudgetTokens < surge.mainBudgetTokens,
     'warmup widens less than /new surge');
@@ -129,7 +129,7 @@ console.log('\n── Scenario 6: critical pressure narrows harder than high ─
     `critical candidate limit clamped to floor (got ${breadth.candidateLimit})`);
 }
 
-console.log('\n── Scenario 7: candidate limit clamps respect [6, 16] ──');
+console.log('\n── Scenario 7: candidate limit clamps respect configured floor/ceiling ──');
 {
   const tiny = scaleRecallBreadth(BASE_REMAINING, 0.1);
   const huge = scaleRecallBreadth(BASE_REMAINING, 5.0);

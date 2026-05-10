@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "name": "hypermem-runtime-validation",
+  "description": "Small deterministic fixture for installed HyperMem runtime validation. It validates message storage, FTS, library facts, vector indexing/search, warm, compose, current-value recall, temporal details, and negative-control recall without an answer LLM.",
+  "agentPrefix": "hypermem-runtime-validation",
+  "messages": [
+    {
+      "sessionId": "session-1",
+      "date": "2026-01-10T09:00:00Z",
+      "role": "user",
+      "content": "[runtime-fixture alpha] Riley stores the launch checklist in a teal binder in the north lab."
+    },
+    {
+      "sessionId": "session-1",
+      "date": "2026-01-10T09:01:00Z",
+      "role": "assistant",
+      "content": "Recorded: teal binder, north lab, launch checklist."
+    },
+    {
+      "sessionId": "session-1",
+      "date": "2026-01-10T09:02:00Z",
+      "role": "user",
+      "content": "[runtime-fixture beta] The backup generator codename is Copper Fox and it runs on Tuesdays."
+    },
+    {
+      "sessionId": "session-2",
+      "date": "2026-02-14T15:30:00Z",
+      "role": "user",
+      "content": "[runtime-fixture gamma] The old incident channel was #ops-red, but it was replaced by #ops-green on February 14."
+    },
+    {
+      "sessionId": "session-2",
+      "date": "2026-02-14T15:31:00Z",
+      "role": "assistant",
+      "content": "Current incident channel should be #ops-green; #ops-red is old."
+    },
+    {
+      "sessionId": "session-2",
+      "date": "2026-02-14T15:32:00Z",
+      "role": "user",
+      "content": "[runtime-fixture delta] Mira's pager handoff window is 18:00 to 20:00 Arizona time."
+    },
+    {
+      "sessionId": "session-3",
+      "date": "2026-03-22T11:45:00Z",
+      "role": "user",
+      "content": "[runtime-fixture epsilon] The release mascot is a brass otter carrying a small lantern."
+    },
+    {
+      "sessionId": "session-3",
+      "date": "2026-03-22T11:46:00Z",
+      "role": "assistant",
+      "content": "Noted release mascot: brass otter with lantern."
+    },
+    {
+      "sessionId": "session-3",
+      "date": "2026-03-22T11:47:00Z",
+      "role": "user",
+      "content": "[runtime-fixture zeta] There is no record of a purple submarine in this validation fixture."
+    }
+  ],
+  "facts": [
+    {
+      "domain": "runtime-validation",
+      "content": "Runtime validation structured fact: the backup generator codename is Copper Fox and it runs on Tuesdays."
+    },
+    {
+      "domain": "runtime-validation",
+      "content": "Runtime validation structured fact: the current incident channel is #ops-green; #ops-red is obsolete."
+    },
+    {
+      "domain": "runtime-validation",
+      "content": "Runtime validation structured fact: Mira's pager handoff window is 18:00 to 20:00 Arizona time."
+    }
+  ],
+  "probes": [
+    {
+      "id": "message-fts-exact-anchor",
+      "component": "message-fts",
+      "query": "teal binder north lab launch checklist",
+      "required": ["teal binder", "north lab", "launch checklist"]
+    },
+    {
+      "id": "message-fts-late-session",
+      "component": "message-fts",
+      "query": "brass otter lantern",
+      "required": ["brass otter", "lantern"]
+    },
+    {
+      "id": "semantic-structured-fact",
+      "component": "semantic",
+      "query": "standby power system codename weekly schedule",
+      "required": ["Copper Fox", "Tuesdays"]
+    },
+    {
+      "id": "semantic-current-value",
+      "component": "semantic",
+      "query": "current incident channel replacement",
+      "required": ["#ops-green"]
+    },
+    {
+      "id": "compose-temporal-detail",
+      "component": "compose",
+      "sessionId": "session-2",
+      "query": "When is Mira's pager handoff window?",
+      "required": ["18:00", "20:00", "Arizona"]
+    },
+    {
+      "id": "compose-late-session-detail",
+      "component": "compose",
+      "sessionId": "session-3",
+      "query": "What is the release mascot?",
+      "required": ["brass otter", "lantern"]
+    },
+    {
+      "id": "compose-negative-control",
+      "component": "compose",
+      "sessionId": "session-3",
+      "query": "What does the fixture say about a purple submarine?",
+      "required": ["no record", "purple submarine"]
+    }
+  ]
+}

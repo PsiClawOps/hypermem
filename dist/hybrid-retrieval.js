@@ -170,6 +170,30 @@ function searchEpisodesFts(db, query, agentId, limit = 20) {
         sourceMessageId: r.source_message_id ?? undefined,
     }));
 }
+export function reciprocalRankFuse(lists, k = 60) {
+    const merged = new Map();
+    for (const list of lists) {
+        const w = list.weight ?? 1.0;
+        list.ranked.forEach((entry, i) => {
+            const rank = i + 1;
+            const inc = w / (k + rank);
+            const existing = merged.get(entry.key);
+            if (existing) {
+                existing.score += inc;
+                existing.ranks.push(rank);
+            }
+            else {
+                merged.set(entry.key, {
+                    key: entry.key,
+                    item: entry.item,
+                    score: inc,
+                    ranks: [rank],
+                });
+            }
+        });
+    }
+    return [...merged.values()].sort((a, b) => b.score - a.score);
+}
 function resultKey(table, id) {
     return `${table}:${id}`;
 }
@@ -380,13 +404,14 @@ export async function hybridSearch(libraryDb, vectorStore, query, opts) {
     }
     // ── KNN retrieval ──
     const knnMap = new Map();
-    if (vectorStore) {
+    if (vectorStore && (opts?.precomputedEmbedding || opts?.allowInlineQueryEmbedding === true)) {
         try {
             const knnResults = await vectorStore.search(query, {
                 tables,
                 limit: Math.ceil(limit * 1.5),
                 maxDistance: maxKnnDistance,
                 precomputedEmbedding: opts?.precomputedEmbedding,
+                allowInlineQueryEmbedding: opts?.allowInlineQueryEmbedding === true,
             });
             knnResults.forEach((r, i) => {
                 const key = resultKey(r.sourceTable, r.sourceId);

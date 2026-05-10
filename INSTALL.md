@@ -152,15 +152,34 @@ OpenClaw loads the plugin runtime from `~/.openclaw/plugins/hypermem/`.
 
 ### Verification checkpoints
 
-Run the installed-system doctor first:
+Run the installed-system doctor and deterministic runtime validator first:
 
 ```bash
 hypermem-doctor --fix-plan
+hypermem-cleanup --data-dir ~/.openclaw/hypermem
+hypermem-validate-runtime --allow-no-embedding
 ```
 
 `hypermem-doctor` is read-only. It inspects OpenClaw config, HyperMem config, plugin wiring, recommended OpenClaw runtime settings, data directory shape, runtime plugin load state, and active model context-window risk. It prints exact `openclaw config set ...` commands when something needs review. It does not edit config or restart the gateway.
 
-Expected result after a complete install: no required failures. Recommendation warnings should be reviewed before production use, especially context-window warnings for GPT/OpenAI-compatible/local gateways.
+`hypermem-validate-runtime` writes a tiny isolated validation agent, then checks message persistence, FTS, structured facts, vector indexing/search when embeddings are enabled, warm, and compose. It does not call an answer LLM. Expected result after a complete install: doctor has no required failures and runtime validation reports `consistencyScore: 1`. Recommendation warnings should be reviewed before production use, especially context-window warnings for GPT/OpenAI-compatible/local gateways.
+
+### Replay duplicate cleanup after upgrade
+
+If agents report repeated user messages after a restart, run the read-only cleanup scan. This is now part of the obvious post-upgrade diagnostic path, not tribal knowledge:
+
+```bash
+hypermem-doctor --fix-plan
+hypermem-cleanup --data-dir ~/.openclaw/hypermem
+```
+
+Only apply during a maintenance window after Gateway/OpenClaw writers are stopped:
+
+```bash
+hypermem-cleanup --data-dir ~/.openclaw/hypermem --apply
+```
+
+Apply mode writes a SQLite backup, rewrites local references, rebuilds FTS, and rolls back unless integrity and foreign-key checks pass.
 
 Walk the install state machine explicitly if you need a manual check:
 

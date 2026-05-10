@@ -983,6 +983,12 @@ export class VectorStore {
       limit?: number;           // default 10
       maxDistance?: number;      // filter out results beyond this distance
       precomputedEmbedding?: Float32Array;
+      /**
+       * When false, return no KNN results instead of generating a query
+       * embedding inline. Used by memory_search/recall to keep embedders out of
+       * the hot path. Default true preserves explicit semanticSearch callers.
+       */
+      allowInlineQueryEmbedding?: boolean;
     }
   ): Promise<VectorSearchResult[]> {
     const limit = opts?.limit || 10;
@@ -1000,6 +1006,8 @@ export class VectorStore {
       // Populate LRU cache so subsequent queries for the same text hit
       const maxSize = this.config.cacheSize ?? 128;
       cachePut(simpleHash(query), queryEmbedding, maxSize);
+    } else if (opts?.allowInlineQueryEmbedding === false) {
+      return [];
     } else {
       [queryEmbedding] = await generateEmbeddings([query], this.config, 'query');
     }

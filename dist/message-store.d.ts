@@ -7,9 +7,31 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { NeutralMessage, StoredMessage, Conversation, ChannelType, ConversationStatus, RecentTurn, ArchivedMiningQuery, ArchivedMiningResult, MultiContextMiningOptions, HistoryQuery, HistoryQueryResult, HistoryQueryMode } from './types.js';
+import { EntityBridgeStore } from './entity-bridge-store.js';
+/**
+ * Sprint B: optional live entity/grace bridge indexer for message writes.
+ *
+ * Set on the MessageStore via `setEntityBridgeIndexer()`. When present and
+ * the bridge tables exist, recordMessage() will live-index the message's
+ * entity/grace mentions after the row is inserted. Indexing failure is
+ * metadata-only and never affects the message write.
+ */
+export interface EntityBridgeIndexer {
+    /** Hard guard: must return true for indexing to fire. */
+    shouldIndex(): boolean;
+    /** Underlying bridge store (created lazily by callers). */
+    store: EntityBridgeStore;
+}
+export declare function isReplayDedupedMessage(message: StoredMessage): boolean;
 export declare class MessageStore {
     private readonly db;
+    private bridgeIndexer;
     constructor(db: DatabaseSync);
+    /**
+     * Sprint B: attach the entity-bridge live indexer. Optional; default off.
+     * Idempotent. Pass null to disable indexing for this instance.
+     */
+    setEntityBridgeIndexer(indexer: EntityBridgeIndexer | null): void;
     /**
      * Get or create a conversation for a session.
      */
@@ -53,6 +75,20 @@ export declare class MessageStore {
         isHeartbeat?: boolean;
         contextId?: number;
     }): StoredMessage;
+    /**
+     * Detect restored transcript replay before inserting a new row.
+     *
+     * Gateway restarts can feed already-persisted transcript turns back through
+     * afterTurn/ingest. Without a DB-level guard those restored turns are appended
+     * again as new rows, often as a same-timestamp batch. We only suppress exact
+     * role + text + tool payload matches within the recent conversation tail.
+     *
+     * To preserve legitimate repeated chatty turns, short text-only repeats are
+     * only suppressed when they duplicate the current tail row. Longer transcript
+     * turns and structured tool carriers are treated as replay candidates across
+     * the recent window.
+     */
+    private findReplayDuplicate;
     /**
      * Get recent messages for a conversation.
      */

@@ -5,7 +5,7 @@
  * Write-heavy, temporal, rotatable.
  * Contains ONLY conversation data — structured knowledge lives in library.db.
  */
-export const LATEST_SCHEMA_VERSION = 11;
+export const LATEST_SCHEMA_VERSION = 12;
 function nowIso() {
     return new Date().toISOString();
 }
@@ -321,6 +321,97 @@ export function migrate(db) {
     `);
         db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
             .run(11, nowIso());
+    }
+    // v11 → v12: Sprint B entity/grace bridge index.
+    //
+    // Pure metadata-only tables. The migration creates empty tables; it does
+    // NOT scan existing messages. Backfill is an explicit operator action via
+    // scripts/backfill-entity-bridge.mjs. This avoids any startup work and
+    // keeps the bridge fully off until both `entityBridge.enabled` and
+    // `entityBridge.pprEnabled` are set.
+    //
+    // - memory_entities / memory_facets: canonical normalized keys + display.
+    // - message_entity_mentions / message_facet_mentions: per-message
+    //   mention rows with cheap (start,end) char offsets.
+    // - entity_bridge_message_index: message indexing watermark. A row exists
+    //   for every message we have indexed (or attempted), even when the
+    //   message produced zero mentions. Lets us distinguish 'never indexed'
+    //   from 'indexed, no mentions'.
+    if (currentVersion < 12) {
+        db.exec(`
+      CREATE TABLE IF NOT EXISTS memory_entities (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        entity_key TEXT NOT NULL,
+        display_name TEXT,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        mention_count INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(agent_id, entity_key)
+      )
+    `);
+        db.exec('CREATE INDEX IF NOT EXISTS idx_memory_entities_worker ON memory_entities(agent_id, last_seen_at DESC)');
+        db.exec(`
+      CREATE TABLE IF NOT EXISTS memory_facets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        facet_key TEXT NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        mention_count INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(agent_id, facet_key)
+      )
+    `);
+        db.exec('CREATE INDEX IF NOT EXISTS idx_memory_facets_worker ON memory_facets(agent_id, last_seen_at DESC)');
+        db.exec(`
+      CREATE TABLE IF NOT EXISTS message_entity_mentions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        entity_id INTEGER NOT NULL REFERENCES memory_entities(id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL,
+        conversation_id INTEGER,
+        match_term TEXT,
+        start_offset INTEGER,
+        end_offset INTEGER,
+        created_at TEXT NOT NULL
+      )
+    `);
+        db.exec('CREATE INDEX IF NOT EXISTS idx_msg_entity_mentions_msg ON message_entity_mentions(message_id)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_msg_entity_mentions_entity ON message_entity_mentions(entity_id, agent_id)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_msg_entity_mentions_worker ON message_entity_mentions(agent_id, created_at DESC)');
+        db.exec(`
+      CREATE TABLE IF NOT EXISTS message_facet_mentions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        facet_id INTEGER NOT NULL REFERENCES memory_facets(id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL,
+        conversation_id INTEGER,
+        match_term TEXT,
+        start_offset INTEGER,
+        end_offset INTEGER,
+        created_at TEXT NOT NULL
+      )
+    `);
+        db.exec('CREATE INDEX IF NOT EXISTS idx_msg_facet_mentions_msg ON message_facet_mentions(message_id)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_msg_facet_mentions_facet ON message_facet_mentions(facet_id, agent_id)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_msg_facet_mentions_worker ON message_facet_mentions(agent_id, created_at DESC)');
+        db.exec(`
+      CREATE TABLE IF NOT EXISTS entity_bridge_message_index (
+        message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL,
+        conversation_id INTEGER,
+        entity_count INTEGER NOT NULL DEFAULT 0,
+        facet_count INTEGER NOT NULL DEFAULT 0,
+        indexed_at TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'live',
+        status TEXT NOT NULL DEFAULT 'ok',
+        last_error TEXT
+      )
+    `);
+        db.exec('CREATE INDEX IF NOT EXISTS idx_entity_bridge_index_worker ON entity_bridge_message_index(agent_id, indexed_at DESC)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_entity_bridge_index_status ON entity_bridge_message_index(agent_id, status)');
+        db.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)')
+            .run(12, nowIso());
     }
 }
 export { LATEST_SCHEMA_VERSION as SCHEMA_VERSION };

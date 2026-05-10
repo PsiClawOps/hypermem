@@ -65,6 +65,12 @@ export interface HybridSearchOptions {
     /** Pre-computed embedding for the query — skips Ollama call in VectorStore.search() */
     precomputedEmbedding?: Float32Array;
     /**
+     * Permit VectorStore.search() to generate a query embedding inline when no
+     * precomputed embedding is available. Default false: memory recall must not
+     * put remote/local embedding generation on the search hot path.
+     */
+    allowInlineQueryEmbedding?: boolean;
+    /**
      * Optional reranker applied after RRF fusion. Only runs on the fused path
      * (both FTS and KNN produced results). FTS-only and KNN-only branches are
      * unchanged. Null/undefined disables reranking.
@@ -100,6 +106,27 @@ export interface HybridSearchOptions {
  * Extracts meaningful words, removes stop words, uses OR conjunction.
  */
 export declare function buildFtsQuery(input: string): string;
+/**
+ * Generic RRF helper, shared by hybridSearch() (library-side fusion) and
+ * the Sprint B entity-bridge compose lane (FTS-over-messages + PPR-over-
+ * bridge-graph). This helper does NOT change hybridSearch() semantics —
+ * the legacy in-place fusion below still owns adjacency boosting and the
+ * reranker hook for the FTS+KNN path.
+ */
+export interface RrfList<T> {
+    ranked: Array<{
+        key: string;
+        item: T;
+    }>;
+    weight?: number;
+}
+export interface RrfFusedEntry<T> {
+    key: string;
+    item: T;
+    score: number;
+    ranks: number[];
+}
+export declare function reciprocalRankFuse<T>(lists: Array<RrfList<T>>, k?: number): Array<RrfFusedEntry<T>>;
 /**
  * Hybrid search combining FTS5 keyword search and KNN vector search.
  *

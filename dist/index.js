@@ -12,6 +12,11 @@
 export { ENGINE_VERSION, MIN_NODE_VERSION, MIN_REDIS_VERSION, SQLITE_VEC_VERSION, MAIN_SCHEMA_VERSION, LIBRARY_SCHEMA_VERSION_EXPORT, HYPERMEM_COMPAT_VERSION, SCHEMA_COMPAT } from './version.js';
 export { DatabaseManager } from './db.js';
 export { MessageStore } from './message-store.js';
+export { EntityBridgeStore } from './entity-bridge-store.js';
+export { runPersonalizedPageRank } from './entity-ppr.js';
+export { runEntityBridgeBackfill } from './entity-bridge-backfill.js';
+export { reciprocalRankFuse } from './hybrid-retrieval.js';
+export { normalizeEntityKey, normalizeFacetKey, extractEntityFacetMentions, } from './entity-extractor.js';
 export { ToolArtifactStore } from './tool-artifact-store.js';
 export { FactStore } from './fact-store.js';
 export { KnowledgeStore } from './knowledge-store.js';
@@ -74,7 +79,8 @@ export { detectTopicShift, stripMessageMetadata } from './topic-detector.js';
 export { SessionTopicMap } from './session-topic-map.js';
 export { getActiveFOS, matchMOD, renderFOS, renderMOD, recordOutputMetrics, } from './fos-mod.js';
 import { DatabaseManager } from './db.js';
-import { MessageStore } from './message-store.js';
+import { MessageStore, isReplayDedupedMessage } from './message-store.js';
+import { EntityBridgeStore } from './entity-bridge-store.js';
 import { FactStore } from './fact-store.js';
 import { KnowledgeStore } from './knowledge-store.js';
 import { TopicStore } from './topic-store.js';
@@ -118,6 +124,21 @@ const DEFAULT_CONFIG = {
         maxRecentToolPairs: 3,
         maxProseToolPairs: 10,
         warmHistoryBudgetFraction: 0.4,
+        entityBridge: {
+            enabled: false,
+            structuredHandoff: false,
+            pprEnabled: false,
+            liveIndexingEnabled: false,
+            maxTokens: 1200,
+            maxGraphEdges: 5000,
+            maxGraphNodes: 2000,
+            maxCandidateMessagesBeforeRanking: 500,
+            maxSeedEntities: 4,
+            maxSeedFacets: 4,
+            pprMaxIterations: 20,
+            pprTeleportProbability: 0.15,
+            pprConvergenceTolerance: 1e-6,
+        },
     },
     indexer: {
         enabled: true,
@@ -498,7 +519,30 @@ export class HyperMem {
         }
         return hm;
     }
-    // ─── Core API (L2: Message DB) ──────────────────────────────
+    // ─── Core API (L2: Message DB) ───────────────────────────
+    /**
+     * Sprint B: attach the entity-bridge live indexer when both `enabled` and
+     * `liveIndexingEnabled` flags are on AND the v12 bridge tables exist on
+     * the agent DB. Falls through silently otherwise.
+     */
+    attachEntityBridgeIndexerIfEnabled(store, db) {
+        const cfg = this.config.compositor.entityBridge;
+        if (!cfg?.enabled || !cfg?.liveIndexingEnabled)
+            return;
+        try {
+            const bridgeStore = new EntityBridgeStore(db);
+            if (!bridgeStore.tablesExist())
+                return;
+            store.setEntityBridgeIndexer({
+                store: bridgeStore,
+                shouldIndex: () => Boolean(this.config.compositor.entityBridge?.enabled
+                    && this.config.compositor.entityBridge?.liveIndexingEnabled),
+            });
+        }
+        catch {
+            // Best-effort: indexer attach is metadata-only; never fail the write path.
+        }
+    }
     /**
      * Record a user message.
      */
@@ -506,6 +550,7 @@ export class HyperMem {
         const db = this.dbManager.getMessageDb(agentId);
         this.dbManager.ensureAgent(agentId);
         const store = new MessageStore(db);
+        this.attachEntityBridgeIndexerIfEnabled(store, db);
         const conversation = store.getOrCreateConversation(agentId, sessionKey, {
             channelType: opts?.channelType,
             channelId: opts?.channelId,
@@ -525,7 +570,9 @@ export class HyperMem {
             isHeartbeat: opts?.isHeartbeat,
             contextId,
         });
-        await this.cache.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
+        if (!isReplayDedupedMessage(stored)) {
+            await this.cache.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
+        }
         await this.cache.touchSession(agentId, sessionKey);
         return stored;
     }
@@ -535,6 +582,7 @@ export class HyperMem {
     async recordAssistantMessage(agentId, sessionKey, message, opts) {
         const db = this.dbManager.getMessageDb(agentId);
         const store = new MessageStore(db);
+        this.attachEntityBridgeIndexerIfEnabled(store, db);
         const conversation = store.getConversation(sessionKey);
         if (!conversation) {
             throw new Error(`No conversation found for session ${sessionKey}`);
@@ -550,7 +598,9 @@ export class HyperMem {
             tokenCount: opts?.tokenCount,
             contextId,
         });
-        await this.cache.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
+        if (!isReplayDedupedMessage(stored)) {
+            await this.cache.pushHistory(agentId, sessionKey, [stored], this.config.compositor.maxHistoryMessages);
+        }
         await this.cache.touchSession(agentId, sessionKey);
         return stored;
     }

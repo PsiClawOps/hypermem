@@ -2,6 +2,19 @@
 
 All notable changes to hypermem are documented here.
 
+## 0.9.9 - 2026-05-09
+
+- **Replay duplication cleanup is operator-visible.** `hypermem-cleanup` now ships as a package CLI, dry-runs by default, reports timestamp-stamped Gateway replay duplicate debt without printing message content, and applies repairs only with `--apply` after creating a SQLite backup, rewiring local message references, rebuilding FTS, and passing integrity checks.
+- **Doctor warns on stamped replay duplicate debt.** `hypermem-doctor` now scans the HyperMem data dir for timestamp-stamped user replay duplicate rows and emits a hard-to-miss `stamped-replay-duplicate-debt` warning with the cleanup dry-run command.
+
+## 0.9.8 - 2026-05-03
+
+- **Deterministic runtime validation added.** `hypermem-validate-runtime` now ships with the package and installer payload, seeds an isolated validation fixture, and verifies message writes, FTS, structured facts, vector indexing/search when enabled, warm, and compose without an answer LLM. Install docs now treat runtime validation as part of completion.
+- **Long-horizon recall widened for EasyLoCoMo.** Steady semantic recall now uses a larger memory envelope and candidate pool, closer to the published Mem0 token-efficient LoCoMo posture instead of starving single-hop and temporal evidence.
+- **Temporal recall is query-shaped.** Temporal retrieval now over-fetches indexed facts, scores them against query terms, and injects relevant temporal evidence rather than blindly taking the latest rows. This targets wrong-date failures on `when did X` questions.
+- **Old episodic evidence is preserved for benchmark-style questions.** Long-horizon QA disables production recency decay and relaxes FTS-only episode floors so valid historical evidence is not filtered out solely because it is old.
+- **Long-horizon fusion weights now favor exact evidence.** Benchmark-style questions use a lower RRF k, modest FTS weight boost, and wider reranker candidate window so names, dates, and quoted objects can outrank semantically-near but wrong old chatter without changing normal production turns.
+
 ## 0.9.7 - 2026-05-02
 
 - **OpenClaw Plugin SDK imports modernized.** HyperCompositor and HyperMem memory now import plugin entry helpers through the canonical public Plugin SDK surface and refresh OpenClaw/Plugin SDK build provenance to the validated runtime.

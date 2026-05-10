@@ -13,6 +13,18 @@ export { ENGINE_VERSION, MIN_NODE_VERSION, MIN_REDIS_VERSION, SQLITE_VEC_VERSION
 export { DatabaseManager } from './db.js';
 export type { DatabaseManagerConfig } from './db.js';
 export { MessageStore } from './message-store.js';
+export { EntityBridgeStore } from './entity-bridge-store.js';
+export { runPersonalizedPageRank } from './entity-ppr.js';
+export { runEntityBridgeBackfill } from './entity-bridge-backfill.js';
+export type { EntityBridgeIndexer } from './message-store.js';
+export type { BridgeIndexState, BridgeWatermarkDiagnostics, BridgeGraphSnapshot } from './entity-bridge-store.js';
+export type { PprResult, PprDiagnostics } from './entity-ppr.js';
+export type { BackfillSummary, BackfillProgress, BackfillOptions } from './entity-bridge-backfill.js';
+export type { EntityBridgeRecallDiagnostics } from './types.js';
+export { reciprocalRankFuse } from './hybrid-retrieval.js';
+export type { RrfList, RrfFusedEntry } from './hybrid-retrieval.js';
+export { normalizeEntityKey, normalizeFacetKey, extractEntityFacetMentions, } from './entity-extractor.js';
+export type { EntityMention, FacetMention, EntityFacetMentions } from './entity-extractor.js';
 export { ToolArtifactStore } from './tool-artifact-store.js';
 export type { ToolArtifactRecord, PutToolArtifactInput } from './tool-artifact-store.js';
 export { FactStore } from './fact-store.js';
@@ -161,6 +173,12 @@ export declare class HyperMem {
      */
     static create(config?: Partial<HyperMemConfig>): Promise<HyperMem>;
     private static _initializeInstance;
+    /**
+     * Sprint B: attach the entity-bridge live indexer when both `enabled` and
+     * `liveIndexingEnabled` flags are on AND the v12 bridge tables exist on
+     * the agent DB. Falls through silently otherwise.
+     */
+    private attachEntityBridgeIndexerIfEnabled;
     /**
      * Record a user message.
      */
@@ -565,6 +583,7 @@ export declare class HyperMem {
         tables?: string[];
         limit?: number;
         maxDistance?: number;
+        allowInlineQueryEmbedding?: boolean;
     }): Promise<VectorSearchResult[]>;
     /**
      * Index all un-indexed content for an agent.

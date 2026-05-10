@@ -455,11 +455,15 @@ openclaw config set plugins.allow '["existing-plugin","hypercompositor","hyperme
 
 openclaw gateway restart
 hypermem-doctor --fix-plan
+hypermem-cleanup --data-dir ~/.openclaw/hypermem
 hypermem-status --health
+hypermem-validate-runtime --allow-no-embedding
 hypermem-model-audit --strict
 ```
 
-`hypermem-doctor` is the confidence check: it validates plugin wiring, plugin registry refresh readiness, runtime load state, recommended OpenClaw settings such as `contextPruning.mode=off`, GPT-5 personality overlay off, startup/bootstrap injection sizing, compaction safety settings including `maxActiveTranscriptBytes` remaining unset for HyperMem-managed compaction, HyperMem data files, and model context-window overrides for GPT/OpenAI-compatible/local gateways. It is read-only and prints a reviewable fix plan.
+`hypermem-cleanup` is the operator-safe repair tool for timestamp-stamped Gateway replay duplicate rows. It is dry-run by default, prints no message content, creates backups in apply mode, rewrites local message references, rebuilds FTS, and commits only after SQLite integrity checks pass. `hypermem-doctor` warns with `stamped-replay-duplicate-debt` when cleanup should be considered.
+
+`hypermem-doctor` is the configuration confidence check: it validates plugin wiring, plugin registry refresh readiness, runtime load state, recommended OpenClaw settings such as `contextPruning.mode=off`, GPT-5 personality overlay off, startup/bootstrap injection sizing, compaction safety settings including `maxActiveTranscriptBytes` remaining unset for HyperMem-managed compaction, HyperMem data files, and model context-window overrides for GPT/OpenAI-compatible/local gateways. It is read-only and prints a reviewable fix plan. `hypermem-validate-runtime` is the deterministic component check: it seeds a tiny isolated fixture and verifies write, FTS, facts, vector indexing/search when enabled, warm, and compose without using an answer LLM.
 
 Full install, upgrade, source-clone, embedding provider, reranker, fleet config, and rollback guidance lives in **[INSTALL.md](./INSTALL.md)**.
 

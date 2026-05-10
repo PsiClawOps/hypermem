@@ -89,9 +89,11 @@ const requiredEntries = [
   ['README.md', 'README.md'],
   ['LICENSE', 'LICENSE'],
   ['assets/default-config.json', 'assets/default-config.json'],
+  ['assets/runtime-validation-fixture.json', 'assets/runtime-validation-fixture.json'],
   ['bin/hypermem-status.mjs', 'bin/hypermem-status.mjs'],
   ['bin/hypermem-model-audit.mjs', 'bin/hypermem-model-audit.mjs'],
   ['bin/hypermem-doctor.mjs', 'bin/hypermem-doctor.mjs'],
+  ['bin/hypermem-validate-runtime.mjs', 'bin/hypermem-validate-runtime.mjs'],
   ['bin/hypermem-bench.mjs', 'bin/hypermem-bench.mjs'],
   ['bench/data-access-bench.mjs', 'bench/data-access-bench.mjs'],
   ['plugin/dist', 'plugin/dist'],
@@ -248,4 +250,5 @@ console.log(`    openclaw gateway restart\n`);
 console.log(`  Verify:\n`);
 console.log(`    openclaw plugins registry --refresh`);
 console.log(`    openclaw plugins list`);
-console.log(`    node bin/hypermem-status.mjs --health\n`);
+console.log(`    node bin/hypermem-status.mjs --health`);
+console.log(`    node bin/hypermem-validate-runtime.mjs\n`);

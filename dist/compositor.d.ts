@@ -137,11 +137,11 @@ export declare function computeUnifiedPressure(usedTokens: number, budgetTokens:
  * and a /new surge does not blow up hybrid search cost.
  */
 export declare const RECALL_BREADTH_BASE: Readonly<{
-    mainBudgetFraction: 0.12;
-    fallbackBudgetFraction: 0.1;
-    candidateLimit: 10;
-    candidateLimitMin: 6;
-    candidateLimitMax: 16;
+    mainBudgetFraction: 0.18;
+    fallbackBudgetFraction: 0.14;
+    candidateLimit: 18;
+    candidateLimitMin: 8;
+    candidateLimitMax: 32;
 }>;
 export interface ScaledRecallBreadth {
     mainBudgetTokens: number;
@@ -458,6 +458,44 @@ export declare class Compositor {
      *   When provided, the Ollama call inside VectorStore.search() is skipped.
      */
     private buildSemanticRecall;
+    /**
+     * Bounded prompt-only FTS recall over raw message history.
+     *
+     * This is intentionally separate from benchmark evidence tracing. The only
+     * input is the user query, so it is safe for product compose and for LoCoMo
+     * evaluation. Neighbor expansion gives the reader local dialogue context for
+     * multi-hop questions where the first FTS hit is only one side of the answer.
+     */
+    /**
+     * Sprint B: build the entity-bridge conversation memory block.
+     *
+     * Pipeline:
+     *  1. Detect question shape → seed entity/grace keys.
+     *  2. Use EntityBridgeStore to build a capped graph snapshot.
+     *  3. Run sparse personalized PageRank.
+     *  4. Pull top-K candidate messages, hydrate text, emit a capped block.
+     *
+     * Degrades safely:
+     *  - Tables missing: returns null with reason=tables_missing.
+     *  - No seeds: returns null with reason=no_seeds.
+     *  - Empty graph or no candidates: returns null with reason set.
+     *  - PPR or DB error: thrown to caller, which records reason=failed.
+     */
+    private buildEntityBridgeRecall;
+    /**
+     * Metadata-only FTS rank over the PPR candidate set. This lets the Sprint B
+     * bridge lane use the same generic RRF math for message-FTS + PPR ordering
+     * without changing the existing raw recall block or hybridSearch() semantics.
+     */
+    private rankBridgeCandidatesByFts;
+    /**
+     * Best-effort lookup for an agent id usable by the entity-bridge lane.
+     * The bridge index is per-agent, so we need to resolve which agent's
+     * messages belong to this DB. Falls back to the most recent conversation
+     * row's `agent_id`.
+     */
+    private getCurrentAgentIdForBridge;
+    private buildQueryMessageRecall;
     /**
      * Format a hybrid search result for injection into context.
      * Shows retrieval source(s) and relevance score.

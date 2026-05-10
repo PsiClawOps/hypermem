@@ -17,21 +17,30 @@
  * raw message history regardless of quality gate.
  */
 import type { DatabaseSync } from 'node:sqlite';
+export declare function extractOpenDomainAnchors(query: string): string[];
+export declare function expandOpenDomainQueryTerms(query: string, terms: string[]): string[];
+export declare function scoreOpenDomainEvidence(content: string, query: string, baseTerms: string[]): number;
 /**
  * Returns true if the query looks like an open-domain question:
  * broad, exploratory, no specific anchors, no temporal signals.
  */
 export declare function isOpenDomainQuery(query: string): boolean;
-/**
- * Build a FTS5 MATCH query from a broad question.
- * Strips stop words, question words, and punctuation.
- * Returns up to 6 prefix-matched terms joined with OR.
- */
 export declare function buildOpenDomainFtsQuery(query: string): string | null;
+/**
+ * Build multiple prompt-only FTS probes for broad open-domain questions.
+ * The primary query favors specific terms; the secondary query preserves the
+ * natural query order so shorter but important entity/activity terms are not
+ * lost when the broad question contains many long words.
+ */
+export declare function buildOpenDomainFtsQueries(query: string): string[];
 export interface OpenDomainResult {
     role: string;
     content: string;
     createdAt: string;
+    conversationId?: number;
+    messageIndex?: number;
+    rank?: number;
+    anchorScore?: number;
 }
 /**
  * Search raw message history via FTS5 for open-domain queries.

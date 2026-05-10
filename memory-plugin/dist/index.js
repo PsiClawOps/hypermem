@@ -181,9 +181,11 @@ function createMemorySearchManager(hm, agentId, workspaceDir) {
             try {
                 const vectorStore = hm.getVectorStore();
                 if (vectorStore) {
-                    const vectorResults = await hm.semanticSearch(agentId, query, {
+                    const semanticSearch = hm.semanticSearch;
+                    const vectorResults = await semanticSearch(agentId, query, {
                         limit: maxResults,
                         maxDistance: 1.5,
+                        allowInlineQueryEmbedding: false,
                     });
                     for (const vr of vectorResults) {
                         const score = 1.0 - (vr.distance / 2.0); // normalize distance to 0-1 score

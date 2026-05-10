@@ -254,9 +254,15 @@ function createMemorySearchManager(
       try {
         const vectorStore = hm.getVectorStore();
         if (vectorStore) {
-          const vectorResults = await hm.semanticSearch(agentId, query, {
+          const semanticSearch = hm.semanticSearch as unknown as (
+            agentId: string,
+            query: string,
+            opts?: { tables?: string[]; limit?: number; maxDistance?: number; allowInlineQueryEmbedding?: boolean }
+          ) => Promise<Array<{ sourceTable: string; sourceId: number; distance: number; content: string }>>;
+          const vectorResults = await semanticSearch(agentId, query, {
             limit: maxResults,
             maxDistance: 1.5,
+            allowInlineQueryEmbedding: false,
           });
 
           for (const vr of vectorResults) {

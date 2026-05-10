@@ -175,6 +175,75 @@ async function run() {
     assert(tightResult.estimatedTokens <= 8000,
       `tight-budget: estimatedTokens ${tightResult.estimatedTokens} is bounded (ceiling 8000 for 2k budget)`);
 
+    // ── Transport metadata split-brain guard ───────────────────
+    // WebChat/canvas can append sender metadata as role='custom' adjacent to
+    // the real user turn. The plugin must neither persist that metadata as a
+    // history turn nor pass it through to the model window.
+    const metaSessionKey = `agent:${agentId}:webchat:metadata-guard`;
+    const currentUserText = '[Sat 2026-05-09 18:05 MST] please diagnose the current emergency';
+    const senderMetadata = 'Sender (untrusted metadata):\n```json\n{"label":"operator (gateway-client)","id":"gateway-client"}\n```';
+    await engine.afterTurn?.({
+      sessionId: 'plugin-metadata-session',
+      sessionKey: metaSessionKey,
+      prePromptMessageCount: 0,
+      isHeartbeat: false,
+      runtimeContext: {},
+      messages: [
+        { role: 'user', content: currentUserText },
+        { role: 'custom', content: senderMetadata },
+        { role: 'assistant', content: [{ type: 'text', text: 'Acknowledged.' }] },
+      ],
+    });
+
+    const metadataAssemble = await engine.assemble({
+      sessionId: 'plugin-metadata-session',
+      sessionKey: metaSessionKey,
+      messages: [
+        { role: 'user', content: currentUserText },
+        { role: 'custom', content: senderMetadata },
+      ],
+      tokenBudget: 12000,
+      model: 'claude-opus-4-6',
+      prompt: currentUserText,
+    });
+
+    const assembledWire = JSON.stringify(metadataAssemble.messages || []);
+    assert(!assembledWire.includes('Sender (untrusted metadata)'),
+      'assemble() drops adjacent role=custom sender metadata from model messages');
+
+    const hmInspect = await HyperMem.create({ dataDir });
+    const persistedTail = hmInspect.queryHistory({
+      agentId,
+      sessionKey: metaSessionKey,
+      mode: 'transcript_tail',
+      limit: 10,
+    });
+    await hmInspect.close();
+    const persistedWire = JSON.stringify(persistedTail.messages);
+    assert(!persistedWire.includes('Sender (untrusted metadata)'),
+      'afterTurn() does not persist role=custom sender metadata as history');
+    assert(persistedWire.includes('please diagnose the current emergency'),
+      'afterTurn() persists the real user turn adjacent to dropped metadata');
+
+    const prefixedUserContent = `${senderMetadata}
+
+${currentUserText}`;
+    const metadataPrefixAssemble = await engine.assemble({
+      sessionId: 'plugin-metadata-session',
+      sessionKey: metaSessionKey,
+      messages: [
+        { role: 'user', content: prefixedUserContent },
+      ],
+      tokenBudget: 12000,
+      model: 'claude-opus-4-6',
+      prompt: currentUserText,
+    });
+    const prefixWire = JSON.stringify(metadataPrefixAssemble.messages || []);
+    assert(!prefixWire.includes('Sender (untrusted metadata)'),
+      'assemble() strips Gateway-injected sender metadata from user-role replay text');
+    assert(prefixWire.includes('please diagnose the current emergency'),
+      'assemble() preserves actual user text after stripping metadata prefix');
+
     // ── Forked-context prepare proof ───────────────────────────
     // OpenClaw 2026.4.23 passes contextMode='fork' plus parent/child ids to
     // context-engine prepareSubagentSpawn(). The plugin should seed the child

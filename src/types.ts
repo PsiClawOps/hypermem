@@ -391,6 +391,12 @@ export interface ComposeDiagnostics {
   factsIncluded: number;
   /** Approximate number of lines returned by semantic recall */
   semanticResultsIncluded: number;
+  /** Raw message FTS hits considered by query-matched message recall */
+  queryMessageRecallHits?: number;
+  /** Neighbor messages added around raw message FTS hits */
+  queryMessageRecallExpanded?: number;
+  /** Raw message recall lines included in composed context */
+  queryMessageRecallIncluded?: number;
   /** Number of doc chunk collections that returned at least one chunk */
   docChunksCollections: number;
   /** Number of items rejected by scope policy during retrieval */
@@ -401,8 +407,8 @@ export interface ComposeDiagnostics {
    * "budget exhausted", and "all items filtered by scope".
    */
   zeroResultReason?: 'no_trigger_no_fallback' | 'empty_corpus' | 'budget_exhausted' | 'scope_filtered_all' | 'unknown';
-  /** The retrieval path that was used for doc chunks */
-  retrievalMode: 'triggered' | 'fallback_knn' | 'fallback_fts' | 'none';
+  /** The retrieval path that was used for composed recall/context */
+  retrievalMode: 'triggered' | 'fallback_knn' | 'fallback_fts' | 'raw_message_fts' | 'open_domain_raw' | 'none';
   /** Number of cross-topic keystone messages injected (P3.5) */
   crossTopicKeystones?: number;
   /** Actual reserve fraction used this compose (base or dynamic) */
@@ -664,6 +670,34 @@ export interface ComposeDiagnostics {
    * Undefined when the compose path has not yet emitted this field (pre-Sprint 3 paths).
    */
   pressureSource?: string;
+  // ── Sprint A: Multi-hop structured handoff diagnostics ───────────────────
+  /**
+   * Question shape classification for this compose pass.
+   * 'multi-hop' when the detector found 2+ entities or entity+grace with a relation word.
+   * Undefined when the query-matched recall lane did not fire.
+   */
+  questionShape?: { kind: 'multi-hop' | 'single-hop'; entities: string[]; facets: string[]; confidence: number };
+  /**
+   * True when the structured handoff formatter replaced the flat multi-hop instruction block.
+   * Only set when questionShape.kind === 'multi-hop' AND the feature flag is enabled.
+   */
+  structuredHandoffApplied?: boolean;
+  /**
+   * Number of evidence groups that contained at least one query entity
+   * in their content during structured handoff formatting.
+   */
+  structuredHandoffEntityGroups?: number;
+  /**
+   * Number of evidence groups that contained at least one query grace
+   * in their content during structured handoff formatting.
+   */
+  structuredHandoffFacetGroups?: number;
+  /**
+   * Sprint B: metadata-only diagnostics for the entity/grace PPR bridge lane.
+   * Undefined when the lane is fully disabled. Contains counts and cap flags only,
+   * never message text or prompt content.
+   */
+  entityBridgeRecall?: EntityBridgeRecallDiagnostics;
 }
 
 export interface ComposeResult {
@@ -833,6 +867,141 @@ export interface CacheConfig {
 /** @deprecated Use CacheConfig */
 export type RedisConfig = CacheConfig;
 
+
+export interface QueryMessageRecallConfig {
+  /** Fraction of remaining compose tokens allocated to open-domain raw-message recall. Default: 0.34 */
+  openDomainRemainingFraction?: number;
+  /** Fraction of remaining compose tokens allocated to strict temporal raw-message recall. Default: 0.22 */
+  temporalRemainingFraction?: number;
+  /** Fraction of remaining compose tokens allocated to non-temporal multi-hop raw-message recall. Default: 0.44 */
+  multiHopRemainingFraction?: number;
+  /** Absolute token ceiling for open-domain raw-message recall. Default: 4200 */
+  openDomainMaxTokens?: number;
+  /** Absolute token ceiling for strict temporal raw-message recall. Default: 2400 */
+  temporalMaxTokens?: number;
+  /** Absolute token ceiling for non-temporal multi-hop raw-message recall. Default: 6500 */
+  multiHopMaxTokens?: number;
+  /** FTS hit limit for open-domain recall. Default: 24 */
+  openDomainHitLimit?: number;
+  /** FTS hit limit for strict temporal recall. Default: 12 */
+  temporalHitLimit?: number;
+  /** FTS hit limit for non-temporal multi-hop recall. Default: 48 */
+  multiHopHitLimit?: number;
+  /** Neighbor expansion window for open-domain recall. Default: 4 */
+  openDomainNeighborWindow?: number;
+  /** Neighbor expansion window for strict temporal recall. Default: 2 */
+  temporalNeighborWindow?: number;
+  /** Neighbor expansion window for non-temporal multi-hop recall. Default: 8 */
+  multiHopNeighborWindow?: number;
+  /** Per-line character cap for open-domain recall. Default: 420 */
+  openDomainLineCharLimit?: number;
+  /** Per-line character cap for strict temporal recall. Default: 420 */
+  temporalLineCharLimit?: number;
+  /** Per-line character cap for non-temporal multi-hop recall. Default: 760 */
+  multiHopLineCharLimit?: number;
+  /** Natural-order FTS term cap for strict temporal queries. Default: 16 */
+  temporalFtsNaturalTermLimit?: number;
+  /** Specificity-order FTS term cap for strict temporal queries. Default: 12 */
+  temporalFtsSpecificTermLimit?: number;
+  /** Natural-order FTS term cap for expanded multi-hop queries. Default: 32 */
+  multiHopFtsNaturalTermLimit?: number;
+  /** Specificity-order FTS term cap for expanded multi-hop queries. Default: 24 */
+  multiHopFtsSpecificTermLimit?: number;
+  /** Scoped conversation grace query term cap for multi-hop recall. Default: 24 */
+  multiHopScopedFacetTermLimit?: number;
+  /** Global specific grace query term cap for multi-hop recall. Default: 16 */
+  multiHopSpecificFacetTermLimit?: number;
+  /** Total added rows allowed by rare-grace fanout. Default: 12 */
+  multiHopRareFacetFanoutLimit?: number;
+  /** Rows fetched per rare-grace term. Default: 3 */
+  multiHopRareFacetPerTermLimit?: number;
+  /** Direct-hit-first ordering within a conversation for multi-hop recall. Default: false */
+  multiHopSameConversationDirectFirst?: boolean;
+}
+
+/**
+ * Sprint A: Entity bridge and structured handoff configuration.
+ * Default: all flags false (safe-off). Enable only after Sprint A gate validation.
+ */
+export interface EntityBridgeConfig {
+  /**
+   * Master flag for entity bridge features.
+   * Governs Sprint B+ (PPR, entity index). Default: false.
+   */
+  enabled?: boolean;
+  /**
+   * Sprint A: Enable structured handoff for multi-hop queries.
+   * When true, the multi-hop raw-memory block is replaced with a grouped
+   * evidence format annotated by entity/grace. Default: false.
+   * Safe to enable independently of `enabled` (compositor-only change).
+   */
+  structuredHandoff?: boolean;
+  /**
+   * Sprint B+: Enable PPR-based entity bridge recall lane.
+   * Requires entity/grace index to exist. Default: false.
+   */
+  pprEnabled?: boolean;
+  /** Max tokens for entity bridge recall block. Default: 1200. */
+  maxTokens?: number;
+  /** Max graph edges before edge-cap fires. Default: 5000. */
+  maxGraphEdges?: number;
+  /** Max graph nodes before node-cap fires. Default: 2000. */
+  maxGraphNodes?: number;
+  /** Max candidate messages before PPR ranking. Default: 500. */
+  maxCandidateMessagesBeforeRanking?: number;
+  /** Max seed entities from query. Default: 4. */
+  maxSeedEntities?: number;
+  /** Max seed facets from query. Default: 4. */
+  maxSeedFacets?: number;
+  /** PPR max iterations. Default: 20. */
+  pprMaxIterations?: number;
+  /** PPR teleport probability. Default: 0.15. */
+  pprTeleportProbability?: number;
+  /** PPR convergence tolerance. Default: 1e-6. */
+  pprConvergenceTolerance?: number;
+  /**
+   * Sprint B: when true, message-store live-indexes entity/grace mentions
+   * after a successful message insert. Bridge tables must already exist
+   * (schema v12) AND `enabled` must be true. Default: false. Index failure
+   * is metadata-only and never blocks the message write.
+   */
+  liveIndexingEnabled?: boolean;
+  /** Sprint B: per-seed message cap inside `buildGraphSnapshot()`. Default 200. */
+  perSeedMessageLimit?: number;
+  /** Sprint B: top-K PPR-ranked messages forwarded to compose. Default 20. */
+  pprTopK?: number;
+}
+
+/**
+ * Sprint B: per-compose diagnostics for the entity-bridge lane.
+ * Always emitted when the lane attempts to run, even if it degrades.
+ */
+export interface EntityBridgeRecallDiagnostics {
+  attempted: boolean;
+  applied: boolean;
+  reason?:
+    | 'disabled'
+    | 'tables_missing'
+    | 'no_seeds'
+    | 'empty_graph'
+    | 'no_candidates'
+    | 'failed';
+  seedEntityCount?: number;
+  seedFacetCount?: number;
+  graphNodeCount?: number;
+  graphMessageCount?: number;
+  graphEdgeCount?: number;
+  graphNodesCapped?: boolean;
+  graphEdgesCapped?: boolean;
+  capFired?: string[];
+  ftsCandidates?: number;
+  rrfCandidates?: number;
+  pprIterations?: number;
+  pprConverged?: boolean;
+  candidatesEmitted?: number;
+  tokensEmitted?: number;
+}
+
 export interface CompositorConfig {
   /**
    * Fraction of the detected context window to use as the input token budget.
@@ -866,6 +1035,12 @@ export interface CompositorConfig {
    * for fixed-cost slots (system, identity, HyperForm: typically 3–8k tokens).
    */
   memoryFraction?: number;
+  /**
+   * Query-matched raw-message recall controls. These are intentionally grouped
+   * so benchmark/DOE harnesses can sweep retrieval behavior without rebuilding
+   * HyperMem. Defaults preserve 0.9.8 post-rollback behavior.
+   */
+  queryMessageRecall?: QueryMessageRecallConfig;
   /**
    * @deprecated Use budgetFraction instead. Absolute token fallback used when
    * model detection fails and budgetFraction is not set.
@@ -988,6 +1163,11 @@ export interface CompositorConfig {
    * Extended preset: 800 tokens
    */
   wikiTokenCap?: number;
+  /**
+   * Sprint A: Entity bridge and structured handoff configuration.
+   * All sub-flags default false (safe-off) until Sprint A gate passes.
+   */
+  entityBridge?: EntityBridgeConfig;
   // Note: assembly order is fixed in compose() — system, identity, history,
   // facts, knowledge, preferences, semanticRecall, cross-session, library.
   //

@@ -780,6 +780,9 @@ export class VectorStore {
             const maxSize = this.config.cacheSize ?? 128;
             cachePut(simpleHash(query), queryEmbedding, maxSize);
         }
+        else if (opts?.allowInlineQueryEmbedding === false) {
+            return [];
+        }
         else {
             [queryEmbedding] = await generateEmbeddings([query], this.config, 'query');
         }

@@ -1,0 +1,478 @@
+{
+  "schemaVersion": 1,
+  "name": "test-hank-doe-phase1-query-message-recall-pb16-2026-05-09",
+  "baseline": {
+    "hypermemCommit": "d51ee2f",
+    "baselineCommit": "0a1512c19",
+    "v15NoiseFloorReport": "docs/reviews/test-hank-noise-floor-v15-report-2026-05-09.md"
+  },
+  "design": "16-run 2^(8-4) fractional-factorial screening; A-D full factorial; E=ABC, F=BCD, G=ACD, H=ABD",
+  "factors": {
+    "A": {
+      "field": "multiHopMaxTokens",
+      "low": 5200,
+      "high": 7800
+    },
+    "B": {
+      "field": "multiHopHitLimit",
+      "low": 32,
+      "high": 60
+    },
+    "C": {
+      "field": "multiHopNeighborWindow",
+      "low": 4,
+      "high": 8
+    },
+    "D": {
+      "field": "multiHopLineCharLimit",
+      "low": 520,
+      "high": 920
+    },
+    "E": {
+      "field": "multiHopFtsNaturalTermLimit",
+      "low": 24,
+      "high": 48
+    },
+    "F": {
+      "field": "multiHopFtsSpecificTermLimit",
+      "low": 16,
+      "high": 36
+    },
+    "G": {
+      "field": "multiHopRareFacetFanoutLimit",
+      "low": 6,
+      "high": 18
+    },
+    "H": {
+      "field": "multiHopSameConversationDirectFirst",
+      "low": false,
+      "high": true
+    }
+  },
+  "runs": [
+    {
+      "cell": "doe-pb16-c01",
+      "levels": {
+        "A": "-",
+        "B": "-",
+        "C": "-",
+        "D": "-",
+        "E": "-",
+        "F": "-",
+        "G": "-",
+        "H": "-"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 5200,
+          "multiHopHitLimit": 32,
+          "multiHopNeighborWindow": 4,
+          "multiHopLineCharLimit": 520,
+          "multiHopFtsNaturalTermLimit": 24,
+          "multiHopFtsSpecificTermLimit": 16,
+          "multiHopRareFacetFanoutLimit": 6,
+          "multiHopSameConversationDirectFirst": false
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":5200,\"multiHopHitLimit\":32,\"multiHopNeighborWindow\":4,\"multiHopLineCharLimit\":520,\"multiHopFtsNaturalTermLimit\":24,\"multiHopFtsSpecificTermLimit\":16,\"multiHopRareFacetFanoutLimit\":6,\"multiHopSameConversationDirectFirst\":false}}'"
+    },
+    {
+      "cell": "doe-pb16-c02",
+      "levels": {
+        "A": "-",
+        "B": "-",
+        "C": "-",
+        "D": "+",
+        "E": "-",
+        "F": "+",
+        "G": "+",
+        "H": "+"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 5200,
+          "multiHopHitLimit": 32,
+          "multiHopNeighborWindow": 4,
+          "multiHopLineCharLimit": 920,
+          "multiHopFtsNaturalTermLimit": 24,
+          "multiHopFtsSpecificTermLimit": 36,
+          "multiHopRareFacetFanoutLimit": 18,
+          "multiHopSameConversationDirectFirst": true
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":5200,\"multiHopHitLimit\":32,\"multiHopNeighborWindow\":4,\"multiHopLineCharLimit\":920,\"multiHopFtsNaturalTermLimit\":24,\"multiHopFtsSpecificTermLimit\":36,\"multiHopRareFacetFanoutLimit\":18,\"multiHopSameConversationDirectFirst\":true}}'"
+    },
+    {
+      "cell": "doe-pb16-c03",
+      "levels": {
+        "A": "-",
+        "B": "-",
+        "C": "+",
+        "D": "-",
+        "E": "+",
+        "F": "+",
+        "G": "+",
+        "H": "-"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 5200,
+          "multiHopHitLimit": 32,
+          "multiHopNeighborWindow": 8,
+          "multiHopLineCharLimit": 520,
+          "multiHopFtsNaturalTermLimit": 48,
+          "multiHopFtsSpecificTermLimit": 36,
+          "multiHopRareFacetFanoutLimit": 18,
+          "multiHopSameConversationDirectFirst": false
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":5200,\"multiHopHitLimit\":32,\"multiHopNeighborWindow\":8,\"multiHopLineCharLimit\":520,\"multiHopFtsNaturalTermLimit\":48,\"multiHopFtsSpecificTermLimit\":36,\"multiHopRareFacetFanoutLimit\":18,\"multiHopSameConversationDirectFirst\":false}}'"
+    },
+    {
+      "cell": "doe-pb16-c04",
+      "levels": {
+        "A": "-",
+        "B": "-",
+        "C": "+",
+        "D": "+",
+        "E": "+",
+        "F": "-",
+        "G": "-",
+        "H": "+"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 5200,
+          "multiHopHitLimit": 32,
+          "multiHopNeighborWindow": 8,
+          "multiHopLineCharLimit": 920,
+          "multiHopFtsNaturalTermLimit": 48,
+          "multiHopFtsSpecificTermLimit": 16,
+          "multiHopRareFacetFanoutLimit": 6,
+          "multiHopSameConversationDirectFirst": true
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":5200,\"multiHopHitLimit\":32,\"multiHopNeighborWindow\":8,\"multiHopLineCharLimit\":920,\"multiHopFtsNaturalTermLimit\":48,\"multiHopFtsSpecificTermLimit\":16,\"multiHopRareFacetFanoutLimit\":6,\"multiHopSameConversationDirectFirst\":true}}'"
+    },
+    {
+      "cell": "doe-pb16-c05",
+      "levels": {
+        "A": "-",
+        "B": "+",
+        "C": "-",
+        "D": "-",
+        "E": "+",
+        "F": "+",
+        "G": "-",
+        "H": "+"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 5200,
+          "multiHopHitLimit": 60,
+          "multiHopNeighborWindow": 4,
+          "multiHopLineCharLimit": 520,
+          "multiHopFtsNaturalTermLimit": 48,
+          "multiHopFtsSpecificTermLimit": 36,
+          "multiHopRareFacetFanoutLimit": 6,
+          "multiHopSameConversationDirectFirst": true
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":5200,\"multiHopHitLimit\":60,\"multiHopNeighborWindow\":4,\"multiHopLineCharLimit\":520,\"multiHopFtsNaturalTermLimit\":48,\"multiHopFtsSpecificTermLimit\":36,\"multiHopRareFacetFanoutLimit\":6,\"multiHopSameConversationDirectFirst\":true}}'"
+    },
+    {
+      "cell": "doe-pb16-c06",
+      "levels": {
+        "A": "-",
+        "B": "+",
+        "C": "-",
+        "D": "+",
+        "E": "+",
+        "F": "-",
+        "G": "+",
+        "H": "-"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 5200,
+          "multiHopHitLimit": 60,
+          "multiHopNeighborWindow": 4,
+          "multiHopLineCharLimit": 920,
+          "multiHopFtsNaturalTermLimit": 48,
+          "multiHopFtsSpecificTermLimit": 16,
+          "multiHopRareFacetFanoutLimit": 18,
+          "multiHopSameConversationDirectFirst": false
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":5200,\"multiHopHitLimit\":60,\"multiHopNeighborWindow\":4,\"multiHopLineCharLimit\":920,\"multiHopFtsNaturalTermLimit\":48,\"multiHopFtsSpecificTermLimit\":16,\"multiHopRareFacetFanoutLimit\":18,\"multiHopSameConversationDirectFirst\":false}}'"
+    },
+    {
+      "cell": "doe-pb16-c07",
+      "levels": {
+        "A": "-",
+        "B": "+",
+        "C": "+",
+        "D": "-",
+        "E": "-",
+        "F": "-",
+        "G": "+",
+        "H": "+"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 5200,
+          "multiHopHitLimit": 60,
+          "multiHopNeighborWindow": 8,
+          "multiHopLineCharLimit": 520,
+          "multiHopFtsNaturalTermLimit": 24,
+          "multiHopFtsSpecificTermLimit": 16,
+          "multiHopRareFacetFanoutLimit": 18,
+          "multiHopSameConversationDirectFirst": true
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":5200,\"multiHopHitLimit\":60,\"multiHopNeighborWindow\":8,\"multiHopLineCharLimit\":520,\"multiHopFtsNaturalTermLimit\":24,\"multiHopFtsSpecificTermLimit\":16,\"multiHopRareFacetFanoutLimit\":18,\"multiHopSameConversationDirectFirst\":true}}'"
+    },
+    {
+      "cell": "doe-pb16-c08",
+      "levels": {
+        "A": "-",
+        "B": "+",
+        "C": "+",
+        "D": "+",
+        "E": "-",
+        "F": "+",
+        "G": "-",
+        "H": "-"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 5200,
+          "multiHopHitLimit": 60,
+          "multiHopNeighborWindow": 8,
+          "multiHopLineCharLimit": 920,
+          "multiHopFtsNaturalTermLimit": 24,
+          "multiHopFtsSpecificTermLimit": 36,
+          "multiHopRareFacetFanoutLimit": 6,
+          "multiHopSameConversationDirectFirst": false
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":5200,\"multiHopHitLimit\":60,\"multiHopNeighborWindow\":8,\"multiHopLineCharLimit\":920,\"multiHopFtsNaturalTermLimit\":24,\"multiHopFtsSpecificTermLimit\":36,\"multiHopRareFacetFanoutLimit\":6,\"multiHopSameConversationDirectFirst\":false}}'"
+    },
+    {
+      "cell": "doe-pb16-c09",
+      "levels": {
+        "A": "+",
+        "B": "-",
+        "C": "-",
+        "D": "-",
+        "E": "+",
+        "F": "-",
+        "G": "+",
+        "H": "+"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 7800,
+          "multiHopHitLimit": 32,
+          "multiHopNeighborWindow": 4,
+          "multiHopLineCharLimit": 520,
+          "multiHopFtsNaturalTermLimit": 48,
+          "multiHopFtsSpecificTermLimit": 16,
+          "multiHopRareFacetFanoutLimit": 18,
+          "multiHopSameConversationDirectFirst": true
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":7800,\"multiHopHitLimit\":32,\"multiHopNeighborWindow\":4,\"multiHopLineCharLimit\":520,\"multiHopFtsNaturalTermLimit\":48,\"multiHopFtsSpecificTermLimit\":16,\"multiHopRareFacetFanoutLimit\":18,\"multiHopSameConversationDirectFirst\":true}}'"
+    },
+    {
+      "cell": "doe-pb16-c10",
+      "levels": {
+        "A": "+",
+        "B": "-",
+        "C": "-",
+        "D": "+",
+        "E": "+",
+        "F": "+",
+        "G": "-",
+        "H": "-"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 7800,
+          "multiHopHitLimit": 32,
+          "multiHopNeighborWindow": 4,
+          "multiHopLineCharLimit": 920,
+          "multiHopFtsNaturalTermLimit": 48,
+          "multiHopFtsSpecificTermLimit": 36,
+          "multiHopRareFacetFanoutLimit": 6,
+          "multiHopSameConversationDirectFirst": false
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":7800,\"multiHopHitLimit\":32,\"multiHopNeighborWindow\":4,\"multiHopLineCharLimit\":920,\"multiHopFtsNaturalTermLimit\":48,\"multiHopFtsSpecificTermLimit\":36,\"multiHopRareFacetFanoutLimit\":6,\"multiHopSameConversationDirectFirst\":false}}'"
+    },
+    {
+      "cell": "doe-pb16-c11",
+      "levels": {
+        "A": "+",
+        "B": "-",
+        "C": "+",
+        "D": "-",
+        "E": "-",
+        "F": "+",
+        "G": "-",
+        "H": "+"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 7800,
+          "multiHopHitLimit": 32,
+          "multiHopNeighborWindow": 8,
+          "multiHopLineCharLimit": 520,
+          "multiHopFtsNaturalTermLimit": 24,
+          "multiHopFtsSpecificTermLimit": 36,
+          "multiHopRareFacetFanoutLimit": 6,
+          "multiHopSameConversationDirectFirst": true
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":7800,\"multiHopHitLimit\":32,\"multiHopNeighborWindow\":8,\"multiHopLineCharLimit\":520,\"multiHopFtsNaturalTermLimit\":24,\"multiHopFtsSpecificTermLimit\":36,\"multiHopRareFacetFanoutLimit\":6,\"multiHopSameConversationDirectFirst\":true}}'"
+    },
+    {
+      "cell": "doe-pb16-c12",
+      "levels": {
+        "A": "+",
+        "B": "-",
+        "C": "+",
+        "D": "+",
+        "E": "-",
+        "F": "-",
+        "G": "+",
+        "H": "-"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 7800,
+          "multiHopHitLimit": 32,
+          "multiHopNeighborWindow": 8,
+          "multiHopLineCharLimit": 920,
+          "multiHopFtsNaturalTermLimit": 24,
+          "multiHopFtsSpecificTermLimit": 16,
+          "multiHopRareFacetFanoutLimit": 18,
+          "multiHopSameConversationDirectFirst": false
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":7800,\"multiHopHitLimit\":32,\"multiHopNeighborWindow\":8,\"multiHopLineCharLimit\":920,\"multiHopFtsNaturalTermLimit\":24,\"multiHopFtsSpecificTermLimit\":16,\"multiHopRareFacetFanoutLimit\":18,\"multiHopSameConversationDirectFirst\":false}}'"
+    },
+    {
+      "cell": "doe-pb16-c13",
+      "levels": {
+        "A": "+",
+        "B": "+",
+        "C": "-",
+        "D": "-",
+        "E": "-",
+        "F": "+",
+        "G": "+",
+        "H": "-"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 7800,
+          "multiHopHitLimit": 60,
+          "multiHopNeighborWindow": 4,
+          "multiHopLineCharLimit": 520,
+          "multiHopFtsNaturalTermLimit": 24,
+          "multiHopFtsSpecificTermLimit": 36,
+          "multiHopRareFacetFanoutLimit": 18,
+          "multiHopSameConversationDirectFirst": false
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":7800,\"multiHopHitLimit\":60,\"multiHopNeighborWindow\":4,\"multiHopLineCharLimit\":520,\"multiHopFtsNaturalTermLimit\":24,\"multiHopFtsSpecificTermLimit\":36,\"multiHopRareFacetFanoutLimit\":18,\"multiHopSameConversationDirectFirst\":false}}'"
+    },
+    {
+      "cell": "doe-pb16-c14",
+      "levels": {
+        "A": "+",
+        "B": "+",
+        "C": "-",
+        "D": "+",
+        "E": "-",
+        "F": "-",
+        "G": "-",
+        "H": "+"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 7800,
+          "multiHopHitLimit": 60,
+          "multiHopNeighborWindow": 4,
+          "multiHopLineCharLimit": 920,
+          "multiHopFtsNaturalTermLimit": 24,
+          "multiHopFtsSpecificTermLimit": 16,
+          "multiHopRareFacetFanoutLimit": 6,
+          "multiHopSameConversationDirectFirst": true
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":7800,\"multiHopHitLimit\":60,\"multiHopNeighborWindow\":4,\"multiHopLineCharLimit\":920,\"multiHopFtsNaturalTermLimit\":24,\"multiHopFtsSpecificTermLimit\":16,\"multiHopRareFacetFanoutLimit\":6,\"multiHopSameConversationDirectFirst\":true}}'"
+    },
+    {
+      "cell": "doe-pb16-c15",
+      "levels": {
+        "A": "+",
+        "B": "+",
+        "C": "+",
+        "D": "-",
+        "E": "+",
+        "F": "-",
+        "G": "-",
+        "H": "-"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 7800,
+          "multiHopHitLimit": 60,
+          "multiHopNeighborWindow": 8,
+          "multiHopLineCharLimit": 520,
+          "multiHopFtsNaturalTermLimit": 48,
+          "multiHopFtsSpecificTermLimit": 16,
+          "multiHopRareFacetFanoutLimit": 6,
+          "multiHopSameConversationDirectFirst": false
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":7800,\"multiHopHitLimit\":60,\"multiHopNeighborWindow\":8,\"multiHopLineCharLimit\":520,\"multiHopFtsNaturalTermLimit\":48,\"multiHopFtsSpecificTermLimit\":16,\"multiHopRareFacetFanoutLimit\":6,\"multiHopSameConversationDirectFirst\":false}}'"
+    },
+    {
+      "cell": "doe-pb16-c16",
+      "levels": {
+        "A": "+",
+        "B": "+",
+        "C": "+",
+        "D": "+",
+        "E": "+",
+        "F": "+",
+        "G": "+",
+        "H": "+"
+      },
+      "compositorConfig": {
+        "queryMessageRecall": {
+          "multiHopMaxTokens": 7800,
+          "multiHopHitLimit": 60,
+          "multiHopNeighborWindow": 8,
+          "multiHopLineCharLimit": 920,
+          "multiHopFtsNaturalTermLimit": 48,
+          "multiHopFtsSpecificTermLimit": 36,
+          "multiHopRareFacetFanoutLimit": 18,
+          "multiHopSameConversationDirectFirst": true
+        }
+      },
+      "env": "HYPERMEM_BENCH_COMPOSITOR_CONFIG_JSON='{\"queryMessageRecall\":{\"multiHopMaxTokens\":7800,\"multiHopHitLimit\":60,\"multiHopNeighborWindow\":8,\"multiHopLineCharLimit\":920,\"multiHopFtsNaturalTermLimit\":48,\"multiHopFtsSpecificTermLimit\":36,\"multiHopRareFacetFanoutLimit\":18,\"multiHopSameConversationDirectFirst\":true}}'"
+    }
+  ],
+  "guardrails": {
+    "mh_complete_min": 3,
+    "mh_complete_improvement_target": 4,
+    "multiHopRawF1InterestingMin": 0.6193,
+    "temporalRawF1Floor": 0.6804,
+    "openDomainRawF1Floor": 0.2752,
+    "od_any_min": 5
+  }
+}

@@ -257,6 +257,27 @@ async function run() {
   });
   assert(limited.length <= 2, `Limit enforced (got ${limited.length})`);
 
+  // ── Hot Path Guard ──
+  console.log('\n── Hot Path Guard ──');
+
+  let inlineVectorCalled = false;
+  const guardedResults = await hybridSearch(
+    libDb,
+    {
+      search: async () => {
+        inlineVectorCalled = true;
+        throw new Error('vector search should be bypassed without precomputed query embedding');
+      },
+    },
+    'Redis infrastructure',
+    { agentId, tables: ['facts'], limit: 5 }
+  );
+  assert(!inlineVectorCalled, 'KNN bypassed when no precomputed query embedding is supplied');
+  assert(
+    guardedResults.length > 0 && guardedResults.every(r => r.sources.includes('fts')),
+    'Hot-path guard falls back to FTS-only results'
+  );
+
 
   // ── Adjacency-Aware Fusion Boost ──
   console.log('\n── Adjacency-Aware Fusion Boost ──');
@@ -303,7 +324,7 @@ async function run() {
       vectorFact(antecedentId, antecedentContent, 'infrastructure', 0.2),
     ]),
     'adjacencyboost shared',
-    { agentId, tables: ['facts'], limit: 5 }
+    { agentId, tables: ['facts'], limit: 5, allowInlineQueryEmbedding: true }
   );
   assert(
     adjacencyResults[0]?.sourceId === antecedentId,
@@ -325,7 +346,7 @@ async function run() {
       vectorFact(farAntecedentId, farAntecedentContent, 'infrastructure', 0.3),
     ]),
     'deltaboost shared',
-    { agentId, tables: ['facts'], limit: 5 }
+    { agentId, tables: ['facts'], limit: 5, allowInlineQueryEmbedding: true }
   );
   assert(
     farResults.findIndex(r => r.sourceId === farSuccessorId) < farResults.findIndex(r => r.sourceId === farAntecedentId),
@@ -347,7 +368,7 @@ async function run() {
       vectorFact(heartbeatId, heartbeatContent, 'heartbeat', 0.3),
     ]),
     'heartbeatcase packetadjacency',
-    { agentId, tables: ['facts'], limit: 5 }
+    { agentId, tables: ['facts'], limit: 5, allowInlineQueryEmbedding: true }
   );
   assert(
     heartbeatResults.findIndex(r => r.sourceId === heartbeatSuccessorId) < heartbeatResults.findIndex(r => r.sourceId === heartbeatId),
@@ -369,7 +390,7 @@ async function run() {
       vectorFact(systemId, systemContent, 'system', 0.3),
     ]),
     'systemcase packetadjacency',
-    { agentId, tables: ['facts'], limit: 5 }
+    { agentId, tables: ['facts'], limit: 5, allowInlineQueryEmbedding: true }
   );
   assert(
     systemResults.findIndex(r => r.sourceId === systemSuccessorId) < systemResults.findIndex(r => r.sourceId === systemId),
@@ -383,7 +404,7 @@ async function run() {
       vectorFact(9902, 'stable tie second', 'test', 0.5),
     ]),
     'the is a an',
-    { agentId, tables: ['facts'], limit: 2 }
+    { agentId, tables: ['facts'], limit: 2, allowInlineQueryEmbedding: true }
   );
   assert(
     stableResults[0]?.sourceId === 9901 && stableResults[1]?.sourceId === 9902,

@@ -94,6 +94,12 @@ export interface HybridSearchOptions {
   /** Pre-computed embedding for the query — skips Ollama call in VectorStore.search() */
   precomputedEmbedding?: Float32Array;
   /**
+   * Permit VectorStore.search() to generate a query embedding inline when no
+   * precomputed embedding is available. Default false: memory recall must not
+   * put remote/local embedding generation on the search hot path.
+   */
+  allowInlineQueryEmbedding?: boolean;
+  /**
    * Optional reranker applied after RRF fusion. Only runs on the fused path
    * (both FTS and KNN produced results). FTS-only and KNN-only branches are
    * unchanged. Null/undefined disables reranking.
@@ -329,6 +335,52 @@ function searchEpisodesFts(
 }
 
 // ─── Reciprocal Rank Fusion ────────────────────────────────────
+
+/**
+ * Generic RRF helper, shared by hybridSearch() (library-side fusion) and
+ * the Sprint B entity-bridge compose lane (FTS-over-messages + PPR-over-
+ * bridge-graph). This helper does NOT change hybridSearch() semantics —
+ * the legacy in-place fusion below still owns adjacency boosting and the
+ * reranker hook for the FTS+KNN path.
+ */
+export interface RrfList<T> {
+  ranked: Array<{ key: string; item: T }>;
+  weight?: number;
+}
+
+export interface RrfFusedEntry<T> {
+  key: string;
+  item: T;
+  score: number;
+  ranks: number[];
+}
+
+export function reciprocalRankFuse<T>(
+  lists: Array<RrfList<T>>,
+  k: number = 60,
+): Array<RrfFusedEntry<T>> {
+  const merged = new Map<string, RrfFusedEntry<T>>();
+  for (const list of lists) {
+    const w = list.weight ?? 1.0;
+    list.ranked.forEach((entry, i) => {
+      const rank = i + 1;
+      const inc = w / (k + rank);
+      const existing = merged.get(entry.key);
+      if (existing) {
+        existing.score += inc;
+        existing.ranks.push(rank);
+      } else {
+        merged.set(entry.key, {
+          key: entry.key,
+          item: entry.item,
+          score: inc,
+          ranks: [rank],
+        });
+      }
+    });
+  }
+  return [...merged.values()].sort((a, b) => b.score - a.score);
+}
 
 type ResultKey = string; // "table:id"
 
@@ -581,13 +633,14 @@ export async function hybridSearch(
   // ── KNN retrieval ──
   const knnMap = new Map<ResultKey, FusionEntry>();
 
-  if (vectorStore) {
+  if (vectorStore && (opts?.precomputedEmbedding || opts?.allowInlineQueryEmbedding === true)) {
     try {
       const knnResults = await vectorStore.search(query, {
         tables,
         limit: Math.ceil(limit * 1.5),
         maxDistance: maxKnnDistance,
         precomputedEmbedding: opts?.precomputedEmbedding,
+        allowInlineQueryEmbedding: opts?.allowInlineQueryEmbedding === true,
       });
 
       knnResults.forEach((r, i) => {

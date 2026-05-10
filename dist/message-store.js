@@ -6,8 +6,71 @@
  * This is the write-through layer: Redis → here.
  */
 import { getOrCreateActiveContext, updateContextHead, getArchivedContext, getActiveContext, getContextById } from './context-store.js';
+import { extractEntityFacetMentions } from './entity-extractor.js';
 function nowIso() {
     return new Date().toISOString();
+}
+const REPLAY_DEDUPE_RECENT_LIMIT = 80;
+const REPLAY_DEDUPE_TEXT_THRESHOLD = 40;
+function stableJson(value) {
+    if (value == null)
+        return '';
+    try {
+        return JSON.stringify(value);
+    }
+    catch {
+        return String(value);
+    }
+}
+function signatureFromNeutral(message) {
+    return {
+        role: message.role,
+        textContent: message.textContent ?? '',
+        toolCalls: stableJson(message.toolCalls),
+        toolResults: stableJson(message.toolResults),
+    };
+}
+function signatureFromRow(row) {
+    return {
+        role: String(row.role ?? ''),
+        textContent: String(row.text_content ?? ''),
+        toolCalls: String(row.tool_calls ?? ''),
+        toolResults: String(row.tool_results ?? ''),
+    };
+}
+function sameSignature(a, b) {
+    return a.role === b.role
+        && a.textContent === b.textContent
+        && a.toolCalls === b.toolCalls
+        && a.toolResults === b.toolResults;
+}
+function hasStructuredPayload(sig) {
+    return sig.toolCalls.length > 0 || sig.toolResults.length > 0;
+}
+function hasGatewayTimestampPrefix(text) {
+    return /^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{2}:\d{2} [A-Z]{2,4}\]/.test(text.trimStart());
+}
+function shouldSuppressReplayDuplicate(incoming, candidate, isTailCandidate) {
+    if (!sameSignature(incoming, candidate))
+        return false;
+    if (isTailCandidate)
+        return true;
+    if (hasStructuredPayload(incoming))
+        return true;
+    if (hasGatewayTimestampPrefix(incoming.textContent))
+        return true;
+    return incoming.textContent.trim().length >= REPLAY_DEDUPE_TEXT_THRESHOLD;
+}
+function markDedupedMessage(message) {
+    Object.defineProperty(message, '__hypermemDedupedReplay', {
+        value: true,
+        enumerable: false,
+        configurable: false,
+    });
+    return message;
+}
+export function isReplayDedupedMessage(message) {
+    return message.__hypermemDedupedReplay === true;
 }
 /**
  * Parse a stored message row from SQLite into a StoredMessage object.
@@ -52,8 +115,16 @@ function parseConversationRow(row) {
 }
 export class MessageStore {
     db;
+    bridgeIndexer = null;
     constructor(db) {
         this.db = db;
+    }
+    /**
+     * Sprint B: attach the entity-bridge live indexer. Optional; default off.
+     * Idempotent. Pass null to disable indexing for this instance.
+     */
+    setEntityBridgeIndexer(indexer) {
+        this.bridgeIndexer = indexer;
     }
     // ─── Conversation Operations ─────────────────────────────────
     /**
@@ -161,6 +232,10 @@ export class MessageStore {
      */
     recordMessage(conversationId, agentId, message, opts) {
         const now = nowIso();
+        const replayDuplicate = this.findReplayDuplicate(conversationId, agentId, message);
+        if (replayDuplicate) {
+            return markDedupedMessage(replayDuplicate);
+        }
         // Get next message index
         const lastRow = this.db
             .prepare('SELECT MAX(message_index) AS max_idx FROM messages WHERE conversation_id = ?')
@@ -201,7 +276,7 @@ export class MessageStore {
           updated_at = ?
       WHERE id = ?
     `).run(isOutput ? 0 : tokenDelta, isOutput ? tokenDelta : 0, now, conversationId);
-        return {
+        const stored = {
             id,
             conversationId,
             agentId,
@@ -216,6 +291,85 @@ export class MessageStore {
             isHeartbeat: opts?.isHeartbeat || false,
             createdAt: now,
         };
+        // Sprint B: live entity/grace bridge indexing (best-effort).
+        // Skipped for heartbeats and rows with no text content.
+        if (this.bridgeIndexer
+            && !opts?.isHeartbeat
+            && typeof message.textContent === 'string'
+            && message.textContent.length > 0) {
+            try {
+                if (this.bridgeIndexer.shouldIndex() && this.bridgeIndexer.store.tablesExist()) {
+                    let mentions = null;
+                    try {
+                        mentions = extractEntityFacetMentions(message.textContent);
+                    }
+                    catch (err) {
+                        // Extraction itself failed: metadata-only failure marker.
+                        this.bridgeIndexer.store.recordIndexFailure({
+                            messageId: Number(id),
+                            agentId,
+                            threadRef: conversationId,
+                            error: err,
+                            source: 'live',
+                        });
+                    }
+                    if (mentions) {
+                        this.bridgeIndexer.store.recordMentions({
+                            messageId: Number(id),
+                            agentId,
+                            threadRef: conversationId,
+                            mentions,
+                            source: 'live',
+                        });
+                    }
+                }
+            }
+            catch (err) {
+                // Last-ditch metadata-only marker. Never throws.
+                try {
+                    this.bridgeIndexer?.store.recordIndexFailure({
+                        messageId: Number(id),
+                        agentId,
+                        threadRef: conversationId,
+                        error: err,
+                        source: 'live',
+                    });
+                }
+                catch { /* swallow */ }
+            }
+        }
+        return stored;
+    }
+    /**
+     * Detect restored transcript replay before inserting a new row.
+     *
+     * Gateway restarts can feed already-persisted transcript turns back through
+     * afterTurn/ingest. Without a DB-level guard those restored turns are appended
+     * again as new rows, often as a same-timestamp batch. We only suppress exact
+     * role + text + tool payload matches within the recent conversation tail.
+     *
+     * To preserve legitimate repeated chatty turns, short text-only repeats are
+     * only suppressed when they duplicate the current tail row. Longer transcript
+     * turns and structured tool carriers are treated as replay candidates across
+     * the recent window.
+     */
+    findReplayDuplicate(conversationId, agentId, message) {
+        const incoming = signatureFromNeutral(message);
+        if (!incoming.textContent && !incoming.toolCalls && !incoming.toolResults)
+            return null;
+        const rows = this.db.prepare(`
+      SELECT * FROM messages
+      WHERE conversation_id = ? AND agent_id = ?
+      ORDER BY message_index DESC
+      LIMIT ?
+    `).all(conversationId, agentId, REPLAY_DEDUPE_RECENT_LIMIT);
+        for (let i = 0; i < rows.length; i++) {
+            const candidate = signatureFromRow(rows[i]);
+            if (shouldSuppressReplayDuplicate(incoming, candidate, i === 0)) {
+                return parseMessageRow(rows[i]);
+            }
+        }
+        return null;
     }
     /**
      * Get recent messages for a conversation.

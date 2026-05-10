@@ -52,18 +52,31 @@ export function stripMessageMetadata(text) {
             i = j;
             continue;
         }
-        // ── Sender (untrusted metadata): block ──────────────────────────────────
-        if (/^Sender \(untrusted metadata\):/i.test(line)) {
-            // Skip through next blank line or closing ```
+        // ── OpenClaw inbound metadata blocks ───────────────────────────────────
+        // Gateway injects these as user-role prefix text. They are useful for the
+        // live inbound prompt but must not be persisted or replayed as historical
+        // user content, or the model can treat a metadata envelope as a repeated
+        // user message.
+        if (/^(?:Conversation info|Sender|Forwarded message context|Location) \(untrusted metadata\):/i.test(line)
+            || /^Thread starter \(untrusted, for context\):/i.test(line)
+            || /^Reply target of current user message \(untrusted, for context\):/i.test(line)
+            || /^Chat history since last reply \(untrusted, for context\):/i.test(line)) {
             i++;
-            while (i < lines.length) {
-                const l = lines[i];
-                if (l.trim() === '' || l.trim() === '```') {
-                    i++; // consume the blank/closing line too
-                    break;
-                }
+            if (i < lines.length && /^```json\s*$/i.test(lines[i].trim())) {
                 i++;
+                while (i < lines.length && lines[i].trim() !== '```')
+                    i++;
+                if (i < lines.length && lines[i].trim() === '```')
+                    i++;
             }
+            else {
+                while (i < lines.length && lines[i].trim() !== '')
+                    i++;
+                if (i < lines.length && lines[i].trim() === '')
+                    i++;
+            }
+            while (i < lines.length && lines[i].trim() === '')
+                i++;
             continue;
         }
         // ── Pure timestamp lines ─────────────────────────────────────────────────
